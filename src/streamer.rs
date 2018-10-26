@@ -143,7 +143,6 @@ fn main() {
                     println!("Connected to client: {}", addr);
                     let mut rx = bus_r.lock().unwrap().add_rx();
                     thread::spawn(move || loop {
-                        // TODO deal with error on client disconnect
                         match stream
                             .try_clone()
                             .unwrap()

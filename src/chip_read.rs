@@ -19,7 +19,7 @@ use std::fmt;
 use std::i32;
 
 #[derive(Debug)]
-enum ReadType {
+pub enum ReadType {
     Raw,
     FSLS,
 }
@@ -36,53 +36,55 @@ impl fmt::Display for ReadType {
 
 #[derive(Debug)]
 pub struct ChipRead {
-    tag_id: String,
-    timestamp: Timestamp,
-    read_type: ReadType,
+    pub tag_id: String,
+    pub timestamp: Timestamp,
+    pub read_type: ReadType,
 }
 
 impl ChipRead {
-    pub fn new(read: String) -> Result<ChipRead, &'static str> {
-        if !(read.len() == 36 || read.len() == 38) {
+    pub fn new(read_str: String) -> Result<ChipRead, &'static str> {
+        let mut chip_read = read_str.trim().to_string();
+        chip_read = chip_read.split_whitespace().next().unwrap().to_string();
+        if !(chip_read.len() == 36 || chip_read.len() == 38) {
             return Err("Invalid read length");
         }
         let mut read_type = ReadType::Raw;
-        if read.len() == 38
-            && (read[37..39] != "FS".to_string() || read[37..39] != "LS".to_string())
+        if chip_read.len() == 38
+            && (chip_read[37..39] != "FS".to_string() || chip_read[37..39] != "LS".to_string())
         {
             read_type = ReadType::FSLS;
-        } else if read.len() == 38 {
+        } else if chip_read.len() == 38 {
             return Err("Invalid read suffix");
         }
-        if read[..2] != "aa".to_string() {
+        if chip_read[..2] != "aa".to_string() {
             return Err("Invalid read prefix");
         }
-        let tag_id = read[4..16].to_string();
-        let read_year = match read[20..22].parse::<u16>() {
+        let tag_id = chip_read[4..16].to_string();
+        let read_year = match chip_read[20..22].parse::<u16>() {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(year) => year,
         };
-        let read_month = match read[22..24].parse::<u8>() {
+        let read_month = match chip_read[22..24].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(month) => month,
         };
-        let read_day = match read[24..26].parse::<u8>() {
+        let read_day = match chip_read[24..26].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(day) => day,
         };
-        let read_hour = match read[26..28].parse::<u8>() {
+        let read_hour = match chip_read[26..28].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(hour) => hour,
         };
-        let read_min = match read[28..30].parse::<u8>() {
+        let read_min = match chip_read[28..30].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(min) => min,
         };
-        let read_sec = match read[30..32].parse::<u8>() {
+        let read_sec = match chip_read[30..32].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(sec) => sec,
         };
-        let read_millis = match i32::from_str_radix(&read[32..34], 16) {
+        let read_millis = match i32::from_str_radix(&chip_read[32..34], 16) {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(millis) => (millis * 10) as u16,
         };
@@ -113,8 +115,8 @@ impl fmt::Display for ChipRead {
     }
 }
 
-#[derive(Debug)]
-struct Timestamp {
+#[derive(Debug, Eq, Ord, PartialOrd, PartialEq)]
+pub struct Timestamp {
     year: u16,
     month: u8,
     day: u8,

@@ -15,9 +15,10 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+use std::fmt;
 use std::i32;
 
-enum Gender {
+pub enum Gender {
     M,
     F,
     X,
@@ -34,31 +35,52 @@ impl fmt::Display for Gender {
     }
 }
 
+impl fmt::Debug for Gender {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let printable = match *self {
+            Gender::M => "M".to_string(),
+            Gender::F => "F".to_string(),
+            Gender::X => "X".to_string(),
+        };
+        write!(f, "Gender: {}", printable)
+    }
+}
+
 #[derive(Debug)]
 pub struct Participant {
-    chip_id: Vec<String>,
-    bib: i32,
-    first_name: String,
-    last_name: String,
-    gender: Gender,
-    age: Option<i32>,
-    affiliation: Option<String>,
-    division: Option<i32>,
+    pub chip_id: Vec<String>,
+    pub bib: i32,
+    pub first_name: String,
+    pub last_name: String,
+    pub gender: Gender,
+    pub age: Option<i32>,
+    pub affiliation: Option<String>,
+    pub division: Option<i32>,
 }
 
 impl fmt::Display for Participant {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let age_str = match self.age {
-            None() => "".to_string(),
+            None => "".to_string(),
             Some(age) => format!("Age: {}, ", age),
         };
         let affil_str = match self.affiliation {
-            None() => "".to_string(),
-            Some(affiliation) => format!("Affiliation: {}, ", affiliation),
+            None => "".to_string(),
+            Some(ref affiliation) => {
+                if affiliation == "" {
+                    "".to_string()
+                } else {
+                    format!("Affiliation: {}, ", affiliation)
+                }
+            }
+        };
+        let division_str = match self.division {
+            None => "".to_string(),
+            Some(division) => format!("Division: {}, ", division),
         };
         write!(
             f,
-            "Bib: {}, ID: {}, Name: {} {}, Gender: {}, {}{}",
+            "Bib: {}, ID: {:?}, Name: {} {}, Gender: {} {} {} {}",
             self.bib,
             self.chip_id,
             self.first_name,
@@ -66,16 +88,16 @@ impl fmt::Display for Participant {
             self.gender,
             age_str,
             affil_str,
-            self.division
+            division_str
         )
     }
 }
 
 impl Participant {
-    fn from_ppl_record(record: String) -> Result(Participant) {
-        let parts = record.split(",");
+    pub fn from_ppl_record(record: String) -> Result<Participant, &'static str> {
+        let parts = record.split(",").collect::<Vec<&str>>();
         if parts.len() < 3 {
-            Err("Participant Record Error")
+            return Err("Participant Record Error");
         }
         let bib = match parts[0].parse::<i32>() {
             Err(_) => return Err("Participant Record Error"),
@@ -83,10 +105,27 @@ impl Participant {
         };
         let last_name = parts[1];
         let first_name = parts[2];
-        let mut affiliation: Option<String> = None();
+        let mut affil: Option<String> = None;
         if parts.len() >= 4 {
-            affiliation = Some(parts[3]);
+            affil = Some(parts[3].to_string());
         }
-        Participant {chip_id: Vec<String>::new(), bib: bib, first_name: first_name, last_name: last_name, affiliation: affiliation, gender: Gender::M};
+        let mut gender = Gender::X;
+        if parts.len() >= 5 {
+            gender = match parts[4] {
+                "M" | "m" => Gender::M,
+                "F" | "f" => Gender::F,
+                _ => Gender::X,
+            };
+        }
+        Ok(Participant {
+            chip_id: Vec::<String>::new(),
+            bib: bib,
+            first_name: first_name.to_string(),
+            last_name: last_name.to_string(),
+            affiliation: affil,
+            gender: gender,
+            age: None,
+            division: None,
+        })
     }
 }

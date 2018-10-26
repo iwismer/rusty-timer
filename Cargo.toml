@@ -18,3 +18,7 @@ path = "src/streamer.rs"
 name = "emulator"
 path = "src/emulator.rs"
 
+[[bin]]
+name = "reads"
+path = "src/main.rs"
+
