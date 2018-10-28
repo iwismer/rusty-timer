@@ -28,10 +28,13 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 type Port = u16;
+
+static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // Check if the string is a valid IPv4 address
 fn is_ip_addr(ip: String) -> Result<(), String> {
@@ -140,20 +143,24 @@ fn main() {
             // for stream in listener.incoming() {
             match listener.accept() {
                 Ok((stream, addr)) => {
+                    CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
                     println!("Connected to client: {}", addr);
                     let mut rx = bus_r.lock().unwrap().add_rx();
-                    thread::spawn(move || loop {
-                        match stream
-                            .try_clone()
-                            .unwrap()
-                            .write(rx.recv().unwrap().as_bytes())
-                        {
-                            Ok(_) => {}
-                            Err(_) => {
-                                println!("Error: Client {} disconnected unexpectedly", addr);
-                                break;
-                            }
-                        };
+                    thread::spawn(move || {
+                        loop {
+                            match stream
+                                .try_clone()
+                                .unwrap()
+                                .write(rx.recv().unwrap().as_bytes())
+                            {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    println!("Warning: Client {} disconnected unexpectedly", addr);
+                                    break;
+                                }
+                            };
+                        }
+                        CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
                 Err(error) => {
@@ -196,21 +203,24 @@ fn main() {
                             Err(error) => println!("Error writing read to file: {}", error),
                         };
                     }
-                    // Lock the bus so I can send data along it
-                    let mut exclusive_bus = match bus.lock() {
-                        Ok(exclusive_bus) => exclusive_bus,
-                        Err(error) => {
-                            println!("Error communicating with thread: {}", error);
-                            continue;
+                    // Check that there is a connection
+                    if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
+                        // Lock the bus so I can send data along it
+                        let mut exclusive_bus = match bus.lock() {
+                            Ok(exclusive_bus) => exclusive_bus,
+                            Err(error) => {
+                                println!("Error communicating with thread: {}", error);
+                                continue;
+                            }
+                        };
+                        // Send the read to the threads
+                        match exclusive_bus.try_broadcast(chip_read.to_string()) {
+                            Ok(_) => (),
+                            Err(error) => println!(
+                                "Error sending read to thread. Maybe no readers are conected? {}",
+                                error
+                            ),
                         }
-                    };
-                    // Send the read to the threads
-                    match exclusive_bus.try_broadcast(chip_read.to_string()) {
-                        Ok(_) => (),
-                        Err(error) => println!(
-                            "Error sending read to thread. Maybe no readers are conected? {}",
-                            error
-                        ),
                     }
                 }
             }

@@ -27,11 +27,13 @@ use std::io::{BufRead, BufReader, Lines, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 type Port = u16;
+static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // Check if the string is a valid port
 fn is_port(port: String) -> Result<(), String> {
@@ -101,7 +103,8 @@ fn main() {
                 .short("d")
                 .long("delay")
                 .takes_value(true)
-                .validator(is_delay),
+                .validator(is_delay)
+                .default_value("1000"),
         )
         .get_matches();
 
@@ -119,11 +122,9 @@ fn main() {
         };
     }
 
-    let delay = matches
-        .value_of("delay")
-        .unwrap_or("1000")
-        .parse::<u64>()
-        .unwrap();
+    // Unwraps implied as this value passed through the validator, and there
+    // is a default value
+    let delay = matches.value_of("delay").unwrap().parse::<u64>().unwrap();
 
     // parse the port value
     // A port value of 0 let the OS assign a port
@@ -137,24 +138,29 @@ fn main() {
     let bus_r = bus.clone();
     // Thread to connect to clients
     thread::spawn(move || {
+        // TODO: Add a counter for the number of clients connected
         loop {
             // for stream in listener.incoming() {
             match listener.accept() {
                 Ok((stream, addr)) => {
+                    CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
                     println!("Connected to client: {}", addr);
                     let mut rx = bus_r.lock().unwrap().add_rx();
-                    thread::spawn(move || loop {
-                        match stream
-                            .try_clone()
-                            .unwrap()
-                            .write(rx.recv().unwrap().as_bytes())
-                        {
-                            Ok(_) => {}
-                            Err(_) => {
-                                println!("Error: Client {} disconnected unexpectedly", addr);
-                                break;
-                            }
-                        };
+                    thread::spawn(move || {
+                        loop {
+                            match stream
+                                .try_clone()
+                                .unwrap()
+                                .write(rx.recv().unwrap().as_bytes())
+                            {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    println!("Warning: Client {} disconnected unexpectedly", addr);
+                                    break;
+                                }
+                            };
+                        }
+                        CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
                 Err(error) => {
@@ -168,7 +174,6 @@ fn main() {
     // Get reads
     loop {
         // Convert to string
-        // println!("{:?}", now);
         let chip_read: String = match file_reader.as_mut() {
             Some(lines) => match lines.next() {
                 Some(line) => line.unwrap(),
@@ -186,6 +191,7 @@ fn main() {
             }
         };
         // Send the read to the threads
+        // TODO: Only send broadcast if there are connected readers
         match exclusive_bus.try_broadcast(chip_read.to_string()) {
             Ok(_) => (),
             Err(error) => println!(
