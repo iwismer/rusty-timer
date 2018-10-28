@@ -62,7 +62,7 @@ impl fmt::Display for Participant {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let age_str = match self.age {
             None => "".to_string(),
-            Some(age) => format!("Age: {}, ", age),
+            Some(age) => format!(", Age: {}", age),
         };
         let affil_str = match self.affiliation {
             None => "".to_string(),
@@ -70,17 +70,17 @@ impl fmt::Display for Participant {
                 if affiliation == "" {
                     "".to_string()
                 } else {
-                    format!("Affiliation: {}, ", affiliation)
+                    format!(", Affiliation: {}", affiliation)
                 }
             }
         };
         let division_str = match self.division {
             None => "".to_string(),
-            Some(division) => format!("Division: {}, ", division),
+            Some(division) => format!(", Division: {}", division),
         };
         write!(
             f,
-            "Bib: {}, ID: {:?}, Name: {} {}, Gender: {} {} {} {}",
+            "Bib: {}, ID: {:?}, Name: {} {}, Gender: {}{}{}{}",
             self.bib,
             self.chip_id,
             self.first_name,

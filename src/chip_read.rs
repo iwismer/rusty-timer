@@ -104,7 +104,7 @@ impl ChipRead {
         })
     }
 
-    pub fn cmp (a: ChipRead, b: ChipRead) -> std::cmp::Ordering {
+    pub fn cmp(a: ChipRead, b: ChipRead) -> std::cmp::Ordering {
         a.timestamp.cmp(&b.timestamp)
     }
 }

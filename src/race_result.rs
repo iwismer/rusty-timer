@@ -21,10 +21,12 @@ use std::fmt;
 pub struct Race_Result {
     pub participant: participant::Participant,
     pub start_reads: Vec<chip_read::ChipRead>,
+    // TODO: Make a Vec of Vec to allow for multiple timing points
     pub finish_reads: Vec<chip_read::ChipRead>,
 }
 
 impl Race_Result {
+    // Create a new race result with no reads
     pub fn new(participant: participant::Participant) -> Race_Result {
         Race_Result {
             participant: participant,
@@ -33,6 +35,7 @@ impl Race_Result {
         }
     }
 
+    // Create a new race result with chip reads
     pub fn new_with_reads(
         participant: participant::Participant,
         start_reads: Vec<chip_read::ChipRead>,
@@ -45,15 +48,18 @@ impl Race_Result {
         }
     }
 
+    // Add a new chip start read
     pub fn add_start_read(&self, read: chip_read::ChipRead) {
         self.start_reads.push(read);
     }
 
+    // Add a new chip finish read
     pub fn add_finish_read(&self, read: chip_read::ChipRead) {
         self.finish_reads.push(read);
     }
 
-    pub fn sort_reads (&mut self) {
+    // Sort the reads ib the result
+    pub fn sort_reads(&mut self) {
         self.start_reads.sort_unstable_by_key(|r| r.timestamp);
         self.finish_reads.sort_unstable_by_key(|r| r.timestamp);
     }
