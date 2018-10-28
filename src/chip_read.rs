@@ -103,6 +103,10 @@ impl ChipRead {
             read_type: read_type,
         })
     }
+
+    pub fn cmp (a: ChipRead, b: ChipRead) -> std::cmp::Ordering {
+        a.timestamp.cmp(&b.timestamp)
+    }
 }
 
 impl fmt::Display for ChipRead {
