@@ -25,7 +25,15 @@ pub struct Race_Result {
 }
 
 impl Race_Result {
-    pub fn new(
+    pub fn new(participant: participant::Participant) -> Race_Result {
+        Race_Result {
+            participant: participant,
+            start_reads: Vec::new(),
+            finish_reads: Vec::new(),
+        }
+    }
+
+    pub fn new_with_reads(
         participant: participant::Participant,
         start_reads: Vec<chip_read::ChipRead>,
         finish_reads: Vec<chip_read::ChipRead>,
@@ -35,6 +43,19 @@ impl Race_Result {
             start_reads: start_reads,
             finish_reads: finish_reads,
         }
+    }
+
+    pub fn add_start_read(&self, read: chip_read::ChipRead) {
+        self.start_reads.push(read);
+    }
+
+    pub fn add_finish_read(&self, read: chip_read::ChipRead) {
+        self.finish_reads.push(read);
+    }
+
+    pub fn sort_reads (&mut self) {
+        self.start_reads.sort_unstable_by_key(|r| r.timestamp);
+        self.finish_reads.sort_unstable_by_key(|r| r.timestamp);
     }
 }
 
