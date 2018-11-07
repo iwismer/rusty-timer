@@ -24,3 +24,7 @@ Build with ```cargo build --release --bin emulator```
 This is a chip read parsing libarary designed for Ipico chip reads.
 Run with: ```cargo run --bin parser [args]```
 Build with ```cargo build --release --bin parser```
+
+## Licence
+
+See LICENCE.txt
