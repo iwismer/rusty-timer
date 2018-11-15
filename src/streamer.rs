@@ -31,6 +31,7 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+// use std::io;
 
 type Port = u16;
 
@@ -109,6 +110,11 @@ fn main() {
         };
     }
 
+    // Check if running on windows
+    let line_ending = match cfg!(windows) {
+        true => "\r\n",
+        false => "\n",
+    };
     // Get the address of the reader and parse to IP
     let reader = matches
         .value_of("reader")
@@ -171,56 +177,54 @@ fn main() {
         }
     });
 
-    // Get reads
-    let mut input_buffer = [0u8; 1024];
+    // Get 38 bytes from the stream, which is exactly 1 read
+    let mut input_buffer = [0u8; 38];
     loop {
-        match stream.read(&mut input_buffer) {
-            Ok(n) => {
-                if n == 0 {
-                    println!("Error read 0 bytes from reader. This should never happen!");
-                } else {
-                    // io::stdout().write(&input_buffer).unwrap();
-                    // io::stdout().flush().unwrap();
-                    // Convert to string
-                    let chip_read = match std::str::from_utf8(&input_buffer) {
-                        Ok(read) => read,
+        match stream.read_exact(&mut input_buffer) {
+            Ok(_) => {
+                // io::stdout().write(&input_buffer).unwrap();
+                // io::stdout().flush().unwrap();
+                // Convert to string
+                let chip_read = match std::str::from_utf8(&input_buffer) {
+                    Ok(read) => read,
+                    Err(error) => {
+                        println!("Error parsing chip read: {}", error);
+                        continue;
+                    }
+                };
+                // println!("{}", chip_read);
+                // Only write to file if a file was supplied
+                if file_writer.is_some() {
+                    match write!(
+                        // This unwrap is safe as file_writer has been
+                        // proven to be Some(T)
+                        file_writer.as_mut().unwrap(),
+                        "{}{}",
+                        chip_read.replace(|c: char| !c.is_alphanumeric(), ""),
+                        // Use \r\n on a windows machine
+                        line_ending
+                    ) {
+                        Ok(_) => (),
+                        Err(error) => println!("Error writing read to file: {}", error),
+                    };
+                }
+                // Check that there is a connection
+                if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
+                    // Lock the bus so I can send data along it
+                    let mut exclusive_bus = match bus.lock() {
+                        Ok(exclusive_bus) => exclusive_bus,
                         Err(error) => {
-                            println!("Error parsing chip read: {}", error);
+                            println!("Error communicating with thread: {}", error);
                             continue;
                         }
                     };
-                    // println!("{}", chip_read);
-                    // Only write to file if a file was supplied
-                    if file_writer.is_some() {
-                        match writeln!(
-                            // This unwrap is safe as file_writer has been
-                            // proven to be Some(T)
-                            file_writer.as_mut().unwrap(),
-                            "{}",
-                            chip_read.replace(|c: char| !c.is_alphanumeric(), "")
-                        ) {
-                            Ok(_) => (),
-                            Err(error) => println!("Error writing read to file: {}", error),
-                        };
-                    }
-                    // Check that there is a connection
-                    if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
-                        // Lock the bus so I can send data along it
-                        let mut exclusive_bus = match bus.lock() {
-                            Ok(exclusive_bus) => exclusive_bus,
-                            Err(error) => {
-                                println!("Error communicating with thread: {}", error);
-                                continue;
-                            }
-                        };
-                        // Send the read to the threads
-                        match exclusive_bus.try_broadcast(chip_read.to_string()) {
-                            Ok(_) => (),
-                            Err(error) => println!(
-                                "Error sending read to thread. Maybe no readers are conected? {}",
-                                error
-                            ),
-                        }
+                    // Send the read to the threads
+                    match exclusive_bus.try_broadcast(chip_read.to_string()) {
+                        Ok(_) => (),
+                        Err(error) => println!(
+                            "Error sending read to thread. Maybe no readers are conected? {}",
+                            error
+                        ),
                     }
                 }
             }
