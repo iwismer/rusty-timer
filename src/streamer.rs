@@ -192,7 +192,7 @@ fn main() {
                         continue;
                     }
                 };
-                print!("{}", chip_read);
+                // print!("{}", chip_read);
                 // Only write to file if a file was supplied
                 if file_writer.is_some() {
                     match write!(
