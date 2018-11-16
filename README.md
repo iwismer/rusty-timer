@@ -78,4 +78,5 @@ This portion does not yet have a usable interface.
 
 ## Licence
 
+GPL3
 See LICENCE.txt
