@@ -65,7 +65,7 @@ fn is_path(path_str: String) -> Result<(), String> {
 
 fn main() {
     // Create the flags
-    let matches = App::new("Read Streamer")
+    let matches = App::new("Rusty Timer: Read Streamer")
         .version(crate_version!())
         .author("Isaac Wismer")
         .about("A read streamer for timers")
