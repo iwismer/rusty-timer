@@ -41,6 +41,7 @@ pub struct ChipRead {
     pub read_type: ReadType,
 }
 
+#[allow(dead_code)]
 impl ChipRead {
     pub fn new(read_str: String) -> Result<ChipRead, &'static str> {
         let mut chip_read = read_str.trim().to_string();
