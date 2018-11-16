@@ -7,6 +7,7 @@ This project requires Rust nightly to be built
 ## Read Streamer
 
 This is a chip read forwarding program designed for race timing. It allows timers to overcome the connection limits on some chip reader systems.
+This program connects to a single reader, and forwards all the reads to any connected listening programs. There is no theoretical limit to the number of connected clients, but it has not been tested with more than 4 at a time. This program will also save all the collected reads to a file for backup.
 
 It has been tested on the Ipico Lite reader.
 
@@ -35,7 +36,7 @@ Build with ```cargo build --release --bin streamer```
 
 Stream reads from a reader, leaving the local port assignment to the OS: ```streamer 10.0.0.51```
 
-Stream reads from a reader located at 10.0.0.51, specifying a local port of 10001 ```streamer -p 10001 10.0.0.51```
+Stream reads from a reader located at 10.0.0.51, specifying a local port of 10005 ```streamer -p 10005 10.0.0.51```
 
 Stream reads from a reader and save all the reads to a file called reads.txt in the current directory ```streamer -f reads.txt 10.0.0.51```
 
