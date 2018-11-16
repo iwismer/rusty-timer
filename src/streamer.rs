@@ -22,6 +22,7 @@ extern crate bus;
 use bus::Bus;
 use clap::{App, Arg};
 use std::fs::File;
+// use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::net::TcpListener;
@@ -31,7 +32,7 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-// use std::io;
+mod chip_read;
 
 type Port = u16;
 
@@ -179,20 +180,22 @@ fn main() {
 
     // Get 38 bytes from the stream, which is exactly 1 read
     let mut input_buffer = [0u8; 38];
+    let mut read_count: u32 = 0;
     loop {
         match stream.read_exact(&mut input_buffer) {
             Ok(_) => {
+                read_count += 1;
                 // io::stdout().write(&input_buffer).unwrap();
                 // io::stdout().flush().unwrap();
                 // Convert to string
-                let chip_read = match std::str::from_utf8(&input_buffer) {
+                let read = match std::str::from_utf8(&input_buffer) {
                     Ok(read) => read,
                     Err(error) => {
                         println!("Error parsing chip read: {}", error);
                         continue;
                     }
                 };
-                // print!("{}", chip_read);
+                // print!("{}", read);
                 // Only write to file if a file was supplied
                 if file_writer.is_some() {
                     match write!(
@@ -200,7 +203,7 @@ fn main() {
                         // proven to be Some(T)
                         file_writer.as_mut().unwrap(),
                         "{}{}",
-                        chip_read.replace(|c: char| !c.is_alphanumeric(), ""),
+                        read.replace(|c: char| !c.is_alphanumeric(), ""),
                         // Use \r\n on a windows machine
                         line_ending
                     ) {
@@ -219,7 +222,7 @@ fn main() {
                         }
                     };
                     // Send the read to the threads
-                    match exclusive_bus.try_broadcast(chip_read.to_string()) {
+                    match exclusive_bus.try_broadcast(read.to_string()) {
                         Ok(_) => (),
                         Err(error) => println!(
                             "Error sending read to thread. Maybe no readers are conected? {}",
@@ -227,6 +230,15 @@ fn main() {
                         ),
                     }
                 }
+                match chip_read::ChipRead::new(read.to_string()) {
+                    Err(desc) => println!("Error reading chip {}", desc),
+                    Ok(read) => {
+                        print!(
+                            "Total Reads: {} Last Read: {} {}\r",
+                            read_count, read.tag_id, read.timestamp
+                        );
+                    }
+                };
             }
             Err(error) => {
                 println!("Error reading from reader: {}", error);
