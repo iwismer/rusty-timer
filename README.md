@@ -40,6 +40,15 @@ Stream reads from a reader located at 10.0.0.51, specifying a local port of 1000
 
 Stream reads from a reader and save all the reads to a file called reads.txt in the current directory ```streamer -f reads.txt 10.0.0.51```
 
+### TODO
+
+- Add import of bib-chip file and ppl file to show last participant's name
+- Better documentation
+- Connections to multiple readers
+- More error checking (connections to reader and client)
+- More graceful way of shutting down the program
+- Basic GUI
+
 ## Read Emulator
 
 This is a chip read emulation program designed for testing race timing software.
