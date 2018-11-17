@@ -2,8 +2,6 @@
 
 This contains a set of timing related utilities for the Ipico timing system.
 
-This project requires Rust nightly to be built
-
 ## Read Streamer
 
 This is a chip read forwarding program designed for race timing. It allows timers to overcome the connection limits on some chip reader systems.
