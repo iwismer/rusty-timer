@@ -2,7 +2,7 @@
 name = "rusty-timer"
 version = "0.1.0"
 authors = ["iwismer <isaac@iwismer.ca>"]
-edition = "2018"
+# edition = "2018"
 homepage = "https://github.com/iwismer/rusty-timer"
 
 [dependencies]
