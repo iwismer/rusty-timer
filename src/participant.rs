@@ -110,8 +110,8 @@ impl Participant {
             affil = Some(parts[3].to_string());
         }
         let mut gender = Gender::X;
-        if parts.len() >= 5 {
-            gender = match parts[4] {
+        if parts.len() >= 6 {
+            gender = match parts[5] {
                 "M" | "m" => Gender::M,
                 "F" | "f" => Gender::F,
                 _ => Gender::X,
@@ -127,5 +127,18 @@ impl Participant {
             age: None,
             division: None,
         })
+    }
+
+    pub fn create_unknown(bib: i32) -> Participant {
+        Participant {
+            chip_id: Vec::<String>::new(),
+            bib: bib,
+            first_name: "Unknown".to_string(),
+            last_name: "Participent".to_string(),
+            affiliation: None,
+            gender: Gender::X,
+            age: None,
+            division: None,
+        }
     }
 }

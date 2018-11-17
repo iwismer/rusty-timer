@@ -9,6 +9,7 @@ homepage = "https://github.com/iwismer/rusty-timer"
 bus = "2.0.0"
 clap = "2.32"
 time = "0.1.40"
+encoding = "0.2"
 
 [[bin]]
 name = "streamer"

@@ -18,11 +18,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #[macro_use]
 extern crate clap;
 extern crate bus;
+extern crate encoding;
 
 use bus::Bus;
 use clap::{App, Arg};
+use encoding::all::WINDOWS_1252;
+use encoding::{DecoderTrap, Encoding};
+use std::collections::HashMap;
+use std::error::Error;
 use std::fs::File;
-// use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::net::TcpListener;
@@ -33,10 +37,101 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 mod chip_read;
+mod participant;
 
 type Port = u16;
 
 static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn read_file_1252(path_str: String) -> Result<Vec<String>, String> {
+    let path = Path::new(&path_str);
+    let read_string = match std::fs::read(path) {
+        Err(desc) => {
+            return Err(format!(
+                "couldn't read {}: {}",
+                path.display(),
+                desc.description()
+            ))
+        }
+        Ok(mut buffer) => WINDOWS_1252
+            .decode(buffer.as_mut_slice(), DecoderTrap::Replace)
+            .unwrap(),
+    };
+    Ok(read_string.split('\n').map(|s| s.to_string()).collect())
+}
+
+fn read_file_utf8(path_str: String) -> Result<Vec<String>, String> {
+    let path = Path::new(&path_str);
+
+    let read_string = match std::fs::read_to_string(path) {
+        Err(desc) => {
+            return Err(format!(
+                "couldn't read {}: {}",
+                path.display(),
+                desc.description()
+            ))
+        }
+        Ok(s) => s,
+    };
+    Ok(read_string.split('\n').map(|s| s.to_string()).collect())
+}
+
+fn get_bibchip(file_path: String) -> HashMap<i32, String> {
+    let bibs = match read_file_utf8(file_path.clone()) {
+        Err(_desc) => match read_file_1252(file_path.clone()) {
+            Err(desc) => panic!("Error reading file {}", desc),
+            Ok(bibs) => bibs,
+        },
+        Ok(bibs) => bibs,
+    };
+    // Import bib chips into hashmap
+    let mut bib_chip = HashMap::new();
+    for b in bibs {
+        if b != "" && b.chars().next().unwrap().is_digit(10) {
+            let parts = b.trim().split(",").collect::<Vec<&str>>();
+            bib_chip.insert(parts[0].parse::<i32>().unwrap(), parts[1].to_string());
+        }
+    }
+    bib_chip
+}
+
+fn get_participants(
+    ppl_path: String,
+    bib_chip_map: HashMap<i32, String>,
+) -> HashMap<String, participant::Participant> {
+    let ppl = match read_file_utf8(ppl_path.clone()) {
+        Err(_desc) => match read_file_1252(ppl_path.clone()) {
+            Err(desc) => panic!("Error reading file {}", desc),
+            Ok(ppl) => ppl,
+        },
+        Ok(ppl) => ppl,
+    };
+    // Read into list of participants and add the chip
+    let mut participants = HashMap::new();
+    for p in ppl {
+        if p != "" && !p.starts_with(";") {
+            match participant::Participant::from_ppl_record(p.trim().to_string()) {
+                Err(desc) => println!("Error reading person {}", desc),
+                Ok(mut person) => {
+                    // println!("{}", person);
+                    // println!("{}", person);
+                    match bib_chip_map.get(&person.bib) {
+                        Some(id) => {
+                            person.chip_id.push(id.to_string());
+                            participants.insert(id.to_string(), person);
+                        }
+                        None => (),
+                    }
+                }
+            };
+        }
+    }
+    participants.insert(
+        "unknown".to_string(),
+        participant::Participant::create_unknown(0),
+    );
+    participants
+}
 
 // Check if the string is a valid IPv4 address
 fn is_ip_addr(ip: String) -> Result<(), String> {
@@ -60,6 +155,15 @@ fn is_path(path_str: String) -> Result<(), String> {
     match path.exists() {
         true => Err("File exists on file system! Use a different file".to_string()),
         false => Ok(()),
+    }
+}
+
+// Check that the path does not already point to a file
+fn is_file(file_str: String) -> Result<(), String> {
+    let path = Path::new(&file_str);
+    match path.exists() {
+        true => Ok(()),
+        false => Err("File doesn't exists on file system! Use a different file".to_string()),
     }
 }
 
@@ -95,7 +199,36 @@ fn main() {
                 .takes_value(true)
                 .validator(is_path),
         )
+        .arg(
+            Arg::with_name("bibchip")
+                .help("The bib-chip file")
+                .short("b")
+                .long("bibchip")
+                .takes_value(true)
+                .validator(is_file),
+        )
+        .arg(
+            Arg::with_name("participants")
+                .help("The .ppl participant file")
+                .short("P")
+                .long("ppl")
+                .takes_value(true)
+                .validator(is_file)
+                .requires("bibchip"),
+        )
         .get_matches();
+
+    let mut bib_chip_map: Option<HashMap<i32, String>> = None;
+    let mut participants: Option<HashMap<String, participant::Participant>> = None;
+    if matches.is_present("bibchip") {
+        let path = matches.value_of("bibchip").unwrap();
+        bib_chip_map = Some(get_bibchip(path.to_string()));
+        // println!("{:?}", bib_chip_map);
+        if matches.is_present("participants") {
+            let path = matches.value_of("participants").unwrap();
+            participants = Some(get_participants(path.to_string(), bib_chip_map.unwrap()));
+        }
+    }
 
     // Check if the user has specified to save the reads to a file
     let mut file_writer: Option<File> = None;
@@ -233,10 +366,26 @@ fn main() {
                 match chip_read::ChipRead::new(read.to_string()) {
                     Err(desc) => println!("Error reading chip {}", desc),
                     Ok(read) => {
-                        print!(
-                            "Total Reads: {} Last Read: {} {}\r",
-                            read_count, read.tag_id, read.timestamp
-                        );
+                        if participants.is_some() {
+                            let participants_unwrap = participants.as_mut().unwrap();
+                            let last_participant = match participants_unwrap.get(&read.tag_id) {
+                                Some(participant) => participant.clone(),
+                                None => participants_unwrap.get(&"unkown".to_string()).unwrap(),
+                            };
+                            print!(
+                                "Total Reads: {} Last Read: {} {} {} {}\r",
+                                read_count,
+                                last_participant.bib,
+                                last_participant.first_name,
+                                last_participant.last_name,
+                                read.timestamp
+                            );
+                        } else {
+                            print!(
+                                "Total Reads: {} Last Read: {} {}\r",
+                                read_count, read.tag_id, read.timestamp
+                            );
+                        }
                     }
                 };
             }
