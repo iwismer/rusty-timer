@@ -43,8 +43,8 @@ type Port = u16;
 
 static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-fn read_file_1252(path_str: String) -> Result<Vec<String>, String> {
-    let path = Path::new(&path_str);
+fn read_file_1252(path_str: &String) -> Result<Vec<String>, String> {
+    let path = Path::new(path_str);
     let read_string = match std::fs::read(path) {
         Err(desc) => {
             return Err(format!(
@@ -60,8 +60,8 @@ fn read_file_1252(path_str: String) -> Result<Vec<String>, String> {
     Ok(read_string.split('\n').map(|s| s.to_string()).collect())
 }
 
-fn read_file_utf8(path_str: String) -> Result<Vec<String>, String> {
-    let path = Path::new(&path_str);
+fn read_file_utf8(path_str: &String) -> Result<Vec<String>, String> {
+    let path = Path::new(path_str);
 
     let read_string = match std::fs::read_to_string(path) {
         Err(desc) => {
@@ -77,8 +77,8 @@ fn read_file_utf8(path_str: String) -> Result<Vec<String>, String> {
 }
 
 fn get_bibchip(file_path: String) -> HashMap<i32, String> {
-    let bibs = match read_file_utf8(file_path.clone()) {
-        Err(_desc) => match read_file_1252(file_path.clone()) {
+    let bibs = match read_file_utf8(&file_path) {
+        Err(_desc) => match read_file_1252(&file_path) {
             Err(desc) => panic!("Error reading file {}", desc),
             Ok(bibs) => bibs,
         },
@@ -99,8 +99,8 @@ fn get_participants(
     ppl_path: String,
     bib_chip_map: &HashMap<i32, String>,
 ) -> HashMap<String, participant::Participant> {
-    let ppl = match read_file_utf8(ppl_path.clone()) {
-        Err(_desc) => match read_file_1252(ppl_path.clone()) {
+    let ppl = match read_file_utf8(&ppl_path) {
+        Err(_desc) => match read_file_1252(&ppl_path) {
             Err(desc) => panic!("Error reading file {}", desc),
             Ok(ppl) => ppl,
         },
@@ -126,10 +126,6 @@ fn get_participants(
             };
         }
     }
-    participants.insert(
-        "unknown".to_string(),
-        participant::Participant::create_unknown(0),
-    );
     participants
 }
 
