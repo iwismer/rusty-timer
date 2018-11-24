@@ -177,8 +177,7 @@ fn main() {
                 .value_name("reader_ip")
                 .validator(is_ip_addr)
                 .required(true),
-        )
-        .arg(
+        ).arg(
             Arg::with_name("port")
                 .help("The port of the local machine to listen for connections")
                 .short("p")
@@ -186,24 +185,21 @@ fn main() {
                 .takes_value(true)
                 .validator(is_port)
                 .default_value("10001"),
-        )
-        .arg(
+        ).arg(
             Arg::with_name("file")
                 .help("The file to output the reads to")
                 .short("f")
                 .long("file")
                 .takes_value(true)
                 .validator(is_path),
-        )
-        .arg(
+        ).arg(
             Arg::with_name("bibchip")
                 .help("The bib-chip file")
                 .short("b")
                 .long("bibchip")
                 .takes_value(true)
                 .validator(is_file),
-        )
-        .arg(
+        ).arg(
             Arg::with_name("participants")
                 .help("The .ppl participant file")
                 .short("P")
@@ -211,15 +207,13 @@ fn main() {
                 .takes_value(true)
                 .validator(is_file)
                 .requires("bibchip"),
-        )
-        .arg(
+        ).arg(
             Arg::with_name("is_unbuffered")
                 .help("Unbuffer the output output")
                 .short("u")
                 .long("unbuffer")
                 .takes_value(false),
-        )
-        .get_matches();
+        ).get_matches();
 
     let mut bib_chip_map: Option<HashMap<i32, String>> = None;
     let mut participants: Option<HashMap<String, participant::Participant>> = None;

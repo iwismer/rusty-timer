@@ -88,16 +88,14 @@ fn main() {
                 .takes_value(true)
                 .validator(is_port)
                 .default_value("10001"),
-        )
-        .arg(
+        ).arg(
             Arg::with_name("file")
                 .help("The file to get the reads from")
                 .short("f")
                 .long("file")
                 .takes_value(true)
                 .validator(is_path),
-        )
-        .arg(
+        ).arg(
             Arg::with_name("delay")
                 .help("Delay between reads")
                 .short("d")
@@ -105,8 +103,7 @@ fn main() {
                 .takes_value(true)
                 .validator(is_delay)
                 .default_value("1000"),
-        )
-        .get_matches();
+        ).get_matches();
 
     // Check if the user has specified to save the reads to a file
     let mut file_reader: Option<Lines<BufReader<_>>> = None;
