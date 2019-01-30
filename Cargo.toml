@@ -2,13 +2,13 @@
 name = "rusty-timer"
 version = "0.1.0"
 authors = ["iwismer <isaac@iwismer.ca>"]
-# edition = "2018"
+edition = "2018"
 homepage = "https://github.com/iwismer/rusty-timer"
 
 [dependencies]
-bus = "2.0.0"
+bus = "2.0.1"
 clap = "2.32"
-time = "0.1.40"
+time = "0.1.42"
 encoding = "0.2"
 
 [[bin]]
