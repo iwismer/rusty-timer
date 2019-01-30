@@ -10,6 +10,7 @@ bus = "2.0.1"
 clap = "2.32"
 time = "0.1.42"
 encoding = "0.2"
+rusqlite = "0.16.0"
 
 [[bin]]
 name = "streamer"
