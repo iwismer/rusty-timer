@@ -15,6 +15,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+
 use std::fmt;
 use std::i32;
 
@@ -93,6 +94,7 @@ impl fmt::Display for Participant {
     }
 }
 
+#[allow(dead_code)]
 impl Participant {
     pub fn from_ppl_record(record: String) -> Result<Participant, &'static str> {
         let parts = record.split(",").collect::<Vec<&str>>();
@@ -134,7 +136,7 @@ impl Participant {
             chip_id: Vec::<String>::new(),
             bib: bib,
             first_name: "Unknown".to_string(),
-            last_name: "Participent".to_string(),
+            last_name: "Participant".to_string(),
             affiliation: None,
             gender: Gender::X,
             age: None,
