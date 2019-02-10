@@ -192,6 +192,15 @@ fn main() {
                 .default_value("10001"),
         )
         .arg(
+            Arg::with_name("reader-port")
+                .help("The port of the reader to connect to")
+                .short("r")
+                .long("reader-port")
+                .takes_value(true)
+                .validator(is_port)
+                .default_value("10000"),
+        )
+        .arg(
             Arg::with_name("file")
                 .help("The file to output the reads to")
                 .short("f")
@@ -311,14 +320,15 @@ fn main() {
     // parse the port value
     // A port value of 0 let the OS assign a port
     let bind_port = matches.value_of("port").unwrap().parse::<Port>().unwrap();
+    let reader_port = matches.value_of("reader-port").unwrap().parse::<Port>().unwrap();
     // Bind to the listening port to allow other computers to connect
     let listener = TcpListener::bind(("0.0.0.0", bind_port)).expect("Unable to bind to port");
     println!("Bound to port: {}", listener.local_addr().unwrap().port());
-    println!("Waiting for reader: {}:{}", reader, 10000);
+    println!("Waiting for reader: {}:{}", reader, reader_port);
     // Connect to the reader
-    let mut stream = match TcpStream::connect((reader, 10000)) {
+    let mut stream = match TcpStream::connect((reader, reader_port)) {
         Ok(stream) => {
-            println!("Connected to reader: {}:{}", reader, 10000);
+            println!("Connected to reader: {}:{}", reader, reader_port);
             stream
         }
         Err(error) => {
