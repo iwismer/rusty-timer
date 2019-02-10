@@ -171,13 +171,14 @@ fn main() {
     // Get reads
     loop {
         // Convert to string
-        let chip_read: String = match file_reader.as_mut() {
+        let mut chip_read: String = match file_reader.as_mut() {
             Some(lines) => match lines.next() {
                 Some(line) => line.unwrap(),
                 None => generate_read(),
             },
             None => generate_read(),
         };
+        chip_read.push_str("\r\n");
         // println!("{}", chip_read);
         // Lock the bus so I can send data along it
         let mut exclusive_bus = match bus.lock() {
@@ -196,6 +197,7 @@ fn main() {
                 error
             ),
         }
+        // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
         thread::sleep(Duration::from_millis(delay));
     }
 }

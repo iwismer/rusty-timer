@@ -38,8 +38,11 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
 mod chip_read;
 mod participant;
+use chip_read::ChipRead;
+use participant::{Gender, Participant};
 
 type Port = u16;
 
@@ -105,7 +108,7 @@ fn get_bibchip(file_path: String) -> Vec<Chip> {
     bib_chip
 }
 
-fn get_participants(ppl_path: String) -> Vec<participant::Participant> {
+fn get_participants(ppl_path: String) -> Vec<Participant> {
     let ppl = match read_file_utf8(&ppl_path) {
         Err(_desc) => match read_file_1252(&ppl_path) {
             Err(desc) => panic!("Error reading file {}", desc),
@@ -117,9 +120,9 @@ fn get_participants(ppl_path: String) -> Vec<participant::Participant> {
     let mut participants = Vec::new();
     for p in ppl {
         if p != "" && !p.starts_with(";") {
-            match participant::Participant::from_ppl_record(p.trim().to_string()) {
+            match Participant::from_ppl_record(p.trim().to_string()) {
                 Err(desc) => println!("Error reading person {}", desc),
-                Ok(mut person) => {
+                Ok(person) => {
                     // println!("{}", person);
                     // println!("{}", person);
                     participants.push(person);
@@ -368,9 +371,9 @@ fn main() {
         match stream.read_exact(&mut input_buffer) {
             Ok(_) => {
                 read_count += 1;
-                let len = io::stdout().write(&input_buffer).unwrap();
-                io::stdout().flush().unwrap();
-                println!("\n{}", len);
+                // let len = io::stdout().write(&input_buffer).unwrap();
+                // io::stdout().flush().unwrap();
+                // println!("\n{}", len);
                 // Convert to string
                 let read = match std::str::from_utf8(&input_buffer) {
                     Ok(read) => read,
@@ -414,67 +417,63 @@ fn main() {
                         ),
                     }
                 }
-                match chip_read::ChipRead::new(read.to_string()) {
+                // println!("{} {:?}", read.len(), read);
+                match ChipRead::new(read.to_string()) {
                     Err(desc) => println!("Error reading chip {}", desc),
                     Ok(read) => {
+                        // dbg!(&read);
                         // let bib_chip_map = bib_chip_map.clone();
                         let mut stmt = conn
-                            .prepare("SELECT
+                            .prepare(
+                                "SELECT
                                         c.id,
                                         c.bib,
                                         p.first_name,
                                         p.last_name
                                      FROM chip c
-                                     JOIN participant p
+                                     LEFT JOIN participant p
                                         ON c.bib = p.bib
-                                     WHERE c.id = ?")
+                                     WHERE c.id = ?",
+                            )
                             .unwrap();
-                        let row = stmt.query_row(&[read.tag_id.as_str()], |row| participant::Participant {
-                            chip_id: vec!(row.get(0)),
-                            bib: row.get(1),
-                            first_name: row.get(2),
-                            last_name: row.get(3),
-                            gender: participant::Gender::X,
-                            age: None,
-                            affiliation: None,
-                            division: None,
-                        }).unwrap();
-                        println!("{:?}", row);
-                        // match &participants {
-                        //     Some(participants_map) => match participants_map.get(&read.tag_id) {
-                        //         Some(participant) => {
-                        //             print!(
-                        //                 "Total Reads: {} Last Read: {} {} {} {}\r",
-                        //                 read_count,
-                        //                 participant.bib,
-                        //                 participant.first_name,
-                        //                 participant.last_name,
-                        //                 read.timestamp
-                        //             );
-                        //         }
-                        //         None => match &bib_chip_map {
-                        //             Some(bib_chip_map) => {
-                        //                 let mut unknown_bib = 0;
-                        //                 for (bib, chip) in bib_chip_map.iter() {
-                        //                     if *chip == read.tag_id {
-                        //                         unknown_bib = bib.clone();
-                        //                         break;
-                        //                     }
-                        //                 }
-                        //                 print!("Total Reads: {} Last Read: {} Unknown Participant {}\r",
-                        //                             read_count,
-                        //                             unknown_bib,
-                        //                             read.timestamp
-                        //                         );
-                        //             }
-                        //             None => (),
-                        //         },
-                        //     },
-                        //     None => print!(
-                        //         "Total Reads: {} Last Read: {} {}\r",
-                        //         read_count, read.tag_id, read.timestamp
-                        //     ),
-                        // };
+                        // Make the query and map to a participant
+                        let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
+                            Participant {
+                                // If there is a missing field, then map it to unknown
+                                chip_id: vec![row.get_checked(0).unwrap_or("None".to_string())],
+                                bib: row.get_checked(1).unwrap_or(0),
+                                first_name: row.get_checked(2).unwrap_or("Unknown".to_string()),
+                                last_name: row.get_checked(3).unwrap_or("Participant".to_string()),
+                                gender: Gender::X,
+                                age: None,
+                                affiliation: None,
+                                division: None,
+                            }
+                        });
+
+                        match row {
+                            // Bandit chip
+                            Err(_) => {
+                                print!(
+                                    "Total Reads: {} Last Read: Unknown Chip {} {}\r",
+                                    read_count,
+                                    read.tag_id,
+                                    read.time_string()
+                                );
+                            }
+                            // Good chip, either good or unknown participant
+                            Ok(participant) => {
+                                // println!("{:?}", participant);
+                                print!(
+                                    "Total Reads: {} Last Read: {} {} {} {}\r",
+                                    read_count,
+                                    participant.bib,
+                                    participant.first_name,
+                                    participant.last_name,
+                                    read.time_string()
+                                );
+                            }
+                        }
                         if is_unbuffered {
                             io::stdout().flush().unwrap();
                         }
