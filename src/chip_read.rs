@@ -108,6 +108,10 @@ impl ChipRead {
     pub fn cmp(a: ChipRead, b: ChipRead) -> std::cmp::Ordering {
         a.timestamp.cmp(&b.timestamp)
     }
+
+    pub fn time_string(&self) -> String {
+        self.timestamp.time_string()
+    }
 }
 
 impl fmt::Display for ChipRead {
@@ -150,6 +154,15 @@ impl Timestamp {
             second: second,
             millis: millis,
         }
+    }
+}
+
+impl Timestamp {
+    pub fn time_string(&self) -> String {
+        format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            self.hour, self.minute, self.second, self.millis
+        )
     }
 }
 
