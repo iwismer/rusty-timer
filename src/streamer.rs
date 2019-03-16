@@ -87,21 +87,32 @@ fn read_file_utf8(path_str: &String) -> Result<Vec<String>, String> {
 }
 
 fn get_bibchip(file_path: String) -> Vec<Chip> {
+    // Attempt to read the bibs, assuming UTF-8 file encoding
     let bibs = match read_file_utf8(&file_path) {
+        // If there was an error, attempt again with Windows 1252 encoding
         Err(_desc) => match read_file_1252(&file_path) {
-            Err(desc) => panic!("Error reading file {}", desc),
+            // If it errors again, then return an empty list of bib chips
+            Err(desc) => {
+                println!("Error reading bibchip file {}", desc);
+                Vec::new()
+            },
             Ok(bibs) => bibs,
         },
         Ok(bibs) => bibs,
     };
-    // Import bib chips into hashmap
+    // parse the file and import bib chips into hashmap
     let mut bib_chip = Vec::new();
     for b in bibs {
         if b != "" && b.chars().next().unwrap().is_digit(10) {
             let parts = b.trim().split(",").collect::<Vec<&str>>();
             bib_chip.push(Chip {
                 id: parts[1].to_string(),
-                bib: parts[0].parse::<i32>().unwrap(),
+                bib: parts[0]
+                    .parse::<i32>()
+                    .unwrap_or_else(|_| {
+                        println!("Error reading bib file. Invalid bib: {}", parts[0]);
+                        0
+                    }),
             });
         }
     }
@@ -109,9 +120,15 @@ fn get_bibchip(file_path: String) -> Vec<Chip> {
 }
 
 fn get_participants(ppl_path: String) -> Vec<Participant> {
+    // Attempt to read the participants, assuming UTF-8 file encoding
     let ppl = match read_file_utf8(&ppl_path) {
+        // If there was an error, attempt again with Windows 1252 encoding
         Err(_desc) => match read_file_1252(&ppl_path) {
-            Err(desc) => panic!("Error reading file {}", desc),
+            // If it errors again, then return an empty list of participants
+            Err(desc) => {
+                println!("Error reading participant file {}", desc);
+                Vec::new()
+            },
             Ok(ppl) => ppl,
         },
         Ok(ppl) => ppl,
@@ -119,12 +136,11 @@ fn get_participants(ppl_path: String) -> Vec<Participant> {
     // Read into list of participants and add the chip
     let mut participants = Vec::new();
     for p in ppl {
+        // Ignore empty and comment lines
         if p != "" && !p.starts_with(";") {
             match Participant::from_ppl_record(p.trim().to_string()) {
                 Err(desc) => println!("Error reading person {}", desc),
                 Ok(person) => {
-                    // println!("{}", person);
-                    // println!("{}", person);
                     participants.push(person);
                 }
             };
@@ -184,7 +200,7 @@ fn main() {
         )
         .arg(
             Arg::with_name("port")
-                .help("The port of the local machine to listen for connections")
+                .help("The port of the local machine to bind to")
                 .short("p")
                 .long("port")
                 .takes_value(true)
@@ -257,7 +273,9 @@ fn main() {
     )
     .unwrap();
 
+    // Check if there was a bibchip argument
     if matches.is_present("bibchip") {
+        // Unwrap is sage as bibchip argument is present
         let path = matches.value_of("bibchip").unwrap();
         let bib_chips = get_bibchip(path.to_string());
         // println!("{:?}", bib_chip_map);
@@ -271,6 +289,7 @@ fn main() {
         }
     }
     if matches.is_present("participants") {
+        // Unwrap is sage as participants argument is present
         let path = matches.value_of("participants").unwrap();
         let participants = get_participants(path.to_string());
         for p in &participants {
@@ -320,7 +339,11 @@ fn main() {
     // parse the port value
     // A port value of 0 let the OS assign a port
     let bind_port = matches.value_of("port").unwrap().parse::<Port>().unwrap();
-    let reader_port = matches.value_of("reader-port").unwrap().parse::<Port>().unwrap();
+    let reader_port = matches
+        .value_of("reader-port")
+        .unwrap()
+        .parse::<Port>()
+        .unwrap();
     // Bind to the listening port to allow other computers to connect
     let listener = TcpListener::bind(("0.0.0.0", bind_port)).expect("Unable to bind to port");
     println!("Bound to port: {}", listener.local_addr().unwrap().port());
@@ -343,14 +366,18 @@ fn main() {
     // Thread to connect to clients
     thread::spawn(move || {
         loop {
-            // for stream in listener.incoming() {
+            // wait for a connection, then connect when it comes
             match listener.accept() {
                 Ok((stream, addr)) => {
+                    // Increment the number of connections
                     CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
                     println!("Connected to client: {}", addr);
+                    // Add a receiver for the connection
                     let mut rx = bus_r.lock().unwrap().add_rx();
+                    // Make a thread for that connection
                     thread::spawn(move || {
                         loop {
+                            // Receive messages and pass to client
                             match stream
                                 .try_clone()
                                 .unwrap()
@@ -358,19 +385,20 @@ fn main() {
                             {
                                 Ok(_) => {}
                                 Err(_) => {
-                                    println!("Warning: Client {} disconnected unexpectedly", addr);
+                                    println!("Warning: Client {} disconnected", addr);
+                                    // Decrement the number of clients on disconnect
+                                    CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
+                                    // end the loop, destroying the thread
                                     break;
                                 }
                             };
                         }
-                        CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
                 Err(error) => {
                     println!("Failed to connect to client: {}", error);
                 }
             }
-            // }
         }
     });
 
@@ -484,6 +512,8 @@ fn main() {
                                 );
                             }
                         }
+                        // only flush if the output is unbuffered
+                        // This can cause high CPU use on some systems
                         if is_unbuffered {
                             io::stdout().flush().unwrap();
                         }
