@@ -1,5 +1,5 @@
 /*
-Copyright Â© 2018  Isaac Wismer
+Copyright © 2018  Isaac Wismer
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -95,7 +95,7 @@ fn get_bibchip(file_path: String) -> Vec<Chip> {
             Err(desc) => {
                 println!("Error reading bibchip file {}", desc);
                 Vec::new()
-            },
+            }
             Ok(bibs) => bibs,
         },
         Ok(bibs) => bibs,
@@ -107,12 +107,10 @@ fn get_bibchip(file_path: String) -> Vec<Chip> {
             let parts = b.trim().split(",").collect::<Vec<&str>>();
             bib_chip.push(Chip {
                 id: parts[1].to_string(),
-                bib: parts[0]
-                    .parse::<i32>()
-                    .unwrap_or_else(|_| {
-                        println!("Error reading bib file. Invalid bib: {}", parts[0]);
-                        0
-                    }),
+                bib: parts[0].parse::<i32>().unwrap_or_else(|_| {
+                    println!("Error reading bib file. Invalid bib: {}", parts[0]);
+                    0
+                }),
             });
         }
     }
@@ -128,7 +126,7 @@ fn get_participants(ppl_path: String) -> Vec<Participant> {
             Err(desc) => {
                 println!("Error reading participant file {}", desc);
                 Vec::new()
-            },
+            }
             Ok(ppl) => ppl,
         },
         Ok(ppl) => ppl,
@@ -407,122 +405,113 @@ fn main() {
     let mut read_count: u32 = 0;
     loop {
         match stream.read_exact(&mut input_buffer) {
-            Ok(_) => {
-                read_count += 1;
-                // let len = io::stdout().write(&input_buffer).unwrap();
-                // io::stdout().flush().unwrap();
-                // println!("\n{}", len);
-                // Convert to string
-                let read = match std::str::from_utf8(&input_buffer) {
-                    Ok(read) => read,
-                    Err(error) => {
-                        println!("Error parsing chip read: {}", error);
-                        continue;
-                    }
-                };
-                // print!("{}", read);
-                // Only write to file if a file was supplied
-                if file_writer.is_some() {
-                    match write!(
-                        // This unwrap is safe as file_writer has been
-                        // proven to be Some(T)
-                        file_writer.as_mut().unwrap(),
-                        "{}{}",
-                        read.replace(|c: char| !c.is_alphanumeric(), ""),
-                        // Use \r\n on a windows machine
-                        line_ending
-                    ) {
-                        Ok(_) => (),
-                        Err(error) => println!("Error writing read to file: {}", error),
-                    };
-                }
-                // Check that there is a connection
-                if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
-                    // Lock the bus so I can send data along it
-                    let mut exclusive_bus = match bus.lock() {
-                        Ok(exclusive_bus) => exclusive_bus,
-                        Err(error) => {
-                            println!("Error communicating with thread: {}", error);
-                            continue;
-                        }
-                    };
-                    // Send the read to the threads
-                    match exclusive_bus.try_broadcast(read.to_string()) {
-                        Ok(_) => (),
-                        Err(error) => println!(
-                            "Error sending read to thread. Maybe no readers are conected? {}",
-                            error
-                        ),
-                    }
-                }
-                // println!("{} {:?}", read.len(), read);
-                match ChipRead::new(read.to_string()) {
-                    Err(desc) => println!("Error reading chip {}", desc),
-                    Ok(read) => {
-                        // dbg!(&read);
-                        // let bib_chip_map = bib_chip_map.clone();
-                        let mut stmt = conn
-                            .prepare(
-                                "SELECT
-                                        c.id,
-                                        c.bib,
-                                        p.first_name,
-                                        p.last_name
-                                     FROM chip c
-                                     LEFT JOIN participant p
-                                        ON c.bib = p.bib
-                                     WHERE c.id = ?",
-                            )
-                            .unwrap();
-                        // Make the query and map to a participant
-                        let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
-                            Participant {
-                                // If there is a missing field, then map it to unknown
-                                chip_id: vec![row.get_checked(0).unwrap_or("None".to_string())],
-                                bib: row.get_checked(1).unwrap_or(0),
-                                first_name: row.get_checked(2).unwrap_or("Unknown".to_string()),
-                                last_name: row.get_checked(3).unwrap_or("Participant".to_string()),
-                                gender: Gender::X,
-                                age: None,
-                                affiliation: None,
-                                division: None,
-                            }
-                        });
-
-                        match row {
-                            // Bandit chip
-                            Err(_) => {
-                                print!(
-                                    "Total Reads: {} Last Read: Unknown Chip {} {}\r",
-                                    read_count,
-                                    read.tag_id,
-                                    read.time_string()
-                                );
-                            }
-                            // Good chip, either good or unknown participant
-                            Ok(participant) => {
-                                // println!("{:?}", participant);
-                                print!(
-                                    "Total Reads: {} Last Read: {} {} {} {}\r",
-                                    read_count,
-                                    participant.bib,
-                                    participant.first_name,
-                                    participant.last_name,
-                                    read.time_string()
-                                );
-                            }
-                        }
-                        // only flush if the output is unbuffered
-                        // This can cause high CPU use on some systems
-                        if is_unbuffered {
-                            io::stdout().flush().unwrap();
-                        }
-                    }
-                };
-            }
-            Err(error) => {
-                println!("Error reading from reader: {}", error);
+            Ok(_) => (),
+            Err(e) => {
+                println!("Error reading from reader: {}", e);
+                continue;
             }
         }
+        read_count += 1;
+        // Convert to string
+        let read = match std::str::from_utf8(&input_buffer) {
+            Ok(read) => read,
+            Err(error) => {
+                println!("Error parsing chip read: {}", error);
+                continue;
+            }
+        };
+        // Only write to file if a file was supplied
+        if file_writer.is_some() {
+            write!(
+                // This unwrap is safe as file_writer has been
+                // proven to be Some(T)
+                file_writer.as_mut().unwrap(),
+                "{}{}",
+                read.replace(|c: char| !c.is_alphanumeric(), ""),
+                // Use \r\n on a windows machine
+                line_ending
+            ).unwrap_or_else(|e| {
+                println!("Error writing read to file: {}", e);
+            });
+        }
+        // Check that there is a connection
+        if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
+            // Lock the bus so I can send data along it
+            let mut exclusive_bus = match bus.lock() {
+                Ok(exclusive_bus) => exclusive_bus,
+                Err(error) => {
+                    println!("Error communicating with thread: {}", error);
+                    continue;
+                }
+            };
+            // Send the read to the threads
+            exclusive_bus.try_broadcast(read.to_string()).unwrap_or_else(|e| {
+                println!(
+                    "Error sending read to thread. Maybe no readers are conected? {}",
+                    e
+                )
+            });
+        }
+        match ChipRead::new(read.to_string()) {
+            Err(desc) => println!("Error reading chip {}", desc),
+            Ok(read) => {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT
+                                c.id,
+                                c.bib,
+                                p.first_name,
+                                p.last_name
+                                FROM chip c
+                                LEFT JOIN participant p
+                                ON c.bib = p.bib
+                                WHERE c.id = ?",
+                    )
+                    .unwrap();
+                // Make the query and map to a participant
+                let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
+                    Participant {
+                        // If there is a missing field, then map it to unknown
+                        chip_id: vec![row.get_checked(0).unwrap_or("None".to_string())],
+                        bib: row.get_checked(1).unwrap_or(0),
+                        first_name: row.get_checked(2).unwrap_or("Unknown".to_string()),
+                        last_name: row.get_checked(3).unwrap_or("Participant".to_string()),
+                        gender: Gender::X,
+                        age: None,
+                        affiliation: None,
+                        division: None,
+                    }
+                });
+
+                match row {
+                    // Bandit chip
+                    Err(_) => {
+                        print!(
+                            "Total Reads: {} Last Read: Unknown Chip {} {}\r",
+                            read_count,
+                            read.tag_id,
+                            read.time_string()
+                        );
+                    }
+                    // Good chip, either good or unknown participant
+                    Ok(participant) => {
+                        // println!("{:?}", participant);
+                        print!(
+                            "Total Reads: {} Last Read: {} {} {} {}\r",
+                            read_count,
+                            participant.bib,
+                            participant.first_name,
+                            participant.last_name,
+                            read.time_string()
+                        );
+                    }
+                }
+                // only flush if the output is unbuffered
+                // This can cause high CPU use on some systems
+                if is_unbuffered {
+                    io::stdout().flush().unwrap_or(());
+                }
+            }
+        };
     }
 }
