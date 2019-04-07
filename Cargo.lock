@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-timer"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "bus 2.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap 2.32.0 (registry+https://github.com/rust-lang/crates.io-index)",

@@ -243,7 +243,7 @@ fn main() {
             Arg::with_name("is_buffered")
                 .help("Buffer the output. Use if high CPU use in encountered")
                 .short("B")
-                .long("unbuffer")
+                .long("buffer")
                 .takes_value(false),
         )
         .get_matches();

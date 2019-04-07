@@ -17,15 +17,19 @@ Build with ```cargo build --release --bin streamer```
 ### Running
 
     USAGE:
-        streamer [OPTIONS] <reader_ip>
+    streamer [FLAGS] [OPTIONS] <reader_ip>
 
     FLAGS:
-        -h, --help       Prints help information
-        -V, --version    Prints version information
+        -h, --help        Prints help information
+        -B, --buffer      Buffer the output. Use if high CPU use in encountered
+        -V, --version     Prints version information
 
     OPTIONS:
-        -f, --file <file>    The file to output the reads to
-        -p, --port <port>    The port of the local machine to listen for connections [default: 10001]
+        -b, --bibchip <bibchip>            The bib-chip file
+        -f, --file <file>                  The file to output the reads to
+        -P, --ppl <participants>           The .ppl participant file
+        -p, --port <port>                  The port of the local machine to bind to [default: 10001]
+        -r, --reader-port <reader-port>    The port of the reader to connect to [default: 10000]
 
     ARGS:
         <reader_ip>    The IP address of the reader to connect to
@@ -40,16 +44,16 @@ Stream reads from a reader and save all the reads to a file called reads.txt in 
 
 ### TODO
 
-- Add import of bib-chip file and ppl file to show last participant's name
 - Better documentation
 - Connections to multiple readers
 - More error checking (connections to reader and client)
 - More graceful way of shutting down the program
 - Basic GUI
+- Read checksum validation
 
 ## Read Emulator
 
-This is a chip read emulation program designed for testing race timing software.
+This is a chip read emulation program designed for testing race timing software. I generates random, valid reads (except the checksum).
 
 ### Building
 
@@ -69,19 +73,6 @@ Build with ```cargo build --release --bin emulator```
         -d, --delay <delay>    Delay between reads [default: 1000]
         -f, --file <file>      The file to get the reads from
         -p, --port <port>      The port of the local machine to listen for connections [default: 10001]
-
-## Read Parser
-
-This is a chip read parsing libarary designed for Ipico chip reads.
-
-### Building
-
-Run with: ```cargo run --bin reads -- [args]```
-Build with ```cargo build --release --bin reads```
-
-### Running
-
-This portion does not yet have a usable interface.
 
 ## Licence
 
