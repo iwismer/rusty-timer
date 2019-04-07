@@ -1,5 +1,5 @@
 /*
-Copyright Ãƒâ€šÃ‚Â© 2018  Isaac Wismer
+Copyright © 2018  Isaac Wismer
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -470,17 +470,17 @@ fn main() {
                     .unwrap();
                 // Make the query and map to a participant
                 let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
-                    Participant {
+                    Ok(Participant {
                         // If there is a missing field, then map it to unknown
-                        chip_id: vec![row.get_checked(0).unwrap_or("None".to_string())],
-                        bib: row.get_checked(1).unwrap_or(0),
-                        first_name: row.get_checked(2).unwrap_or("Unknown".to_string()),
-                        last_name: row.get_checked(3).unwrap_or("Participant".to_string()),
+                        chip_id: vec![row.get(0).unwrap_or("None".to_string())],
+                        bib: row.get(1).unwrap_or(0),
+                        first_name: row.get(2).unwrap_or("Unknown".to_string()),
+                        last_name: row.get(3).unwrap_or("Participant".to_string()),
                         gender: Gender::X,
                         age: None,
                         affiliation: None,
                         division: None,
-                    }
+                    })
                 });
 
                 match row {

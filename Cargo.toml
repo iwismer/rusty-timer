@@ -1,16 +1,19 @@
 [package]
 name = "rusty-timer"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["iwismer <isaac@iwismer.ca>"]
 edition = "2018"
 homepage = "https://github.com/iwismer/rusty-timer"
 
 [dependencies]
-bus = "2.0.1"
-clap = "2.32"
-time = "0.1.42"
+bus = "2.2.1"
+clap = "2.9.3"
+time = "0.1.9"
 encoding = "0.2"
-rusqlite = "0.16.0"
+
+[dependencies.rusqlite]
+version = "0.17.0"
+features = ["bundled"]
 
 [[bin]]
 name = "streamer"
@@ -19,8 +22,3 @@ path = "src/streamer.rs"
 [[bin]]
 name = "emulator"
 path = "src/emulator.rs"
-
-[[bin]]
-name = "reads"
-path = "src/main.rs"
-
