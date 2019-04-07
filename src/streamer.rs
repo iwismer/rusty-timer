@@ -1,5 +1,5 @@
 /*
-Copyright © 2018  Isaac Wismer
+Copyright Ãƒâ€šÃ‚Â© 2018  Isaac Wismer
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -240,9 +240,9 @@ fn main() {
                 .requires("bibchip"),
         )
         .arg(
-            Arg::with_name("is_unbuffered")
-                .help("Unbuffer the output output")
-                .short("u")
+            Arg::with_name("is_buffered")
+                .help("Buffer the output. Use if high CPU use in encountered")
+                .short("B")
                 .long("unbuffer")
                 .takes_value(false),
         )
@@ -307,7 +307,7 @@ fn main() {
         }
     }
 
-    let is_unbuffered = matches.is_present("is_unbuffered");
+    let is_buffered = matches.is_present("is_buffered");
 
     // Check if the user has specified to save the reads to a file
     let mut file_writer: Option<File> = None;
@@ -508,7 +508,7 @@ fn main() {
                 }
                 // only flush if the output is unbuffered
                 // This can cause high CPU use on some systems
-                if is_unbuffered {
+                if !is_buffered {
                     io::stdout().flush().unwrap_or(());
                 }
             }
