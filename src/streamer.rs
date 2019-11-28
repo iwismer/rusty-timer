@@ -165,6 +165,67 @@ fn is_file(file_str: String) -> Result<(), String> {
     }
 }
 
+fn print_read(read: &str, conn: &rusqlite::Connection, read_count: &u32) {
+    match ChipRead::new(read.to_string()) {
+        Err(desc) => println!("Error reading chip {}", desc),
+        Ok(read) => {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT
+                            c.id,
+                            c.bib,
+                            p.first_name,
+                            p.last_name
+                            FROM chip c
+                            LEFT JOIN participant p
+                            ON c.bib = p.bib
+                            WHERE c.id = ?",
+                )
+                .unwrap();
+            // Make the query and map to a participant
+            let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
+                Ok(Participant {
+                    // If there is a missing field, then map it to unknown
+                    chip_id: vec![row.get(0).unwrap_or("None".to_string())],
+                    bib: row.get(1).unwrap_or(0),
+                    first_name: row.get(2).unwrap_or("Unknown".to_string()),
+                    last_name: row.get(3).unwrap_or("Participant".to_string()),
+                    gender: Gender::X,
+                    age: None,
+                    affiliation: None,
+                    division: None,
+                })
+            });
+
+            match row {
+                // Bandit chip
+                Err(_) => {
+                    print!("\x1b[2K");
+                    print!(
+                        "Total Reads: {} Last Read: Unknown Chip {} {}\r",
+                        read_count,
+                        read.tag_id,
+                        read.time_string()
+                    );
+                }
+                // Good chip, either good or unknown participant
+                Ok(participant) => {
+                    // println!("{:?}", participant);
+                    print!("\x1b[2K");
+                    print!(
+                        "Total Reads: {} Last Read: {} {} {} {}\r",
+                        read_count,
+                        participant.bib,
+                        participant.first_name,
+                        participant.last_name,
+                        read.time_string()
+                    );
+                }
+            }
+        }
+    };
+}
+
 fn main() {
     // Create the flags
     let matches = App::new("Rusty Timer: Read Streamer")
@@ -391,7 +452,12 @@ fn main() {
         match stream.read_exact(&mut input_buffer) {
             Ok(_) => (),
             Err(e) => {
+                print!("\x1b[2K");
                 println!("Error reading from reader: {}", e);
+                if e.kind() == io::ErrorKind::UnexpectedEof {
+                    println!("Reader disconnected!");
+                    process::exit(1);
+                }
                 continue;
             }
         }
@@ -400,10 +466,12 @@ fn main() {
         let read = match std::str::from_utf8(&input_buffer) {
             Ok(read) => read,
             Err(error) => {
+                print!("\x1b[2K");
                 println!("Error parsing chip read: {}", error);
                 continue;
             }
         };
+        // println!("'{}'", read);
         // Only write to file if a file was supplied
         if file_writer.is_some() {
             write!(
@@ -416,6 +484,7 @@ fn main() {
                 line_ending
             )
             .unwrap_or_else(|e| {
+                print!("\x1b[2K");
                 println!("Error writing read to file: {}", e);
             });
         }
@@ -425,6 +494,7 @@ fn main() {
             let mut exclusive_bus = match bus.lock() {
                 Ok(exclusive_bus) => exclusive_bus,
                 Err(error) => {
+                    print!("\x1b[2K");
                     println!("Error communicating with thread: {}", error);
                     continue;
                 }
@@ -433,72 +503,18 @@ fn main() {
             exclusive_bus
                 .try_broadcast(read.to_string())
                 .unwrap_or_else(|e| {
+                    print!("\x1b[2K");
                     println!(
                         "Error sending read to thread. Maybe no readers are conected? {}",
                         e
                     )
                 });
         }
-        match ChipRead::new(read.to_string()) {
-            Err(desc) => println!("Error reading chip {}", desc),
-            Ok(read) => {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT
-                                c.id,
-                                c.bib,
-                                p.first_name,
-                                p.last_name
-                                FROM chip c
-                                LEFT JOIN participant p
-                                ON c.bib = p.bib
-                                WHERE c.id = ?",
-                    )
-                    .unwrap();
-                // Make the query and map to a participant
-                let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
-                    Ok(Participant {
-                        // If there is a missing field, then map it to unknown
-                        chip_id: vec![row.get(0).unwrap_or("None".to_string())],
-                        bib: row.get(1).unwrap_or(0),
-                        first_name: row.get(2).unwrap_or("Unknown".to_string()),
-                        last_name: row.get(3).unwrap_or("Participant".to_string()),
-                        gender: Gender::X,
-                        age: None,
-                        affiliation: None,
-                        division: None,
-                    })
-                });
-
-                match row {
-                    // Bandit chip
-                    Err(_) => {
-                        print!(
-                            "Total Reads: {} Last Read: Unknown Chip {} {}\r",
-                            read_count,
-                            read.tag_id,
-                            read.time_string()
-                        );
-                    }
-                    // Good chip, either good or unknown participant
-                    Ok(participant) => {
-                        // println!("{:?}", participant);
-                        print!(
-                            "Total Reads: {} Last Read: {} {} {} {}\r",
-                            read_count,
-                            participant.bib,
-                            participant.first_name,
-                            participant.last_name,
-                            read.time_string()
-                        );
-                    }
-                }
-                // only flush if the output is unbuffered
-                // This can cause high CPU use on some systems
-                if !is_buffered {
-                    io::stdout().flush().unwrap_or(());
-                }
-            }
-        };
+        print_read(&read, &conn, &read_count);
+        // only flush if the output is unbuffered
+        // This can cause high CPU use on some systems
+        if !is_buffered {
+            io::stdout().flush().unwrap_or(());
+        }
     }
 }
