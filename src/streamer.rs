@@ -53,51 +53,32 @@ pub struct Chip {
     pub bib: i32,
 }
 
-fn read_file_1252(path_str: &String) -> Result<Vec<String>, String> {
+fn read_file(path_str: &String) -> Result<Vec<String>, String> {
     let path = Path::new(path_str);
-    let read_string = match std::fs::read(path) {
-        Err(desc) => {
-            return Err(format!(
+    match std::fs::read_to_string(path) {
+        Err(_desc) => match std::fs::read(path) {
+            Err(desc) => Err(format!(
                 "couldn't read {}: {}",
                 path.display(),
                 desc.description()
-            ));
-        }
-        Ok(mut buffer) => WINDOWS_1252
-            .decode(buffer.as_mut_slice(), DecoderTrap::Replace)
-            .unwrap(),
-    };
-    Ok(read_string.split('\n').map(|s| s.to_string()).collect())
-}
-
-fn read_file_utf8(path_str: &String) -> Result<Vec<String>, String> {
-    let path = Path::new(path_str);
-
-    let read_string = match std::fs::read_to_string(path) {
-        Err(desc) => {
-            return Err(format!(
-                "couldn't read {}: {}",
-                path.display(),
-                desc.description()
-            ));
-        }
-        Ok(s) => s,
-    };
-    Ok(read_string.split('\n').map(|s| s.to_string()).collect())
+            )),
+            Ok(mut buffer) => Ok(WINDOWS_1252
+                .decode(buffer.as_mut_slice(), DecoderTrap::Replace)
+                .unwrap()),
+        },
+        Ok(s) => Ok(s),
+    }
+    .map(|s| s.split('\n').map(|s| s.to_string()).collect())
 }
 
 fn get_bibchip(file_path: String) -> Vec<Chip> {
     // Attempt to read the bibs, assuming UTF-8 file encoding
-    let bibs = match read_file_utf8(&file_path) {
+    let bibs = match read_file(&file_path) {
         // If there was an error, attempt again with Windows 1252 encoding
-        Err(_desc) => match read_file_1252(&file_path) {
-            // If it errors again, then return an empty list of bib chips
-            Err(desc) => {
-                println!("Error reading bibchip file {}", desc);
-                Vec::new()
-            }
-            Ok(bibs) => bibs,
-        },
+        Err(desc) => {
+            println!("Error reading bibchip file {}", desc);
+            Vec::new()
+        }
         Ok(bibs) => bibs,
     };
     // parse the file and import bib chips into hashmap
@@ -119,15 +100,11 @@ fn get_bibchip(file_path: String) -> Vec<Chip> {
 
 fn get_participants(ppl_path: String) -> Vec<Participant> {
     // Attempt to read the participants, assuming UTF-8 file encoding
-    let ppl = match read_file_utf8(&ppl_path) {
+    let ppl = match read_file(&ppl_path) {
         // If there was an error, attempt again with Windows 1252 encoding
-        Err(_desc) => match read_file_1252(&ppl_path) {
-            // If it errors again, then return an empty list of participants
-            Err(desc) => {
-                println!("Error reading participant file {}", desc);
-                Vec::new()
-            }
-            Ok(ppl) => ppl,
+        Err(desc) => {
+            println!("Error reading participant file {}", desc);
+            Vec::new()
         },
         Ok(ppl) => ppl,
     };
@@ -281,7 +258,7 @@ fn main() {
             conn.execute(
                 "INSERT INTO chip (id, bib)
                         VALUES (?1, ?2)",
-                &[&c.id as &ToSql, &c.bib],
+                &[&c.id as &dyn ToSql, &c.bib],
             )
             .unwrap();
         }
@@ -295,12 +272,12 @@ fn main() {
                 "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 &[
-                    &p.bib as &ToSql,
-                    &p.first_name as &ToSql,
-                    &p.last_name as &ToSql,
+                    &p.bib as &dyn ToSql,
+                    &p.first_name as &dyn ToSql,
+                    &p.last_name as &dyn ToSql,
                     &format!("{}", p.gender),
-                    &p.affiliation as &ToSql,
-                    &p.division as &ToSql,
+                    &p.affiliation as &dyn ToSql,
+                    &p.division as &dyn ToSql,
                 ],
             )
             .unwrap();
@@ -430,7 +407,8 @@ fn main() {
                 read.replace(|c: char| !c.is_alphanumeric(), ""),
                 // Use \r\n on a windows machine
                 line_ending
-            ).unwrap_or_else(|e| {
+            )
+            .unwrap_or_else(|e| {
                 println!("Error writing read to file: {}", e);
             });
         }
@@ -445,12 +423,14 @@ fn main() {
                 }
             };
             // Send the read to the threads
-            exclusive_bus.try_broadcast(read.to_string()).unwrap_or_else(|e| {
-                println!(
-                    "Error sending read to thread. Maybe no readers are conected? {}",
-                    e
-                )
-            });
+            exclusive_bus
+                .try_broadcast(read.to_string())
+                .unwrap_or_else(|e| {
+                    println!(
+                        "Error sending read to thread. Maybe no readers are conected? {}",
+                        e
+                    )
+                });
         }
         match ChipRead::new(read.to_string()) {
             Err(desc) => println!("Error reading chip {}", desc),
