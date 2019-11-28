@@ -55,20 +55,27 @@ pub struct Chip {
 
 fn read_file(path_str: &String) -> Result<Vec<String>, String> {
     let path = Path::new(path_str);
-    match std::fs::read_to_string(path) {
-        Err(_desc) => match std::fs::read(path) {
-            Err(desc) => Err(format!(
+    let buffer = match std::fs::read(path) {
+        Err(desc) => {
+            return Err(format!(
                 "couldn't read {}: {}",
                 path.display(),
                 desc.description()
+            ))
+        }
+        Ok(buf) => buf,
+    };
+    match std::str::from_utf8(&buffer) {
+        Err(_desc) => match WINDOWS_1252.decode(buffer.as_slice(), DecoderTrap::Replace) {
+            Err(desc) => Err(format!(
+                "couldn't read {}: {}",
+                path.display(),
+                desc
             )),
-            Ok(mut buffer) => Ok(WINDOWS_1252
-                .decode(buffer.as_mut_slice(), DecoderTrap::Replace)
-                .unwrap()),
+            Ok(s) => Ok(s.to_string()),
         },
-        Ok(s) => Ok(s),
-    }
-    .map(|s| s.split('\n').map(|s| s.to_string()).collect())
+        Ok(s) => Ok(s.to_string()),
+    }.map(|s| s.split('\n').map(|s| s.to_string()).collect())
 }
 
 fn get_bibchip(file_path: String) -> Vec<Chip> {
@@ -105,7 +112,7 @@ fn get_participants(ppl_path: String) -> Vec<Participant> {
         Err(desc) => {
             println!("Error reading participant file {}", desc);
             Vec::new()
-        },
+        }
         Ok(ppl) => ppl,
     };
     // Read into list of participants and add the chip
