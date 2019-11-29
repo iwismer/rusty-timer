@@ -127,7 +127,7 @@ fn get_participants(ppl_path: String) -> Vec<Participant> {
     participants
 }
 
-// Check if the string is a valid IPv4 address
+/// Check if the string is a valid IPv4 address
 fn is_ip_addr(ip: String) -> Result<(), String> {
     match ip.parse::<Ipv4Addr>() {
         Ok(_) => Ok(()),
@@ -135,7 +135,7 @@ fn is_ip_addr(ip: String) -> Result<(), String> {
     }
 }
 
-// Check if the string is a valid port
+/// Check if the string is a valid port
 fn is_port(port: String) -> Result<(), String> {
     match port.parse::<Port>() {
         Ok(_) => Ok(()),
@@ -143,7 +143,7 @@ fn is_port(port: String) -> Result<(), String> {
     }
 }
 
-// Check that the path does not already point to a file
+/// Check that the path does not already point to a file
 fn is_path(path_str: String) -> Result<(), String> {
     let path = Path::new(&path_str);
     match path.exists() {
@@ -152,7 +152,7 @@ fn is_path(path_str: String) -> Result<(), String> {
     }
 }
 
-// Check that the path does not already point to a file
+/// Check that the path does not already point to a file
 fn is_file(file_str: String) -> Result<(), String> {
     let path = Path::new(&file_str);
     match path.exists() {
@@ -161,7 +161,7 @@ fn is_file(file_str: String) -> Result<(), String> {
     }
 }
 
-fn read_str(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
+fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
     match ChipRead::new(read.to_string()) {
         Err(desc) => format!("Error reading chip {}", desc),
         Ok(read) => {
@@ -326,7 +326,7 @@ fn main() {
         }
     }
     if matches.is_present("participants") {
-        // Unwrap is sage as participants argument is present
+        // Unwrap is safe as participants argument is present
         let path = matches.value_of("participants").unwrap();
         let participants = get_participants(path.to_string());
         for p in &participants {
@@ -446,8 +446,7 @@ fn main() {
         match stream.read_exact(&mut input_buffer) {
             Ok(_) => (),
             Err(e) => {
-                print!("\x1b[2K");
-                println!("Error reading from reader: {}", e);
+                println!("\r\x1b[2KError reading from reader: {}", e);
                 if e.kind() == io::ErrorKind::UnexpectedEof {
                     println!("Reader disconnected!");
                     process::exit(1);
@@ -460,8 +459,7 @@ fn main() {
         let read = match std::str::from_utf8(&input_buffer) {
             Ok(read) => read,
             Err(error) => {
-                print!("\x1b[2K");
-                println!("Error parsing chip read: {}", error);
+                println!("\r\x1b[2KError parsing chip read: {}", error);
                 continue;
             }
         };
@@ -478,8 +476,7 @@ fn main() {
                 line_ending
             )
             .unwrap_or_else(|e| {
-                print!("\x1b[2K");
-                println!("Error writing read to file: {}", e);
+                println!("\r\x1b[2KError writing read to file: {}", e);
             });
         }
         // Check that there is a connection
@@ -488,8 +485,7 @@ fn main() {
             let mut exclusive_bus = match bus.lock() {
                 Ok(exclusive_bus) => exclusive_bus,
                 Err(error) => {
-                    print!("\x1b[2K");
-                    println!("Error communicating with thread: {}", error);
+                    println!("\r\x1b[2KError communicating with thread: {}", error);
                     continue;
                 }
             };
@@ -497,16 +493,14 @@ fn main() {
             exclusive_bus
                 .try_broadcast(read.to_string())
                 .unwrap_or_else(|e| {
-                    print!("\x1b[2K");
                     println!(
-                        "Error sending read to thread. Maybe no readers are conected? {}",
+                        "\r\x1b[2KError sending read to thread. Maybe no readers are conected? {}",
                         e
                     )
                 });
         }
-        let to_print = read_str(&read, &conn, &read_count);
-        print!("\r\x1b[2K");
-        print!("{}", to_print);
+        let to_print = read_to_string(&read, &conn, &read_count);
+        print!("\r\x1b[2K{}", to_print);
         // only flush if the output is unbuffered
         // This can cause high CPU use on some systems
         if !is_buffered {
