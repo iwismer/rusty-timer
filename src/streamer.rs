@@ -79,9 +79,7 @@ fn read_file(path_str: &String) -> Result<Vec<String>, String> {
 }
 
 fn get_bibchip(file_path: String) -> Vec<Chip> {
-    // Attempt to read the bibs, assuming UTF-8 file encoding
     let bibs = match read_file(&file_path) {
-        // If there was an error, attempt again with Windows 1252 encoding
         Err(desc) => {
             println!("Error reading bibchip file {}", desc);
             Vec::new()
@@ -106,9 +104,7 @@ fn get_bibchip(file_path: String) -> Vec<Chip> {
 }
 
 fn get_participants(ppl_path: String) -> Vec<Participant> {
-    // Attempt to read the participants, assuming UTF-8 file encoding
     let ppl = match read_file(&ppl_path) {
-        // If there was an error, attempt again with Windows 1252 encoding
         Err(desc) => {
             println!("Error reading participant file {}", desc);
             Vec::new()
@@ -165,9 +161,9 @@ fn is_file(file_str: String) -> Result<(), String> {
     }
 }
 
-fn print_read(read: &str, conn: &rusqlite::Connection, read_count: &u32) {
+fn read_str(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
     match ChipRead::new(read.to_string()) {
-        Err(desc) => println!("Error reading chip {}", desc),
+        Err(desc) => format!("Error reading chip {}", desc),
         Ok(read) => {
             let mut stmt = conn
                 .prepare(
@@ -200,30 +196,28 @@ fn print_read(read: &str, conn: &rusqlite::Connection, read_count: &u32) {
             match row {
                 // Bandit chip
                 Err(_) => {
-                    print!("\x1b[2K");
-                    print!(
-                        "Total Reads: {} Last Read: Unknown Chip {} {}\r",
+                    format!(
+                        "Total Reads: {} Last Read: Unknown Chip {} {}",
                         read_count,
                         read.tag_id,
                         read.time_string()
-                    );
+                    )
                 }
                 // Good chip, either good or unknown participant
                 Ok(participant) => {
                     // println!("{:?}", participant);
-                    print!("\x1b[2K");
-                    print!(
-                        "Total Reads: {} Last Read: {} {} {} {}\r",
+                    format!(
+                        "Total Reads: {} Last Read: {} {} {} {}",
                         read_count,
                         participant.bib,
                         participant.first_name,
                         participant.last_name,
                         read.time_string()
-                    );
+                    )
                 }
             }
         }
-    };
+    }
 }
 
 fn main() {
@@ -510,7 +504,9 @@ fn main() {
                     )
                 });
         }
-        print_read(&read, &conn, &read_count);
+        let to_print = read_str(&read, &conn, &read_count);
+        print!("\r\x1b[2K");
+        print!("{}", to_print);
         // only flush if the output is unbuffered
         // This can cause high CPU use on some systems
         if !is_buffered {
