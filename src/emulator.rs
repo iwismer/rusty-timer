@@ -70,7 +70,7 @@ fn generate_read() -> String {
         now.tm_hour,
         now.tm_min,
         now.tm_sec,
-        now.tm_nsec / 1000000
+        now.tm_nsec / 10000000
     )
 }
 
@@ -173,13 +173,13 @@ fn main() {
         // Convert to string
         let mut chip_read: String = match file_reader.as_mut() {
             Some(lines) => match lines.next() {
-                Some(line) => line.unwrap(),
+                Some(line) => line.unwrap().trim().to_string(),
                 None => generate_read(),
             },
             None => generate_read(),
         };
         chip_read.push_str("\r\n");
-        // println!("{}", chip_read);
+        // print!("{}", chip_read);
         // Lock the bus so I can send data along it
         let mut exclusive_bus = match bus.lock() {
             Ok(exclusive_bus) => exclusive_bus,
