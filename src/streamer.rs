@@ -21,6 +21,7 @@ extern crate bus;
 extern crate encoding;
 extern crate rusqlite;
 
+use futures::executor::block_on;
 use bus::Bus;
 use clap::{App, Arg};
 use encoding::all::WINDOWS_1252;
@@ -40,8 +41,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 mod chip_read;
+mod client;
 mod participant;
 use chip_read::ChipRead;
+use client::Client;
 use participant::{Gender, Participant};
 
 type Port = u16;
@@ -67,15 +70,12 @@ fn read_file(path_str: &String) -> Result<Vec<String>, String> {
     };
     match std::str::from_utf8(&buffer) {
         Err(_desc) => match WINDOWS_1252.decode(buffer.as_slice(), DecoderTrap::Replace) {
-            Err(desc) => Err(format!(
-                "couldn't read {}: {}",
-                path.display(),
-                desc
-            )),
+            Err(desc) => Err(format!("couldn't read {}: {}", path.display(), desc)),
             Ok(s) => Ok(s.to_string()),
         },
         Ok(s) => Ok(s.to_string()),
-    }.map(|s| s.split('\n').map(|s| s.to_string()).collect())
+    }
+    .map(|s| s.split('\n').map(|s| s.to_string()).collect())
 }
 
 fn get_bibchip(file_path: String) -> Vec<Chip> {
@@ -195,14 +195,12 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
 
             match row {
                 // Bandit chip
-                Err(_) => {
-                    format!(
-                        "Total Reads: {} Last Read: Unknown Chip {} {}",
-                        read_count,
-                        read.tag_id,
-                        read.time_string()
-                    )
-                }
+                Err(_) => format!(
+                    "Total Reads: {} Last Read: Unknown Chip {} {}",
+                    read_count,
+                    read.tag_id,
+                    read.time_string()
+                ),
                 // Good chip, either good or unknown participant
                 Ok(participant) => {
                     // println!("{:?}", participant);
@@ -400,6 +398,7 @@ fn main() {
     // to each client computer
     let bus: Arc<Mutex<Bus<String>>> = Arc::new(Mutex::new(Bus::new(1000)));
     let bus_r = bus.clone();
+    // let mut clients = Vec::new();
     // Thread to connect to clients
     thread::spawn(move || {
         loop {
@@ -408,29 +407,42 @@ fn main() {
                 Ok((stream, addr)) => {
                     // Increment the number of connections
                     CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
-                    println!("Connected to client: {}", addr);
                     // Add a receiver for the connection
-                    let mut rx = bus_r.lock().unwrap().add_rx();
-                    // Make a thread for that connection
-                    thread::spawn(move || {
-                        loop {
-                            // Receive messages and pass to client
-                            match stream
-                                .try_clone()
-                                .unwrap()
-                                .write(rx.recv().unwrap().as_bytes())
-                            {
-                                Ok(_) => {}
-                                Err(_) => {
-                                    println!("Warning: Client {} disconnected", addr);
-                                    // Decrement the number of clients on disconnect
-                                    CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
-                                    // end the loop, destroying the thread
-                                    break;
-                                }
-                            };
+                    let rx = bus_r.lock().unwrap().add_rx();
+                    match Client::new(stream, addr, rx, || {
+                        CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
+                    }) {
+                        Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
+                        Ok(client) => {
+                            thread::spawn(|| {
+                                let c = client.begin();
+                                block_on(c);
+                            });
+                            // clients.push(client);
+                            println!("\r\x1b[2KConnected to client: {}", addr)
                         }
-                    });
+                    };
+                    // Make a thread for that connection
+                    // println!("Connected to client: {}", addr);
+                    // thread::spawn(move || {
+                    //     loop {
+                    //         // Receive messages and pass to client
+                    //         match stream
+                    //             .try_clone()
+                    //             .unwrap()
+                    //             .write(rx.recv().unwrap().as_bytes())
+                    //         {
+                    //             Ok(_) => {}
+                    //             Err(_) => {
+                    //                 println!("Warning: Client {} disconnected", addr);
+                    //                 // Decrement the number of clients on disconnect
+                    //                 CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
+                    //                 // end the loop, destroying the thread
+                    //                 break;
+                    //             }
+                    //         };
+                    //     }
+                    // });
                 }
                 Err(error) => {
                     println!("Failed to connect to client: {}", error);
