@@ -62,7 +62,7 @@ fn is_delay(delay: String) -> Result<(), String> {
 fn generate_read() -> String {
     let now = time::now();
     format!(
-        "aa00{}00{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}",
+        "aa00{}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}cc",
         "05800319aeeb0001",
         now.tm_year % 100,
         now.tm_mon,
