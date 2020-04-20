@@ -11,6 +11,7 @@ clap = "2.33.0"
 time = "0.1.42"
 encoding = "0.2"
 futures = "0.3.1"
+signal-hook = "0.1.12"
 
 [dependencies.rusqlite]
 version = "0.20.0"

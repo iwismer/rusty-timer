@@ -39,6 +39,8 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use signal_hook::{iterator::Signals, SIGINT};
+use std::net::Shutdown;
 
 mod chip_read;
 mod client;
@@ -63,7 +65,7 @@ fn read_file(path_str: &String) -> Result<Vec<String>, String> {
             return Err(format!(
                 "couldn't read {}: {}",
                 path.display(),
-                desc.description()
+                desc.to_string()
             ))
         }
         Ok(buf) => buf,
@@ -218,7 +220,7 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
     }
 }
 
-fn main() {
+async fn main_async() {
     // Create the flags
     let matches = App::new("Rusty Timer: Read Streamer")
         .version(crate_version!())
@@ -398,6 +400,18 @@ fn main() {
     // to each client computer
     let bus: Arc<Mutex<Bus<String>>> = Arc::new(Mutex::new(Bus::new(1000)));
     let bus_r = bus.clone();
+
+    let handler_bus: Arc<Mutex<Bus<bool>>> = Arc::new(Mutex::new(Bus::new(1000)));
+    let handler_bus_r = handler_bus.clone();
+    let stream_handler = stream.try_clone().unwrap();
+    thread::spawn(move || {
+        let signals = Signals::new(&[SIGINT]).unwrap();
+        for sig in signals.forever() {
+            println!("\r\x1b[2KReceived signal {:?}", sig);
+            handler_bus.lock().unwrap().try_broadcast(true).unwrap();
+            stream_handler.shutdown(Shutdown::Both).unwrap();
+        }
+    });
     // let mut clients = Vec::new();
     // Thread to connect to clients
     thread::spawn(move || {
@@ -409,7 +423,8 @@ fn main() {
                     CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
                     // Add a receiver for the connection
                     let rx = bus_r.lock().unwrap().add_rx();
-                    match Client::new(stream, addr, rx, || {
+                    let handler_rx = handler_bus_r.lock().unwrap().add_rx();
+                    match Client::new(stream, addr, rx, handler_rx, || {
                         CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
                     }) {
                         Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
@@ -422,27 +437,6 @@ fn main() {
                             println!("\r\x1b[2KConnected to client: {}", addr)
                         }
                     };
-                    // Make a thread for that connection
-                    // println!("Connected to client: {}", addr);
-                    // thread::spawn(move || {
-                    //     loop {
-                    //         // Receive messages and pass to client
-                    //         match stream
-                    //             .try_clone()
-                    //             .unwrap()
-                    //             .write(rx.recv().unwrap().as_bytes())
-                    //         {
-                    //             Ok(_) => {}
-                    //             Err(_) => {
-                    //                 println!("Warning: Client {} disconnected", addr);
-                    //                 // Decrement the number of clients on disconnect
-                    //                 CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
-                    //                 // end the loop, destroying the thread
-                    //                 break;
-                    //             }
-                    //         };
-                    //     }
-                    // });
                 }
                 Err(error) => {
                     println!("Failed to connect to client: {}", error);
@@ -519,4 +513,8 @@ fn main() {
             io::stdout().flush().unwrap_or(());
         }
     }
+}
+
+fn main() {
+    block_on(main_async());
 }
