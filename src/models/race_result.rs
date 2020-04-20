@@ -1,5 +1,5 @@
 /*
-Copyright © 2019  Isaac Wismer
+Copyright © 2020  Isaac Wismer
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -16,19 +16,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 use std::fmt;
+use super::{Participant, ChipRead};
 
-#[derive(debug)]
-pub struct Race_Result {
-    pub participant: participant::Participant,
-    pub start_reads: Vec<chip_read::ChipRead>,
+#[derive(Debug)]
+pub struct RaceResult {
+    pub participant: Participant,
+    pub start_reads: Vec<ChipRead>,
     // TODO: Make a Vec of Vec to allow for multiple timing points
-    pub finish_reads: Vec<chip_read::ChipRead>,
+    pub finish_reads: Vec<ChipRead>,
 }
 
-impl Race_Result {
+#[allow(dead_code)]
+impl RaceResult {
     // Create a new race result with no reads
-    pub fn new(participant: participant::Participant) -> Race_Result {
-        Race_Result {
+    pub fn new(participant: Participant) -> RaceResult {
+        RaceResult {
             participant: participant,
             start_reads: Vec::new(),
             finish_reads: Vec::new(),
@@ -37,11 +39,11 @@ impl Race_Result {
 
     // Create a new race result with chip reads
     pub fn new_with_reads(
-        participant: participant::Participant,
-        start_reads: Vec<chip_read::ChipRead>,
-        finish_reads: Vec<chip_read::ChipRead>,
-    ) -> Race_Result {
-        Race_Result {
+        participant: Participant,
+        start_reads: Vec<ChipRead>,
+        finish_reads: Vec<ChipRead>,
+    ) -> RaceResult {
+        RaceResult {
             participant: participant,
             start_reads: start_reads,
             finish_reads: finish_reads,
@@ -49,12 +51,12 @@ impl Race_Result {
     }
 
     // Add a new chip start read
-    pub fn add_start_read(&self, read: chip_read::ChipRead) {
+    pub fn add_start_read(&mut self, read: ChipRead) {
         self.start_reads.push(read);
     }
 
     // Add a new chip finish read
-    pub fn add_finish_read(&self, read: chip_read::ChipRead) {
+    pub fn add_finish_read(&mut self, read: ChipRead) {
         self.finish_reads.push(read);
     }
 
@@ -65,20 +67,20 @@ impl Race_Result {
     }
 }
 
-impl fmt::display for Race_Result {
+impl fmt::Display for RaceResult {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "Result (Participant: {} Start Time: {} Finish Time: {})",
             self.participant,
             match self.start_reads.len() {
-                len if len > 0 => self.start_reads[len - 1],
-                _ => "No start time".to_string(),
-            };
+                len if len > 0 => self.start_reads[len - 1].timestamp.time_string(),
+                _ => "No start time".to_owned(),
+            },
             match self.finish_reads.len() {
-                len if len > 0 => self.finish_reads[0],
-                _ => "No finish time".to_string(),
-            };
+                len if len > 0 => self.finish_reads[0].timestamp.time_string(),
+                _ => "No finish time".to_owned(),
+            },
         )
     }
 }

@@ -1,5 +1,5 @@
 /*
-Copyright © 2019  Isaac Wismer
+Copyright © 2020  Isaac Wismer
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -24,8 +24,6 @@ extern crate rusqlite;
 use futures::executor::block_on;
 use bus::Bus;
 use clap::{App, Arg};
-use encoding::all::WINDOWS_1252;
-use encoding::{DecoderTrap, Encoding};
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
 use std::error::Error;
@@ -42,92 +40,18 @@ use std::thread;
 use signal_hook::{iterator::Signals, SIGINT};
 use std::net::Shutdown;
 
-mod chip_read;
+mod util;
 mod client;
-mod participant;
-use chip_read::ChipRead;
+mod models;
 use client::Client;
-use participant::{Gender, Participant};
+use models::{Gender, Participant, ChipRead, ChipBib};
+use models::chip::read_bibchip_file;
+use models::participant::read_participant_file;
 
 type Port = u16;
 
 static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-pub struct Chip {
-    pub id: String,
-    pub bib: i32,
-}
-
-fn read_file(path_str: &String) -> Result<Vec<String>, String> {
-    let path = Path::new(path_str);
-    let buffer = match std::fs::read(path) {
-        Err(desc) => {
-            return Err(format!(
-                "couldn't read {}: {}",
-                path.display(),
-                desc.to_string()
-            ))
-        }
-        Ok(buf) => buf,
-    };
-    match std::str::from_utf8(&buffer) {
-        Err(_desc) => match WINDOWS_1252.decode(buffer.as_slice(), DecoderTrap::Replace) {
-            Err(desc) => Err(format!("couldn't read {}: {}", path.display(), desc)),
-            Ok(s) => Ok(s.to_string()),
-        },
-        Ok(s) => Ok(s.to_string()),
-    }
-    .map(|s| s.split('\n').map(|s| s.to_string()).collect())
-}
-
-fn get_bibchip(file_path: String) -> Vec<Chip> {
-    let bibs = match read_file(&file_path) {
-        Err(desc) => {
-            println!("Error reading bibchip file {}", desc);
-            Vec::new()
-        }
-        Ok(bibs) => bibs,
-    };
-    // parse the file and import bib chips into hashmap
-    let mut bib_chip = Vec::new();
-    for b in bibs {
-        if b != "" && b.chars().next().unwrap().is_digit(10) {
-            let parts = b.trim().split(",").collect::<Vec<&str>>();
-            bib_chip.push(Chip {
-                id: parts[1].to_string(),
-                bib: parts[0].parse::<i32>().unwrap_or_else(|_| {
-                    println!("Error reading bib file. Invalid bib: {}", parts[0]);
-                    0
-                }),
-            });
-        }
-    }
-    bib_chip
-}
-
-fn get_participants(ppl_path: String) -> Vec<Participant> {
-    let ppl = match read_file(&ppl_path) {
-        Err(desc) => {
-            println!("Error reading participant file {}", desc);
-            Vec::new()
-        }
-        Ok(ppl) => ppl,
-    };
-    // Read into list of participants and add the chip
-    let mut participants = Vec::new();
-    for p in ppl {
-        // Ignore empty and comment lines
-        if p != "" && !p.starts_with(";") {
-            match Participant::from_ppl_record(p.trim().to_string()) {
-                Err(desc) => println!("Error reading person {}", desc),
-                Ok(person) => {
-                    participants.push(person);
-                }
-            };
-        }
-    }
-    participants
-}
 
 /// Check if the string is a valid IPv4 address
 fn is_ip_addr(ip: String) -> Result<(), String> {
@@ -314,7 +238,7 @@ async fn main_async() {
     if matches.is_present("bibchip") {
         // Unwrap is sage as bibchip argument is present
         let path = matches.value_of("bibchip").unwrap();
-        let bib_chips = get_bibchip(path.to_string());
+        let bib_chips = read_bibchip_file(path.to_string());
         // println!("{:?}", bib_chip_map);
         for c in &bib_chips {
             conn.execute(
@@ -328,7 +252,7 @@ async fn main_async() {
     if matches.is_present("participants") {
         // Unwrap is safe as participants argument is present
         let path = matches.value_of("participants").unwrap();
-        let participants = get_participants(path.to_string());
+        let participants = read_participant_file(path.to_string());
         for p in &participants {
             conn.execute(
                 "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)

@@ -1,5 +1,5 @@
 /*
-Copyright © 2019  Isaac Wismer
+Copyright © 2020  Isaac Wismer
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -15,8 +15,16 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+use crate::util::io::read_file;
+use super::Timestamp;
 use std::fmt;
 use std::i32;
+
+
+pub struct ChipBib {
+    pub id: String,
+    pub bib: i32,
+}
 
 #[derive(Debug)]
 pub enum ReadType {
@@ -124,55 +132,28 @@ impl fmt::Display for ChipRead {
     }
 }
 
-#[derive(Debug, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Timestamp {
-    year: u16,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: u8,
-    millis: u16,
-}
 
-impl Timestamp {
-    fn new(
-        year: u16,
-        month: u8,
-        day: u8,
-        hour: u8,
-        minute: u8,
-        second: u8,
-        millis: u16,
-    ) -> Timestamp {
-        Timestamp {
-            year: year,
-            month: month,
-            day: day,
-            hour: hour,
-            minute: minute,
-            second: second,
-            millis: millis,
+pub fn read_bibchip_file(file_path: String) -> Vec<ChipBib> {
+    let bibs = match read_file(&file_path) {
+        Err(desc) => {
+            println!("Error reading bibchip file {}", desc);
+            Vec::new()
+        }
+        Ok(bibs) => bibs,
+    };
+    // parse the file and import bib chips into hashmap
+    let mut bib_chip = Vec::new();
+    for b in bibs {
+        if b != "" && b.chars().next().unwrap().is_digit(10) {
+            let parts = b.trim().split(",").collect::<Vec<&str>>();
+            bib_chip.push(ChipBib {
+                id: parts[1].to_string(),
+                bib: parts[0].parse::<i32>().unwrap_or_else(|_| {
+                    println!("Error reading bib file. Invalid bib: {}", parts[0]);
+                    0
+                }),
+            });
         }
     }
-}
-
-impl Timestamp {
-    pub fn time_string(&self) -> String {
-        format!(
-            "{:02}:{:02}:{:02}.{:03}",
-            self.hour, self.minute, self.second, self.millis
-        )
-    }
-}
-
-impl fmt::Display for Timestamp {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Customize so only `x` and `y` are denoted.
-        write!(
-            f,
-            "20{:02}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}",
-            self.year, self.month, self.day, self.hour, self.minute, self.second, self.millis
-        )
-    }
+    bib_chip
 }
