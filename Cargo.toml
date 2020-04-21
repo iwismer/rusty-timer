@@ -6,12 +6,12 @@ edition = "2018"
 homepage = "https://github.com/iwismer/rusty-timer"
 
 [dependencies]
-bus = "2.2.2"
-clap = "2.33.0"
-time = "0.1.42"
+clap = "2"
+time = "0.2"
 encoding = "0.2"
-futures = "0.3.1"
+futures = "0.3"
 signal-hook = "0.1.12"
+tokio = { version = "0.2", features = ["full"] }
 
 [dependencies.rusqlite]
 version = "0.20.0"

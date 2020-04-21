@@ -17,41 +17,30 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #[macro_use]
 extern crate clap;
-extern crate bus;
-extern crate encoding;
-extern crate rusqlite;
 
-use futures::executor::block_on;
-use bus::Bus;
 use clap::{App, Arg};
+use futures::{future::FutureExt, join};
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
-use std::error::Error;
-use std::fs::File;
-use std::io::{self, Read, Write};
+use signal_hook::{iterator::Signals, SIGINT};
 use std::net::Ipv4Addr;
-use std::net::TcpListener;
-use std::net::TcpStream;
+use std::net::Shutdown;
 use std::path::Path;
-use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use signal_hook::{iterator::Signals, SIGINT};
-use std::net::Shutdown;
+use tokio::sync::broadcast;
 
-mod util;
-mod client;
 mod models;
-use client::Client;
-use models::{Gender, Participant, ChipRead, ChipBib};
+mod util;
+mod workers;
 use models::chip::read_bibchip_file;
 use models::participant::read_participant_file;
+use workers::{ClientConnector, ReadBroadcaster};
 
 type Port = u16;
 
-static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
-
+pub static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Check if the string is a valid IPv4 address
 fn is_ip_addr(ip: String) -> Result<(), String> {
@@ -87,64 +76,109 @@ fn is_file(file_str: String) -> Result<(), String> {
     }
 }
 
-fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
-    match ChipRead::new(read.to_string()) {
-        Err(desc) => format!("Error reading chip {}", desc),
-        Ok(read) => {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT
-                            c.id,
-                            c.bib,
-                            p.first_name,
-                            p.last_name
-                            FROM chip c
-                            LEFT JOIN participant p
-                            ON c.bib = p.bib
-                            WHERE c.id = ?",
-                )
-                .unwrap();
-            // Make the query and map to a participant
-            let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
-                Ok(Participant {
-                    // If there is a missing field, then map it to unknown
-                    chip_id: vec![row.get(0).unwrap_or("None".to_string())],
-                    bib: row.get(1).unwrap_or(0),
-                    first_name: row.get(2).unwrap_or("Unknown".to_string()),
-                    last_name: row.get(3).unwrap_or("Participant".to_string()),
-                    gender: Gender::X,
-                    age: None,
-                    affiliation: None,
-                    division: None,
-                })
-            });
-
-            match row {
-                // Bandit chip
-                Err(_) => format!(
-                    "Total Reads: {} Last Read: Unknown Chip {} {}",
-                    read_count,
-                    read.tag_id,
-                    read.time_string()
-                ),
-                // Good chip, either good or unknown participant
-                Ok(participant) => {
-                    // println!("{:?}", participant);
-                    format!(
-                        "Total Reads: {} Last Read: {} {} {} {}",
-                        read_count,
-                        participant.bib,
-                        participant.first_name,
-                        participant.last_name,
-                        read.time_string()
-                    )
-                }
-            }
-        }
-    }
+struct Args {
+    bib_chip_file_path: Option<String>,
+    participants_file_path: Option<String>,
+    reader_ip: Ipv4Addr,
+    reader_port: Port,
+    bind_port: Port,
+    out_file: Option<String>,
+    buffered_output: bool,
 }
 
-async fn main_async() {
+#[tokio::main]
+async fn main() {
+    let args = get_args();
+
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute(
+        "CREATE TABLE participant (
+                  bib           INTEGER PRIMARY KEY,
+                  first_name    TEXT NOT NULL,
+                  last_name     TEXT NOT NULL,
+                  gender        CHECK( gender IN ('M','F','X') ) NOT NULL DEFAULT 'X',
+                  affiliation   TEXT,
+                  division      INTEGER
+                  )",
+        NO_PARAMS,
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE chip (
+                  id     TEXT PRIMARY KEY,
+                  bib    INTEGER NOT NULL
+                  )",
+        NO_PARAMS,
+    )
+    .unwrap();
+
+    // Check if there was a bibchip argument
+    if args.bib_chip_file_path.is_some() {
+        // Unwrap is sage as bibchip argument is present
+        let bib_chips = read_bibchip_file(args.bib_chip_file_path.unwrap().to_string());
+        // println!("{:?}", bib_chip_map);
+        for c in &bib_chips {
+            conn.execute(
+                "INSERT INTO chip (id, bib)
+                        VALUES (?1, ?2)",
+                &[&c.id as &dyn ToSql, &c.bib],
+            )
+            .unwrap();
+        }
+    }
+    if args.participants_file_path.is_some() {
+        // Unwrap is safe as participants argument is present
+        let participants = read_participant_file(args.participants_file_path.unwrap().to_string());
+        for p in &participants {
+            conn.execute(
+                "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                &[
+                    &p.bib as &dyn ToSql,
+                    &p.first_name as &dyn ToSql,
+                    &p.last_name as &dyn ToSql,
+                    &format!("{}", p.gender),
+                    &p.affiliation as &dyn ToSql,
+                    &p.division as &dyn ToSql,
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    // Create a bus to send the reads to the threads that control the connection
+    // to each client computer
+    let (chip_read_tx, _) = broadcast::channel::<String>(1000);
+    let (signal_tx, _) = broadcast::channel::<bool>(10);
+
+    let connector = ClientConnector::new(args.bind_port, chip_read_tx.clone(), signal_tx.clone()).await;
+    let receiver = ReadBroadcaster::new(
+        args.reader_ip,
+        args.reader_port,
+        chip_read_tx.clone(),
+        conn,
+        args.out_file,
+        args.buffered_output,
+    )
+    .await;
+
+    // let stream_handler = receiver.get_stream_clone();
+    // tokio::spawn(async {
+    //     let signals = Signals::new(&[SIGINT]).unwrap();
+    //     for sig in signals.forever() {
+    //         println!("\r\x1b[2KReceived signal {:?}", sig);
+    //         signal_tx.send(true).unwrap();
+    //         stream_handler.shutdown(Shutdown::Both).unwrap();
+    //     }
+    // });
+    let fut_recv = receiver.begin().fuse();
+    let fut_conn = connector.begin().fuse();
+
+    join!(fut_recv, fut_conn);
+}
+
+fn get_args() -> Args {
     // Create the flags
     let matches = App::new("Rusty Timer: Read Streamer")
         .version(crate_version!())
@@ -210,87 +244,6 @@ async fn main_async() {
                 .takes_value(false),
         )
         .get_matches();
-
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute(
-        "CREATE TABLE participant (
-                  bib           INTEGER PRIMARY KEY,
-                  first_name    TEXT NOT NULL,
-                  last_name     TEXT NOT NULL,
-                  gender        CHECK( gender IN ('M','F','X') ) NOT NULL DEFAULT 'X',
-                  affiliation   TEXT,
-                  division      INTEGER
-                  )",
-        NO_PARAMS,
-    )
-    .unwrap();
-
-    conn.execute(
-        "CREATE TABLE chip (
-                  id     TEXT PRIMARY KEY,
-                  bib    INTEGER NOT NULL
-                  )",
-        NO_PARAMS,
-    )
-    .unwrap();
-
-    // Check if there was a bibchip argument
-    if matches.is_present("bibchip") {
-        // Unwrap is sage as bibchip argument is present
-        let path = matches.value_of("bibchip").unwrap();
-        let bib_chips = read_bibchip_file(path.to_string());
-        // println!("{:?}", bib_chip_map);
-        for c in &bib_chips {
-            conn.execute(
-                "INSERT INTO chip (id, bib)
-                        VALUES (?1, ?2)",
-                &[&c.id as &dyn ToSql, &c.bib],
-            )
-            .unwrap();
-        }
-    }
-    if matches.is_present("participants") {
-        // Unwrap is safe as participants argument is present
-        let path = matches.value_of("participants").unwrap();
-        let participants = read_participant_file(path.to_string());
-        for p in &participants {
-            conn.execute(
-                "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
-                        VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                &[
-                    &p.bib as &dyn ToSql,
-                    &p.first_name as &dyn ToSql,
-                    &p.last_name as &dyn ToSql,
-                    &format!("{}", p.gender),
-                    &p.affiliation as &dyn ToSql,
-                    &p.division as &dyn ToSql,
-                ],
-            )
-            .unwrap();
-        }
-    }
-
-    let is_buffered = matches.is_present("is_buffered");
-
-    // Check if the user has specified to save the reads to a file
-    let mut file_writer: Option<File> = None;
-    if matches.is_present("file") {
-        // Create the file writer for saving reads
-        let file_path = Path::new(matches.value_of("file").unwrap());
-        file_writer = match File::create(file_path) {
-            Ok(file) => Some(file),
-            Err(error) => {
-                println!("Error creating file: {}", error);
-                process::exit(1);
-            }
-        };
-    }
-
-    // Check if running on windows
-    let line_ending = match cfg!(windows) {
-        true => "\r\n",
-        false => "\n",
-    };
     // Get the address of the reader and parse to IP
     let reader = matches
         .value_of("reader")
@@ -305,140 +258,14 @@ async fn main_async() {
         .unwrap()
         .parse::<Port>()
         .unwrap();
-    // Bind to the listening port to allow other computers to connect
-    let listener = TcpListener::bind(("0.0.0.0", bind_port)).expect("Unable to bind to port");
-    println!("Bound to port: {}", listener.local_addr().unwrap().port());
-    println!("Waiting for reader: {}:{}", reader, reader_port);
-    // Connect to the reader
-    let mut stream = match TcpStream::connect((reader, reader_port)) {
-        Ok(stream) => {
-            println!("Connected to reader: {}:{}", reader, reader_port);
-            stream
-        }
-        Err(error) => {
-            println!("Failed to connect to reader: {}", error);
-            process::exit(1);
-        }
-    };
-    // Create a bus to send the reads to the threads that control the connection
-    // to each client computer
-    let bus: Arc<Mutex<Bus<String>>> = Arc::new(Mutex::new(Bus::new(1000)));
-    let bus_r = bus.clone();
 
-    let handler_bus: Arc<Mutex<Bus<bool>>> = Arc::new(Mutex::new(Bus::new(1000)));
-    let handler_bus_r = handler_bus.clone();
-    let stream_handler = stream.try_clone().unwrap();
-    thread::spawn(move || {
-        let signals = Signals::new(&[SIGINT]).unwrap();
-        for sig in signals.forever() {
-            println!("\r\x1b[2KReceived signal {:?}", sig);
-            handler_bus.lock().unwrap().try_broadcast(true).unwrap();
-            stream_handler.shutdown(Shutdown::Both).unwrap();
-        }
-    });
-    // let mut clients = Vec::new();
-    // Thread to connect to clients
-    thread::spawn(move || {
-        loop {
-            // wait for a connection, then connect when it comes
-            match listener.accept() {
-                Ok((stream, addr)) => {
-                    // Increment the number of connections
-                    CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
-                    // Add a receiver for the connection
-                    let rx = bus_r.lock().unwrap().add_rx();
-                    let handler_rx = handler_bus_r.lock().unwrap().add_rx();
-                    match Client::new(stream, addr, rx, handler_rx, || {
-                        CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
-                    }) {
-                        Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
-                        Ok(client) => {
-                            thread::spawn(|| {
-                                let c = client.begin();
-                                block_on(c);
-                            });
-                            // clients.push(client);
-                            println!("\r\x1b[2KConnected to client: {}", addr)
-                        }
-                    };
-                }
-                Err(error) => {
-                    println!("Failed to connect to client: {}", error);
-                }
-            }
-        }
-    });
-
-    // Get 38 bytes from the stream, which is exactly 1 read
-    let mut input_buffer = [0u8; 38];
-    let mut read_count: u32 = 0;
-    loop {
-        match stream.read_exact(&mut input_buffer) {
-            Ok(_) => (),
-            Err(e) => {
-                println!("\r\x1b[2KError reading from reader: {}", e);
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    println!("Reader disconnected!");
-                    process::exit(1);
-                }
-                continue;
-            }
-        }
-        read_count += 1;
-        // Convert to string
-        let read = match std::str::from_utf8(&input_buffer) {
-            Ok(read) => read,
-            Err(error) => {
-                println!("\r\x1b[2KError parsing chip read: {}", error);
-                continue;
-            }
-        };
-        // println!("'{}'", read);
-        // Only write to file if a file was supplied
-        if file_writer.is_some() {
-            write!(
-                // This unwrap is safe as file_writer has been
-                // proven to be Some(T)
-                file_writer.as_mut().unwrap(),
-                "{}{}",
-                read.replace(|c: char| !c.is_alphanumeric(), ""),
-                // Use \r\n on a windows machine
-                line_ending
-            )
-            .unwrap_or_else(|e| {
-                println!("\r\x1b[2KError writing read to file: {}", e);
-            });
-        }
-        // Check that there is a connection
-        if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
-            // Lock the bus so I can send data along it
-            let mut exclusive_bus = match bus.lock() {
-                Ok(exclusive_bus) => exclusive_bus,
-                Err(error) => {
-                    println!("\r\x1b[2KError communicating with thread: {}", error);
-                    continue;
-                }
-            };
-            // Send the read to the threads
-            exclusive_bus
-                .try_broadcast(read.to_string())
-                .unwrap_or_else(|e| {
-                    println!(
-                        "\r\x1b[2KError sending read to thread. Maybe no readers are conected? {}",
-                        e
-                    )
-                });
-        }
-        let to_print = read_to_string(&read, &conn, &read_count);
-        print!("\r\x1b[2K{}", to_print);
-        // only flush if the output is unbuffered
-        // This can cause high CPU use on some systems
-        if !is_buffered {
-            io::stdout().flush().unwrap_or(());
-        }
+    Args {
+        bib_chip_file_path: matches.value_of("bibchip").map(|s| s.to_string()),
+        participants_file_path: matches.value_of("participants").map(|s| s.to_string()),
+        reader_ip: reader,
+        reader_port: reader_port,
+        bind_port,
+        out_file: matches.value_of("file").map(|s| s.to_string()),
+        buffered_output: matches.is_present("is_buffered"),
     }
-}
-
-fn main() {
-    block_on(main_async());
 }

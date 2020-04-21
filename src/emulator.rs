@@ -17,10 +17,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #[macro_use]
 extern crate clap;
-extern crate bus;
 extern crate time;
 
-use bus::Bus;
+use tokio::sync::broadcast;
 use clap::{App, Arg};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Lines, Write};
@@ -31,6 +30,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use futures::executor::block_on;
 
 type Port = u16;
 static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -88,14 +88,16 @@ fn main() {
                 .takes_value(true)
                 .validator(is_port)
                 .default_value("10001"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("file")
                 .help("The file to get the reads from")
                 .short("f")
                 .long("file")
                 .takes_value(true)
                 .validator(is_path),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("delay")
                 .help("Delay between reads")
                 .short("d")
@@ -103,7 +105,8 @@ fn main() {
                 .takes_value(true)
                 .validator(is_delay)
                 .default_value("1000"),
-        ).get_matches();
+        )
+        .get_matches();
 
     // Check if the user has specified to save the reads to a file
     let mut file_reader: Option<Lines<BufReader<_>>> = None;
@@ -131,8 +134,9 @@ fn main() {
     println!("Bound to port: {}", listener.local_addr().unwrap().port());
     // Create a bus to send the reads to the threads that control the connection
     // to each client computer
-    let bus: Arc<Mutex<Bus<String>>> = Arc::new(Mutex::new(Bus::new(1000)));
-    let bus_r = bus.clone();
+    let (sender, _) = broadcast::channel::<String>(1000);
+    let sender_clone = sender.clone();
+    // let bus_r = bus.clone();
     // Thread to connect to clients
     thread::spawn(move || {
         // TODO: Add a counter for the number of clients connected
@@ -142,13 +146,13 @@ fn main() {
                 Ok((stream, addr)) => {
                     CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
                     println!("Connected to client: {}", addr);
-                    let mut rx = bus_r.lock().unwrap().add_rx();
+                    let mut rx = sender_clone.subscribe();
                     thread::spawn(move || {
                         loop {
                             match stream
                                 .try_clone()
                                 .unwrap()
-                                .write(rx.recv().unwrap().as_bytes())
+                                .write(block_on(rx.recv()).unwrap().as_bytes())
                             {
                                 Ok(_) => {}
                                 Err(_) => {
@@ -180,21 +184,12 @@ fn main() {
         };
         chip_read.push_str("\r\n");
         // print!("{}", chip_read);
-        // Lock the bus so I can send data along it
-        let mut exclusive_bus = match bus.lock() {
-            Ok(exclusive_bus) => exclusive_bus,
-            Err(error) => {
-                println!("Error communicating with thread: {}", error);
-                continue;
-            }
-        };
         // Send the read to the threads
         // TODO: Only send broadcast if there are connected readers
-        match exclusive_bus.try_broadcast(chip_read.to_string()) {
+        match sender.clone().send(chip_read.to_string()) {
             Ok(_) => (),
-            Err(error) => println!(
-                "Error sending read to thread. Maybe no readers are conected? {}",
-                error
+            Err(_) => println!(
+                "Error sending read to thread. Maybe no readers are conected?"
             ),
         }
         // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
