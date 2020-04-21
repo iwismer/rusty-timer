@@ -3,11 +3,14 @@ use crate::util::io::read_file;
 use std::fmt;
 use std::i32;
 
+/// A struct for mapping a chip to a bib number
+#[derive(Debug)]
 pub struct ChipBib {
     pub id: String,
     pub bib: i32,
 }
 
+/// Define a read as either raw, or first-seen/last-seen
 #[derive(Debug)]
 pub enum ReadType {
     Raw,
@@ -33,6 +36,7 @@ pub struct ChipRead {
 
 #[allow(dead_code)]
 impl ChipRead {
+    // TODOConvert to TryFrom trait
     pub fn new(read_str: String) -> Result<ChipRead, &'static str> {
         let mut chip_read = read_str.trim().to_string();
         chip_read = chip_read.split_whitespace().next().unwrap().to_string();

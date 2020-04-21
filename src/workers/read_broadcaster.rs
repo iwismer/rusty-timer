@@ -68,6 +68,7 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
     }
 }
 
+/// Receives reads from the reader, then forwards them to the client pool.
 pub struct ReadBroadcaster {
     stream: TcpStream,
     file_writer: Option<File>,
@@ -122,16 +123,17 @@ impl ReadBroadcaster {
         }
     }
 
+    /// Start listening for reads.
+    /// This function should never return.
     pub async fn begin(mut self) {
-        let mut input_buffer = [0u8; 38];
-        let mut read_count: u32 = 0;
-
-        // Check if running on windows
+        // Check if running on windows, and set line ending.
         let line_ending = match cfg!(windows) {
             true => "\r\n",
             false => "\n",
         };
 
+        let mut input_buffer = [0u8; 38];
+        let mut read_count: u32 = 0;
         loop {
             // Get 38 bytes from the stream, which is exactly 1 read
             match self.stream.read_exact(&mut input_buffer).await {

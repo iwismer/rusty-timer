@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
+/// Holds a connection to a single client, and forwards reads to it.
 #[derive(Debug)]
 pub struct Client {
     stream: TcpStream,

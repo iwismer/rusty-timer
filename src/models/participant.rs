@@ -30,6 +30,7 @@ impl fmt::Debug for Gender {
     }
 }
 
+/// A single race participant
 #[derive(Debug)]
 pub struct Participant {
     pub chip_id: Vec<String>,
@@ -127,8 +128,6 @@ impl Participant {
         }
     }
 }
-
-
 
 pub fn read_participant_file(ppl_path: String) -> Vec<Participant> {
     let ppl = match read_file(&ppl_path) {
