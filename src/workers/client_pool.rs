@@ -1,7 +1,6 @@
 use super::Client;
 use crate::models::Message;
 use futures::future::join_all;
-use std::sync::atomic::Ordering;
 use tokio::sync::mpsc::Receiver;
 
 pub struct ClientPool {

@@ -5,7 +5,6 @@ use std::io::{self, Write};
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process;
-use std::sync::atomic::Ordering;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 // use tokio::sync::broadcast::Sender;
