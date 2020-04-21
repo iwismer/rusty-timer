@@ -17,7 +17,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #[macro_use]
 extern crate clap;
-extern crate time;
 
 use tokio::sync::broadcast;
 use clap::{App, Arg};
@@ -27,10 +26,10 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use futures::executor::block_on;
+use chrono::{Datelike, Timelike};
 
 type Port = u16;
 static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -60,17 +59,17 @@ fn is_delay(delay: String) -> Result<(), String> {
 }
 
 fn generate_read() -> String {
-    let now = time::now();
+    let now = chrono::Local::now();
     format!(
         "aa00{}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}cc",
         "05800319aeeb0001",
-        now.tm_year % 100,
-        now.tm_mon,
-        now.tm_mday,
-        now.tm_hour,
-        now.tm_min,
-        now.tm_sec,
-        now.tm_nsec / 10000000
+        now.year() % 100,
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        now.nanosecond() / 10000000
     )
 }
 
