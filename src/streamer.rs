@@ -30,13 +30,15 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 mod models;
 mod util;
 mod workers;
+use models::Message;
 use models::chip::read_bibchip_file;
 use models::participant::read_participant_file;
-use workers::{ClientConnector, ReadBroadcaster};
+use workers::{ClientConnector, ReadBroadcaster, ClientPool};
 
 type Port = u16;
 
@@ -149,10 +151,10 @@ async fn main() {
 
     // Create a bus to send the reads to the threads that control the connection
     // to each client computer
-    let (chip_read_tx, _) = broadcast::channel::<String>(1000);
-    let (signal_tx, _) = broadcast::channel::<bool>(10);
+    let (chip_read_tx, rx) = mpsc::channel::<Message>(1000);
+    // let (signal_tx, _) = broadcast::channel::<bool>(10);
 
-    let connector = ClientConnector::new(args.bind_port, chip_read_tx.clone(), signal_tx.clone()).await;
+    let connector = ClientConnector::new(args.bind_port, chip_read_tx.clone()).await;
     let receiver = ReadBroadcaster::new(
         args.reader_ip,
         args.reader_port,
@@ -162,6 +164,7 @@ async fn main() {
         args.buffered_output,
     )
     .await;
+    let client_pool = ClientPool::new(rx);
 
     // let stream_handler = receiver.get_stream_clone();
     // tokio::spawn(async {
@@ -174,8 +177,9 @@ async fn main() {
     // });
     let fut_recv = receiver.begin().fuse();
     let fut_conn = connector.begin().fuse();
+    let fut_pool = client_pool.begin().fuse();
 
-    join!(fut_recv, fut_conn);
+    join!(fut_recv, fut_conn, fut_pool);
 }
 
 fn get_args() -> Args {

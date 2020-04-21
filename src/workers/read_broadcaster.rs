@@ -25,7 +25,9 @@ use std::process;
 use std::sync::atomic::Ordering;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
-use tokio::sync::broadcast::Sender;
+// use tokio::sync::broadcast::Sender;
+use crate::models::Message;
+use tokio::sync::mpsc::Sender;
 
 fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
     match ChipRead::new(read.to_string()) {
@@ -87,7 +89,7 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
 pub struct ReadBroadcaster {
     stream: TcpStream,
     file_writer: Option<File>,
-    chip_read_bus: Sender<String>,
+    chip_read_bus: Sender<Message>,
     buffered_output: bool,
     db_conn: Connection,
 }
@@ -96,7 +98,7 @@ impl ReadBroadcaster {
     pub async fn new(
         reader_ip: Ipv4Addr,
         reader_port: u16,
-        chip_read_bus: Sender<String>,
+        chip_read_bus: Sender<Message>,
         db_conn: Connection,
         out_file: Option<String>,
         buffered_output: bool,
@@ -191,10 +193,12 @@ impl ReadBroadcaster {
                 // Lock the bus so I can send data along it
                 // Send the read to the threads
                 self.chip_read_bus
-                    .send(read.to_string())
+                    .send(Message::CHIP_READ(read.to_string()))
+                    .await
                     .unwrap_or_else(|_| {
-                        println!("\r\x1b[2KError sending read to thread. Maybe no readers are conected?");
-                        0
+                        println!(
+                            "\r\x1b[2KError sending read to thread. Maybe no readers are conected?"
+                        );
                     });
             }
             let to_print = read_to_string(&read, &self.db_conn, &read_count);
