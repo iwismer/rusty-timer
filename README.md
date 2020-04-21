@@ -47,7 +47,6 @@ Stream reads from a reader and save all the reads to a file called reads.txt in 
 - Better documentation
 - Connections to multiple readers
 - More error checking (connections to reader and client)
-- More graceful way of shutting down the program
 - Basic GUI
 - Read checksum validation
 
@@ -77,4 +76,5 @@ Build with ```cargo build --release --bin emulator```
 ## Licence
 
 GPL3
+
 See LICENCE.txt
