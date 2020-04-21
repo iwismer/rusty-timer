@@ -1,5 +1,7 @@
 # Rusty Timer
 
+[![Build Status](https://travis-ci.org/iwismer/rusty-timer.svg?branch=master)](https://travis-ci.org/iwismer/rusty-timer)
+
 This contains a set of timing related utilities for the Ipico timing system.
 
 ## Read Streamer
