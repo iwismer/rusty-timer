@@ -74,7 +74,7 @@ impl ClientConnector {
                         Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
                         Ok(client) => {
                             // CLIENTS.lock().await.deref().push(client);
-                            self.chip_read_bus.send(Message::CLIENT(client)).await;
+                            self.chip_read_bus.send(Message::CLIENT(client)).await.unwrap();
                             // TODO: Fix when async closures stabilize
                             // thread::spawn(|| {
                             //     let c = client.begin();

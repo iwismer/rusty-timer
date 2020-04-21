@@ -4,9 +4,9 @@ use crate::CONNECTION_COUNT;
 use futures::future::join_all;
 use std::sync::atomic::Ordering;
 // use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::sync::Mutex;
-use std::ops::{DerefMut, Deref};
+use std::ops::{Deref, DerefMut};
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::Mutex;
 
 // pub static CLIENTS: Mutex<Vec<Client>> = Mutex::new(Vec::new());
 
@@ -33,7 +33,19 @@ impl ClientPool {
                     for client in self.clients.iter_mut() {
                         futures.push(client.send_read(r.clone()));
                     }
-                    join_all(futures).await;
+                    let results = join_all(futures).await;
+                    for r in results.iter() {
+                        if r.is_err() {
+                            let pos = self
+                                .clients
+                                .iter()
+                                .position(|c| c.get_addr() == r.err().unwrap());
+                            if pos.is_some() {
+                                self.clients.remove(pos.unwrap());
+                            }
+                            // self.clients.remove_item(r.err().unwrap());
+                        }
+                    }
                 }
                 Message::SHUTDOWN => {
                     for client in self.clients {

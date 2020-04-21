@@ -1,10 +1,10 @@
+use crate::models::Message;
 use futures::{future::FutureExt, pin_mut, select};
 use std::net::Shutdown;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::sync::broadcast::Receiver;
-use crate::models::Message;
 // async fn handler(handler_bus: &mut Receiver<bool>) {
 //     println!("\r\x1b[2KStarted Handler");
 //     handler_bus.recv().await.unwrap();
@@ -55,17 +55,18 @@ impl Client {
         })
     }
 
-    pub async fn send_read(&mut self, read: String) {
-        match self.stream
+    pub async fn send_read(&mut self, read: String) -> Result<usize, SocketAddr> {
+        self.stream
             .write(read.as_bytes())
             .await
-        {
-            Ok(_) => {}
-            Err(_) => {
-                eprintln!("\r\x1b[2KWarning: Client {} disconnected", self.addr);
-                // end the loop, destroying the thread
-            }
-        };
+            .map_err(|_| self.addr)
+        // {
+        //     Ok(_) => {}
+        //     Err(_) => {
+        //         eprintln!("\r\x1b[2KWarning: Client {} disconnected", self.addr);
+        //         // end the loop, destroying the thread
+        //     }
+        // };
     }
 
     // pub async fn begin(mut self) {
@@ -89,5 +90,9 @@ impl Client {
             Err(e) => eprintln!("\r\x1b[2KError disconnecting: {}", e),
         };
         // (self.exit_callback)();
+    }
+
+    pub fn get_addr(&self) -> SocketAddr {
+        self.addr
     }
 }
