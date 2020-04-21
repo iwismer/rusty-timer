@@ -6,8 +6,6 @@ use futures::{future::FutureExt, pin_mut, select};
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
 use std::net::Ipv4Addr;
-use std::path::Path;
-use std::sync::atomic::AtomicUsize;
 use tokio::sync::mpsc;
 use tokio::signal;
 
@@ -18,44 +16,7 @@ use models::chip::read_bibchip_file;
 use models::participant::read_participant_file;
 use models::Message;
 use workers::{ClientConnector, ClientPool, ReadBroadcaster};
-
-type Port = u16;
-
-pub static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Check if the string is a valid IPv4 address
-fn is_ip_addr(ip: String) -> Result<(), String> {
-    match ip.parse::<Ipv4Addr>() {
-        Ok(_) => Ok(()),
-        Err(_) => Err("Invalid IP Address".to_string()),
-    }
-}
-
-/// Check if the string is a valid port
-fn is_port(port: String) -> Result<(), String> {
-    match port.parse::<Port>() {
-        Ok(_) => Ok(()),
-        Err(_) => Err("Invalid port number".to_string()),
-    }
-}
-
-/// Check that the path does not already point to a file
-fn is_path(path_str: String) -> Result<(), String> {
-    let path = Path::new(&path_str);
-    match path.exists() {
-        true => Err("File exists on file system! Use a different file".to_string()),
-        false => Ok(()),
-    }
-}
-
-/// Check that the path does not already point to a file
-fn is_file(file_str: String) -> Result<(), String> {
-    let path = Path::new(&file_str);
-    match path.exists() {
-        true => Ok(()),
-        false => Err("File doesn't exists on file system! Use a different file".to_string()),
-    }
-}
+use util::*;
 
 async fn signal_handler() {
     signal::ctrl_c().await.unwrap();
@@ -65,8 +26,8 @@ struct Args {
     bib_chip_file_path: Option<String>,
     participants_file_path: Option<String>,
     reader_ip: Ipv4Addr,
-    reader_port: Port,
-    bind_port: Port,
+    reader_port: u16,
+    bind_port: u16,
     out_file: Option<String>,
     buffered_output: bool,
 }
@@ -134,7 +95,7 @@ async fn main() {
 
     // Create a bus to send the reads to the threads that control the connection
     // to each client computer
-    let (bus_tx, rx) = mpsc::channel::<Message>(1000);
+    let (bus_tx, rx) = mpsc::channel::<Message>(10);
 
     let client_pool = ClientPool::new(rx);
     let connector = ClientConnector::new(args.bind_port, bus_tx.clone()).await;
@@ -236,11 +197,11 @@ fn get_args() -> Args {
         .unwrap();
     // parse the port value
     // A port value of 0 let the OS assign a port
-    let bind_port = matches.value_of("port").unwrap().parse::<Port>().unwrap();
+    let bind_port = matches.value_of("port").unwrap().parse::<u16>().unwrap();
     let reader_port = matches
         .value_of("reader-port")
         .unwrap()
-        .parse::<Port>()
+        .parse::<u16>()
         .unwrap();
 
     Args {

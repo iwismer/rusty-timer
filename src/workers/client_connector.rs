@@ -1,7 +1,5 @@
 use super::Client;
 use crate::models::Message;
-use crate::CONNECTION_COUNT;
-use std::sync::atomic::Ordering;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 
@@ -29,8 +27,6 @@ impl ClientConnector {
             // wait for a connection, then connect when it comes
             match self.listen_stream.accept().await {
                 Ok((stream, addr)) => {
-                    // Increment the number of connections
-                    CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
                     match Client::new(stream, addr) {
                         Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
                         Ok(client) => {

@@ -1,6 +1,5 @@
 use super::Client;
 use crate::models::Message;
-use crate::CONNECTION_COUNT;
 use futures::future::join_all;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc::Receiver;
@@ -42,7 +41,6 @@ impl ClientPool {
                 Message::SHUTDOWN => {
                     for client in self.clients {
                         client.exit();
-                        CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
                     }
                     return;
                 }

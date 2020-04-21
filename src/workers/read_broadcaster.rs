@@ -1,5 +1,4 @@
 use crate::models::{ChipRead, Gender, Participant};
-use crate::CONNECTION_COUNT;
 use rusqlite::Connection;
 use std::fs::File;
 use std::io::{self, Write};
@@ -172,19 +171,16 @@ impl ReadBroadcaster {
                     println!("\r\x1b[2KError writing read to file: {}", e);
                 });
             }
-            // Check that there is a connection
-            if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
-                // Lock the bus so I can send data along it
-                // Send the read to the threads
-                self.chip_read_bus
-                    .send(Message::CHIP_READ(read.to_string()))
-                    .await
-                    .unwrap_or_else(|_| {
-                        println!(
-                            "\r\x1b[2KError sending read to thread. Maybe no readers are conected?"
-                        );
-                    });
-            }
+            // Lock the bus so I can send data along it
+            // Send the read to the threads
+            self.chip_read_bus
+                .send(Message::CHIP_READ(read.to_string()))
+                .await
+                .unwrap_or_else(|_| {
+                    println!(
+                        "\r\x1b[2KError sending read to thread. Maybe no readers are conected?"
+                    );
+                });
             let to_print = read_to_string(&read, &self.db_conn, &read_count);
             print!("\r\x1b[2K{}", to_print);
             // only flush if the output is unbuffered
