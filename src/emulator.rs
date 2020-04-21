@@ -1,25 +1,9 @@
-/*
-Copyright © 2020  Isaac Wismer
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
-
 #[macro_use]
 extern crate clap;
 
-use tokio::sync::broadcast;
+use chrono::{Datelike, Timelike};
 use clap::{App, Arg};
+use futures::executor::block_on;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::net::TcpListener;
@@ -28,8 +12,7 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
-use futures::executor::block_on;
-use chrono::{Datelike, Timelike};
+use tokio::sync::broadcast;
 
 type Port = u16;
 static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -187,9 +170,7 @@ fn main() {
         // TODO: Only send broadcast if there are connected readers
         match sender.clone().send(chip_read.to_string()) {
             Ok(_) => (),
-            Err(_) => println!(
-                "Error sending read to thread. Maybe no readers are conected?"
-            ),
+            Err(_) => println!("Error sending read to thread. Maybe no readers are conected?"),
         }
         // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
         thread::sleep(Duration::from_millis(delay));

@@ -3,16 +3,10 @@ use crate::models::Message;
 use crate::CONNECTION_COUNT;
 use futures::future::join_all;
 use std::sync::atomic::Ordering;
-// use tokio::sync::broadcast::{Receiver, Sender};
-use std::ops::{Deref, DerefMut};
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::Mutex;
-
-// pub static CLIENTS: Mutex<Vec<Client>> = Mutex::new(Vec::new());
 
 pub struct ClientPool {
     clients: Vec<Client>,
-    // bus_tx: Sender<Message>,
     bus_rx: Receiver<Message>,
 }
 
@@ -20,7 +14,6 @@ impl ClientPool {
     pub fn new(bus_rx: Receiver<Message>) -> Self {
         ClientPool {
             clients: Vec::new(),
-            // bus_tx,
             bus_rx,
         }
     }
@@ -43,7 +36,6 @@ impl ClientPool {
                             if pos.is_some() {
                                 self.clients.remove(pos.unwrap());
                             }
-                            // self.clients.remove_item(r.err().unwrap());
                         }
                     }
                 }

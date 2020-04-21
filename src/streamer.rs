@@ -1,20 +1,3 @@
-/*
-Copyright © 2020  Isaac Wismer
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
-
 #[macro_use]
 extern crate clap;
 
@@ -22,23 +5,18 @@ use clap::{App, Arg};
 use futures::{future::FutureExt, join};
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
-use signal_hook::{iterator::Signals, SIGINT};
 use std::net::Ipv4Addr;
-use std::net::Shutdown;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 mod models;
 mod util;
 mod workers;
-use models::Message;
 use models::chip::read_bibchip_file;
 use models::participant::read_participant_file;
-use workers::{ClientConnector, ReadBroadcaster, ClientPool};
+use models::Message;
+use workers::{ClientConnector, ClientPool, ReadBroadcaster};
 
 type Port = u16;
 
@@ -151,14 +129,13 @@ async fn main() {
 
     // Create a bus to send the reads to the threads that control the connection
     // to each client computer
-    let (chip_read_tx, rx) = mpsc::channel::<Message>(1000);
-    // let (signal_tx, _) = broadcast::channel::<bool>(10);
+    let (bus_tx, rx) = mpsc::channel::<Message>(1000);
 
-    let connector = ClientConnector::new(args.bind_port, chip_read_tx.clone()).await;
+    let connector = ClientConnector::new(args.bind_port, bus_tx.clone()).await;
     let receiver = ReadBroadcaster::new(
         args.reader_ip,
         args.reader_port,
-        chip_read_tx.clone(),
+        bus_tx.clone(),
         conn,
         args.out_file,
         args.buffered_output,
