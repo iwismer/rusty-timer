@@ -34,7 +34,6 @@ impl ClientConnector {
                     match Client::new(stream, addr) {
                         Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
                         Ok(client) => {
-                            // CLIENTS.lock().await.deref().push(client);
                             self.chip_read_bus
                                 .send(Message::CLIENT(client))
                                 .await
