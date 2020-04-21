@@ -2,13 +2,14 @@
 extern crate clap;
 
 use clap::{App, Arg};
-use futures::{future::FutureExt, join};
+use futures::{future::FutureExt, pin_mut, select};
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::mpsc;
+use tokio::signal;
 
 mod models;
 mod util;
@@ -54,6 +55,10 @@ fn is_file(file_str: String) -> Result<(), String> {
         true => Ok(()),
         false => Err("File doesn't exists on file system! Use a different file".to_string()),
     }
+}
+
+async fn signal_handler() {
+    signal::ctrl_c().await.unwrap();
 }
 
 struct Args {
@@ -131,6 +136,7 @@ async fn main() {
     // to each client computer
     let (bus_tx, rx) = mpsc::channel::<Message>(1000);
 
+    let client_pool = ClientPool::new(rx);
     let connector = ClientConnector::new(args.bind_port, bus_tx.clone()).await;
     let receiver = ReadBroadcaster::new(
         args.reader_ip,
@@ -141,22 +147,19 @@ async fn main() {
         args.buffered_output,
     )
     .await;
-    let client_pool = ClientPool::new(rx);
 
-    // let stream_handler = receiver.get_stream_clone();
-    // tokio::spawn(async {
-    //     let signals = Signals::new(&[SIGINT]).unwrap();
-    //     for sig in signals.forever() {
-    //         println!("\r\x1b[2KReceived signal {:?}", sig);
-    //         signal_tx.send(true).unwrap();
-    //         stream_handler.shutdown(Shutdown::Both).unwrap();
-    //     }
-    // });
     let fut_recv = receiver.begin().fuse();
     let fut_conn = connector.begin().fuse();
     let fut_pool = client_pool.begin().fuse();
-
-    join!(fut_recv, fut_conn, fut_pool);
+    let fut_sig = signal_handler().fuse();
+    pin_mut!(fut_recv, fut_conn, fut_pool, fut_sig);
+    select! {
+        () = fut_recv => println!("Receiver crashed"),
+        () = fut_conn => println!("Client connector crashed"),
+        () = fut_pool => println!("Client pool crashed"),
+        () = fut_sig => println!("Signal received"),
+    };
+    bus_tx.clone().send(Message::SHUTDOWN).await.unwrap();
 }
 
 fn get_args() -> Args {
