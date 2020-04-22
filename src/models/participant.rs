@@ -1,6 +1,7 @@
 use std::fmt;
 use std::i32;
 
+#[derive(Eq, Ord, PartialOrd, PartialEq, Clone)]
 pub enum Gender {
     M,
     F,
@@ -30,7 +31,7 @@ impl fmt::Debug for Gender {
 }
 
 /// A single race participant
-#[derive(Debug)]
+#[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone)]
 pub struct Participant {
     pub chip_id: Vec<String>,
     pub bib: i32,
@@ -125,5 +126,56 @@ impl Participant {
             age: None,
             division: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_ppl() {
+        let part = Participant::from_ppl_record("0,Smith,John,Team Smith,,M".to_string());
+        assert!(part.is_ok());
+        assert_eq!(
+            part.unwrap(),
+            Participant {
+                chip_id: Vec::<String>::new(),
+                bib: 0,
+                first_name: "John".to_string(),
+                last_name: "Smith".to_string(),
+                affiliation: Some("Team Smith".to_string()),
+                gender: Gender::M,
+                age: None,
+                division: None,
+            }
+        );
+        let part2 = Participant::from_ppl_record("0,Smith,John".to_string());
+        assert!(part2.is_ok());
+        assert_eq!(
+            part2.unwrap(),
+            Participant {
+                chip_id: Vec::<String>::new(),
+                bib: 0,
+                first_name: "John".to_string(),
+                last_name: "Smith".to_string(),
+                affiliation: None,
+                gender: Gender::X,
+                age: None,
+                division: None,
+            }
+        );
+    }
+
+    #[test]
+    fn bad_bib() {
+        let part = Participant::from_ppl_record("z,Smith,John,Team Smith,,M".to_string());
+        assert!(part.is_err());
+    }
+
+    #[test]
+    fn empty_record() {
+        let part = Participant::from_ppl_record("".to_string());
+        assert!(part.is_err());
     }
 }
