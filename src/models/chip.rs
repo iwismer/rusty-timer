@@ -1,5 +1,4 @@
 use super::Timestamp;
-use crate::util::io::read_file;
 use std::convert::TryFrom;
 use std::fmt;
 use std::i32;
@@ -173,29 +172,4 @@ mod tests {
         assert!(read.is_err());
         assert_eq!(read.err().unwrap(), "Invalid read prefix");
     }
-}
-
-pub fn read_bibchip_file(file_path: String) -> Vec<ChipBib> {
-    let bibs = match read_file(&file_path) {
-        Err(desc) => {
-            println!("Error reading bibchip file {}", desc);
-            Vec::new()
-        }
-        Ok(bibs) => bibs,
-    };
-    // parse the file and import bib chips into hashmap
-    let mut bib_chip = Vec::new();
-    for b in bibs {
-        if b != "" && b.chars().next().unwrap().is_digit(10) {
-            let parts = b.trim().split(",").collect::<Vec<&str>>();
-            bib_chip.push(ChipBib {
-                id: parts[1].to_string(),
-                bib: parts[0].parse::<i32>().unwrap_or_else(|_| {
-                    println!("Error reading bib file. Invalid bib: {}", parts[0]);
-                    0
-                }),
-            });
-        }
-    }
-    bib_chip
 }

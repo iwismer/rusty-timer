@@ -1,4 +1,3 @@
-use crate::util::io::read_file;
 use std::fmt;
 use std::i32;
 
@@ -127,28 +126,4 @@ impl Participant {
             division: None,
         }
     }
-}
-
-pub fn read_participant_file(ppl_path: String) -> Vec<Participant> {
-    let ppl = match read_file(&ppl_path) {
-        Err(desc) => {
-            println!("Error reading participant file {}", desc);
-            Vec::new()
-        }
-        Ok(ppl) => ppl,
-    };
-    // Read into list of participants and add the chip
-    let mut participants = Vec::new();
-    for p in ppl {
-        // Ignore empty and comment lines
-        if p != "" && !p.starts_with(";") {
-            match Participant::from_ppl_record(p.trim().to_string()) {
-                Err(desc) => println!("Error reading person {}", desc),
-                Ok(person) => {
-                    participants.push(person);
-                }
-            };
-        }
-    }
-    participants
 }
