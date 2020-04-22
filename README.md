@@ -47,10 +47,9 @@ Stream reads from a reader and save all the reads to a file called reads.txt in 
 ### TODO
 
 - Better documentation
-- Connections to multiple readers
-- More error checking (connections to reader and client)
 - Basic GUI
 - Read checksum validation
+- Tests
 
 ## Read Emulator
 

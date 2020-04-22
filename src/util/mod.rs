@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 
 pub mod io;
@@ -8,6 +8,14 @@ pub fn is_ip_addr(ip: String) -> Result<(), String> {
     match ip.parse::<Ipv4Addr>() {
         Ok(_) => Ok(()),
         Err(_) => Err("Invalid IP Address".to_string()),
+    }
+}
+
+/// Check if the string is a valid IPv4 socket address
+pub fn is_socket_addr(socket: String) -> Result<(), String> {
+    match socket.parse::<SocketAddrV4>() {
+        Ok(_) => Ok(()),
+        Err(_) => Err("Invalid Socket Address".to_string()),
     }
 }
 

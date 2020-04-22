@@ -26,7 +26,6 @@ impl Client {
     }
 
     pub fn exit(&self) {
-        println!("!!!CALLED EXIT!!!");
         match self.stream.shutdown(Shutdown::Both) {
             Ok(_) => println!("\r\x1b[2KClient disconnected gracefully."),
             Err(e) => eprintln!("\r\x1b[2KError disconnecting: {}", e),

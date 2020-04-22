@@ -2,10 +2,11 @@
 extern crate clap;
 
 use clap::{App, Arg};
-use futures::{future::FutureExt, pin_mut, select};
+use futures::{future::select_all, future::Future, future::FutureExt, pin_mut};
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
-use std::net::Ipv4Addr;
+use std::net::SocketAddrV4;
+use std::pin::Pin;
 use tokio::signal;
 use tokio::sync::mpsc;
 
@@ -16,7 +17,7 @@ use models::chip::read_bibchip_file;
 use models::participant::read_participant_file;
 use models::Message;
 use util::*;
-use workers::{ClientConnector, ClientPool, ReadBroadcaster};
+use workers::{ClientConnector, ClientPool, ReaderPool};
 
 async fn signal_handler() {
     signal::ctrl_c().await.unwrap();
@@ -25,8 +26,7 @@ async fn signal_handler() {
 struct Args {
     bib_chip_file_path: Option<String>,
     participants_file_path: Option<String>,
-    reader_ip: Ipv4Addr,
-    reader_port: u16,
+    readers: Vec<SocketAddrV4>,
     bind_port: u16,
     out_file: Option<String>,
     buffered_output: bool,
@@ -40,11 +40,12 @@ fn get_args() -> Args {
         .about("A read streamer for timers")
         .arg(
             Arg::with_name("reader")
-                .help("The IP address of the reader to connect to")
+                .help("The socket address of the reader to connect to. Eg. 192.168.0.52:10000")
                 .index(1)
                 .takes_value(true)
                 .value_name("reader_ip")
-                .validator(is_ip_addr)
+                .validator(is_socket_addr)
+                .multiple(true)
                 .required(true),
         )
         .arg(
@@ -55,15 +56,6 @@ fn get_args() -> Args {
                 .takes_value(true)
                 .validator(is_port)
                 .default_value("10001"),
-        )
-        .arg(
-            Arg::with_name("reader-port")
-                .help("The port of the reader to connect to")
-                .short("r")
-                .long("reader-port")
-                .takes_value(true)
-                .validator(is_port)
-                .default_value("10000"),
         )
         .arg(
             Arg::with_name("file")
@@ -99,25 +91,18 @@ fn get_args() -> Args {
         )
         .get_matches();
     // Get the address of the reader and parse to IP
-    let reader = matches
-        .value_of("reader")
+    let readers: Vec<SocketAddrV4> = matches
+        .values_of("reader")
         .unwrap()
-        .parse::<Ipv4Addr>()
-        .unwrap();
+        .map(|a| a.parse::<SocketAddrV4>().unwrap())
+        .collect();
     // parse the port value
-    // A port value of 0 let the OS assign a port
     let bind_port = matches.value_of("port").unwrap().parse::<u16>().unwrap();
-    let reader_port = matches
-        .value_of("reader-port")
-        .unwrap()
-        .parse::<u16>()
-        .unwrap();
 
     Args {
         bib_chip_file_path: matches.value_of("bibchip").map(|s| s.to_string()),
         participants_file_path: matches.value_of("participants").map(|s| s.to_string()),
-        reader_ip: reader,
-        reader_port: reader_port,
+        readers: readers,
         bind_port,
         out_file: matches.value_of("file").map(|s| s.to_string()),
         buffered_output: matches.is_present("is_buffered"),
@@ -185,33 +170,20 @@ async fn main() {
     }
 
     // Bus to send messages to client pool
-    let (bus_tx, rx) = mpsc::channel::<Message>(10);
+    let (bus_tx, rx) = mpsc::channel::<Message>(1000);
 
-    let client_pool = ClientPool::new(rx);
+    let client_pool = ClientPool::new(rx, conn, args.out_file, args.buffered_output);
     let connector = ClientConnector::new(args.bind_port, bus_tx.clone()).await;
-    let receiver = ReadBroadcaster::new(
-        args.reader_ip,
-        args.reader_port,
-        bus_tx.clone(),
-        conn,
-        args.out_file,
-        args.buffered_output,
-    )
-    .await;
+    let mut reader_pool = ReaderPool::new(args.readers, bus_tx.clone());
 
-    // TODO Allow multiple readers
-    let fut_recv = receiver.begin().fuse();
+    let fut_readers = reader_pool.begin().fuse();
+    let fut_clients = client_pool.begin().fuse();
     let fut_conn = connector.begin().fuse();
-    let fut_pool = client_pool.begin().fuse();
     let fut_sig = signal_handler().fuse();
-    pin_mut!(fut_recv, fut_conn, fut_pool, fut_sig);
-    // Run the workers
-    select! {
-        () = fut_recv => println!("\r\x1b[2KReceiver crashed"),
-        () = fut_conn => println!("\r\x1b[2KClient connector crashed"),
-        () = fut_pool => println!("\r\x1b[2KClient pool crashed"),
-        () = fut_sig => println!("\r\x1b[2KSignal received"),
-    };
+
+    pin_mut!(fut_readers, fut_clients, fut_conn, fut_sig);
+    let futures: Vec<Pin<&mut dyn Future<Output = ()>>> = vec![fut_readers, fut_clients, fut_conn, fut_sig];
+    select_all(futures).await;
     // If any of them finish, end the program as something went wrong
     bus_tx.clone().send(Message::SHUTDOWN).await.unwrap();
 }
