@@ -7,7 +7,7 @@ This contains a set of timing related utilities for the Ipico timing system.
 ## Read Streamer
 
 This is a chip read forwarding program designed for race timing. It allows timers to overcome the connection limits on some chip reader systems.
-This program connects to a single reader, and forwards all the reads to any connected listening programs. There is no theoretical limit to the number of connected clients, but it has not been tested with more than 4 at a time. This program will also save all the collected reads to a file for backup.
+This program connects to one or more readers, and forwards all the reads to any connected listening programs. There is no theoretical limit to the number of connected clients, but it has not been tested with more than 4 at a time. This program will also save all the collected reads to a file for backup.
 
 It has been tested on the Ipico Lite reader.
 
@@ -19,22 +19,21 @@ Build with ```cargo build --release --bin streamer```
 ### Running
 
     USAGE:
-    streamer [FLAGS] [OPTIONS] <reader_ip>
+    streamer.exe [FLAGS] [OPTIONS] <reader_ip>...
 
     FLAGS:
-        -h, --help        Prints help information
-        -B, --buffer      Buffer the output. Use if high CPU use in encountered
-        -V, --version     Prints version information
+        -h, --help       Prints help information
+        -B, --buffer     Buffer the output. Use if high CPU use in encountered
+        -V, --version    Prints version information
 
     OPTIONS:
-        -b, --bibchip <bibchip>            The bib-chip file
-        -f, --file <file>                  The file to output the reads to
-        -P, --ppl <participants>           The .ppl participant file
-        -p, --port <port>                  The port of the local machine to bind to [default: 10001]
-        -r, --reader-port <reader-port>    The port of the reader to connect to [default: 10000]
+        -b, --bibchip <bibchip>     The bib-chip file
+        -f, --file <file>           The file to output the reads to
+        -P, --ppl <participants>    The .ppl participant file
+        -p, --port <port>           The port of the local machine to bind to [default: 10001]
 
     ARGS:
-        <reader_ip>    The IP address of the reader to connect to
+        <reader_ip>...    The socket address of the reader to connect to. Eg. 192.168.0.52:10000
 
 #### Examples
 
@@ -48,6 +47,7 @@ Stream reads from a reader and save all the reads to a file called reads.txt in 
 
 - Better documentation
 - Basic GUI
+- Make compatible with binary records
 
 ## Read Emulator
 
