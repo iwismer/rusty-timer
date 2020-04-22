@@ -11,6 +11,14 @@ This program connects to one or more readers, and forwards all the reads to any 
 
 It has been tested on the Ipico Lite reader.
 
+### Features
+
+- Multiple reader connections
+- Multiple client connections
+- Automatic reader reconnection on disconnect
+- Save reads to a file
+- Display participant information for each read
+
 ### Building
 
 Run with: ```cargo run --bin streamer -- [args]```
