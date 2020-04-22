@@ -2,6 +2,7 @@ use super::Timestamp;
 use crate::util::io::read_file;
 use std::fmt;
 use std::i32;
+use std::convert::TryFrom;
 
 /// A struct for mapping a chip to a bib number
 #[derive(Debug)]
@@ -36,8 +37,19 @@ pub struct ChipRead {
 
 #[allow(dead_code)]
 impl ChipRead {
-    // TODOConvert to TryFrom trait
-    pub fn new(read_str: String) -> Result<ChipRead, &'static str> {
+    pub fn cmp(a: ChipRead, b: ChipRead) -> std::cmp::Ordering {
+        a.timestamp.cmp(&b.timestamp)
+    }
+
+    pub fn time_string(&self) -> String {
+        self.timestamp.time_string()
+    }
+}
+
+impl TryFrom<String> for ChipRead {
+    type Error = &'static str;
+
+    fn try_from(read_str: String) -> Result<Self, Self::Error> {
         let mut chip_read = read_str.trim().to_string();
         chip_read = chip_read.split_whitespace().next().unwrap().to_string();
         if !(chip_read.len() == 36 || chip_read.len() == 38) {
@@ -97,14 +109,6 @@ impl ChipRead {
             timestamp: read_time,
             read_type: read_type,
         })
-    }
-
-    pub fn cmp(a: ChipRead, b: ChipRead) -> std::cmp::Ordering {
-        a.timestamp.cmp(&b.timestamp)
-    }
-
-    pub fn time_string(&self) -> String {
-        self.timestamp.time_string()
     }
 }
 

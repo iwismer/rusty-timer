@@ -7,12 +7,12 @@ use std::path::Path;
 use std::process;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
-// use tokio::sync::broadcast::Sender;
 use crate::models::Message;
 use tokio::sync::mpsc::Sender;
+use std::convert::TryFrom;
 
 fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
-    match ChipRead::new(read.to_string()) {
+    match ChipRead::try_from(read.to_string()) {
         Err(desc) => format!("Error reading chip {}", desc),
         Ok(read) => {
             let mut stmt = conn
