@@ -55,7 +55,7 @@ impl TryFrom<String> for ChipRead {
             return Err("Invalid read length");
         }
         let checksum = chip_read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
-        if format!("{:x}", checksum) != chip_read[34..36] {
+        if format!("{:02x}", checksum) != chip_read[34..36] {
             return Err("Checksum doesn't match");
         }
         let mut read_type = ReadType::Raw;
