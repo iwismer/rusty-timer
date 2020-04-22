@@ -43,8 +43,8 @@ fn is_delay(delay: String) -> Result<(), String> {
 
 fn generate_read() -> String {
     let now = chrono::Local::now();
-    format!(
-        "aa00{}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}cc",
+    let read = format!(
+        "aa00{}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}",
         "05800319aeeb0001",
         now.year() % 100,
         now.month(),
@@ -53,6 +53,12 @@ fn generate_read() -> String {
         now.minute(),
         now.second(),
         now.nanosecond() / 10000000
+    );
+    let checksum = read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
+    format!(
+        "{}{:02x}",
+        read,
+        checksum
     )
 }
 
@@ -156,23 +162,24 @@ fn main() {
 
     // Get reads
     loop {
-        // Convert to string
-        let mut chip_read: String = match file_reader.as_mut() {
-            Some(lines) => match lines.next() {
-                Some(line) => line.unwrap().trim().to_string(),
+        if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
+            // Convert to string
+            let mut chip_read: String = match file_reader.as_mut() {
+                Some(lines) => match lines.next() {
+                    Some(line) => line.unwrap().trim().to_string(),
+                    None => generate_read(),
+                },
                 None => generate_read(),
-            },
-            None => generate_read(),
-        };
-        chip_read.push_str("\r\n");
-        // print!("{}", chip_read);
-        // Send the read to the threads
-        // TODO: Only send broadcast if there are connected readers
-        match sender.clone().send(chip_read.to_string()) {
-            Ok(_) => (),
-            Err(_) => println!("Error sending read to thread. Maybe no readers are conected?"),
+            };
+            chip_read.push_str("\r\n");
+            // print!("{}", chip_read);
+            // Send the read to the threads
+            match sender.clone().send(chip_read.to_string()) {
+                Ok(_) => (),
+                Err(_) => println!("Error sending read to thread. Maybe no readers are conected?"),
+            }
+            // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
         }
-        // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
         thread::sleep(Duration::from_millis(delay));
     }
 }
