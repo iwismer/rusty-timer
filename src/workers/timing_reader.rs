@@ -35,18 +35,7 @@ impl TimingReader {
                 Some(stream) => {
                     // Get 38 bytes from the stream, which is exactly 1 read
                     match stream.read_exact(&mut input_buffer).await {
-                        // Valid read
-                        Ok(size) if size == 38 || size == 40 => {}
-                        // The stream is EOF, so try to reconnect next loop
-                        Ok(size) if size == 0 => {
-                            self.stream = None;
-                            continue;
-                        }
-                        // Invalid data
-                        Ok(size) => {
-                            println!("Didn't read enough data from stream. Read {} bytes", size);
-                            continue;
-                        }
+                        Ok(_) => {}
                         Err(e) => {
                             println!("\r\x1b[2KError reading from reader: {}", e);
                             self.stream = None::<TcpStream>;
@@ -67,7 +56,7 @@ impl TimingReader {
                         .await
                         .unwrap_or_else(|_| {
                             println!(
-                        "\r\x1b[2KError sending read to thread. Maybe no readers are conected?"
+                        "\r\x1b[2KError sending read to thread. Maybe no readers are connected?"
                     );
                         });
                 }
