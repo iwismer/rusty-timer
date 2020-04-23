@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use tokio::signal;
@@ -9,7 +10,6 @@ pub async fn signal_handler() {
 }
 
 /// Check if the string is a valid IPv4 address
-#[allow(dead_code)]
 pub fn is_ip_addr(ip: String) -> Result<(), String> {
     match ip.parse::<Ipv4Addr>() {
         Ok(_) => Ok(()),
