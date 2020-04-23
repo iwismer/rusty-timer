@@ -7,7 +7,7 @@ mod workers;
 use models::Message;
 use workers::{ClientConnector, ClientPool};
 
-use crate::util::{is_delay, is_path, is_port, signal_handler};
+use crate::util::{is_delay, is_file, is_port, signal_handler};
 use chrono::{Datelike, Timelike};
 use clap::{App, Arg};
 use futures::{future::select_all, future::Future, future::FutureExt, pin_mut};
@@ -88,7 +88,7 @@ async fn main() {
                 .short("f")
                 .long("file")
                 .takes_value(true)
-                .validator(is_path),
+                .validator(is_file),
         )
         .arg(
             Arg::with_name("delay")

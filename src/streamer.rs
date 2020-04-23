@@ -57,7 +57,7 @@ fn get_args() -> Args {
                 .short("f")
                 .long("file")
                 .takes_value(true)
-                .validator(is_path),
+                .validator(is_empty_path),
         )
         .arg(
             Arg::with_name("bibchip")
