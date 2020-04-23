@@ -20,7 +20,8 @@ This program connects to one or more readers, and forwards all the reads to any 
 
 ### Building
 
-Run with: ```cargo run --bin streamer -- [args]```
+Run directly with: ```cargo run --bin streamer -- [args]```
+
 Build with ```cargo build --release --bin streamer```
 
 ### Running
@@ -45,11 +46,15 @@ Build with ```cargo build --release --bin streamer```
 
 #### Examples
 
-Stream reads from a reader, leaving the local port assignment to the OS: ```streamer 10.0.0.51```
+In Windows, replace `streamer` with `streamer.exe` (and include the path to it, if it's not in the current directory). In linux use `./streamer`.
 
-Stream reads from a reader located at 10.0.0.51, specifying a local port of 10005 ```streamer -p 10005 10.0.0.51```
+Stream reads from a reader, leaving the local port assignment to the OS: ```streamer 10.0.0.51:10000```
 
-Stream reads from a reader and save all the reads to a file called reads.txt in the current directory ```streamer -f reads.txt 10.0.0.51```
+Stream reads from 2 readers, using a local port of 10003: ```streamer 10.0.0.51:10000 10.0.0.52:10000 -p 10003```
+
+Stream reads from a reader located at 10.0.0.51, specifying a local port of 10005 ```streamer -p 10005 10.0.0.51:10000```
+
+Stream reads from a reader and save all the reads to a file called reads.txt in the current directory ```streamer -f reads.txt 10.0.0.51:10000```
 
 ### TODO
 
@@ -59,11 +64,14 @@ Stream reads from a reader and save all the reads to a file called reads.txt in 
 
 ## Read Emulator
 
-This is a chip read emulation program designed for testing race timing software. I generates random, valid reads (except the checksum).
+This is a chip read emulation program designed for testing race timing software. It generates valid reads that are all the same chip, but use the current time. You can also use a reads file as input, and it will simply send one read after each delay cycle.
+
+This can be used to test the read streaming program.
 
 ### Building
 
 Run with: ```cargo run --bin emulator -- [args]```
+
 Build with ```cargo build --release --bin emulator```
 
 ### Running
