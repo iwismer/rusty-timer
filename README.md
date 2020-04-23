@@ -9,8 +9,6 @@ This contains a set of timing related utilities for the Ipico timing system.
 This is a chip read forwarding program designed for race timing. It allows timers to overcome the connection limits on some chip reader systems.
 This program connects to one or more readers, and forwards all the reads to any connected listening programs. There is no theoretical limit to the number of connected clients, but it has not been tested with more than 4 at a time. This program will also save all the collected reads to a file for backup.
 
-It has been tested on the Ipico Lite reader.
-
 ### Features
 
 - Multiple reader connections
