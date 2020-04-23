@@ -8,11 +8,12 @@ use rusqlite::{Connection, NO_PARAMS};
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use tokio::sync::mpsc;
+use std::convert::TryInto;
 
 mod models;
 mod util;
 mod workers;
-use models::Message;
+use models::{Message, chip::ReadType};
 use util::io::{read_bibchip_file, read_participant_file};
 use util::*;
 use workers::{ClientConnector, ClientPool, ReaderPool};
@@ -24,6 +25,7 @@ struct Args {
     bind_port: u16,
     out_file: Option<String>,
     buffered_output: bool,
+    read_type: ReadType,
 }
 
 fn get_args() -> Args {
@@ -50,6 +52,15 @@ fn get_args() -> Args {
                 .takes_value(true)
                 .validator(is_port)
                 .default_value("10001"),
+        )
+        .arg(
+            Arg::with_name("read_type")
+                .help("The type of read the reader is sending")
+                .short("t")
+                .long("type")
+                .takes_value(true)
+                .possible_values(&["raw", "fsls"])
+                .default_value("raw"),
         )
         .arg(
             Arg::with_name("file")
@@ -100,6 +111,7 @@ fn get_args() -> Args {
         bind_port,
         out_file: matches.value_of("file").map(|s| s.to_string()),
         buffered_output: matches.is_present("is_buffered"),
+        read_type: matches.value_of("read_type").unwrap().try_into().unwrap()
     }
 }
 
@@ -170,7 +182,7 @@ async fn main() {
 
     let client_pool = ClientPool::new(rx, Some(conn), args.out_file, args.buffered_output);
     let connector = ClientConnector::new(args.bind_port, bus_tx.clone()).await;
-    let mut reader_pool = ReaderPool::new(args.readers, bus_tx.clone());
+    let mut reader_pool = ReaderPool::new(args.readers, bus_tx.clone(), args.read_type);
 
     let fut_readers = reader_pool.begin().fuse();
     let fut_clients = client_pool.begin().fuse();

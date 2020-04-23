@@ -16,6 +16,7 @@ This program connects to one or more readers, and forwards all the reads to any 
 - Automatic reader reconnection on disconnect
 - Save reads to a file
 - Display participant information for each read
+- Performant: uses less than 1MB of memory, handles at least 1000 reads/second
 
 ### Building
 

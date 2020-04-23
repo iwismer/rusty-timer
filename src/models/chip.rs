@@ -13,8 +13,8 @@ pub struct ChipBib {
 /// Define a read as either raw, or first-seen/last-seen
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Copy, Clone)]
 pub enum ReadType {
-    Raw,
-    FSLS,
+    Raw = 38,
+    FSLS = 40,
 }
 
 impl fmt::Display for ReadType {
@@ -24,6 +24,18 @@ impl fmt::Display for ReadType {
             ReadType::FSLS => "FSLS".to_string(),
         };
         write!(f, "{}", printable)
+    }
+}
+
+impl TryFrom<&str> for ReadType {
+    type Error = &'static str;
+
+    fn try_from(type_str: &str) -> Result<Self, Self::Error> {
+        match type_str.to_lowercase().as_str() {
+            "raw" => Ok(ReadType::Raw),
+            "fsls" => Ok(ReadType::FSLS),
+            _ => Err("Invalid read type"),
+        }
     }
 }
 

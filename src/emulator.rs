@@ -4,7 +4,7 @@ extern crate clap;
 mod models;
 mod util;
 mod workers;
-use models::Message;
+use models::{Message, chip::ReadType};
 use workers::{ClientConnector, ClientPool};
 
 use crate::util::{is_delay, is_file, is_port, signal_handler};
@@ -18,8 +18,9 @@ use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::time::delay_for;
+use std::convert::TryFrom;
 
-fn generate_read() -> String {
+fn generate_read(read_type: ReadType) -> String {
     let now = chrono::Local::now();
     let read = format!(
         "aa00{}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}",
@@ -33,13 +34,17 @@ fn generate_read() -> String {
         now.nanosecond() / 10000000
     );
     let checksum = read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
-    format!("{}{:02x}", read, checksum)
+    match read_type {
+        ReadType::Raw => format!("{}{:02x}", read, checksum),
+        ReadType::FSLS => format!("{}{:02x}LS", read, checksum)
+    }
 }
 
 async fn send_reads(
     delay: u64,
     mut file_reader: Option<Lines<BufReader<File>>>,
     mut bus_tx: Sender<Message>,
+    read_type: ReadType
 ) {
     loop {
         // Convert to string
@@ -48,10 +53,10 @@ async fn send_reads(
                 Some(line) => line.unwrap().trim().to_string(),
                 None => {
                     file_reader = None;
-                    generate_read()
+                    generate_read(read_type)
                 }
             },
-            None => generate_read(),
+            None => generate_read(read_type),
         };
         chip_read.push_str("\r\n");
         // Send the read to the threads
@@ -99,6 +104,15 @@ async fn main() {
                 .validator(is_delay)
                 .default_value("1000"),
         )
+        .arg(
+            Arg::with_name("read_type")
+                .help("The type of read the reader is sending")
+                .short("t")
+                .long("type")
+                .takes_value(true)
+                .possible_values(&["raw", "fsls"])
+                .default_value("raw"),
+        )
         .get_matches();
 
     // Check if the user has specified to save the reads to a file
@@ -117,6 +131,7 @@ async fn main() {
 
     let delay = matches.value_of("delay").unwrap().parse::<u64>().unwrap();
     let bind_port = matches.value_of("port").unwrap().parse::<u16>().unwrap();
+    let read_type = ReadType::try_from(matches.value_of("read_type").unwrap()).unwrap();
 
     let (bus_tx, rx) = mpsc::channel::<Message>(1000);
     let client_pool = ClientPool::new(rx, None, None, false);
@@ -125,7 +140,7 @@ async fn main() {
     let fut_clients = client_pool.begin().fuse();
     let fut_conn = connector.begin().fuse();
     let fut_sig = signal_handler().fuse();
-    let fut_sender = send_reads(delay, file_reader, bus_tx.clone()).fuse();
+    let fut_sender = send_reads(delay, file_reader, bus_tx.clone(), read_type).fuse();
 
     pin_mut!(fut_sender, fut_clients, fut_conn, fut_sig);
     let futures: Vec<Pin<&mut dyn Future<Output = ()>>> =

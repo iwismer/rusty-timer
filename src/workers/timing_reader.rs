@@ -1,4 +1,4 @@
-use crate::models::Message;
+use crate::models::{chip::ReadType, Message};
 use std::net::SocketAddrV4;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
@@ -8,16 +8,18 @@ use tokio::sync::mpsc::Sender;
 #[derive(Debug)]
 pub struct TimingReader {
     addr: SocketAddrV4,
+    read_type: ReadType,
     stream: Option<TcpStream>,
     chip_read_bus: Sender<Message>,
 }
 
 impl TimingReader {
-    pub fn new(addr: SocketAddrV4, chip_read_bus: Sender<Message>) -> Self {
+    pub fn new(addr: SocketAddrV4, read_type: ReadType, chip_read_bus: Sender<Message>) -> Self {
         println!("Waiting for reader: {}", addr);
 
         TimingReader {
             addr,
+            read_type,
             stream: None::<TcpStream>,
             chip_read_bus,
         }
@@ -27,19 +29,19 @@ impl TimingReader {
     ///
     /// This function should never return.
     pub async fn begin(&mut self) {
-        let mut input_buffer = [0u8; 40];
+        let mut input_buffer = vec![0u8; self.read_type as usize];
         loop {
             match self.stream.as_mut() {
                 Some(stream) => {
                     // Get 38 bytes from the stream, which is exactly 1 read
-                    match stream.read(&mut input_buffer).await {
+                    match stream.read_exact(&mut input_buffer).await {
                         // Valid read
-                        Ok(size) if size == 38 || size == 40 => {},
+                        Ok(size) if size == 38 || size == 40 => {}
                         // The stream is EOF, so try to reconnect next loop
                         Ok(size) if size == 0 => {
                             self.stream = None;
                             continue;
-                        },
+                        }
                         // Invalid data
                         Ok(size) => {
                             println!("Didn't read enough data from stream. Read {} bytes", size);
