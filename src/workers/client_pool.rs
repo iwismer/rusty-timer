@@ -73,13 +73,13 @@ pub struct ClientPool {
     bus: Receiver<Message>,
     file_writer: Option<File>,
     buffered_output: bool,
-    db_conn: Connection,
+    db_conn: Option<Connection>,
 }
 
 impl ClientPool {
     pub fn new(
         bus: Receiver<Message>,
-        db_conn: Connection,
+        db_conn: Option<Connection>,
         out_file: Option<String>,
         buffered_output: bool,
     ) -> Self {
@@ -134,13 +134,17 @@ impl ClientPool {
                             println!("\r\x1b[2KError writing read to file: {}", e);
                         });
                     }
-
-                    let to_print = read_to_string(&r, &self.db_conn, &read_count);
-                    print!("\r\x1b[2K{}", to_print);
-                    // only flush if the output is unbuffered
-                    // This can cause high CPU use on some systems
-                    if !self.buffered_output {
-                        io::stdout().flush().unwrap_or(());
+                    match &self.db_conn {
+                        Some(conn) => {
+                            let to_print = read_to_string(&r, &conn, &read_count);
+                            print!("\r\x1b[2K{}", to_print);
+                            // only flush if the output is unbuffered
+                            // This can cause high CPU use on some systems
+                            if !self.buffered_output {
+                                io::stdout().flush().unwrap_or(());
+                            }
+                        }
+                        None => {}
                     }
                     let mut futures = Vec::new();
                     for client in self.clients.iter_mut() {

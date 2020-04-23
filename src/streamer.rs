@@ -7,20 +7,15 @@ use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
 use std::net::SocketAddrV4;
 use std::pin::Pin;
-use tokio::signal;
 use tokio::sync::mpsc;
 
 mod models;
 mod util;
 mod workers;
-use util::io::{read_bibchip_file, read_participant_file};
 use models::Message;
+use util::io::{read_bibchip_file, read_participant_file};
 use util::*;
 use workers::{ClientConnector, ClientPool, ReaderPool};
-
-async fn signal_handler() {
-    signal::ctrl_c().await.unwrap();
-}
 
 struct Args {
     bib_chip_file_path: Option<String>,
@@ -138,7 +133,8 @@ async fn main() {
 
     // Get bib chips
     if args.bib_chip_file_path.is_some() {
-        let bib_chips = read_bibchip_file(args.bib_chip_file_path.unwrap().to_string()).unwrap_or_else(|_|vec![]);
+        let bib_chips = read_bibchip_file(args.bib_chip_file_path.unwrap().to_string())
+            .unwrap_or_else(|_| vec![]);
         for c in &bib_chips {
             conn.execute(
                 "INSERT INTO chip (id, bib)
@@ -150,7 +146,8 @@ async fn main() {
     }
     // Get participants
     if args.participants_file_path.is_some() {
-        let participants = read_participant_file(args.participants_file_path.unwrap().to_string()).unwrap_or_else(|_|vec![]);
+        let participants = read_participant_file(args.participants_file_path.unwrap().to_string())
+            .unwrap_or_else(|_| vec![]);
         for p in &participants {
             conn.execute(
                 "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
@@ -171,7 +168,7 @@ async fn main() {
     // Bus to send messages to client pool
     let (bus_tx, rx) = mpsc::channel::<Message>(1000);
 
-    let client_pool = ClientPool::new(rx, conn, args.out_file, args.buffered_output);
+    let client_pool = ClientPool::new(rx, Some(conn), args.out_file, args.buffered_output);
     let connector = ClientConnector::new(args.bind_port, bus_tx.clone()).await;
     let mut reader_pool = ReaderPool::new(args.readers, bus_tx.clone());
 
@@ -181,7 +178,8 @@ async fn main() {
     let fut_sig = signal_handler().fuse();
 
     pin_mut!(fut_readers, fut_clients, fut_conn, fut_sig);
-    let futures: Vec<Pin<&mut dyn Future<Output = ()>>> = vec![fut_readers, fut_clients, fut_conn, fut_sig];
+    let futures: Vec<Pin<&mut dyn Future<Output = ()>>> =
+        vec![fut_readers, fut_clients, fut_conn, fut_sig];
     select_all(futures).await;
     // If any of them finish, end the program as something went wrong
     bus_tx.clone().send(Message::SHUTDOWN).await.unwrap();

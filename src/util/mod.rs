@@ -1,7 +1,12 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
+use tokio::signal;
 
 pub mod io;
+
+pub async fn signal_handler() {
+    signal::ctrl_c().await.unwrap();
+}
 
 /// Check if the string is a valid IPv4 address
 #[allow(dead_code)]
@@ -43,5 +48,12 @@ pub fn is_file(file_str: String) -> Result<(), String> {
     match path.exists() {
         true => Ok(()),
         false => Err("File doesn't exists on file system! Use a different file".to_string()),
+    }
+}
+
+pub fn is_delay(delay: String) -> Result<(), String> {
+    match delay.parse::<u32>() {
+        Ok(_) => Ok(()),
+        Err(_) => Err("Invalid delay value".to_string()),
     }
 }

@@ -1,45 +1,24 @@
 #[macro_use]
 extern crate clap;
 
+mod models;
+mod util;
+mod workers;
+use models::Message;
+use workers::{ClientConnector, ClientPool};
+
+use crate::util::{is_delay, is_path, is_port, signal_handler};
 use chrono::{Datelike, Timelike};
 use clap::{App, Arg};
-use futures::executor::block_on;
+use futures::{future::select_all, future::Future, future::FutureExt, pin_mut};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Lines, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Lines};
 use std::path::Path;
+use std::pin::Pin;
 use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 use std::time::Duration;
-use tokio::sync::broadcast;
-
-type Port = u16;
-static CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-// Check if the string is a valid port
-fn is_port(port: String) -> Result<(), String> {
-    match port.parse::<Port>() {
-        Ok(_) => Ok(()),
-        Err(_) => Err("Invalid port number".to_string()),
-    }
-}
-
-// Check that the path does not already point to a file
-fn is_path(path_str: String) -> Result<(), String> {
-    let path = Path::new(&path_str);
-    match path.exists() {
-        false => Err("File doesn't exists on file system! Use a different file".to_string()),
-        true => Ok(()),
-    }
-}
-
-fn is_delay(delay: String) -> Result<(), String> {
-    match delay.parse::<u32>() {
-        Ok(_) => Ok(()),
-        Err(_) => Err("Invalid delay value".to_string()),
-    }
-}
+use tokio::sync::mpsc::{self, Sender};
+use tokio::time::delay_for;
 
 fn generate_read() -> String {
     let now = chrono::Local::now();
@@ -55,14 +34,38 @@ fn generate_read() -> String {
         now.nanosecond() / 10000000
     );
     let checksum = read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
-    format!(
-        "{}{:02x}",
-        read,
-        checksum
-    )
+    format!("{}{:02x}", read, checksum)
 }
 
-fn main() {
+async fn send_reads(
+    delay: u64,
+    mut file_reader: Option<Lines<BufReader<File>>>,
+    mut bus_tx: Sender<Message>,
+) {
+    loop {
+        // Convert to string
+        let mut chip_read: String = match file_reader.as_mut() {
+            Some(lines) => match lines.next() {
+                Some(line) => line.unwrap().trim().to_string(),
+                None => generate_read(),
+            },
+            None => generate_read(),
+        };
+        chip_read.push_str("\r\n");
+        // Send the read to the threads
+        bus_tx
+            .send(Message::CHIP_READ(chip_read.to_string()))
+            .await
+            .unwrap_or_else(|_| {
+                println!("\r\x1b[2KError sending read to thread. Maybe no readers are conected?");
+            });
+        // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
+        delay_for(Duration::from_millis(delay)).await;
+    }
+}
+
+#[tokio::main]
+async fn main() {
     // Create the flags
     let matches = App::new("Read Streamer")
         .version(crate_version!())
@@ -97,7 +100,7 @@ fn main() {
         .get_matches();
 
     // Check if the user has specified to save the reads to a file
-    let mut file_reader: Option<Lines<BufReader<_>>> = None;
+    let mut file_reader: Option<Lines<BufReader<File>>> = None;
     if matches.is_present("file") {
         // Create the file reader for saving reads
         let file_path = Path::new(matches.value_of("file").unwrap());
@@ -111,65 +114,21 @@ fn main() {
     }
 
     let delay = matches.value_of("delay").unwrap().parse::<u64>().unwrap();
+    let bind_port = matches.value_of("port").unwrap().parse::<u16>().unwrap();
 
-    let bind_port = matches.value_of("port").unwrap().parse::<Port>().unwrap();
-    let listener = TcpListener::bind(("0.0.0.0", bind_port)).expect("Unable to bind to port");
-    println!("Bound to port: {}", listener.local_addr().unwrap().port());
-    // Create a bus to send the reads to the threads that control the connection
-    // to each client computer
-    let (sender, _) = broadcast::channel::<String>(1000);
-    let sender_clone = sender.clone();
-    // Thread to connect to clients
-    thread::spawn(move || {
-        loop {
-            match listener.accept() {
-                Ok((stream, addr)) => {
-                    CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
-                    println!("Connected to client: {}", addr);
-                    let mut rx = sender_clone.subscribe();
-                    thread::spawn(move || {
-                        loop {
-                            match stream
-                                .try_clone()
-                                .unwrap()
-                                .write(block_on(rx.recv()).unwrap().as_bytes())
-                            {
-                                Ok(_) => {}
-                                Err(_) => {
-                                    println!("Warning: Client {} disconnected unexpectedly", addr);
-                                    break;
-                                }
-                            };
-                        }
-                        CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
-                    });
-                }
-                Err(error) => {
-                    println!("Failed to connect to client: {}", error);
-                }
-            }
-        }
-    });
+    let (bus_tx, rx) = mpsc::channel::<Message>(1000);
+    let client_pool = ClientPool::new(rx, None, None, false);
+    let connector = ClientConnector::new(bind_port, bus_tx.clone()).await;
 
-    // Get reads
-    loop {
-        if CONNECTION_COUNT.load(Ordering::SeqCst) > 0 {
-            // Convert to string
-            let mut chip_read: String = match file_reader.as_mut() {
-                Some(lines) => match lines.next() {
-                    Some(line) => line.unwrap().trim().to_string(),
-                    None => generate_read(),
-                },
-                None => generate_read(),
-            };
-            chip_read.push_str("\r\n");
-            // Send the read to the threads
-            match sender.clone().send(chip_read.to_string()) {
-                Ok(_) => (),
-                Err(_) => println!("Error sending read to thread. Maybe no readers are connected?"),
-            }
-            // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
-        }
-        thread::sleep(Duration::from_millis(delay));
-    }
+    let fut_clients = client_pool.begin().fuse();
+    let fut_conn = connector.begin().fuse();
+    let fut_sig = signal_handler().fuse();
+    let fut_sender = send_reads(delay, file_reader, bus_tx.clone()).fuse();
+
+    pin_mut!(fut_sender, fut_clients, fut_conn, fut_sig);
+    let futures: Vec<Pin<&mut dyn Future<Output = ()>>> =
+        vec![fut_sender, fut_clients, fut_conn, fut_sig];
+    select_all(futures).await;
+    // If any of them finish, end the program as something went wrong
+    bus_tx.clone().send(Message::SHUTDOWN).await.unwrap();
 }
