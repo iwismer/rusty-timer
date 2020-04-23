@@ -7,7 +7,6 @@ use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
-use std::process;
 use tokio::sync::mpsc::Receiver;
 
 fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
@@ -92,8 +91,10 @@ impl ClientPool {
             file_writer = match File::create(file_path) {
                 Ok(file) => Some(file),
                 Err(error) => {
-                    println!("Error creating file: {}", error);
-                    process::exit(1);
+                    // File saving is important, so panic if it fails.
+                    // This should never happen, as the file location should be
+                    // checked when taking in args.
+                    panic!("Error creating file: {}", error);
                 }
             };
         }
@@ -127,7 +128,6 @@ impl ClientPool {
                             self.file_writer.as_mut().unwrap(),
                             "{}{}",
                             r.replace(|c: char| !c.is_alphanumeric(), ""),
-                            // Use \r\n on a windows machine
                             line_ending
                         )
                         .unwrap_or_else(|e| {

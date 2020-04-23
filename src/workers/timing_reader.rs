@@ -48,7 +48,6 @@ impl TimingReader {
                             continue;
                         }
                     };
-                    // Lock the bus so I can send data along it
                     // Send the read to the threads
                     self.chip_read_bus
                         .send(Message::CHIP_READ(read.to_string()))
