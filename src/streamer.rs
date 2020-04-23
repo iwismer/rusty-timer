@@ -138,7 +138,7 @@ async fn main() {
 
     // Get bib chips
     if args.bib_chip_file_path.is_some() {
-        let bib_chips = read_bibchip_file(args.bib_chip_file_path.unwrap().to_string());
+        let bib_chips = read_bibchip_file(args.bib_chip_file_path.unwrap().to_string()).unwrap_or_else(|_|vec![]);
         for c in &bib_chips {
             conn.execute(
                 "INSERT INTO chip (id, bib)
@@ -150,7 +150,7 @@ async fn main() {
     }
     // Get participants
     if args.participants_file_path.is_some() {
-        let participants = read_participant_file(args.participants_file_path.unwrap().to_string());
+        let participants = read_participant_file(args.participants_file_path.unwrap().to_string()).unwrap_or_else(|_|vec![]);
         for p in &participants {
             conn.execute(
                 "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
