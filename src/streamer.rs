@@ -145,7 +145,7 @@ async fn main() {
 
     // Get bib chips
     if args.bib_chip_file_path.is_some() {
-        let bib_chips = read_bibchip_file(args.bib_chip_file_path.unwrap().to_string())
+        let bib_chips = read_bibchip_file(&args.bib_chip_file_path.unwrap().as_str())
             .unwrap_or_else(|_| vec![]);
         for c in &bib_chips {
             conn.execute(
@@ -158,7 +158,7 @@ async fn main() {
     }
     // Get participants
     if args.participants_file_path.is_some() {
-        let participants = read_participant_file(args.participants_file_path.unwrap().to_string())
+        let participants = read_participant_file(&args.participants_file_path.unwrap().as_str())
             .unwrap_or_else(|_| vec![]);
         for p in &participants {
             conn.execute(

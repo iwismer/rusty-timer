@@ -19,11 +19,10 @@ pub enum ReadType {
 
 impl fmt::Display for ReadType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let printable = match *self {
-            ReadType::Raw => "Streaming".to_string(),
-            ReadType::FSLS => "FSLS".to_string(),
-        };
-        write!(f, "{}", printable)
+        match *self {
+            ReadType::Raw => write!(f, "Streaming"),
+            ReadType::FSLS => write!(f, "FSLS"),
+        }
     }
 }
 
@@ -61,8 +60,7 @@ impl TryFrom<String> for ChipRead {
     type Error = &'static str;
 
     fn try_from(read_str: String) -> Result<Self, Self::Error> {
-        let mut chip_read = read_str.trim().to_string();
-        chip_read = chip_read.split_whitespace().next().unwrap().to_string();
+        let chip_read = read_str.trim().split_whitespace().next().unwrap();
         if !(chip_read.len() == 36 || chip_read.len() == 38) {
             return Err("Invalid read length");
         }
@@ -71,14 +69,12 @@ impl TryFrom<String> for ChipRead {
             return Err("Checksum doesn't match");
         }
         let mut read_type = ReadType::Raw;
-        if chip_read.len() == 38
-            && (chip_read[37..] != "FS".to_string() || chip_read[37..] != "LS".to_string())
-        {
+        if chip_read.len() == 38 && (&chip_read[37..] != "FS" || &chip_read[37..] != "LS") {
             read_type = ReadType::FSLS;
         } else if chip_read.len() == 38 {
             return Err("Invalid read suffix");
         }
-        if chip_read[..2] != "aa".to_string() {
+        if &chip_read[..2] != "aa" {
             return Err("Invalid read prefix");
         }
         let tag_id = chip_read[4..16].to_string();

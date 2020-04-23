@@ -80,7 +80,7 @@ impl fmt::Display for Participant {
 
 #[allow(dead_code)]
 impl Participant {
-    pub fn from_ppl_record(record: String) -> Result<Participant, &'static str> {
+    pub fn from_ppl_record(record: &str) -> Result<Participant, &'static str> {
         let parts = record.split(",").collect::<Vec<&str>>();
         if parts.len() < 3 {
             return Err("Participant Record Error");
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn valid_ppl() {
-        let part = Participant::from_ppl_record("0,Smith,John,Team Smith,,M".to_string());
+        let part = Participant::from_ppl_record("0,Smith,John,Team Smith,,M");
         assert!(part.is_ok());
         assert_eq!(
             part.unwrap(),
@@ -150,7 +150,7 @@ mod tests {
                 division: None,
             }
         );
-        let part2 = Participant::from_ppl_record("0,Smith,John".to_string());
+        let part2 = Participant::from_ppl_record("0,Smith,John");
         assert!(part2.is_ok());
         assert_eq!(
             part2.unwrap(),
@@ -169,13 +169,13 @@ mod tests {
 
     #[test]
     fn bad_bib() {
-        let part = Participant::from_ppl_record("z,Smith,John,Team Smith,,M".to_string());
+        let part = Participant::from_ppl_record("z,Smith,John,Team Smith,,M");
         assert!(part.is_err());
     }
 
     #[test]
     fn empty_record() {
-        let part = Participant::from_ppl_record("".to_string());
+        let part = Participant::from_ppl_record("");
         assert!(part.is_err());
     }
 }
