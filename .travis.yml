@@ -5,4 +5,6 @@ script:
   - cargo build --bin streamer --verbose
   - cargo build --bin emulator --verbose
   - cargo test
+  - cargo build --bin streamer --verbose --release
+  - cargo build --bin emulator --verbose --release
 cache: cargo
