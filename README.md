@@ -26,7 +26,7 @@ Build with ```cargo build --release --bin streamer```
 ### Running
 
     USAGE:
-    streamer.exe [FLAGS] [OPTIONS] <reader_ip>...
+        streamer.exe [FLAGS] [OPTIONS] <reader_ip>...
 
     FLAGS:
         -h, --help       Prints help information
@@ -38,6 +38,7 @@ Build with ```cargo build --release --bin streamer```
         -f, --file <file>           The file to output the reads to
         -P, --ppl <participants>    The .ppl participant file
         -p, --port <port>           The port of the local machine to bind to [default: 10001]
+        -t, --type <read_type>      The type of read the reader is sending [default: raw]  [possible values: raw, fsls]
 
     ARGS:
         <reader_ip>...    The socket address of the reader to connect to. Eg. 192.168.0.52:10000
@@ -68,16 +69,17 @@ Build with ```cargo build --release --bin emulator```
 ### Running
 
     USAGE:
-        emulator [OPTIONS]
+        emulator.exe [OPTIONS]
 
     FLAGS:
         -h, --help       Prints help information
         -V, --version    Prints version information
 
     OPTIONS:
-        -d, --delay <delay>    Delay between reads [default: 1000]
-        -f, --file <file>      The file to get the reads from
-        -p, --port <port>      The port of the local machine to listen for connections [default: 10001]
+        -d, --delay <delay>       Delay between reads [default: 1000]
+        -f, --file <file>         The file to get the reads from
+        -p, --port <port>         The port of the local machine to listen for connections [default: 10001]
+        -t, --type <read_type>    The type of read the reader is sending [default: raw]  [possible values: raw, fsls]
 
 ## Licence
 
