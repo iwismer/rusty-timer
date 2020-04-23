@@ -47,7 +47,10 @@ async fn send_reads(
         let mut chip_read: String = match file_reader.as_mut() {
             Some(lines) => match lines.next() {
                 Some(line) => line.unwrap().trim().to_string(),
-                None => generate_read(),
+                None => {
+                    file_reader = None;
+                    generate_read()
+                }
             },
             None => generate_read(),
         };
