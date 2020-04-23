@@ -60,7 +60,7 @@ impl TryFrom<String> for ChipRead {
         }
         let mut read_type = ReadType::Raw;
         if chip_read.len() == 38
-            && (chip_read[37..39] != "FS".to_string() || chip_read[37..39] != "LS".to_string())
+            && (chip_read[37..] != "FS".to_string() || chip_read[37..] != "LS".to_string())
         {
             read_type = ReadType::FSLS;
         } else if chip_read.len() == 38 {

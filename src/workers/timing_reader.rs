@@ -27,13 +27,24 @@ impl TimingReader {
     ///
     /// This function should never return.
     pub async fn begin(&mut self) {
-        let mut input_buffer = [0u8; 38];
+        let mut input_buffer = [0u8; 40];
         loop {
             match self.stream.as_mut() {
                 Some(stream) => {
                     // Get 38 bytes from the stream, which is exactly 1 read
-                    match stream.read_exact(&mut input_buffer).await {
-                        Ok(_) => (),
+                    match stream.read(&mut input_buffer).await {
+                        // Valid read
+                        Ok(size) if size == 38 || size == 40 => {},
+                        // The stream is EOF, so try to reconnect next loop
+                        Ok(size) if size == 0 => {
+                            self.stream = None;
+                            continue;
+                        },
+                        // Invalid data
+                        Ok(size) => {
+                            println!("Didn't read enough data from stream. Read {} bytes", size);
+                            continue;
+                        }
                         Err(e) => {
                             println!("\r\x1b[2KError reading from reader: {}", e);
                             self.stream = None::<TcpStream>;
