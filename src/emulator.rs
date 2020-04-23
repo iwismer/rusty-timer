@@ -110,26 +110,18 @@ fn main() {
         };
     }
 
-    // Unwraps implied as this value passed through the validator, and there
-    // is a default value
     let delay = matches.value_of("delay").unwrap().parse::<u64>().unwrap();
 
-    // parse the port value
-    // A port value of 0 let the OS assign a port
     let bind_port = matches.value_of("port").unwrap().parse::<Port>().unwrap();
-    // Bind to the listening port to allow other computers to connect
     let listener = TcpListener::bind(("0.0.0.0", bind_port)).expect("Unable to bind to port");
     println!("Bound to port: {}", listener.local_addr().unwrap().port());
     // Create a bus to send the reads to the threads that control the connection
     // to each client computer
     let (sender, _) = broadcast::channel::<String>(1000);
     let sender_clone = sender.clone();
-    // let bus_r = bus.clone();
     // Thread to connect to clients
     thread::spawn(move || {
-        // TODO: Add a counter for the number of clients connected
         loop {
-            // for stream in listener.incoming() {
             match listener.accept() {
                 Ok((stream, addr)) => {
                     CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -156,7 +148,6 @@ fn main() {
                     println!("Failed to connect to client: {}", error);
                 }
             }
-            // }
         }
     });
 
@@ -172,11 +163,10 @@ fn main() {
                 None => generate_read(),
             };
             chip_read.push_str("\r\n");
-            // print!("{}", chip_read);
             // Send the read to the threads
             match sender.clone().send(chip_read.to_string()) {
                 Ok(_) => (),
-                Err(_) => println!("Error sending read to thread. Maybe no readers are conected?"),
+                Err(_) => println!("Error sending read to thread. Maybe no readers are connected?"),
             }
             // println!("{} {:?} {:?}", chip_read.len(), chip_read, chip_read.as_bytes());
         }

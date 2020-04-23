@@ -18,6 +18,7 @@ impl Client {
         })
     }
 
+    /// Send a single read to the connected client.
     pub async fn send_read(&mut self, read: String) -> Result<usize, SocketAddr> {
         self.stream
             .write(read.as_bytes())
@@ -25,6 +26,7 @@ impl Client {
             .map_err(|_| self.addr)
     }
 
+    /// Close the connection to the client.
     pub fn exit(&self) {
         match self.stream.shutdown(Shutdown::Both) {
             Ok(_) => println!("\r\x1b[2KClient disconnected gracefully."),

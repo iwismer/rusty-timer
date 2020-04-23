@@ -108,6 +108,7 @@ impl ClientPool {
     }
 
     /// Begin listening for new clients and reads.
+    ///
     /// This function should never return.
     pub async fn begin(mut self) {
         // Check if running on windows, and set line ending.
@@ -123,8 +124,6 @@ impl ClientPool {
                     // Only write to file if a file was supplied
                     if self.file_writer.is_some() {
                         write!(
-                            // This unwrap is safe as file_writer has been
-                            // proven to be Some(T)
                             self.file_writer.as_mut().unwrap(),
                             "{}{}",
                             r.replace(|c: char| !c.is_alphanumeric(), ""),

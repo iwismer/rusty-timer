@@ -3,7 +3,7 @@ use crate::models::Message;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 
-/// A worker that connects to clients and passes them along to the pool
+/// A worker that connects to clients and passes them along to the pool.
 pub struct ClientConnector {
     listen_stream: TcpListener,
     bus: Sender<Message>,
@@ -23,7 +23,8 @@ impl ClientConnector {
         }
     }
 
-    /// Start listening for clients
+    /// Start listening for client connections.
+    ///
     /// This function should never return.
     pub async fn begin(mut self) {
         loop {

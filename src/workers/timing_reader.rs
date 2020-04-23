@@ -24,6 +24,7 @@ impl TimingReader {
     }
 
     /// Start listening for reads.
+    ///
     /// This function should never return.
     pub async fn begin(&mut self) {
         let mut input_buffer = [0u8; 38];
@@ -47,7 +48,6 @@ impl TimingReader {
                             continue;
                         }
                     };
-                    // println!("'{}'", read);
                     // Lock the bus so I can send data along it
                     // Send the read to the threads
                     self.chip_read_bus
@@ -58,7 +58,6 @@ impl TimingReader {
                         "\r\x1b[2KError sending read to thread. Maybe no readers are conected?"
                     );
                         });
-                    // Some(stream)
                 }
                 None => {
                     let stream = match TcpStream::connect(self.addr).await {

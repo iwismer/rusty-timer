@@ -20,6 +20,7 @@ impl ReaderPool {
         ReaderPool { readers, bus }
     }
 
+    /// Start connections to readers, and listen for new reads.
     pub async fn begin(&mut self) {
         let mut futures = Vec::new();
         for reader in self.readers.iter_mut() {
