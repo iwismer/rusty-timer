@@ -15,7 +15,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Lines};
 use std::path::Path;
 use std::pin::Pin;
-use std::process;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::time::delay_for;
@@ -110,8 +109,8 @@ async fn main() {
         file_reader = match File::open(file_path) {
             Ok(file) => Some(BufReader::new(file).lines()),
             Err(error) => {
-                println!("Error creating file: {}", error);
-                process::exit(1);
+                println!("Error opening file: {}", error);
+                None
             }
         };
     }
