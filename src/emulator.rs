@@ -4,7 +4,7 @@ extern crate clap;
 mod models;
 mod util;
 mod workers;
-use models::{Message, chip::ReadType};
+use models::{Message, ReadType};
 use workers::{ClientConnector, ClientPool};
 
 use crate::util::{is_delay, is_file, is_port, signal_handler};

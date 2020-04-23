@@ -1,5 +1,5 @@
 use super::TimingReader;
-use crate::models::{chip::ReadType, Message};
+use crate::models::{ReadType, Message};
 use futures::future::join_all;
 use std::net::SocketAddrV4;
 use tokio::sync::mpsc::Sender;

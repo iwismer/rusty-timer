@@ -1,10 +1,11 @@
 #![allow(dead_code)]
-pub mod chip;
-pub mod message;
-pub mod participant;
-pub mod race_result;
-pub mod timestamp;
+mod chip;
+mod message;
+mod participant;
+mod race_result;
+mod timestamp;
 
+pub type ReadType = chip::ReadType;
 pub type ChipBib = chip::ChipBib;
 pub type ChipRead = chip::ChipRead;
 pub type Participant = participant::Participant;

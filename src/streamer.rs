@@ -13,7 +13,7 @@ use std::convert::TryInto;
 mod models;
 mod util;
 mod workers;
-use models::{Message, chip::ReadType};
+use models::{Message, ReadType};
 use util::io::{read_bibchip_file, read_participant_file};
 use util::*;
 use workers::{ClientConnector, ClientPool, ReaderPool};

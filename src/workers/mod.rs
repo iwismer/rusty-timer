@@ -1,9 +1,9 @@
 #![allow(dead_code)]
-pub mod client;
-pub mod client_connector;
-pub mod client_pool;
-pub mod reader_pool;
-pub mod timing_reader;
+mod client;
+mod client_connector;
+mod client_pool;
+mod reader_pool;
+mod timing_reader;
 
 pub type Client = client::Client;
 pub type ClientConnector = client_connector::ClientConnector;

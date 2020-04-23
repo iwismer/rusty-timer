@@ -1,4 +1,4 @@
-use crate::models::{chip::ReadType, Message};
+use crate::models::{ReadType, Message};
 use std::net::SocketAddrV4;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
