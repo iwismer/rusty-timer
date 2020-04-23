@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
+use std::fs::{File, remove_file};
 use tokio::signal;
 
 pub mod io;
@@ -38,7 +39,15 @@ pub fn is_empty_path(path_str: String) -> Result<(), String> {
     let path = Path::new(&path_str);
     match path.exists() {
         true => Err("File exists on file system! Use a different file".to_string()),
-        false => Ok(()),
+        false => {
+            // Check that the file can be created
+            match File::create(path) {
+                Ok(_) => {
+                    Ok(remove_file(path).unwrap_or(()))
+                }
+                Err(_) => Err("File path invalid! Use a different file".to_string())
+            }
+        },
     }
 }
 
@@ -111,9 +120,9 @@ mod tests {
 
     #[test]
     fn test_is_empty_path() {
-        assert!(is_empty_path("".to_string()).is_ok());
         assert!(is_empty_path("qwerty.txt".to_string()).is_ok());
 
+        assert!(is_empty_path("".to_string()).is_err());
         assert!(is_empty_path("test_assets/bibchip/empty.txt".to_string()).is_err());
         assert!(is_empty_path("test_assets/bibchip".to_string()).is_err());
     }
