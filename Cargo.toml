@@ -10,11 +10,8 @@ clap = "2"
 chrono = "0.4"
 encoding = "0.2"
 futures = "0.3"
+rusqlite = {version = "0.22.0", features = ["bundled"]}
 tokio = { version = "0.2", features = ["full"] }
-
-[dependencies.rusqlite]
-version = "0.22.0"
-features = ["bundled"]
 
 [[bin]]
 name = "streamer"
