@@ -1,6 +1,6 @@
 [package]
 name = "rusty-timer"
-version = "2.0.0"
+version = "1.0.0"
 authors = ["iwismer <isaac@iwismer.ca>"]
 edition = "2018"
 homepage = "https://github.com/iwismer/rusty-timer"
@@ -10,7 +10,7 @@ clap = "2"
 chrono = "0.4"
 encoding = "0.2"
 futures = "0.3"
-rusqlite = {version = "0.22.0", features = ["bundled"]}
+rusqlite = {version = "0.23.1", features = ["bundled"]}
 tokio = { version = "0.2", features = ["full"] }
 
 [[bin]]
