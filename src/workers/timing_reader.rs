@@ -52,7 +52,7 @@ impl TimingReader {
                     };
                     // Send the read to the threads
                     self.chip_read_bus
-                        .send(Message::CHIP_READ(read.to_string()))
+                        .send(Message::CHIP_READ(read.to_owned()))
                         .await
                         .unwrap_or_else(|_| {
                             println!(

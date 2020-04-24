@@ -35,7 +35,7 @@ fn generate_read(read_type: ReadType) -> String {
     );
     let checksum = read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
     match read_type {
-        ReadType::Raw => format!("{}{:02x}", read, checksum),
+        ReadType::RAW => format!("{}{:02x}", read, checksum),
         ReadType::FSLS => format!("{}{:02x}LS", read, checksum)
     }
 }
@@ -50,7 +50,7 @@ async fn send_reads(
         // Convert to string
         let mut chip_read: String = match file_reader.as_mut() {
             Some(lines) => match lines.next() {
-                Some(line) => line.unwrap().trim().to_string(),
+                Some(line) => line.unwrap().trim().to_owned(),
                 None => {
                     file_reader = None;
                     generate_read(read_type)
@@ -61,7 +61,7 @@ async fn send_reads(
         chip_read.push_str("\r\n");
         // Send the read to the threads
         bus_tx
-            .send(Message::CHIP_READ(chip_read.to_string()))
+            .send(Message::CHIP_READ(chip_read))
             .await
             .unwrap_or_else(|_| {
                 println!("\r\x1b[2KError sending read to thread. Maybe no readers are conected?");

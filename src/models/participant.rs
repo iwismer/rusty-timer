@@ -10,23 +10,21 @@ pub enum Gender {
 
 impl fmt::Display for Gender {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let printable = match *self {
-            Gender::M => "M".to_string(),
-            Gender::F => "F".to_string(),
-            Gender::X => "X".to_string(),
-        };
-        write!(f, "{}", printable)
+        match *self {
+            Gender::M => write!(f, "M"),
+            Gender::F => write!(f, "F"),
+            Gender::X => write!(f, "X"),
+        }
     }
 }
 
 impl fmt::Debug for Gender {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let printable = match *self {
-            Gender::M => "M".to_string(),
-            Gender::F => "F".to_string(),
-            Gender::X => "X".to_string(),
-        };
-        write!(f, "Gender: {}", printable)
+        match *self {
+            Gender::M => write!(f, "Gender: M"),
+            Gender::F => write!(f, "Gender: F"),
+            Gender::X => write!(f, "Gender: X"),
+        }
     }
 }
 
@@ -46,21 +44,21 @@ pub struct Participant {
 impl fmt::Display for Participant {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let age_str = match self.age {
-            None => "".to_string(),
+            None => "".to_owned(),
             Some(age) => format!(", Age: {}", age),
         };
         let affil_str = match self.affiliation {
-            None => "".to_string(),
+            None => "".to_owned(),
             Some(ref affiliation) => {
                 if affiliation == "" {
-                    "".to_string()
+                    "".to_owned()
                 } else {
                     format!(", Affiliation: {}", affiliation)
                 }
             }
         };
         let division_str = match self.division {
-            None => "".to_string(),
+            None => "".to_owned(),
             Some(division) => format!(", Division: {}", division),
         };
         write!(
@@ -89,11 +87,11 @@ impl Participant {
             Err(_) => return Err("Participant Record Error"),
             Ok(id) => id,
         };
-        let last_name = parts[1];
-        let first_name = parts[2];
+        let last_name = parts[1].to_owned();
+        let first_name = parts[2].to_owned();
         let mut affil: Option<String> = None;
         if parts.len() >= 4 {
-            affil = Some(parts[3].to_string());
+            affil = Some(parts[3].to_owned());
         }
         let mut gender = Gender::X;
         if parts.len() >= 6 {
@@ -105,11 +103,11 @@ impl Participant {
         }
         Ok(Participant {
             chip_id: Vec::<String>::new(),
-            bib: bib,
-            first_name: first_name.to_string(),
-            last_name: last_name.to_string(),
+            bib,
+            first_name,
+            last_name,
             affiliation: affil,
-            gender: gender,
+            gender,
             age: None,
             division: None,
         })
@@ -119,8 +117,8 @@ impl Participant {
         Participant {
             chip_id: Vec::<String>::new(),
             bib: bib,
-            first_name: "Unknown".to_string(),
-            last_name: "Participant".to_string(),
+            first_name: "Unknown".to_owned(),
+            last_name: "Participant".to_owned(),
             affiliation: None,
             gender: Gender::X,
             age: None,
@@ -142,9 +140,9 @@ mod tests {
             Participant {
                 chip_id: Vec::<String>::new(),
                 bib: 0,
-                first_name: "John".to_string(),
-                last_name: "Smith".to_string(),
-                affiliation: Some("Team Smith".to_string()),
+                first_name: "John".to_owned(),
+                last_name: "Smith".to_owned(),
+                affiliation: Some("Team Smith".to_owned()),
                 gender: Gender::M,
                 age: None,
                 division: None,
@@ -157,8 +155,8 @@ mod tests {
             Participant {
                 chip_id: Vec::<String>::new(),
                 bib: 0,
-                first_name: "John".to_string(),
-                last_name: "Smith".to_string(),
+                first_name: "John".to_owned(),
+                last_name: "Smith".to_owned(),
                 affiliation: None,
                 gender: Gender::X,
                 age: None,

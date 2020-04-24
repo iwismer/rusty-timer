@@ -21,11 +21,11 @@ pub fn read_file(path_str: &str) -> Result<Vec<String>, String> {
     match std::str::from_utf8(&buffer) {
         Err(_desc) => match WINDOWS_1252.decode(buffer.as_slice(), DecoderTrap::Replace) {
             Err(desc) => Err(format!("Couldn't read {}: {}", path.display(), desc)),
-            Ok(s) => Ok(s.to_string()),
+            Ok(s) => Ok(s.to_owned()),
         },
-        Ok(s) => Ok(s.to_string()),
+        Ok(s) => Ok(s.to_owned()),
     }
-    .map(|s| s.split('\n').map(|s| s.to_string()).collect())
+    .map(|s| s.split('\n').map(|s| s.to_owned()).collect())
 }
 
 pub fn read_bibchip_file(file_path: &str) -> Result<Vec<ChipBib>, String> {
@@ -41,7 +41,7 @@ pub fn read_bibchip_file(file_path: &str) -> Result<Vec<ChipBib>, String> {
         if b != "" && b.chars().next().unwrap().is_digit(10) {
             let parts = b.trim().split(",").collect::<Vec<&str>>();
             bib_chip.push(ChipBib {
-                id: parts[1].to_string(),
+                id: parts[1].to_owned(),
                 bib: parts[0].parse::<i32>().unwrap_or_else(|_| {
                     println!("Error reading bib file. Invalid bib: {}", parts[0]);
                     0

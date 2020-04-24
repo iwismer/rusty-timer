@@ -13,14 +13,14 @@ pub struct ChipBib {
 /// Define a read as either raw, or first-seen/last-seen
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Copy, Clone)]
 pub enum ReadType {
-    Raw = 38,
+    RAW = 38,
     FSLS = 40,
 }
 
 impl fmt::Display for ReadType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            ReadType::Raw => write!(f, "Streaming"),
+            ReadType::RAW => write!(f, "Streaming"),
             ReadType::FSLS => write!(f, "FSLS"),
         }
     }
@@ -31,7 +31,7 @@ impl TryFrom<&str> for ReadType {
 
     fn try_from(type_str: &str) -> Result<Self, Self::Error> {
         match type_str.to_lowercase().as_str() {
-            "raw" => Ok(ReadType::Raw),
+            "raw" => Ok(ReadType::RAW),
             "fsls" => Ok(ReadType::FSLS),
             _ => Err("Invalid read type"),
         }
@@ -56,10 +56,10 @@ impl ChipRead {
     }
 }
 
-impl TryFrom<String> for ChipRead {
+impl TryFrom<&str> for ChipRead {
     type Error = &'static str;
 
-    fn try_from(read_str: String) -> Result<Self, Self::Error> {
+    fn try_from(read_str: &str) -> Result<Self, Self::Error> {
         let chip_read = read_str.trim().split_whitespace().next().unwrap();
         if !(chip_read.len() == 36 || chip_read.len() == 38) {
             return Err("Invalid read length");
@@ -68,7 +68,7 @@ impl TryFrom<String> for ChipRead {
         if format!("{:02x}", checksum) != chip_read[34..36] {
             return Err("Checksum doesn't match");
         }
-        let mut read_type = ReadType::Raw;
+        let mut read_type = ReadType::RAW;
         if chip_read.len() == 38 && (&chip_read[37..] != "FS" || &chip_read[37..] != "LS") {
             read_type = ReadType::FSLS;
         } else if chip_read.len() == 38 {
@@ -77,7 +77,7 @@ impl TryFrom<String> for ChipRead {
         if &chip_read[..2] != "aa" {
             return Err("Invalid read prefix");
         }
-        let tag_id = chip_read[4..16].to_string();
+        let tag_id = chip_read[4..16].to_owned();
         let read_year = match chip_read[20..22].parse::<u16>() {
             Err(_) => return Err("Invalid Chip Read"),
             Ok(year) => year,
@@ -140,43 +140,43 @@ mod tests {
 
     #[test]
     fn simple_chip() {
-        let read = ChipRead::try_from("aa400000000123450a2a01123018455927a7".to_string());
+        let read = ChipRead::try_from("aa400000000123450a2a01123018455927a7");
         assert!(read.is_ok());
         assert_eq!(
             read.unwrap(),
             ChipRead {
-                tag_id: "000000012345".to_string(),
+                tag_id: "000000012345".to_owned(),
                 timestamp: Timestamp::new(1, 12, 30, 18, 45, 59, 390),
-                read_type: ReadType::Raw
+                read_type: ReadType::RAW
             }
         );
     }
 
     #[test]
     fn invalid_checksum() {
-        let read = ChipRead::try_from("aa400000000123450a2a01123018455927a8".to_string());
+        let read = ChipRead::try_from("aa400000000123450a2a01123018455927a8");
         assert!(read.is_err());
         assert_eq!(read.err().unwrap(), "Checksum doesn't match");
 
-        let read2 = ChipRead::try_from("aa400000000123450a2a01123018455927ff".to_string());
+        let read2 = ChipRead::try_from("aa400000000123450a2a01123018455927ff");
         assert!(read2.is_err());
         assert_eq!(read2.err().unwrap(), "Checksum doesn't match");
     }
 
     #[test]
     fn wrong_length() {
-        let read = ChipRead::try_from("aa400000000123450a2a01123018455927a8a".to_string());
+        let read = ChipRead::try_from("aa400000000123450a2a01123018455927a8a");
         assert!(read.is_err());
         assert_eq!(read.err().unwrap(), "Invalid read length");
 
-        let read2 = ChipRead::try_from("aa400000000123450a2a01123018455927a".to_string());
+        let read2 = ChipRead::try_from("aa400000000123450a2a01123018455927a");
         assert!(read2.is_err());
         assert_eq!(read2.err().unwrap(), "Invalid read length");
     }
 
     #[test]
     fn invalid_header() {
-        let read = ChipRead::try_from("ab400000000123450a2a01123018455927a7".to_string());
+        let read = ChipRead::try_from("ab400000000123450a2a01123018455927a7");
         assert!(read.is_err());
         assert_eq!(read.err().unwrap(), "Invalid read prefix");
     }

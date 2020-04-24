@@ -105,11 +105,11 @@ fn get_args() -> Args {
     let bind_port = matches.value_of("port").unwrap().parse::<u16>().unwrap();
 
     Args {
-        bib_chip_file_path: matches.value_of("bibchip").map(|s| s.to_string()),
-        participants_file_path: matches.value_of("participants").map(|s| s.to_string()),
+        bib_chip_file_path: matches.value_of("bibchip").map(|s| s.to_owned()),
+        participants_file_path: matches.value_of("participants").map(|s| s.to_owned()),
         readers: readers,
         bind_port,
-        out_file: matches.value_of("file").map(|s| s.to_string()),
+        out_file: matches.value_of("file").map(|s| s.to_owned()),
         buffered_output: matches.is_present("is_buffered"),
         read_type: matches.value_of("read_type").unwrap().try_into().unwrap()
     }
