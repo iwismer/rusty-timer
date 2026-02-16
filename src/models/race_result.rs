@@ -14,7 +14,7 @@ impl RaceResult {
     // Create a new race result with no reads
     pub fn new(participant: Participant) -> RaceResult {
         RaceResult {
-            participant: participant,
+            participant,
             start_reads: Vec::new(),
             finish_reads: Vec::new(),
         }
@@ -27,9 +27,9 @@ impl RaceResult {
         finish_reads: Vec<ChipRead>,
     ) -> RaceResult {
         RaceResult {
-            participant: participant,
-            start_reads: start_reads,
-            finish_reads: finish_reads,
+            participant,
+            start_reads,
+            finish_reads,
         }
     }
 

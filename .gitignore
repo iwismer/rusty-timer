@@ -2,3 +2,5 @@
 **/*.rs.bk
 assets/
 ext_docs/
+.worktrees/
+docs/

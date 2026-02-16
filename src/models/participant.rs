@@ -1,5 +1,4 @@
 use std::fmt;
-use std::i32;
 
 #[derive(Eq, Ord, PartialOrd, PartialEq, Clone)]
 pub enum Gender {
@@ -50,7 +49,7 @@ impl fmt::Display for Participant {
         let affil_str = match self.affiliation {
             None => "".to_owned(),
             Some(ref affiliation) => {
-                if affiliation == "" {
+                if affiliation.is_empty() {
                     "".to_owned()
                 } else {
                     format!(", Affiliation: {}", affiliation)
@@ -116,7 +115,7 @@ impl Participant {
     pub fn create_unknown(bib: i32) -> Participant {
         Participant {
             chip_id: Vec::<String>::new(),
-            bib: bib,
+            bib,
             first_name: "Unknown".to_owned(),
             last_name: "Participant".to_owned(),
             affiliation: None,

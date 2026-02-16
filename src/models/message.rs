@@ -3,6 +3,7 @@ use crate::workers::Client;
 /// A message that gets passed along the bus between workers
 #[allow(non_camel_case_types)]
 #[derive(Debug)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum Message {
     // Shutdown all the streams
     SHUTDOWN,

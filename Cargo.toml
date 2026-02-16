@@ -2,16 +2,16 @@
 name = "rusty-timer"
 version = "1.0.0"
 authors = ["iwismer <isaac@iwismer.ca>"]
-edition = "2018"
+edition = "2021"
 homepage = "https://github.com/iwismer/rusty-timer"
 
 [dependencies]
-clap = "2"
+clap = "4"
 chrono = "0.4"
 encoding = "0.2"
 futures = "0.3"
-rusqlite = {version = "0.23.1", features = ["bundled"]}
-tokio = { version = "0.2", features = ["full"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
 
 [[bin]]
 name = "streamer"
