@@ -3,9 +3,11 @@ use crate::models::Message;
 use crate::models::{ChipRead, Gender, Participant};
 use futures::future::join_all;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::path::Path;
 use tokio::sync::mpsc::Receiver;
 
@@ -14,7 +16,7 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
         Err(desc) => format!("Error reading chip {}", desc),
         Ok(read) => {
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT
                             c.id,
                             c.bib,
@@ -64,6 +66,13 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
             }
         }
     }
+}
+
+fn remove_failed_clients(clients: &mut Vec<Client>, failed_addrs: &HashSet<SocketAddr>) {
+    if failed_addrs.is_empty() {
+        return;
+    }
+    clients.retain(|client| !failed_addrs.contains(&client.get_addr()));
 }
 
 /// Contains a vec of all the clients and forwards reads to them
@@ -118,7 +127,12 @@ impl ClientPool {
         };
         let mut read_count: u32 = 0;
         loop {
-            match self.bus.recv().await.unwrap() {
+            let message = match self.bus.recv().await {
+                Some(message) => message,
+                None => return,
+            };
+
+            match message {
                 Message::CHIP_READ(r) => {
                     read_count += 1;
                     // Only write to file if a file was supplied
@@ -142,6 +156,7 @@ impl ClientPool {
                             io::stdout().flush().unwrap_or(());
                         }
                     }
+
                     let mut futures = Vec::new();
                     for client in self.clients.iter_mut() {
                         futures.push(client.send_read(r.clone()));
@@ -149,14 +164,9 @@ impl ClientPool {
                     let results = join_all(futures).await;
                     // If a client returned an error, remove it from future
                     // transmissions.
-                    for r in results.iter() {
-                        if let Err(addr) = r {
-                            let pos = self.clients.iter().position(|c| c.get_addr() == *addr);
-                            if let Some(pos) = pos {
-                                self.clients.remove(pos);
-                            }
-                        }
-                    }
+                    let failed_addrs: HashSet<_> =
+                        results.into_iter().filter_map(Result::err).collect();
+                    remove_failed_clients(&mut self.clients, &failed_addrs);
                 }
                 Message::SHUTDOWN => {
                     return;
@@ -166,5 +176,39 @@ impl ClientPool {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn make_client() -> Client {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let connect_task =
+            tokio::spawn(async move { TcpStream::connect(listen_addr).await.unwrap() });
+        let (server_stream, server_addr) = listener.accept().await.unwrap();
+        let _ = connect_task.await.unwrap();
+        Client::new(server_stream, server_addr).unwrap()
+    }
+
+    #[tokio::test]
+    async fn remove_failed_clients_drops_all_failed_addresses() {
+        let mut clients = vec![
+            make_client().await,
+            make_client().await,
+            make_client().await,
+        ];
+        let dropped_addr = clients[1].get_addr();
+
+        let mut failed = HashSet::new();
+        failed.insert(dropped_addr);
+
+        remove_failed_clients(&mut clients, &failed);
+
+        assert_eq!(clients.len(), 2);
+        assert!(clients.iter().all(|c| c.get_addr() != dropped_addr));
     }
 }
