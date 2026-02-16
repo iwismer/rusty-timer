@@ -18,10 +18,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::time::sleep;
 
-fn generate_read(read_type: ReadType) -> String {
-    let now = chrono::Local::now();
+fn generate_read_for_time(read_type: ReadType, now: chrono::DateTime<chrono::Local>) -> String {
+    let centiseconds = (now.nanosecond() / 10000000) as u8;
     let read = format!(
-        "aa00{}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}{:>02}",
+        "aa00{}{:02}{:02}{:02}{:02}{:02}{:02}{:02x}",
         "05800319aeeb0001",
         now.year() % 100,
         now.month(),
@@ -29,13 +29,17 @@ fn generate_read(read_type: ReadType) -> String {
         now.hour(),
         now.minute(),
         now.second(),
-        now.nanosecond() / 10000000
+        centiseconds
     );
     let checksum = read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
     match read_type {
         ReadType::RAW => format!("{}{:02x}", read, checksum),
         ReadType::FSLS => format!("{}{:02x}LS", read, checksum),
     }
+}
+
+fn generate_read(read_type: ReadType) -> String {
+    generate_read_for_time(read_type, chrono::Local::now())
 }
 
 async fn send_reads(
@@ -48,7 +52,14 @@ async fn send_reads(
         // Convert to string
         let mut chip_read: String = match file_reader.as_mut() {
             Some(lines) => match lines.next() {
-                Some(line) => line.unwrap().trim().to_owned(),
+                Some(line) => match line {
+                    Ok(line) => line.trim().to_owned(),
+                    Err(error) => {
+                        eprintln!("Error reading line from file: {}", error);
+                        file_reader = None;
+                        generate_read(read_type)
+                    }
+                },
                 None => {
                     file_reader = None;
                     generate_read(read_type)
@@ -94,10 +105,10 @@ fn validate_read_type(value: &str) -> Result<ReadType, String> {
 #[tokio::main]
 async fn main() {
     // Create the flags
-    let matches = Command::new("Read Streamer")
+    let matches = Command::new("Read Emulator")
         .version(env!("CARGO_PKG_VERSION"))
         .author("Isaac Wismer")
-        .about("A read streamer for timers")
+        .about("A chip read emulator for timers")
         .arg(
             Arg::new("port")
                 .help("The port of the local machine to listen for connections")
@@ -170,4 +181,115 @@ async fn main() {
     select_all(futures).await;
     // If any of them finish, end the program as something went wrong
     bus_tx.send(Message::SHUTDOWN).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ChipRead;
+    use chrono::TimeZone;
+    use std::convert::TryFrom;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::mpsc;
+    use tokio::time::{timeout, Duration};
+
+    #[test]
+    fn generated_raw_reads_parse() {
+        let read = generate_read(ReadType::RAW);
+        let parsed = ChipRead::try_from(read.as_str());
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn generated_fsls_reads_parse() {
+        let read = generate_read(ReadType::FSLS);
+        let parsed = ChipRead::try_from(read.as_str());
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn generated_read_shapes_are_stable() {
+        let raw = generate_read(ReadType::RAW);
+        assert_eq!(raw.len(), 36);
+        assert!(raw.starts_with("aa"));
+
+        let fsls = generate_read(ReadType::FSLS);
+        assert_eq!(fsls.len(), 38);
+        assert!(fsls.ends_with("LS"));
+    }
+
+    #[test]
+    fn generated_read_encodes_centiseconds_as_hex() {
+        let now = chrono::Local.ymd(2025, 1, 2).and_hms_milli(3, 4, 5, 990);
+        let read = generate_read_for_time(ReadType::RAW, now);
+        assert_eq!(&read[32..34], "63");
+
+        let parsed = ChipRead::try_from(read.as_str()).unwrap();
+        assert_eq!(parsed.time_string(), "03:04:05.990");
+    }
+
+    fn tmp_file_path(name_prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}_{}.txt", name_prefix, nonce))
+    }
+
+    #[tokio::test]
+    async fn send_reads_uses_file_line_then_falls_back_to_generated() {
+        let input_path = tmp_file_path("emulator_send_reads");
+        let mut file = File::create(&input_path).unwrap();
+        writeln!(file, "aa400000000123450a2a01123018455927a7").unwrap();
+
+        let file = File::open(&input_path).unwrap();
+        let file_reader = Some(BufReader::new(file).lines());
+        let (bus_tx, mut bus_rx) = mpsc::channel(8);
+        let sender_task = tokio::spawn(send_reads(1, file_reader, bus_tx, ReadType::RAW));
+
+        let first = timeout(Duration::from_millis(100), bus_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = timeout(Duration::from_millis(100), bus_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        match first {
+            Message::CHIP_READ(read) => {
+                assert_eq!(read, "aa400000000123450a2a01123018455927a7\r\n".to_owned());
+            }
+            _ => panic!("expected first message to be a chip read"),
+        }
+        match second {
+            Message::CHIP_READ(read) => {
+                assert!(read.ends_with("\r\n"));
+                assert_ne!(read, "aa400000000123450a2a01123018455927a7\r\n");
+            }
+            _ => panic!("expected a chip read message"),
+        }
+
+        sender_task.abort();
+        let _ = sender_task.await;
+        let _ = std::fs::remove_file(&input_path);
+    }
+
+    #[tokio::test]
+    async fn send_reads_stays_alive_when_bus_receiver_is_closed() {
+        let (bus_tx, bus_rx) = mpsc::channel(1);
+        drop(bus_rx);
+
+        let mut sender_task = tokio::spawn(send_reads(1, None, bus_tx, ReadType::RAW));
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let still_running = timeout(Duration::from_millis(10), &mut sender_task)
+            .await
+            .is_err();
+        assert!(still_running);
+        sender_task.abort();
+        assert!(sender_task.await.unwrap_err().is_cancelled());
+    }
 }
