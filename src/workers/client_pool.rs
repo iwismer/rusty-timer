@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::path::Path;
 use tokio::sync::mpsc::Receiver;
 
@@ -65,6 +66,13 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
             }
         }
     }
+}
+
+fn remove_failed_clients(clients: &mut Vec<Client>, failed_addrs: &HashSet<SocketAddr>) {
+    if failed_addrs.is_empty() {
+        return;
+    }
+    clients.retain(|client| !failed_addrs.contains(&client.get_addr()));
 }
 
 /// Contains a vec of all the clients and forwards reads to them
@@ -158,10 +166,7 @@ impl ClientPool {
                     // transmissions.
                     let failed_addrs: HashSet<_> =
                         results.into_iter().filter_map(Result::err).collect();
-                    if !failed_addrs.is_empty() {
-                        self.clients
-                            .retain(|client| !failed_addrs.contains(&client.get_addr()));
-                    }
+                    remove_failed_clients(&mut self.clients, &failed_addrs);
                 }
                 Message::SHUTDOWN => {
                     return;
@@ -171,5 +176,39 @@ impl ClientPool {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn make_client() -> Client {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let connect_task =
+            tokio::spawn(async move { TcpStream::connect(listen_addr).await.unwrap() });
+        let (server_stream, server_addr) = listener.accept().await.unwrap();
+        let _ = connect_task.await.unwrap();
+        Client::new(server_stream, server_addr).unwrap()
+    }
+
+    #[tokio::test]
+    async fn remove_failed_clients_drops_all_failed_addresses() {
+        let mut clients = vec![
+            make_client().await,
+            make_client().await,
+            make_client().await,
+        ];
+        let dropped_addr = clients[1].get_addr();
+
+        let mut failed = HashSet::new();
+        failed.insert(dropped_addr);
+
+        remove_failed_clients(&mut clients, &failed);
+
+        assert_eq!(clients.len(), 2);
+        assert!(clients.iter().all(|c| c.get_addr() != dropped_addr));
     }
 }

@@ -109,7 +109,12 @@ impl TryFrom<&str> for ChipRead {
         };
         let read_millis = match i32::from_str_radix(&chip_read[32..34], 16) {
             Err(_) => return Err("Invalid Chip Read"),
-            Ok(millis) => (millis * 10) as u16,
+            Ok(millis) => {
+                if millis > 0x63 {
+                    return Err("Invalid Chip Read");
+                }
+                (millis * 10) as u16
+            }
         };
         let read_time: Timestamp = Timestamp::new(
             read_year,
@@ -142,6 +147,13 @@ impl fmt::Display for ChipRead {
 mod tests {
     use super::*;
     use std::convert::TryFrom;
+
+    fn raw_read_with_checksum(centisecond_hex: &str) -> String {
+        let mut read = format!("aa400000000123450a2a011230184559{}", centisecond_hex);
+        let checksum = read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
+        read.push_str(&format!("{:02x}", checksum));
+        read
+    }
 
     #[test]
     fn simple_chip() {
@@ -202,6 +214,38 @@ mod tests {
         let read = ChipRead::try_from("aa400000000123450a2a01123018455927a7ZZ");
         assert!(read.is_err());
         assert_eq!(read.err().unwrap(), "Invalid read suffix");
+    }
+
+    #[test]
+    fn lowercase_fsls_suffixes_are_rejected() {
+        let fs = ChipRead::try_from("aa400000000123450a2a01123018455927a7fs");
+        assert!(fs.is_err());
+        assert_eq!(fs.err().unwrap(), "Invalid read suffix");
+
+        let ls = ChipRead::try_from("aa400000000123450a2a01123018455927a7lS");
+        assert!(ls.is_err());
+        assert_eq!(ls.err().unwrap(), "Invalid read suffix");
+    }
+
+    #[test]
+    fn centisecond_bounds() {
+        let low_read = raw_read_with_checksum("00");
+        let low = ChipRead::try_from(low_read.as_str());
+        assert!(low.is_ok());
+        assert_eq!(low.unwrap().time_string(), "18:45:59.000");
+
+        let high_read = raw_read_with_checksum("63");
+        let high = ChipRead::try_from(high_read.as_str());
+        assert!(high.is_ok());
+        assert_eq!(high.unwrap().time_string(), "18:45:59.990");
+    }
+
+    #[test]
+    fn invalid_centisecond_value_is_rejected() {
+        let invalid_read = raw_read_with_checksum("64");
+        let invalid = ChipRead::try_from(invalid_read.as_str());
+        assert!(invalid.is_err());
+        assert_eq!(invalid.err().unwrap(), "Invalid Chip Read");
     }
 
     #[test]
