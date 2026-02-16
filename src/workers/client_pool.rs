@@ -27,7 +27,7 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
                 )
                 .unwrap();
             // Make the query and map to a participant
-            let row = stmt.query_row(&[read.tag_id.as_str()], |row| {
+            let row = stmt.query_row([read.tag_id.as_str()], |row| {
                 Ok(Participant {
                     // If there is a missing field, then map it to unknown
                     chip_id: vec![row.get(0).unwrap_or("None".to_owned())],
@@ -84,8 +84,7 @@ impl ClientPool {
     ) -> Self {
         // Check if the user has specified to save the reads to a file
         let mut file_writer: Option<File> = None;
-        if out_file.is_some() {
-            let path = out_file.unwrap();
+        if let Some(path) = out_file {
             // Create the file writer for saving reads
             let file_path = Path::new(&path);
             file_writer = match File::create(file_path) {
@@ -123,9 +122,9 @@ impl ClientPool {
                 Message::CHIP_READ(r) => {
                     read_count += 1;
                     // Only write to file if a file was supplied
-                    if self.file_writer.is_some() {
+                    if let Some(file_writer) = self.file_writer.as_mut() {
                         write!(
-                            self.file_writer.as_mut().unwrap(),
+                            file_writer,
                             "{}{}",
                             r.replace(|c: char| !c.is_alphanumeric(), ""),
                             line_ending
@@ -134,17 +133,14 @@ impl ClientPool {
                             println!("\r\x1b[2KError writing read to file: {}", e);
                         });
                     }
-                    match &self.db_conn {
-                        Some(conn) => {
-                            let to_print = read_to_string(&r, &conn, &read_count);
-                            print!("\r\x1b[2K{}", to_print);
-                            // only flush if the output is unbuffered
-                            // This can cause high CPU use on some systems
-                            if !self.buffered_output {
-                                io::stdout().flush().unwrap_or(());
-                            }
+                    if let Some(conn) = &self.db_conn {
+                        let to_print = read_to_string(&r, conn, &read_count);
+                        print!("\r\x1b[2K{}", to_print);
+                        // only flush if the output is unbuffered
+                        // This can cause high CPU use on some systems
+                        if !self.buffered_output {
+                            io::stdout().flush().unwrap_or(());
                         }
-                        None => {}
                     }
                     let mut futures = Vec::new();
                     for client in self.clients.iter_mut() {
@@ -154,21 +150,15 @@ impl ClientPool {
                     // If a client returned an error, remove it from future
                     // transmissions.
                     for r in results.iter() {
-                        if r.is_err() {
-                            let pos = self
-                                .clients
-                                .iter()
-                                .position(|c| c.get_addr() == r.err().unwrap());
-                            if pos.is_some() {
-                                self.clients.remove(pos.unwrap());
+                        if let Err(addr) = r {
+                            let pos = self.clients.iter().position(|c| c.get_addr() == *addr);
+                            if let Some(pos) = pos {
+                                self.clients.remove(pos);
                             }
                         }
                     }
                 }
                 Message::SHUTDOWN => {
-                    for client in self.clients {
-                        client.exit();
-                    }
                     return;
                 }
                 Message::CLIENT(c) => {

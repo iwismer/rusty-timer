@@ -1,6 +1,6 @@
 # Rusty Timer
 
-[![Build Status](https://travis-ci.org/iwismer/rusty-timer.svg?branch=master)](https://travis-ci.org/iwismer/rusty-timer)
+[![CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
 
 This contains a set of timing related utilities for the Ipico timing system.
 

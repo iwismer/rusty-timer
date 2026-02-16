@@ -22,13 +22,13 @@ impl Timestamp {
         millis: u16,
     ) -> Timestamp {
         Timestamp {
-            year: year,
-            month: month,
-            day: day,
-            hour: hour,
-            minute: minute,
-            second: second,
-            millis: millis,
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            millis,
         }
     }
 

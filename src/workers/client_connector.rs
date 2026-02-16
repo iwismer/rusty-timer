@@ -26,7 +26,7 @@ impl ClientConnector {
     /// Start listening for client connections.
     ///
     /// This function should never return.
-    pub async fn begin(mut self) {
+    pub async fn begin(self) {
         loop {
             // wait for a connection, then connect when it comes
             match self.listen_stream.accept().await {
@@ -34,10 +34,7 @@ impl ClientConnector {
                     match Client::new(stream, addr) {
                         Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
                         Ok(client) => {
-                            self.bus
-                                .send(Message::CLIENT(client))
-                                .await
-                                .unwrap();
+                            self.bus.send(Message::CLIENT(client)).await.unwrap();
                             println!("\r\x1b[2KConnected to client: {}", addr)
                         }
                     };

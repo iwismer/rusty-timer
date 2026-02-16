@@ -1,14 +1,12 @@
-#[macro_use]
-extern crate clap;
-
-use clap::{App, Arg};
-use futures::{future::select_all, future::Future, future::FutureExt, pin_mut};
+use clap::{Arg, ArgAction, Command};
+use futures::{future::select_all, future::FutureExt, pin_mut};
 use rusqlite::types::ToSql;
-use rusqlite::{Connection, NO_PARAMS};
+use rusqlite::Connection;
+use std::convert::TryInto;
+use std::future::Future;
 use std::net::SocketAddrV4;
 use std::pin::Pin;
 use tokio::sync::mpsc;
-use std::convert::TryInto;
 
 mod models;
 mod util;
@@ -28,90 +26,113 @@ struct Args {
     read_type: ReadType,
 }
 
+fn validate_socket_addr(value: &str) -> Result<SocketAddrV4, String> {
+    is_socket_addr(value.to_owned())?;
+    value
+        .parse::<SocketAddrV4>()
+        .map_err(|_| "Invalid Socket Address".to_owned())
+}
+
+fn validate_port_value(value: &str) -> Result<u16, String> {
+    is_port(value.to_owned())?;
+    value
+        .parse::<u16>()
+        .map_err(|_| "Invalid port number".to_owned())
+}
+
+fn validate_read_type(value: &str) -> Result<ReadType, String> {
+    value.try_into().map_err(|_| "Invalid read type".to_owned())
+}
+
+fn validate_empty_path_value(value: &str) -> Result<String, String> {
+    is_empty_path(value.to_owned())?;
+    Ok(value.to_owned())
+}
+
+fn validate_existing_file(value: &str) -> Result<String, String> {
+    is_file(value.to_owned())?;
+    Ok(value.to_owned())
+}
+
 fn get_args() -> Args {
-    // Create the flags
-    let matches = App::new("Rusty Timer: Read Streamer")
-        .version(crate_version!())
+    let matches = Command::new("Rusty Timer: Read Streamer")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Isaac Wismer")
         .about("A read streamer for timers")
         .arg(
-            Arg::with_name("reader")
+            Arg::new("reader")
                 .help("The socket address of the reader to connect to. Eg. 192.168.0.52:10000")
-                .index(1)
-                .takes_value(true)
                 .value_name("reader_ip")
-                .validator(is_socket_addr)
-                .multiple(true)
+                .value_parser(validate_socket_addr)
+                .num_args(1..)
                 .required(true),
         )
         .arg(
-            Arg::with_name("port")
+            Arg::new("port")
                 .help("The port of the local machine to bind to")
-                .short("p")
+                .short('p')
                 .long("port")
-                .takes_value(true)
-                .validator(is_port)
+                .value_parser(validate_port_value)
                 .default_value("10001"),
         )
         .arg(
-            Arg::with_name("read_type")
+            Arg::new("read_type")
                 .help("The type of read the reader is sending")
-                .short("t")
+                .short('t')
                 .long("type")
-                .takes_value(true)
-                .possible_values(&["raw", "fsls"])
+                .value_parser(validate_read_type)
                 .default_value("raw"),
         )
         .arg(
-            Arg::with_name("file")
+            Arg::new("file")
                 .help("The file to output the reads to")
-                .short("f")
+                .short('f')
                 .long("file")
-                .takes_value(true)
-                .validator(is_empty_path),
+                .value_parser(validate_empty_path_value),
         )
         .arg(
-            Arg::with_name("bibchip")
+            Arg::new("bibchip")
                 .help("The bib-chip file")
-                .short("b")
+                .short('b')
                 .long("bibchip")
-                .takes_value(true)
-                .validator(is_file),
+                .value_parser(validate_existing_file),
         )
         .arg(
-            Arg::with_name("participants")
+            Arg::new("participants")
                 .help("The .ppl participant file")
-                .short("P")
+                .short('P')
                 .long("ppl")
-                .takes_value(true)
-                .validator(is_file)
+                .value_parser(validate_existing_file)
                 .requires("bibchip"),
         )
         .arg(
-            Arg::with_name("is_buffered")
+            Arg::new("is_buffered")
                 .help("Buffer the output. Use if high CPU use in encountered")
-                .short("B")
+                .short('B')
                 .long("buffer")
-                .takes_value(false),
+                .action(ArgAction::SetTrue),
         )
         .get_matches();
-    // Get the address of the reader and parse to IP
-    let readers: Vec<SocketAddrV4> = matches
-        .values_of("reader")
-        .unwrap()
-        .map(|a| a.parse::<SocketAddrV4>().unwrap())
+
+    let readers = matches
+        .get_many::<SocketAddrV4>("reader")
+        .expect("reader is required")
+        .copied()
         .collect();
-    // parse the port value
-    let bind_port = matches.value_of("port").unwrap().parse::<u16>().unwrap();
+    let bind_port = *matches
+        .get_one::<u16>("port")
+        .expect("port has a default value");
 
     Args {
-        bib_chip_file_path: matches.value_of("bibchip").map(|s| s.to_owned()),
-        participants_file_path: matches.value_of("participants").map(|s| s.to_owned()),
-        readers: readers,
+        bib_chip_file_path: matches.get_one::<String>("bibchip").cloned(),
+        participants_file_path: matches.get_one::<String>("participants").cloned(),
+        readers,
         bind_port,
-        out_file: matches.value_of("file").map(|s| s.to_owned()),
-        buffered_output: matches.is_present("is_buffered"),
-        read_type: matches.value_of("read_type").unwrap().try_into().unwrap()
+        out_file: matches.get_one::<String>("file").cloned(),
+        buffered_output: matches.get_flag("is_buffered"),
+        read_type: *matches
+            .get_one::<ReadType>("read_type")
+            .expect("read_type has a default value"),
     }
 }
 
@@ -130,7 +151,7 @@ async fn main() {
                   affiliation   TEXT,
                   division      INTEGER
                   )",
-        NO_PARAMS,
+        [],
     )
     .unwrap();
 
@@ -139,32 +160,32 @@ async fn main() {
                   id     TEXT PRIMARY KEY,
                   bib    INTEGER NOT NULL
                   )",
-        NO_PARAMS,
+        [],
     )
     .unwrap();
 
     // Get bib chips
     if args.bib_chip_file_path.is_some() {
-        let bib_chips = read_bibchip_file(&args.bib_chip_file_path.unwrap().as_str())
+        let bib_chips = read_bibchip_file(args.bib_chip_file_path.as_deref().unwrap())
             .unwrap_or_else(|_| vec![]);
         for c in &bib_chips {
             conn.execute(
                 "INSERT INTO chip (id, bib)
                         VALUES (?1, ?2)",
-                &[&c.id as &dyn ToSql, &c.bib],
+                [&c.id as &dyn ToSql, &c.bib],
             )
             .unwrap();
         }
     }
     // Get participants
     if args.participants_file_path.is_some() {
-        let participants = read_participant_file(&args.participants_file_path.unwrap().as_str())
+        let participants = read_participant_file(args.participants_file_path.as_deref().unwrap())
             .unwrap_or_else(|_| vec![]);
         for p in &participants {
             conn.execute(
                 "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                &[
+                [
                     &p.bib as &dyn ToSql,
                     &p.first_name as &dyn ToSql,
                     &p.last_name as &dyn ToSql,
@@ -194,5 +215,5 @@ async fn main() {
         vec![fut_readers, fut_clients, fut_conn, fut_sig];
     select_all(futures).await;
     // If any of them finish, end the program as something went wrong
-    bus_tx.clone().send(Message::SHUTDOWN).await.unwrap();
+    bus_tx.send(Message::SHUTDOWN).await.unwrap();
 }

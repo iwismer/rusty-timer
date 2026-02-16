@@ -1,7 +1,6 @@
-use std::net::Shutdown;
 use std::net::SocketAddr;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::prelude::*;
 
 /// Holds a connection to a single client, and forwards reads to it.
 #[derive(Debug)]
@@ -12,26 +11,15 @@ pub struct Client {
 
 impl Client {
     pub fn new(stream: TcpStream, addr: SocketAddr) -> Result<Client, &'static str> {
-        Ok(Client {
-            stream: stream,
-            addr,
-        })
+        Ok(Client { stream, addr })
     }
 
     /// Send a single read to the connected client.
-    pub async fn send_read(&mut self, read: String) -> Result<usize, SocketAddr> {
+    pub async fn send_read(&mut self, read: String) -> Result<(), SocketAddr> {
         self.stream
-            .write(read.as_bytes())
+            .write_all(read.as_bytes())
             .await
             .map_err(|_| self.addr)
-    }
-
-    /// Close the connection to the client.
-    pub fn exit(&self) {
-        match self.stream.shutdown(Shutdown::Both) {
-            Ok(_) => println!("\r\x1b[2KClient disconnected gracefully."),
-            Err(e) => eprintln!("\r\x1b[2KError disconnecting: {}", e),
-        };
     }
 
     pub fn get_addr(&self) -> SocketAddr {
