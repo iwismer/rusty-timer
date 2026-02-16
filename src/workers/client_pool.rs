@@ -182,6 +182,7 @@ impl ClientPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use tokio::net::{TcpListener, TcpStream};
 
     async fn make_client() -> Client {
@@ -210,5 +211,63 @@ mod tests {
 
         assert_eq!(clients.len(), 2);
         assert!(clients.iter().all(|c| c.get_addr() != dropped_addr));
+    }
+
+    fn setup_db(conn: &Connection) {
+        conn.execute(
+            "CREATE TABLE participant (
+                      bib           INTEGER PRIMARY KEY,
+                      first_name    TEXT NOT NULL,
+                      last_name     TEXT NOT NULL,
+                      gender        CHECK( gender IN ('M','F','X') ) NOT NULL DEFAULT 'X',
+                      affiliation   TEXT,
+                      division      INTEGER
+                      )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE chip (
+                      id     TEXT PRIMARY KEY,
+                      bib    INTEGER NOT NULL
+                      )",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn read_to_string_outputs_known_participant() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_db(&conn);
+        conn.execute("INSERT INTO chip (id, bib) VALUES ('000000012345', 99)", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
+             VALUES (99, 'Ada', 'Lovelace', 'F', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let read = "aa400000000123450a2a01123018455927a7";
+        let output = read_to_string(read, &conn, &12);
+        assert_eq!(
+            output,
+            "Total Reads: 12 Last Read: 99 Ada Lovelace 18:45:59.390"
+        );
+    }
+
+    #[test]
+    fn read_to_string_outputs_unknown_chip() {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_db(&conn);
+
+        let read = "aa400000000123450a2a01123018455927a7";
+        let output = read_to_string(read, &conn, &5);
+        assert_eq!(
+            output,
+            "Total Reads: 5 Last Read: Unknown Chip 000000012345 18:45:59.390"
+        );
     }
 }
