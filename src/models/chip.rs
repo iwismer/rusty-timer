@@ -1,7 +1,6 @@
 use super::Timestamp;
 use std::convert::TryFrom;
 use std::fmt;
-use std::i32;
 
 /// A struct for mapping a chip to a bib number
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone)]
@@ -12,6 +11,7 @@ pub struct ChipBib {
 
 /// Define a read as either raw, or first-seen/last-seen
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Copy, Clone)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum ReadType {
     RAW = 38,
     FSLS = 40,
@@ -60,7 +60,7 @@ impl TryFrom<&str> for ChipRead {
     type Error = &'static str;
 
     fn try_from(read_str: &str) -> Result<Self, Self::Error> {
-        let chip_read = read_str.trim().split_whitespace().next().unwrap();
+        let chip_read = read_str.split_whitespace().next().unwrap();
         if !(chip_read.len() == 36 || chip_read.len() == 38) {
             return Err("Invalid read length");
         }
@@ -116,9 +116,9 @@ impl TryFrom<&str> for ChipRead {
             read_millis,
         );
         Ok(ChipRead {
-            tag_id: tag_id,
+            tag_id,
             timestamp: read_time,
-            read_type: read_type,
+            read_type,
         })
     }
 }

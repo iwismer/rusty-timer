@@ -1,5 +1,5 @@
 use super::TimingReader;
-use crate::models::{ReadType, Message};
+use crate::models::{Message, ReadType};
 use futures::future::join_all;
 use std::net::SocketAddrV4;
 use tokio::sync::mpsc::Sender;
@@ -9,7 +9,7 @@ use tokio::sync::mpsc::Sender;
 pub struct ReaderPool {
     readers: Vec<TimingReader>,
     bus: Sender<Message>,
-    read_type: ReadType
+    read_type: ReadType,
 }
 
 impl ReaderPool {
@@ -18,7 +18,11 @@ impl ReaderPool {
             .iter()
             .map(|a| TimingReader::new(*a, read_type, bus.clone()))
             .collect();
-        ReaderPool { readers, bus, read_type }
+        ReaderPool {
+            readers,
+            bus,
+            read_type,
+        }
     }
 
     /// Start connections to readers, and listen for new reads.

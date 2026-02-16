@@ -1,7 +1,7 @@
 #![allow(dead_code)]
+use std::fs::{remove_file, File};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
-use std::fs::{File, remove_file};
 use tokio::signal;
 
 pub mod io;
@@ -43,11 +43,12 @@ pub fn is_empty_path(path_str: String) -> Result<(), String> {
             // Check that the file can be created
             match File::create(path) {
                 Ok(_) => {
-                    Ok(remove_file(path).unwrap_or(()))
+                    remove_file(path).unwrap_or(());
+                    Ok(())
                 }
-                Err(_) => Err("File path invalid! Use a different file".to_owned())
+                Err(_) => Err("File path invalid! Use a different file".to_owned()),
             }
-        },
+        }
     }
 }
 

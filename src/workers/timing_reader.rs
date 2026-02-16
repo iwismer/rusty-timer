@@ -1,7 +1,7 @@
-use crate::models::{ReadType, Message};
+use crate::models::{Message, ReadType};
 use std::net::SocketAddrV4;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::prelude::*;
 use tokio::sync::mpsc::Sender;
 
 /// Receives reads from the reader, then forwards them to the client pool.
