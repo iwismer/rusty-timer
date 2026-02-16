@@ -3,11 +3,11 @@ use crate::models::Message;
 use crate::models::{ChipRead, Gender, Participant};
 use futures::future::join_all;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
-use std::collections::HashSet;
 use tokio::sync::mpsc::Receiver;
 
 fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
@@ -121,12 +121,7 @@ impl ClientPool {
         loop {
             let message = match self.bus.recv().await {
                 Some(message) => message,
-                None => {
-                    for client in self.clients {
-                        client.exit();
-                    }
-                    return;
-                }
+                None => return,
             };
 
             match message {
