@@ -250,8 +250,8 @@ mod tests {
 
     #[test]
     fn empty_read_returns_error() {
-        let result = std::panic::catch_unwind(|| ChipRead::try_from("   "));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().err().unwrap(), "Empty chip read");
+        let result = ChipRead::try_from("   ");
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Empty chip read");
     }
 }
