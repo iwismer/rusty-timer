@@ -7,6 +7,7 @@ use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
+use std::collections::HashSet;
 use tokio::sync::mpsc::Receiver;
 
 fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> String {
@@ -14,7 +15,7 @@ fn read_to_string(read: &str, conn: &rusqlite::Connection, read_count: &u32) -> 
         Err(desc) => format!("Error reading chip {}", desc),
         Ok(read) => {
             let mut stmt = conn
-                .prepare(
+                .prepare_cached(
                     "SELECT
                             c.id,
                             c.bib,
@@ -118,7 +119,17 @@ impl ClientPool {
         };
         let mut read_count: u32 = 0;
         loop {
-            match self.bus.recv().await.unwrap() {
+            let message = match self.bus.recv().await {
+                Some(message) => message,
+                None => {
+                    for client in self.clients {
+                        client.exit();
+                    }
+                    return;
+                }
+            };
+
+            match message {
                 Message::CHIP_READ(r) => {
                     read_count += 1;
                     // Only write to file if a file was supplied
@@ -142,6 +153,7 @@ impl ClientPool {
                             io::stdout().flush().unwrap_or(());
                         }
                     }
+
                     let mut futures = Vec::new();
                     for client in self.clients.iter_mut() {
                         futures.push(client.send_read(r.clone()));
@@ -149,13 +161,9 @@ impl ClientPool {
                     let results = join_all(futures).await;
                     // If a client returned an error, remove it from future
                     // transmissions.
-                    for r in results.iter() {
-                        if let Err(addr) = r {
-                            let pos = self.clients.iter().position(|c| c.get_addr() == *addr);
-                            if let Some(pos) = pos {
-                                self.clients.remove(pos);
-                            }
-                        }
+                    let failed_addrs: HashSet<_> = results.into_iter().filter_map(Result::err).collect();
+                    if !failed_addrs.is_empty() {
+                        self.clients.retain(|client| !failed_addrs.contains(&client.get_addr()));
                     }
                 }
                 Message::SHUTDOWN => {

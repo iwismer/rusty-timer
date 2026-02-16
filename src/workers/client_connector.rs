@@ -34,7 +34,10 @@ impl ClientConnector {
                     match Client::new(stream, addr) {
                         Err(_) => eprintln!("\r\x1b[2KError connecting to client"),
                         Ok(client) => {
-                            self.bus.send(Message::CLIENT(client)).await.unwrap();
+                            if self.bus.send(Message::CLIENT(client)).await.is_err() {
+                                println!("\r\x1b[2KClient bus unavailable, stopping connector.");
+                                return;
+                            }
                             println!("\r\x1b[2KConnected to client: {}", addr)
                         }
                     };

@@ -60,7 +60,10 @@ impl TryFrom<&str> for ChipRead {
     type Error = &'static str;
 
     fn try_from(read_str: &str) -> Result<Self, Self::Error> {
-        let chip_read = read_str.split_whitespace().next().unwrap();
+        let chip_read = read_str
+            .split_whitespace()
+            .next()
+            .ok_or("Empty chip read")?;
         if !(chip_read.len() == 36 || chip_read.len() == 38) {
             return Err("Invalid read length");
         }
@@ -68,12 +71,14 @@ impl TryFrom<&str> for ChipRead {
         if format!("{:02x}", checksum) != chip_read[34..36] {
             return Err("Checksum doesn't match");
         }
-        let mut read_type = ReadType::RAW;
-        if chip_read.len() == 38 && (&chip_read[37..] != "FS" || &chip_read[37..] != "LS") {
-            read_type = ReadType::FSLS;
-        } else if chip_read.len() == 38 {
-            return Err("Invalid read suffix");
-        }
+        let read_type = if chip_read.len() == 38 {
+            match &chip_read[36..38] {
+                "FS" | "LS" => ReadType::FSLS,
+                _ => return Err("Invalid read suffix"),
+            }
+        } else {
+            ReadType::RAW
+        };
         if &chip_read[..2] != "aa" {
             return Err("Invalid read prefix");
         }
@@ -179,5 +184,30 @@ mod tests {
         let read = ChipRead::try_from("ab400000000123450a2a01123018455927a7");
         assert!(read.is_err());
         assert_eq!(read.err().unwrap(), "Invalid read prefix");
+    }
+
+    #[test]
+    fn fsls_suffixes() {
+        let read_fs = ChipRead::try_from("aa400000000123450a2a01123018455927a7FS");
+        assert!(read_fs.is_ok());
+        assert_eq!(read_fs.unwrap().read_type, ReadType::FSLS);
+
+        let read_ls = ChipRead::try_from("aa400000000123450a2a01123018455927a7LS");
+        assert!(read_ls.is_ok());
+        assert_eq!(read_ls.unwrap().read_type, ReadType::FSLS);
+    }
+
+    #[test]
+    fn invalid_fsls_suffix() {
+        let read = ChipRead::try_from("aa400000000123450a2a01123018455927a7ZZ");
+        assert!(read.is_err());
+        assert_eq!(read.err().unwrap(), "Invalid read suffix");
+    }
+
+    #[test]
+    fn empty_read_returns_error() {
+        let result = std::panic::catch_unwind(|| ChipRead::try_from("   "));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().err().unwrap(), "Empty chip read");
     }
 }
