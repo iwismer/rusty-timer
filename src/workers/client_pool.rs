@@ -156,9 +156,11 @@ impl ClientPool {
                     let results = join_all(futures).await;
                     // If a client returned an error, remove it from future
                     // transmissions.
-                    let failed_addrs: HashSet<_> = results.into_iter().filter_map(Result::err).collect();
+                    let failed_addrs: HashSet<_> =
+                        results.into_iter().filter_map(Result::err).collect();
                     if !failed_addrs.is_empty() {
-                        self.clients.retain(|client| !failed_addrs.contains(&client.get_addr()));
+                        self.clients
+                            .retain(|client| !failed_addrs.contains(&client.get_addr()));
                     }
                 }
                 Message::SHUTDOWN => {
