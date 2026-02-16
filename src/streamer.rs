@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 mod models;
 mod util;
 mod workers;
-use models::{Message, ReadType};
+use models::{ChipBib, Message, Participant, ReadType};
 use util::io::{read_bibchip_file, read_participant_file};
 use util::*;
 use workers::{ClientConnector, ClientPool, ReaderPool};
@@ -52,6 +52,60 @@ fn validate_empty_path_value(value: &str) -> Result<String, String> {
 fn validate_existing_file(value: &str) -> Result<String, String> {
     is_file(value.to_owned())?;
     Ok(value.to_owned())
+}
+
+fn create_tables(conn: &Connection) {
+    conn.execute(
+        "CREATE TABLE participant (
+                  bib           INTEGER PRIMARY KEY,
+                  first_name    TEXT NOT NULL,
+                  last_name     TEXT NOT NULL,
+                  gender        CHECK( gender IN ('M','F','X') ) NOT NULL DEFAULT 'X',
+                  affiliation   TEXT,
+                  division      INTEGER
+                  )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE chip (
+                  id     TEXT PRIMARY KEY,
+                  bib    INTEGER NOT NULL
+                  )",
+        [],
+    )
+    .unwrap();
+}
+
+fn import_bib_chips(conn: &Connection, bib_chips: &[ChipBib]) {
+    for c in bib_chips {
+        conn.execute(
+            "INSERT OR IGNORE INTO chip (id, bib)
+                    VALUES (?1, ?2)",
+            [&c.id as &dyn ToSql, &c.bib],
+        )
+        .unwrap();
+    }
+}
+
+fn import_participants(conn: &Connection, participants: &[Participant]) {
+    for p in participants {
+        let gender = format!("{}", p.gender);
+        conn.execute(
+            "INSERT OR IGNORE INTO participant (bib, first_name, last_name, gender, affiliation, division)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            [
+                &p.bib as &dyn ToSql,
+                &p.first_name as &dyn ToSql,
+                &p.last_name as &dyn ToSql,
+                &gender as &dyn ToSql,
+                &p.affiliation as &dyn ToSql,
+                &p.division as &dyn ToSql,
+            ],
+        )
+        .unwrap();
+    }
 }
 
 fn get_args() -> Args {
@@ -142,60 +196,19 @@ async fn main() {
 
     // Create in memory DB for storing participant data
     let conn = Connection::open_in_memory().unwrap();
-    conn.execute(
-        "CREATE TABLE participant (
-                  bib           INTEGER PRIMARY KEY,
-                  first_name    TEXT NOT NULL,
-                  last_name     TEXT NOT NULL,
-                  gender        CHECK( gender IN ('M','F','X') ) NOT NULL DEFAULT 'X',
-                  affiliation   TEXT,
-                  division      INTEGER
-                  )",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "CREATE TABLE chip (
-                  id     TEXT PRIMARY KEY,
-                  bib    INTEGER NOT NULL
-                  )",
-        [],
-    )
-    .unwrap();
+    create_tables(&conn);
 
     // Get bib chips
     if args.bib_chip_file_path.is_some() {
         let bib_chips = read_bibchip_file(args.bib_chip_file_path.as_deref().unwrap())
             .unwrap_or_else(|_| vec![]);
-        for c in &bib_chips {
-            conn.execute(
-                "INSERT INTO chip (id, bib)
-                        VALUES (?1, ?2)",
-                [&c.id as &dyn ToSql, &c.bib],
-            )
-            .unwrap();
-        }
+        import_bib_chips(&conn, &bib_chips);
     }
     // Get participants
     if args.participants_file_path.is_some() {
         let participants = read_participant_file(args.participants_file_path.as_deref().unwrap())
             .unwrap_or_else(|_| vec![]);
-        for p in &participants {
-            conn.execute(
-                "INSERT INTO participant (bib, first_name, last_name, gender, affiliation, division)
-                        VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                [
-                    &p.bib as &dyn ToSql,
-                    &p.first_name as &dyn ToSql,
-                    &p.last_name as &dyn ToSql,
-                    &format!("{}", p.gender),
-                    &p.affiliation as &dyn ToSql,
-                    &p.division as &dyn ToSql,
-                ],
-            )
-            .unwrap();
-        }
+        import_participants(&conn, &participants);
     }
 
     // Bus to send messages to client pool
@@ -216,4 +229,76 @@ async fn main() {
     select_all(futures).await;
     // If any of them finish, end the program as something went wrong
     bus_tx.send(Message::SHUTDOWN).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Gender;
+
+    #[test]
+    fn duplicate_chip_ids_are_ignored() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn);
+
+        let chips = vec![
+            ChipBib {
+                id: "chip-1".to_owned(),
+                bib: 101,
+            },
+            ChipBib {
+                id: "chip-1".to_owned(),
+                bib: 202,
+            },
+        ];
+
+        import_bib_chips(&conn, &chips);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chip WHERE id = 'chip-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn duplicate_participant_bibs_are_ignored() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn);
+
+        let participants = vec![
+            Participant {
+                chip_id: Vec::new(),
+                bib: 77,
+                first_name: "Jane".to_owned(),
+                last_name: "Doe".to_owned(),
+                gender: Gender::F,
+                age: None,
+                affiliation: None,
+                division: None,
+            },
+            Participant {
+                chip_id: Vec::new(),
+                bib: 77,
+                first_name: "Janet".to_owned(),
+                last_name: "Roe".to_owned(),
+                gender: Gender::F,
+                age: None,
+                affiliation: None,
+                division: None,
+            },
+        ];
+
+        import_participants(&conn, &participants);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM participant WHERE bib = 77",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

@@ -3,6 +3,15 @@ use std::net::SocketAddrV4;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
+use tokio::time::{sleep, Duration};
+
+fn reconnect_delay_ms(connect_failures: u32) -> u64 {
+    if connect_failures == 0 {
+        return 0;
+    }
+    let shift = connect_failures.saturating_sub(1).min(6);
+    (100u64 << shift).min(5000)
+}
 
 /// Receives reads from the reader, then forwards them to the client pool.
 #[derive(Debug)]
@@ -30,6 +39,7 @@ impl TimingReader {
     /// This function should never return.
     pub async fn begin(&mut self) {
         let mut input_buffer = vec![0u8; self.read_type as usize];
+        let mut connect_failures = 0u32;
         loop {
             match self.stream.as_mut() {
                 Some(stream) => {
@@ -64,10 +74,17 @@ impl TimingReader {
                     let stream = match TcpStream::connect(self.addr).await {
                         Ok(stream) => {
                             println!("Connected to reader: {}", self.addr);
+                            connect_failures = 0;
                             stream
                         }
                         Err(error) => {
-                            println!("Failed to connect to reader: {}", error);
+                            connect_failures = connect_failures.saturating_add(1);
+                            let delay_ms = reconnect_delay_ms(connect_failures);
+                            println!(
+                                "Failed to connect to reader: {}. Retrying in {}ms",
+                                error, delay_ms
+                            );
+                            sleep(Duration::from_millis(delay_ms)).await;
                             continue;
                         }
                     };
@@ -75,5 +92,25 @@ impl TimingReader {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconnect_delay_ms;
+
+    #[test]
+    fn reconnect_delay_starts_at_zero_and_grows() {
+        assert_eq!(reconnect_delay_ms(0), 0);
+        assert_eq!(reconnect_delay_ms(1), 100);
+        assert_eq!(reconnect_delay_ms(2), 200);
+        assert_eq!(reconnect_delay_ms(3), 400);
+        assert_eq!(reconnect_delay_ms(6), 3200);
+    }
+
+    #[test]
+    fn reconnect_delay_caps() {
+        assert_eq!(reconnect_delay_ms(7), 5000);
+        assert_eq!(reconnect_delay_ms(100), 5000);
     }
 }

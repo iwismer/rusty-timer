@@ -33,7 +33,11 @@ pub fn read_bibchip_file(file_path: &str) -> Result<Vec<ChipBib>, String> {
     let mut bib_chip = Vec::new();
     for b in bibs {
         if !b.is_empty() && b.chars().next().unwrap().is_ascii_digit() {
-            let parts = b.trim().split(",").collect::<Vec<&str>>();
+            let parts = b.trim().split(',').collect::<Vec<&str>>();
+            if parts.len() < 2 || parts[1].is_empty() {
+                println!("Error reading bib file. Invalid row: {}", b);
+                continue;
+            }
             bib_chip.push(ChipBib {
                 id: parts[1].to_owned(),
                 bib: parts[0].parse::<i32>().unwrap_or_else(|_| {
@@ -190,5 +194,15 @@ mod bibchip_tests {
     fn bad_file_path() {
         let bibs = read_bibchip_file("test_assets/bibchip/foo.txt");
         assert!(bibs.is_err());
+    }
+
+    #[test]
+    fn malformed_numeric_row_missing_chip_is_skipped() {
+        let bibs = read_bibchip_file("test_assets/bibchip/malformed_missing_fields.txt");
+        assert!(bibs.is_ok());
+        let bibs = bibs.unwrap();
+        assert_eq!(bibs.len(), 1);
+        assert_eq!(bibs[0].bib, 4401);
+        assert_eq!(bibs[0].id, "05800374ea00");
     }
 }
