@@ -35,13 +35,19 @@ pub fn read_bibchip_file(file_path: &str) -> Result<Vec<ChipBib>, String> {
         if !b.is_empty() && b.chars().next().unwrap().is_ascii_digit() {
             let parts = b.trim().split(',').collect::<Vec<&str>>();
             if parts.len() < 2 || parts[1].is_empty() {
-                println!("Error reading bib file. Invalid row: {}", b);
+                eprintln!(
+                    "Error reading bibchip file {}. Invalid row: {}",
+                    file_path, b
+                );
                 continue;
             }
             bib_chip.push(ChipBib {
                 id: parts[1].to_owned(),
                 bib: parts[0].parse::<i32>().unwrap_or_else(|_| {
-                    println!("Error reading bib file. Invalid bib: {}", parts[0]);
+                    eprintln!(
+                        "Error reading bibchip file {}. Invalid bib: {}",
+                        file_path, parts[0]
+                    );
                     0
                 }),
             });

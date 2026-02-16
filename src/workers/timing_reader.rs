@@ -13,6 +13,11 @@ fn reconnect_delay_ms(connect_failures: u32) -> u64 {
     (100u64 << shift).min(5000)
 }
 
+fn next_reconnect_delay_ms(connect_failures: &mut u32) -> u64 {
+    *connect_failures = connect_failures.saturating_add(1);
+    reconnect_delay_ms(*connect_failures)
+}
+
 /// Receives reads from the reader, then forwards them to the client pool.
 #[derive(Debug)]
 pub struct TimingReader {
@@ -47,8 +52,13 @@ impl TimingReader {
                     match stream.read_exact(&mut input_buffer).await {
                         Ok(_) => {}
                         Err(e) => {
-                            println!("\r\x1b[2KError reading from reader: {}", e);
+                            let delay_ms = next_reconnect_delay_ms(&mut connect_failures);
+                            println!(
+                                "\r\x1b[2KError reading from reader: {}. Retrying in {}ms",
+                                e, delay_ms
+                            );
                             self.stream = None::<TcpStream>;
+                            sleep(Duration::from_millis(delay_ms)).await;
                             continue;
                         }
                     }
@@ -78,8 +88,7 @@ impl TimingReader {
                             stream
                         }
                         Err(error) => {
-                            connect_failures = connect_failures.saturating_add(1);
-                            let delay_ms = reconnect_delay_ms(connect_failures);
+                            let delay_ms = next_reconnect_delay_ms(&mut connect_failures);
                             println!(
                                 "Failed to connect to reader: {}. Retrying in {}ms",
                                 error, delay_ms
@@ -97,7 +106,7 @@ impl TimingReader {
 
 #[cfg(test)]
 mod tests {
-    use super::reconnect_delay_ms;
+    use super::{next_reconnect_delay_ms, reconnect_delay_ms};
 
     #[test]
     fn reconnect_delay_starts_at_zero_and_grows() {
@@ -112,5 +121,14 @@ mod tests {
     fn reconnect_delay_caps() {
         assert_eq!(reconnect_delay_ms(7), 5000);
         assert_eq!(reconnect_delay_ms(100), 5000);
+    }
+
+    #[test]
+    fn reconnect_delay_counter_increments() {
+        let mut failures = 0;
+        assert_eq!(next_reconnect_delay_ms(&mut failures), 100);
+        assert_eq!(failures, 1);
+        assert_eq!(next_reconnect_delay_ms(&mut failures), 200);
+        assert_eq!(failures, 2);
     }
 }
