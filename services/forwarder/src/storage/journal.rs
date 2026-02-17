@@ -272,6 +272,28 @@ impl Journal {
         Ok(count)
     }
 
+    /// Return all events for stream_key with epoch strictly greater than `after_epoch`.
+    ///
+    /// Used by the replay engine to find events in newer epochs after the ack cursor epoch.
+    pub fn unacked_events_across_epochs(
+        &self,
+        stream_key: &str,
+        after_epoch: i64,
+    ) -> Result<Vec<JournalEvent>, JournalError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at
+             FROM journal
+             WHERE stream_key = ?1 AND stream_epoch > ?2
+             ORDER BY stream_epoch ASC, seq ASC",
+        )?;
+        let rows = stmt.query_map(params![stream_key, after_epoch], map_event)?;
+        let mut events = Vec::new();
+        for r in rows {
+            events.push(r?);
+        }
+        Ok(events)
+    }
+
     // -----------------------------------------------------------------------
     // Pruning
     // -----------------------------------------------------------------------

@@ -3,4 +3,6 @@
 
 pub mod config;
 pub mod discovery;
+pub mod replay;
 pub mod storage;
+pub mod uplink;
