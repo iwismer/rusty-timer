@@ -10,6 +10,7 @@ members = [
     "services/server",
     "services/receiver",
     "services/streamer",
+    "services/emulator",
 ]
 resolver = "2"
 
@@ -36,10 +37,6 @@ futures = "0.3"
 ipico-core = { path = "crates/ipico-core" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
-
-[[bin]]
-name = "emulator"
-path = "src/emulator.rs"
 
 # ---------------------------------------------------------------------------
 # Integration test suites (Task 20-21)

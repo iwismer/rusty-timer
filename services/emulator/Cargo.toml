@@ -1,0 +1,25 @@
+[package]
+name = "emulator"
+version = "1.0.0"
+edition = "2021"
+authors = ["iwismer <isaac@iwismer.ca>"]
+
+[lib]
+name = "emulator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "emulator"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+chrono = "0.4"
+clap = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+timer-core = { path = "../../crates/timer-core" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

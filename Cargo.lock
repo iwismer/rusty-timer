@@ -628,6 +628,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "emulator"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "futures",
+ "timer-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "emulator-v2"
 version = "0.1.0"
 dependencies = [
