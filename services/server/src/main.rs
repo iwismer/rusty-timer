@@ -21,5 +21,34 @@ async fn main() {
     let router = server::build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.expect("failed to bind");
     info!(addr = %bind_addr, "server listening");
-    axum::serve(listener, router).await.expect("server error");
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+    info!("server shut down gracefully");
+}
+
+/// Waits for SIGTERM or Ctrl-C (SIGINT) and returns to trigger graceful shutdown.
+async fn shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => { info!("received Ctrl+C, shutting down"); },
+        _ = terminate => { info!("received SIGTERM, shutting down"); },
+    }
 }
