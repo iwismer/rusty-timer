@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import * as api from '$lib/api';
-  import type { StreamEntry } from '$lib/api';
+  import { onMount } from "svelte";
+  import * as api from "$lib/api";
+  import type { StreamEntry } from "$lib/api";
 
   let streams: StreamEntry[] = [];
   let loading = true;
@@ -20,7 +20,7 @@
       streams = resp.streams;
       // Initialise rename inputs with current alias (or empty string)
       for (const s of streams) {
-        renameValues[s.stream_id] = s.display_alias ?? '';
+        renameValues[s.stream_id] = s.display_alias ?? "";
       }
     } catch (e) {
       error = String(e);
@@ -73,9 +73,13 @@
             </a>
 
             {#if stream.online}
-              <span data-testid="stream-online-badge" class="badge online">online</span>
+              <span data-testid="stream-online-badge" class="badge online"
+                >online</span
+              >
             {:else}
-              <span data-testid="stream-offline-badge" class="badge offline">offline</span>
+              <span data-testid="stream-offline-badge" class="badge offline"
+                >offline</span
+              >
             {/if}
           </div>
 
@@ -99,7 +103,7 @@
               on:click={() => handleRename(stream.stream_id)}
               disabled={renameBusy[stream.stream_id]}
             >
-              {renameBusy[stream.stream_id] ? 'Saving…' : 'Rename'}
+              {renameBusy[stream.stream_id] ? "Saving…" : "Rename"}
             </button>
           </div>
 
@@ -117,19 +121,77 @@
 </main>
 
 <style>
-  main { max-width: 900px; margin: 0 auto; padding: 1rem; font-family: sans-serif; }
-  ul { list-style: none; padding: 0; }
-  li { border: 1px solid #ccc; padding: 0.75rem 1rem; margin-bottom: 0.75rem; border-radius: 4px; }
-  .stream-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.4rem; }
-  .stream-meta { font-size: 0.8em; color: #666; display: flex; gap: 1rem; margin-bottom: 0.4rem; }
-  .rename-row { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.4rem; }
-  .rename-row input { flex: 1; padding: 0.25rem 0.5rem; }
-  .badge { font-size: 0.75em; padding: 0.15rem 0.5rem; border-radius: 3px; font-weight: bold; }
-  .online { background: #d4edda; color: #155724; }
-  .offline { background: #f8d7da; color: #721c24; }
-  a { text-decoration: none; color: #0070f3; }
-  a:hover { text-decoration: underline; }
-  button { padding: 0.25rem 0.75rem; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .error { color: red; margin: 0.25rem 0; font-size: 0.85em; }
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 1rem;
+    font-family: sans-serif;
+  }
+  ul {
+    list-style: none;
+    padding: 0;
+  }
+  li {
+    border: 1px solid #ccc;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.75rem;
+    border-radius: 4px;
+  }
+  .stream-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.4rem;
+  }
+  .stream-meta {
+    font-size: 0.8em;
+    color: #666;
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 0.4rem;
+  }
+  .rename-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.4rem;
+  }
+  .rename-row input {
+    flex: 1;
+    padding: 0.25rem 0.5rem;
+  }
+  .badge {
+    font-size: 0.75em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    font-weight: bold;
+  }
+  .online {
+    background: #d4edda;
+    color: #155724;
+  }
+  .offline {
+    background: #f8d7da;
+    color: #721c24;
+  }
+  a {
+    text-decoration: none;
+    color: #0070f3;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+  button {
+    padding: 0.25rem 0.75rem;
+    cursor: pointer;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .error {
+    color: red;
+    margin: 0.25rem 0;
+    font-size: 0.85em;
+  }
 </style>

@@ -1,0 +1,10 @@
+node_modules
+build
+dist
+.svelte-kit
+gen
+.tauri
+Cargo.lock
+*.lock
+target/
+docs/plans/

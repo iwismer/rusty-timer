@@ -1,7 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import * as api from '$lib/api';
-  import type { Profile, StatusResponse, StreamsResponse, LogsResponse } from '$lib/api';
+  import { onMount } from "svelte";
+  import * as api from "$lib/api";
+  import type {
+    Profile,
+    StatusResponse,
+    StreamsResponse,
+    LogsResponse,
+  } from "$lib/api";
 
   let profile: Profile | null = null;
   let status: StatusResponse | null = null;
@@ -10,9 +15,9 @@
   let error: string | null = null;
 
   // Edit state
-  let editServerUrl = '';
-  let editToken = '';
-  let editLogLevel = 'info';
+  let editServerUrl = "";
+  let editToken = "";
+  let editLogLevel = "info";
   let saving = false;
   let connectBusy = false;
 
@@ -21,7 +26,7 @@
       [status, streams, logs] = await Promise.all([
         api.getStatus(),
         api.getStreams(),
-        api.getLogs()
+        api.getLogs(),
       ]);
       const p = await api.getProfile().catch(() => null);
       if (p) {
@@ -38,7 +43,11 @@
   async function saveProfile() {
     saving = true;
     try {
-      await api.putProfile({ server_url: editServerUrl, token: editToken, log_level: editLogLevel });
+      await api.putProfile({
+        server_url: editServerUrl,
+        token: editToken,
+        log_level: editLogLevel,
+      });
       await loadAll();
     } catch (e) {
       error = String(e);
@@ -85,13 +94,21 @@
   <section data-testid="status-section">
     <h2>Status</h2>
     {#if status}
-      <p data-testid="connection-state">Connection: {status.connection_state}</p>
+      <p data-testid="connection-state">
+        Connection: {status.connection_state}
+      </p>
       <p>Local OK: {status.local_ok}</p>
       <p>Streams: {status.streams_count}</p>
-      <button on:click={handleConnect} disabled={connectBusy || status.connection_state === 'connected'}>
+      <button
+        on:click={handleConnect}
+        disabled={connectBusy || status.connection_state === "connected"}
+      >
         Connect
       </button>
-      <button on:click={handleDisconnect} disabled={connectBusy || status.connection_state === 'disconnected'}>
+      <button
+        on:click={handleDisconnect}
+        disabled={connectBusy || status.connection_state === "disconnected"}
+      >
         Disconnect
       </button>
     {/if}
@@ -102,11 +119,20 @@
     <h2>Profile</h2>
     <label>
       Server URL
-      <input data-testid="server-url-input" bind:value={editServerUrl} placeholder="wss://server:8080/ws/v1/receivers" />
+      <input
+        data-testid="server-url-input"
+        bind:value={editServerUrl}
+        placeholder="wss://server:8080/ws/v1/receivers"
+      />
     </label>
     <label>
       Token
-      <input data-testid="token-input" type="password" bind:value={editToken} placeholder="auth token" />
+      <input
+        data-testid="token-input"
+        type="password"
+        bind:value={editToken}
+        placeholder="auth token"
+      />
     </label>
     <label>
       Log Level
@@ -118,14 +144,21 @@
         <option value="error">error</option>
       </select>
     </label>
-    <button data-testid="save-profile-btn" on:click={saveProfile} disabled={saving}>
-      {saving ? 'Saving...' : 'Save Profile'}
+    <button
+      data-testid="save-profile-btn"
+      on:click={saveProfile}
+      disabled={saving}
+    >
+      {saving ? "Saving..." : "Save Profile"}
     </button>
   </section>
 
   <!-- Streams -->
   <section data-testid="streams-section">
-    <h2>Streams {#if streams?.degraded}<span class="degraded">(degraded)</span>{/if}</h2>
+    <h2>
+      Streams {#if streams?.degraded}<span class="degraded">(degraded)</span
+        >{/if}
+    </h2>
     {#if streams?.upstream_error}
       <p class="warning">{streams.upstream_error}</p>
     {/if}
@@ -134,7 +167,10 @@
     {:else}
       <ul>
         {#each streams?.streams ?? [] as stream}
-          <li>{stream.forwarder_id} / {stream.reader_ip} → port {stream.local_port ?? 'auto'}</li>
+          <li>
+            {stream.forwarder_id} / {stream.reader_ip} → port {stream.local_port ??
+              "auto"}
+          </li>
         {/each}
       </ul>
     {/if}
@@ -156,15 +192,55 @@
 </main>
 
 <style>
-  main { max-width: 800px; margin: 0 auto; padding: 1rem; font-family: sans-serif; }
-  section { margin-bottom: 2rem; border: 1px solid #ccc; padding: 1rem; border-radius: 4px; }
-  h2 { margin-top: 0; }
-  label { display: block; margin-bottom: 0.5rem; }
-  input, select { display: block; width: 100%; margin-top: 0.25rem; padding: 0.25rem; }
-  button { margin: 0.25rem; padding: 0.5rem 1rem; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .error { color: red; }
-  .warning { color: orange; }
-  .degraded { color: orange; font-size: 0.8em; }
-  .logs { font-family: monospace; font-size: 0.85em; max-height: 300px; overflow-y: auto; }
+  main {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 1rem;
+    font-family: sans-serif;
+  }
+  section {
+    margin-bottom: 2rem;
+    border: 1px solid #ccc;
+    padding: 1rem;
+    border-radius: 4px;
+  }
+  h2 {
+    margin-top: 0;
+  }
+  label {
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+  input,
+  select {
+    display: block;
+    width: 100%;
+    margin-top: 0.25rem;
+    padding: 0.25rem;
+  }
+  button {
+    margin: 0.25rem;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .error {
+    color: red;
+  }
+  .warning {
+    color: orange;
+  }
+  .degraded {
+    color: orange;
+    font-size: 0.8em;
+  }
+  .logs {
+    font-family: monospace;
+    font-size: 0.85em;
+    max-height: 300px;
+    overflow-y: auto;
+  }
 </style>

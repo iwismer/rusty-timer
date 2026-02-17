@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { page } from '$app/stores';
-  import * as api from '$lib/api';
-  import type { StreamEntry, StreamMetrics } from '$lib/api';
+  import { onMount } from "svelte";
+  import { page } from "$app/stores";
+  import * as api from "$lib/api";
+  import type { StreamEntry, StreamMetrics } from "$lib/api";
 
-  let streamId = '';
+  let streamId = "";
   let stream: StreamEntry | null = null;
   let metrics: StreamMetrics | null = null;
   let loadingMetrics = true;
@@ -21,7 +21,7 @@
     try {
       const [streamsResp, metricsResp] = await Promise.all([
         api.getStreams(),
-        api.getMetrics(id)
+        api.getMetrics(id),
       ]);
       stream = streamsResp.streams.find((s) => s.stream_id === id) ?? null;
       metrics = metricsResp;
@@ -37,7 +37,7 @@
     resetResult = null;
     try {
       await api.resetEpoch(streamId);
-      resetResult = 'Epoch reset command sent successfully.';
+      resetResult = "Epoch reset command sent successfully.";
       // Refresh data after reset
       await loadData(streamId);
     } catch (e) {
@@ -58,7 +58,7 @@
   }
 
   function formatLag(lag: number | null): string {
-    if (lag === null) return 'N/A (no events yet)';
+    if (lag === null) return "N/A (no events yet)";
     if (lag < 1000) return `${lag} ms`;
     return `${(lag / 1000).toFixed(1)} s`;
   }
@@ -94,7 +94,10 @@
         {/if}
       </p>
       <p><strong>Epoch:</strong> {stream.stream_epoch}</p>
-      <p><strong>Created:</strong> {new Date(stream.created_at).toLocaleString()}</p>
+      <p>
+        <strong>Created:</strong>
+        {new Date(stream.created_at).toLocaleString()}
+      </p>
     </section>
   {/if}
 
@@ -116,7 +119,9 @@
           </tr>
           <tr>
             <td>Retransmit count</td>
-            <td data-testid="metric-retransmit-count">{metrics.retransmit_count}</td>
+            <td data-testid="metric-retransmit-count"
+              >{metrics.retransmit_count}</td
+            >
           </tr>
           <tr>
             <td>Lag</td>
@@ -134,7 +139,10 @@
   <!-- Export links -->
   <section data-testid="export-section">
     <h2>Export</h2>
-    <p>Downloads contain all canonical (deduplicated) events, ordered by epoch and sequence.</p>
+    <p>
+      Downloads contain all canonical (deduplicated) events, ordered by epoch
+      and sequence.
+    </p>
     <ul>
       <li>
         <a
@@ -151,7 +159,8 @@
           href={api.exportCsvUrl(streamId)}
           download
         >
-          Download export.csv (stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
+          Download export.csv (stream_epoch, seq, reader_timestamp,
+          raw_read_line, read_type)
         </a>
       </li>
     </ul>
@@ -166,14 +175,18 @@
       disabled={resetBusy}
       class="danger"
     >
-      {resetBusy ? 'Sending…' : 'Reset Epoch'}
+      {resetBusy ? "Sending…" : "Reset Epoch"}
     </button>
     <p class="hint">
-      Sends an epoch-reset command to the connected forwarder. Only works while the forwarder
-      is connected; returns 409 otherwise.
+      Sends an epoch-reset command to the connected forwarder. Only works while
+      the forwarder is connected; returns 409 otherwise.
     </p>
     {#if resetResult}
-      <p data-testid="reset-epoch-result" class:success={!resetResult.startsWith('Error')} class:error={resetResult.startsWith('Error')}>
+      <p
+        data-testid="reset-epoch-result"
+        class:success={!resetResult.startsWith("Error")}
+        class:error={resetResult.startsWith("Error")}
+      >
         {resetResult}
       </p>
     {/if}
@@ -181,26 +194,97 @@
 </main>
 
 <style>
-  main { max-width: 900px; margin: 0 auto; padding: 1rem; font-family: sans-serif; }
-  a { color: #0070f3; }
-  a:hover { text-decoration: underline; }
-  section { margin-bottom: 2rem; border: 1px solid #ccc; padding: 1rem; border-radius: 4px; }
-  h2 { margin-top: 0; }
-  table { border-collapse: collapse; width: 100%; }
-  td { padding: 0.35rem 0.75rem; border-bottom: 1px solid #eee; }
-  td:first-child { font-weight: bold; width: 40%; }
-  ul { padding-left: 1.25rem; }
-  li { margin-bottom: 0.5rem; }
-  .badge { font-size: 0.75em; padding: 0.15rem 0.5rem; border-radius: 3px; font-weight: bold; }
-  .online { background: #d4edda; color: #155724; }
-  .offline { background: #f8d7da; color: #721c24; }
-  button { padding: 0.4rem 1rem; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  button.danger { background: #dc3545; color: white; border: none; border-radius: 4px; }
-  button.danger:hover:not(:disabled) { background: #c82333; }
-  .hint { font-size: 0.8em; color: #666; margin-top: 0.35rem; }
-  .error { color: red; }
-  .success { color: green; }
-  .meta-section { border: 1px solid #ccc; padding: 1rem; border-radius: 4px; margin-bottom: 1.5rem; }
-  .actions-section { border: 1px solid #ccc; padding: 1rem; border-radius: 4px; margin-bottom: 1.5rem; }
+  main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 1rem;
+    font-family: sans-serif;
+  }
+  a {
+    color: #0070f3;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+  section {
+    margin-bottom: 2rem;
+    border: 1px solid #ccc;
+    padding: 1rem;
+    border-radius: 4px;
+  }
+  h2 {
+    margin-top: 0;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  td {
+    padding: 0.35rem 0.75rem;
+    border-bottom: 1px solid #eee;
+  }
+  td:first-child {
+    font-weight: bold;
+    width: 40%;
+  }
+  ul {
+    padding-left: 1.25rem;
+  }
+  li {
+    margin-bottom: 0.5rem;
+  }
+  .badge {
+    font-size: 0.75em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    font-weight: bold;
+  }
+  .online {
+    background: #d4edda;
+    color: #155724;
+  }
+  .offline {
+    background: #f8d7da;
+    color: #721c24;
+  }
+  button {
+    padding: 0.4rem 1rem;
+    cursor: pointer;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  button.danger {
+    background: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 4px;
+  }
+  button.danger:hover:not(:disabled) {
+    background: #c82333;
+  }
+  .hint {
+    font-size: 0.8em;
+    color: #666;
+    margin-top: 0.35rem;
+  }
+  .error {
+    color: red;
+  }
+  .success {
+    color: green;
+  }
+  .meta-section {
+    border: 1px solid #ccc;
+    padding: 1rem;
+    border-radius: 4px;
+    margin-bottom: 1.5rem;
+  }
+  .actions-section {
+    border: 1px solid #ccc;
+    padding: 1rem;
+    border-radius: 4px;
+    margin-bottom: 1.5rem;
+  }
 </style>
