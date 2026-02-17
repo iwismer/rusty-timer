@@ -1,6 +1,26 @@
+# Rust build artifacts
 /target
+
+# Rust backup files
 **/*.rs.bk
+
+# Ignored top-level dirs (legacy)
 assets/
 ext_docs/
+
+# Git worktrees used during development
 .worktrees/
-docs/
+
+# Docs — only exclude the plans directory; keep specs, runbooks, docker docs tracked
+docs/plans/
+
+# Node / SvelteKit / Tauri build artifacts (applies across all apps/)
+node_modules/
+.svelte-kit/
+build/
+dist/
+.tauri/
+*.log
+.env
+.env.local
+.env.*.local
