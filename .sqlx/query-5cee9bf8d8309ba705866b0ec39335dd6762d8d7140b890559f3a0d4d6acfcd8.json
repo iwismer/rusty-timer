@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stream_epoch, last_seq FROM receiver_cursors WHERE receiver_id = $1 AND stream_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_epoch",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "receiver_cursors",
+            "name": "stream_epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "last_seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "receiver_cursors",
+            "name": "last_seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5cee9bf8d8309ba705866b0ec39335dd6762d8d7140b890559f3a0d4d6acfcd8"
+}

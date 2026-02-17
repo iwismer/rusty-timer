@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stream_metrics SET raw_count = raw_count + 1, retransmit_count = retransmit_count + 1 WHERE stream_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "354618522cca52f07d4c375e3f063b784a630055ffcff5ac5b853e5e6452ed34"
+}
