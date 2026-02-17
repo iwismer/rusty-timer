@@ -1,0 +1,15 @@
+{
+  "kind": "receiver_event_batch",
+  "session_id": "sess-xyz789",
+  "events": [
+    {
+      "forwarder_id": "fwd-001",
+      "reader_ip": "192.168.1.10",
+      "stream_epoch": 1,
+      "seq": 4001,
+      "reader_timestamp": "2026-02-17T09:45:00.000Z",
+      "raw_read_line": "09001234567890100 09:45:00.000 1",
+      "read_type": "RAW"
+    }
+  ]
+}

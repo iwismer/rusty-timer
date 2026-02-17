@@ -1,0 +1,6 @@
+{
+  "kind": "error",
+  "code": "SESSION_EXPIRED",
+  "message": "The session has expired. Please reconnect.",
+  "retryable": true
+}

@@ -1,0 +1,12 @@
+{
+  "kind": "receiver_ack",
+  "session_id": "sess-xyz789",
+  "entries": [
+    {
+      "forwarder_id": "fwd-001",
+      "reader_ip": "192.168.1.10",
+      "stream_epoch": 1,
+      "last_seq": 4001
+    }
+  ]
+}
