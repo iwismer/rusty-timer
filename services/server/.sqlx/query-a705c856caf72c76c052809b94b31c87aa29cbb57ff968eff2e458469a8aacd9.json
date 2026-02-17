@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type FROM events\n           WHERE stream_id = $1 AND (stream_epoch > $2 OR (stream_epoch = $2 AND seq > $3))\n           ORDER BY stream_epoch ASC, seq ASC",
+  "query": "SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,\n                  s.forwarder_id, s.reader_ip\n           FROM events e\n           JOIN streams s ON s.stream_id = e.stream_id\n           WHERE e.stream_id = $1 AND (e.stream_epoch > $2 OR (e.stream_epoch = $2 AND e.seq > $3))\n           ORDER BY e.stream_epoch ASC, e.seq ASC",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,28 @@
             "name": "read_type"
           }
         }
+      },
+      {
+        "ordinal": 5,
+        "name": "forwarder_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "forwarder_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "reader_ip",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "reader_ip"
+          }
+        }
       }
     ],
     "parameters": {
@@ -71,8 +93,10 @@
       false,
       true,
       false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "661cd8e07a35137c954158833e123c3cee0a6a1a0c3569062a5f22a2e6af88b6"
+  "hash": "a705c856caf72c76c052809b94b31c87aa29cbb57ff968eff2e458469a8aacd9"
 }
