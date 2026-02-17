@@ -1,0 +1,87 @@
+# deploy/docker-compose.prod.yml
+#
+# Production Docker Compose for the Remote Timing Server + PostgreSQL.
+#
+# The forwarder runs as a systemd service on Linux (deploy/systemd/rt-forwarder.service);
+# it is NOT included in this compose file.
+#
+# Usage:
+#   # Copy and edit the env file first:
+#   cp deploy/.env.example deploy/.env
+#   # Edit deploy/.env with your DATABASE_URL, etc.
+#
+#   docker compose -f deploy/docker-compose.prod.yml up -d
+#
+# See docs/runbooks/server-operations.md for full operational guidance.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — authoritative event store.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-bookworm
+    container_name: rt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rtserver}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-rtserver}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rt-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rtserver} -d ${POSTGRES_DB:-rtserver}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Do not expose Postgres port externally in production.
+    # Use a database admin tool via the internal network or SSH tunnel.
+
+  # ---------------------------------------------------------------------------
+  # rt-server — WebSocket ingest, receiver delivery, REST API, dashboard.
+  # ---------------------------------------------------------------------------
+  server:
+    image: rt-server:${SERVER_VERSION:-latest}
+    container_name: rt-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-rtserver}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-rtserver}
+      BIND_ADDR: "0.0.0.0:8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    networks:
+      - rt-internal
+      - rt-public
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  # Internal network: server <-> postgres communication only.
+  rt-internal:
+    driver: bridge
+    internal: true
+
+  # Public network: server port exposed to host/reverse proxy.
+  rt-public:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
