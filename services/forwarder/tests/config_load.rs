@@ -330,7 +330,10 @@ target = "192.168.2.156:10000"
     let r = &cfg.readers[0];
     // local_fallback_port is derived at expansion time via discovery module
     // Config stores None (unset), expansion provides default
-    assert!(r.local_fallback_port.is_none(), "should be None when not explicitly set");
+    assert!(
+        r.local_fallback_port.is_none(),
+        "should be None when not explicitly set"
+    );
 }
 
 #[test]

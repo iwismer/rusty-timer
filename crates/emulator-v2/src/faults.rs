@@ -103,10 +103,7 @@ impl FaultSchedule {
 ///
 /// `event_num` is 0-based (the first event is 0, matching `after_events = 0`).
 /// Returns `FaultOutcome::Normal` when no fault is active at this position.
-pub fn apply_fault_to_event_emission(
-    schedule: &FaultSchedule,
-    event_num: u64,
-) -> FaultOutcome {
+pub fn apply_fault_to_event_emission(schedule: &FaultSchedule, event_num: u64) -> FaultOutcome {
     // Walk entries in definition order; return first match.
     for entry in &schedule.entries {
         if event_num >= entry.after_events {

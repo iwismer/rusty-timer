@@ -3,7 +3,7 @@
 //! Used by the uplink session to determine which events need to be
 //! (re-)transmitted after a reconnect or on initial connect.
 
-use crate::storage::journal::{Journal, JournalEvent, JournalError};
+use crate::storage::journal::{Journal, JournalError, JournalEvent};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -64,7 +64,8 @@ impl ReplayEngine {
         let newer_events = journal.unacked_events_across_epochs(stream_key, acked_epoch)?;
 
         // Group by epoch
-        let mut epoch_groups: std::collections::BTreeMap<i64, Vec<JournalEvent>> = std::collections::BTreeMap::new();
+        let mut epoch_groups: std::collections::BTreeMap<i64, Vec<JournalEvent>> =
+            std::collections::BTreeMap::new();
         for ev in newer_events {
             epoch_groups.entry(ev.stream_epoch).or_default().push(ev);
         }

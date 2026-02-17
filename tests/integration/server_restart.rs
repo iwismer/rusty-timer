@@ -39,9 +39,7 @@ async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, r
 async fn start_server_instance(pool: sqlx::PgPool) -> std::net::SocketAddr {
     let state = server::AppState::new(pool);
     let router = server::build_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, router).await.expect("server error");
@@ -114,7 +112,10 @@ async fn server_restart_events_survive_in_postgres() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count_before, 4, "4 events should be in DB before server restart");
+    assert_eq!(
+        count_before, 4,
+        "4 events should be in DB before server restart"
+    );
 
     // --- Simulate server restart: start server instance 2 (same DB) ---
     // Instance 1's port is abandoned (simulates server stop).
@@ -271,7 +272,10 @@ async fn server_restart_new_forwarder_connection_works() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(total_count, 4, "all 4 events (pre + post restart) must be in DB");
+    assert_eq!(
+        total_count, 4,
+        "all 4 events (pre + post restart) must be in DB"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -341,16 +345,26 @@ async fn server_restart_http_api_accessible_after_restart() {
     // The healthz endpoint should respond OK.
     let healthz_url = format!("http://{}/healthz", addr2);
     let response = reqwest::get(&healthz_url).await.unwrap();
-    assert_eq!(response.status(), 200, "/healthz should return 200 after restart");
+    assert_eq!(
+        response.status(),
+        200,
+        "/healthz should return 200 after restart"
+    );
 
     // The streams API should list the stream created before restart.
     let streams_url = format!("http://{}/api/v1/streams", addr2);
     let response = reqwest::get(&streams_url).await.unwrap();
-    assert_eq!(response.status(), 200, "/api/v1/streams should return 200 after restart");
+    assert_eq!(
+        response.status(),
+        200,
+        "/api/v1/streams should return 200 after restart"
+    );
 
     // The streams API returns { "streams": [...] }.
     let body: serde_json::Value = response.json().await.unwrap();
-    let streams = body["streams"].as_array().expect("should have streams array");
+    let streams = body["streams"]
+        .as_array()
+        .expect("should have streams array");
     let fwd_stream = streams
         .iter()
         .find(|s| s["forwarder_id"].as_str() == Some("fwd-srv-03"))

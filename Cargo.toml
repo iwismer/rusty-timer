@@ -11,6 +11,14 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# These are commonly too noisy in this codebase — suppress
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
 [package]
 name = "rusty-timer"
 version = "1.0.0"

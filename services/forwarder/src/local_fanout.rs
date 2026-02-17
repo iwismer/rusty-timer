@@ -91,7 +91,9 @@ impl FanoutServer {
         let (tx, _rx) = broadcast::channel(256);
 
         // Register in the global map so push_to_addr can reach us.
-        let local_addr = listener.local_addr().expect("local_addr always succeeds after bind");
+        let local_addr = listener
+            .local_addr()
+            .expect("local_addr always succeeds after bind");
         registry().lock().await.insert(local_addr, tx.clone());
 
         Ok(FanoutServer { listener, tx })

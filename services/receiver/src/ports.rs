@@ -3,8 +3,8 @@
 //! Default mapping: `10000 + reader_ip_last_octet`.
 //! Port collisions: affected stream marked degraded, non-conflicting streams start normally.
 
-use std::collections::HashMap;
 use crate::db::Subscription;
+use std::collections::HashMap;
 
 /// Result of resolving the local port for a subscription.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +19,9 @@ pub enum PortAssignment {
 /// Returns `None` if the address is not a parseable IPv4 address.
 pub fn last_octet(ip: &str) -> Option<u8> {
     let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() != 4 { return None; }
+    if parts.len() != 4 {
+        return None;
+    }
     parts[3].parse::<u8>().ok()
 }
 
@@ -41,7 +43,8 @@ pub fn resolve_ports(subs: &[Subscription]) -> HashMap<String, PortAssignment> {
     let mut wanted: Vec<(String, u16)> = Vec::new();
     for s in subs {
         let key = stream_key(&s.forwarder_id, &s.reader_ip);
-        let port = s.local_port_override
+        let port = s
+            .local_port_override
             .or_else(|| default_port(&s.reader_ip))
             .unwrap_or(0);
         wanted.push((key, port));
@@ -65,21 +68,31 @@ pub fn resolve_ports(subs: &[Subscription]) -> HashMap<String, PortAssignment> {
                 // Both this stream and the first claimant are colliding.
                 // Mark first as collision if not already.
                 let first_key = first.clone();
-                assignments.entry(first_key.clone()).or_insert_with(|| {
-                    PortAssignment::Collision { wanted: *port, collides_with: key.clone() }
-                });
-                assignments.insert(key.clone(), PortAssignment::Collision {
-                    wanted: *port,
-                    collides_with: first_key,
-                });
+                assignments
+                    .entry(first_key.clone())
+                    .or_insert_with(|| PortAssignment::Collision {
+                        wanted: *port,
+                        collides_with: key.clone(),
+                    });
+                assignments.insert(
+                    key.clone(),
+                    PortAssignment::Collision {
+                        wanted: *port,
+                        collides_with: first_key,
+                    },
+                );
             }
         }
     }
 
     // Fill in non-colliding streams.
     for (key, port) in &wanted {
-        if *port == 0 { continue; }
-        assignments.entry(key.clone()).or_insert(PortAssignment::Assigned(*port));
+        if *port == 0 {
+            continue;
+        }
+        assignments
+            .entry(key.clone())
+            .or_insert(PortAssignment::Assigned(*port));
     }
 
     assignments
@@ -95,7 +108,11 @@ mod tests {
     use super::*;
 
     fn sub(fwd: &str, ip: &str, port: Option<u16>) -> Subscription {
-        Subscription { forwarder_id: fwd.to_owned(), reader_ip: ip.to_owned(), local_port_override: port }
+        Subscription {
+            forwarder_id: fwd.to_owned(),
+            reader_ip: ip.to_owned(),
+            local_port_override: port,
+        }
     }
 
     #[test]
@@ -115,7 +132,10 @@ mod tests {
     fn override_port_takes_priority() {
         let subs = vec![sub("f", "192.168.1.100", Some(9999))];
         let r = resolve_ports(&subs);
-        assert_eq!(r[&stream_key("f","192.168.1.100")], PortAssignment::Assigned(9999));
+        assert_eq!(
+            r[&stream_key("f", "192.168.1.100")],
+            PortAssignment::Assigned(9999)
+        );
     }
 
     #[test]
@@ -125,8 +145,14 @@ mod tests {
             sub("f", "192.168.1.200", None),
         ];
         let r = resolve_ports(&subs);
-        assert_eq!(r[&stream_key("f","192.168.1.100")], PortAssignment::Assigned(10100));
-        assert_eq!(r[&stream_key("f","192.168.1.200")], PortAssignment::Assigned(10200));
+        assert_eq!(
+            r[&stream_key("f", "192.168.1.100")],
+            PortAssignment::Assigned(10100)
+        );
+        assert_eq!(
+            r[&stream_key("f", "192.168.1.200")],
+            PortAssignment::Assigned(10200)
+        );
     }
 
     #[test]
@@ -137,10 +163,16 @@ mod tests {
         ];
         let r = resolve_ports(&subs);
         // Both map to port 10100 - both should be Collision
-        let k1 = stream_key("f1","192.168.1.100");
-        let k2 = stream_key("f2","10.0.0.100");
-        assert!(matches!(r[&k1], PortAssignment::Collision { wanted: 10100, .. }), "f1 should collide");
-        assert!(matches!(r[&k2], PortAssignment::Collision { wanted: 10100, .. }), "f2 should collide");
+        let k1 = stream_key("f1", "192.168.1.100");
+        let k2 = stream_key("f2", "10.0.0.100");
+        assert!(
+            matches!(r[&k1], PortAssignment::Collision { wanted: 10100, .. }),
+            "f1 should collide"
+        );
+        assert!(
+            matches!(r[&k2], PortAssignment::Collision { wanted: 10100, .. }),
+            "f2 should collide"
+        );
     }
 
     #[test]
@@ -150,36 +182,54 @@ mod tests {
             sub("f", "192.168.1.200", Some(9500)),
         ];
         let r = resolve_ports(&subs);
-        let k1 = stream_key("f","192.168.1.100");
-        let k2 = stream_key("f","192.168.1.200");
-        assert!(matches!(r[&k1], PortAssignment::Collision { wanted: 9500, .. }));
-        assert!(matches!(r[&k2], PortAssignment::Collision { wanted: 9500, .. }));
+        let k1 = stream_key("f", "192.168.1.100");
+        let k2 = stream_key("f", "192.168.1.200");
+        assert!(matches!(
+            r[&k1],
+            PortAssignment::Collision { wanted: 9500, .. }
+        ));
+        assert!(matches!(
+            r[&k2],
+            PortAssignment::Collision { wanted: 9500, .. }
+        ));
     }
 
     #[test]
     fn non_colliding_streams_not_marked_degraded() {
         let subs = vec![
-            sub("f", "10.0.0.1", None),   // 10001
-            sub("f", "10.0.0.2", None),   // 10002
-            sub("f", "10.0.0.3", None),   // 10003
+            sub("f", "10.0.0.1", None), // 10001
+            sub("f", "10.0.0.2", None), // 10002
+            sub("f", "10.0.0.3", None), // 10003
         ];
         let r = resolve_ports(&subs);
-        for ip in ["10.0.0.1","10.0.0.2","10.0.0.3"] {
-            assert!(matches!(r[&stream_key("f",ip)], PortAssignment::Assigned(_)));
+        for ip in ["10.0.0.1", "10.0.0.2", "10.0.0.3"] {
+            assert!(matches!(
+                r[&stream_key("f", ip)],
+                PortAssignment::Assigned(_)
+            ));
         }
     }
 
     #[test]
     fn only_colliding_pair_marked_degraded_others_fine() {
         let subs = vec![
-            sub("f", "10.0.0.1", None),   // 10001 - ok
-            sub("f", "10.0.0.2", None),   // 10002 - ok
-            sub("f1", "10.0.0.1", None),  // 10001 - collides with f:10.0.0.1
+            sub("f", "10.0.0.1", None),  // 10001 - ok
+            sub("f", "10.0.0.2", None),  // 10002 - ok
+            sub("f1", "10.0.0.1", None), // 10001 - collides with f:10.0.0.1
         ];
         let r = resolve_ports(&subs);
-        assert!(matches!(r[&stream_key("f","10.0.0.2")], PortAssignment::Assigned(10002)));
-        assert!(matches!(r[&stream_key("f","10.0.0.1")], PortAssignment::Collision { .. }));
-        assert!(matches!(r[&stream_key("f1","10.0.0.1")], PortAssignment::Collision { .. }));
+        assert!(matches!(
+            r[&stream_key("f", "10.0.0.2")],
+            PortAssignment::Assigned(10002)
+        ));
+        assert!(matches!(
+            r[&stream_key("f", "10.0.0.1")],
+            PortAssignment::Collision { .. }
+        ));
+        assert!(matches!(
+            r[&stream_key("f1", "10.0.0.1")],
+            PortAssignment::Collision { .. }
+        ));
     }
 
     #[test]
@@ -189,7 +239,10 @@ mod tests {
 
     #[test]
     fn stream_key_format() {
-        assert_eq!(stream_key("fwd-001","192.168.1.100"), "fwd-001:192.168.1.100");
+        assert_eq!(
+            stream_key("fwd-001", "192.168.1.100"),
+            "fwd-001:192.168.1.100"
+        );
     }
 
     #[test]

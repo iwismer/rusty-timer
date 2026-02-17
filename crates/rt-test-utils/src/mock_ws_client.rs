@@ -18,7 +18,10 @@ impl MockWsClient {
         Ok(Self { write, read })
     }
 
-    pub async fn connect_with_token(url: &str, token: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn connect_with_token(
+        url: &str,
+        token: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         use tokio_tungstenite::tungstenite::handshake::client::generate_key;
         let uri: tokio_tungstenite::tungstenite::http::Uri = url.parse()?;
         let host = uri.host().unwrap_or("localhost").to_owned();
@@ -42,7 +45,10 @@ impl MockWsClient {
         Ok(Self { write, read })
     }
 
-    pub async fn send_message(&mut self, msg: &WsMessage) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send_message(
+        &mut self,
+        msg: &WsMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_string(msg)?;
         self.write.send(Message::Text(json.into())).await?;
         Ok(())
@@ -51,7 +57,10 @@ impl MockWsClient {
     pub async fn recv_message(&mut self) -> Result<WsMessage, Box<dyn std::error::Error>> {
         loop {
             match self.read.next().await {
-                Some(Ok(Message::Text(text))) => { let msg: WsMessage = serde_json::from_str(&text)?; return Ok(msg); }
+                Some(Ok(Message::Text(text))) => {
+                    let msg: WsMessage = serde_json::from_str(&text)?;
+                    return Ok(msg);
+                }
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
                 Some(Ok(Message::Close(_))) => return Err("connection closed by server".into()),
                 Some(Ok(_)) => continue,

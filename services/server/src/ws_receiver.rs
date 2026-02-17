@@ -1,10 +1,3 @@
-use axum::extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State};
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
-use rt_protocol::{error_codes, Heartbeat, ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage};
-use std::time::Duration;
-use tracing::{error, info, warn};
-use uuid::Uuid;
 use crate::{
     auth::{extract_bearer, validate_token},
     repo::{
@@ -13,6 +6,16 @@ use crate::{
     },
     state::AppState,
 };
+use axum::extract::{
+    ws::{Message, WebSocket, WebSocketUpgrade},
+    State,
+};
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
+use rt_protocol::{error_codes, Heartbeat, ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage};
+use std::time::Duration;
+use tracing::{error, info, warn};
+use uuid::Uuid;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
@@ -53,19 +56,37 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     let token_str = match token {
         Some(t) => t,
         None => {
-            send_ws_error(&mut socket, error_codes::INVALID_TOKEN, "missing Authorization header", false).await;
+            send_ws_error(
+                &mut socket,
+                error_codes::INVALID_TOKEN,
+                "missing Authorization header",
+                false,
+            )
+            .await;
             return;
         }
     };
     let claims = match validate_token(&state.pool, &token_str).await {
         Some(c) => c,
         None => {
-            send_ws_error(&mut socket, error_codes::INVALID_TOKEN, "unknown or revoked token", false).await;
+            send_ws_error(
+                &mut socket,
+                error_codes::INVALID_TOKEN,
+                "unknown or revoked token",
+                false,
+            )
+            .await;
             return;
         }
     };
     if claims.device_type != "receiver" {
-        send_ws_error(&mut socket, error_codes::INVALID_TOKEN, "token is not for a receiver device", false).await;
+        send_ws_error(
+            &mut socket,
+            error_codes::INVALID_TOKEN,
+            "token is not for a receiver device",
+            false,
+        )
+        .await;
         return;
     }
     let device_id = claims.device_id.clone();
@@ -75,22 +96,46 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
         Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<WsMessage>(&text) {
             Ok(WsMessage::ReceiverHello(hello)) => hello,
             Ok(_) => {
-                send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, "expected receiver_hello", false).await;
+                send_ws_error(
+                    &mut socket,
+                    error_codes::PROTOCOL_ERROR,
+                    "expected receiver_hello",
+                    false,
+                )
+                .await;
                 return;
             }
             Err(e) => {
-                send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await;
+                send_ws_error(
+                    &mut socket,
+                    error_codes::PROTOCOL_ERROR,
+                    &format!("invalid JSON: {}", e),
+                    false,
+                )
+                .await;
                 return;
             }
         },
         _ => {
-            send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, "timeout waiting for receiver_hello", false).await;
+            send_ws_error(
+                &mut socket,
+                error_codes::PROTOCOL_ERROR,
+                "timeout waiting for receiver_hello",
+                false,
+            )
+            .await;
             return;
         }
     };
 
     if !hello.receiver_id.is_empty() && hello.receiver_id != device_id {
-        send_ws_error(&mut socket, error_codes::IDENTITY_MISMATCH, "hello receiver_id does not match token claims", false).await;
+        send_ws_error(
+            &mut socket,
+            error_codes::IDENTITY_MISMATCH,
+            "hello receiver_id does not match token claims",
+            false,
+        )
+        .await;
         return;
     }
 
@@ -98,7 +143,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     info!(device_id = %device_id, session_id = %session_id, "receiver connected");
 
     // Send heartbeat with session_id
-    let hb_msg = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
+    let hb_msg = WsMessage::Heartbeat(Heartbeat {
+        session_id: session_id.clone(),
+        device_id: device_id.clone(),
+    });
     if let Ok(json) = serde_json::to_string(&hb_msg) {
         if socket.send(Message::Text(json.into())).await.is_err() {
             return;
@@ -115,7 +163,9 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
             &cursor.reader_ip,
             cursor.stream_epoch as i64,
             cursor.last_seq as i64,
-        ).await {
+        )
+        .await
+        {
             subscriptions.push(sub);
         }
     }
@@ -145,7 +195,8 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                     Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
                         warn!(device_id = %device_id, stream_id = %sub.stream_id, lagged = n, "receiver lagged, replaying from DB");
-                        if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await {
+                        if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await
+                        {
                             error!(error = %e, "replay failed");
                             return;
                         }
@@ -246,7 +297,8 @@ async fn subscribe_to_stream(
 ) -> Option<StreamSub> {
     let row = sqlx::query!(
         "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
-        forwarder_id, reader_ip
+        forwarder_id,
+        reader_ip
     )
     .fetch_optional(&state.pool)
     .await
@@ -256,7 +308,12 @@ async fn subscribe_to_stream(
     let tx = state.get_or_create_broadcast(stream_id).await;
     let rx = tx.subscribe();
 
-    Some(StreamSub { stream_id, last_epoch, last_seq, rx })
+    Some(StreamSub {
+        stream_id,
+        last_epoch,
+        last_seq,
+        rx,
+    })
 }
 
 async fn get_cursor_for_stream(
@@ -267,14 +324,17 @@ async fn get_cursor_for_stream(
 ) -> (i64, i64) {
     let row = sqlx::query!(
         "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
-        forwarder_id, reader_ip
+        forwarder_id,
+        reader_ip
     )
     .fetch_optional(&state.pool)
     .await
     .ok()
     .flatten();
 
-    let Some(stream_row) = row else { return (1, 0); };
+    let Some(stream_row) = row else {
+        return (1, 0);
+    };
     let stream_id = stream_row.stream_id;
 
     fetch_cursor(&state.pool, device_id, stream_id)
@@ -290,20 +350,24 @@ async fn replay_backlog(
     session_id: &str,
     sub: &mut StreamSub,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let events = fetch_events_after_cursor(&state.pool, sub.stream_id, sub.last_epoch, sub.last_seq).await?;
+    let events =
+        fetch_events_after_cursor(&state.pool, sub.stream_id, sub.last_epoch, sub.last_seq).await?;
     if events.is_empty() {
         return Ok(());
     }
 
-    let read_events: Vec<ReadEvent> = events.iter().map(|e| ReadEvent {
-        forwarder_id: e.forwarder_id.clone(),
-        reader_ip: e.reader_ip.clone(),
-        stream_epoch: e.stream_epoch as u64,
-        seq: e.seq as u64,
-        reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
-        raw_read_line: e.raw_read_line.clone(),
-        read_type: e.read_type.clone(),
-    }).collect();
+    let read_events: Vec<ReadEvent> = events
+        .iter()
+        .map(|e| ReadEvent {
+            forwarder_id: e.forwarder_id.clone(),
+            reader_ip: e.reader_ip.clone(),
+            stream_epoch: e.stream_epoch as u64,
+            seq: e.seq as u64,
+            reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
+            raw_read_line: e.raw_read_line.clone(),
+            read_type: e.read_type.clone(),
+        })
+        .collect();
 
     if let Some(last) = events.last() {
         sub.last_epoch = last.stream_epoch;
@@ -327,13 +391,21 @@ async fn handle_receiver_ack(
     for entry in &ack.entries {
         let row = sqlx::query!(
             "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
-            entry.forwarder_id, entry.reader_ip
+            entry.forwarder_id,
+            entry.reader_ip
         )
         .fetch_optional(&state.pool)
         .await?;
 
         if let Some(r) = row {
-            upsert_cursor(&state.pool, device_id, r.stream_id, entry.stream_epoch as i64, entry.last_seq as i64).await?;
+            upsert_cursor(
+                &state.pool,
+                device_id,
+                r.stream_id,
+                entry.stream_epoch as i64,
+                entry.last_seq as i64,
+            )
+            .await?;
         }
     }
     Ok(())

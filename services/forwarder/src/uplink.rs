@@ -43,9 +43,8 @@ pub struct UplinkConfig {
 // UplinkSession
 // ---------------------------------------------------------------------------
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// An active WebSocket session with the server.
 ///
@@ -97,7 +96,10 @@ impl UplinkSession {
                 );
             }
             WsMessage::Error(e) => {
-                return Err(UplinkError::Protocol(format!("server error: {} - {}", e.code, e.message)));
+                return Err(UplinkError::Protocol(format!(
+                    "server error: {} - {}",
+                    e.code, e.message
+                )));
             }
             other => {
                 return Err(UplinkError::Protocol(format!(
@@ -144,7 +146,10 @@ impl UplinkSession {
                 session.device_id = hb.device_id;
             }
             WsMessage::Error(e) => {
-                return Err(UplinkError::Protocol(format!("server error: {} - {}", e.code, e.message)));
+                return Err(UplinkError::Protocol(format!(
+                    "server error: {} - {}",
+                    e.code, e.message
+                )));
             }
             other => {
                 return Err(UplinkError::Protocol(format!(
@@ -221,8 +226,8 @@ impl UplinkSession {
     // -----------------------------------------------------------------------
 
     async fn send_ws_message(&mut self, msg: &WsMessage) -> Result<(), UplinkError> {
-        let json = serde_json::to_string(msg)
-            .map_err(|e| UplinkError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(msg).map_err(|e| UplinkError::Serialization(e.to_string()))?;
         self.ws
             .send(Message::Text(json.into()))
             .await
@@ -297,11 +302,11 @@ fn build_ws_request(
 
     request.headers_mut().insert(
         "Authorization",
-        format!("Bearer {}", token)
-            .parse()
-            .map_err(|e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
+        format!("Bearer {}", token).parse().map_err(
+            |e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| {
                 UplinkError::Connect(format!("invalid auth header: {}", e))
-            })?,
+            },
+        )?,
     );
 
     Ok(request)

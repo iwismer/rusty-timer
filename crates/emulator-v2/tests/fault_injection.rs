@@ -14,11 +14,8 @@
 //! 8. Slow ack fault introduces delay before ack
 //! 9. No fault = zero delays, all events emitted
 
-use emulator_v2::faults::{
-    FaultSchedule, FaultOutcome,
-    apply_fault_to_event_emission,
-};
-use emulator_v2::scenario::{FaultConfig, load_scenario_from_str};
+use emulator_v2::faults::{apply_fault_to_event_emission, FaultOutcome, FaultSchedule};
+use emulator_v2::scenario::{load_scenario_from_str, FaultConfig};
 
 // ---------------------------------------------------------------------------
 // YAML parsing tests for fault configs
@@ -151,7 +148,11 @@ fn jitter_fault_triggers_after_threshold() {
 
     // Before threshold: normal
     let before = apply_fault_to_event_emission(&schedule, 4);
-    assert_eq!(before, FaultOutcome::Normal, "before threshold should be Normal");
+    assert_eq!(
+        before,
+        FaultOutcome::Normal,
+        "before threshold should be Normal"
+    );
 
     // At/after threshold: Jitter with duration
     let at = apply_fault_to_event_emission(&schedule, 5);
@@ -184,7 +185,9 @@ fn disconnect_fault_triggers_after_threshold() {
     let at = apply_fault_to_event_emission(&schedule, 10);
     assert_eq!(
         at,
-        FaultOutcome::Disconnect { reconnect_delay_ms: 500 },
+        FaultOutcome::Disconnect {
+            reconnect_delay_ms: 500
+        },
         "at threshold should return Disconnect"
     );
 }

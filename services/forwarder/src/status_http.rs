@@ -150,16 +150,14 @@ pub enum EpochResetError {
 impl JournalAccess for Journal {
     fn reset_epoch(&mut self, stream_key: &str) -> Result<i64, EpochResetError> {
         // Get current epoch
-        let (current_epoch, _) = self
-            .current_epoch_and_next_seq(stream_key)
-            .map_err(|e| {
-                // If query_row returns nothing, rusqlite returns QueryReturnedNoRows
-                if e.to_string().contains("returned no rows") {
-                    EpochResetError::NotFound
-                } else {
-                    EpochResetError::Storage(e.to_string())
-                }
-            })?;
+        let (current_epoch, _) = self.current_epoch_and_next_seq(stream_key).map_err(|e| {
+            // If query_row returns nothing, rusqlite returns QueryReturnedNoRows
+            if e.to_string().contains("returned no rows") {
+                EpochResetError::NotFound
+            } else {
+                EpochResetError::Storage(e.to_string())
+            }
+        })?;
         let new_epoch = current_epoch + 1;
         self.bump_epoch(stream_key, new_epoch)
             .map_err(|e| EpochResetError::Storage(e.to_string()))?;
@@ -275,7 +273,9 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
             );
             send_response(&mut stream, 200, "text/html; charset=utf-8", &html).await;
         }
-        ("POST", path) if path.starts_with("/api/v1/streams/") && path.ends_with("/reset-epoch") => {
+        ("POST", path)
+            if path.starts_with("/api/v1/streams/") && path.ends_with("/reset-epoch") =>
+        {
             // Extract reader_ip from: /api/v1/streams/{reader_ip}/reset-epoch
             let inner = &path["/api/v1/streams/".len()..path.len() - "/reset-epoch".len()];
             let reader_ip = inner.to_owned();

@@ -1,3 +1,4 @@
+use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -7,7 +8,6 @@ use axum::{
 };
 use rt_protocol::HttpErrorEnvelope;
 use uuid::Uuid;
-use crate::state::AppState;
 
 /// `GET /api/v1/streams/{stream_id}/export.raw`
 ///
@@ -26,12 +26,28 @@ pub async fn export_raw(
     .await;
 
     match exists {
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(HttpErrorEnvelope {
-            code: "INTERNAL_ERROR".to_owned(), message: e.to_string(), details: None,
-        })).into_response(),
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(HttpErrorEnvelope {
-            code: "NOT_FOUND".to_owned(), message: "stream not found".to_owned(), details: None,
-        })).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(HttpErrorEnvelope {
+                    code: "NOT_FOUND".to_owned(),
+                    message: "stream not found".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
         Ok(Some(_)) => {}
     }
 
@@ -45,9 +61,15 @@ pub async fn export_raw(
     .await;
 
     match rows {
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(HttpErrorEnvelope {
-            code: "INTERNAL_ERROR".to_owned(), message: e.to_string(), details: None,
-        })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
         Ok(rows) => {
             let mut buf = String::new();
             for row in &rows {
@@ -84,12 +106,28 @@ pub async fn export_csv(
     .await;
 
     match exists {
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(HttpErrorEnvelope {
-            code: "INTERNAL_ERROR".to_owned(), message: e.to_string(), details: None,
-        })).into_response(),
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(HttpErrorEnvelope {
-            code: "NOT_FOUND".to_owned(), message: "stream not found".to_owned(), details: None,
-        })).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(HttpErrorEnvelope {
+                    code: "NOT_FOUND".to_owned(),
+                    message: "stream not found".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
         Ok(Some(_)) => {}
     }
 
@@ -104,11 +142,18 @@ pub async fn export_csv(
     .await;
 
     match rows {
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(HttpErrorEnvelope {
-            code: "INTERNAL_ERROR".to_owned(), message: e.to_string(), details: None,
-        })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
         Ok(rows) => {
-            let mut buf = String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");
+            let mut buf =
+                String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");
             for row in &rows {
                 let epoch = row.stream_epoch.to_string();
                 let seq = row.seq.to_string();

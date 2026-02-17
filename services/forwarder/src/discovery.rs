@@ -32,7 +32,9 @@ impl ReaderEndpoint {
 /// Returns an error for unsupported syntaxes or malformed inputs.
 pub fn expand_target(target: &str) -> Result<Vec<ReaderEndpoint>, DiscoveryError> {
     if target.is_empty() {
-        return Err(DiscoveryError::InvalidFormat("empty target string".to_owned()));
+        return Err(DiscoveryError::InvalidFormat(
+            "empty target string".to_owned(),
+        ));
     }
 
     // Reject CIDR notation
@@ -51,9 +53,9 @@ pub fn expand_target(target: &str) -> Result<Vec<ReaderEndpoint>, DiscoveryError
 
     // Split host and port on the last ':' to correctly handle IPv4 with ranges.
     // e.g. "192.168.2.150-160:10000" → host="192.168.2.150-160", port="10000"
-    let colon_pos = target
-        .rfind(':')
-        .ok_or_else(|| DiscoveryError::InvalidFormat("missing port (expected HOST:PORT)".to_owned()))?;
+    let colon_pos = target.rfind(':').ok_or_else(|| {
+        DiscoveryError::InvalidFormat("missing port (expected HOST:PORT)".to_owned())
+    })?;
 
     let host_part = &target[..colon_pos];
     let port_str = &target[colon_pos + 1..];

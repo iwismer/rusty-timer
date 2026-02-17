@@ -128,7 +128,10 @@ fn disk_watermark_total_count_decreases_after_prune() {
     assert_eq!(pruned, 9);
 
     let total_after = j.total_event_count().unwrap();
-    assert_eq!(total_after, 3, "should have 3 events remaining after pruning 9");
+    assert_eq!(
+        total_after, 3,
+        "should have 3 events remaining after pruning 9"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -198,11 +201,19 @@ fn disk_watermark_streams_pruned_independently() {
     assert_eq!(pruned_a, 5, "should prune all 5 acked events from stream A");
 
     // Total should now be 4 (stream B untouched).
-    assert_eq!(j.total_event_count().unwrap(), 4, "stream B events must be untouched");
+    assert_eq!(
+        j.total_event_count().unwrap(),
+        4,
+        "stream B events must be untouched"
+    );
 
     // Stream B must still have all 4 events.
     let b_unacked = j.unacked_events("10.200.200.6", 1, 0).unwrap();
-    assert_eq!(b_unacked.len(), 4, "stream B must still have 4 events after pruning stream A");
+    assert_eq!(
+        b_unacked.len(),
+        4,
+        "stream B must still have 4 events after pruning stream A"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +266,11 @@ fn disk_watermark_prune_cycle_simulation() {
     j.update_ack_cursor("10.200.200.8", 1, 10).unwrap();
     let pruned_r1 = j.prune_acked("10.200.200.8", 10).unwrap();
     assert_eq!(pruned_r1, 10, "round 1: should prune 10 acked events");
-    assert_eq!(j.total_event_count().unwrap(), 10, "round 1: 10 events remaining");
+    assert_eq!(
+        j.total_event_count().unwrap(),
+        10,
+        "round 1: 10 events remaining"
+    );
 
     // Round 2: Insert 5 more events (total: 10+5=15), ack 5 more, prune 5.
     for _ in 0..5 {
@@ -267,7 +282,11 @@ fn disk_watermark_prune_cycle_simulation() {
     j.update_ack_cursor("10.200.200.8", 1, 15).unwrap();
     let pruned_r2 = j.prune_acked("10.200.200.8", 5).unwrap();
     assert_eq!(pruned_r2, 5, "round 2: should prune 5 more acked events");
-    assert_eq!(j.total_event_count().unwrap(), 10, "round 2: 10 events remaining");
+    assert_eq!(
+        j.total_event_count().unwrap(),
+        10,
+        "round 2: 10 events remaining"
+    );
 
     // Verify the remaining 10 events are unacked (seq 16-25).
     let remaining = j.unacked_events("10.200.200.8", 1, 15).unwrap();
@@ -276,6 +295,12 @@ fn disk_watermark_prune_cycle_simulation() {
         10,
         "remaining 10 events must all be unacked"
     );
-    assert_eq!(remaining[0].seq, 16, "first remaining event should be seq 16");
-    assert_eq!(remaining[9].seq, 25, "last remaining event should be seq 25");
+    assert_eq!(
+        remaining[0].seq, 16,
+        "first remaining event should be seq 16"
+    );
+    assert_eq!(
+        remaining[9].seq, 25,
+        "last remaining event should be seq 25"
+    );
 }

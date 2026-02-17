@@ -29,7 +29,12 @@ impl AppState {
 
     pub async fn register_forwarder(&self, device_id: &str) -> bool {
         let mut map = self.active_forwarders.write().await;
-        if map.contains_key(device_id) { false } else { map.insert(device_id.to_owned(), ()); true }
+        if map.contains_key(device_id) {
+            false
+        } else {
+            map.insert(device_id.to_owned(), ());
+            true
+        }
     }
 
     pub async fn unregister_forwarder(&self, device_id: &str) {
@@ -39,10 +44,14 @@ impl AppState {
     pub async fn get_or_create_broadcast(&self, stream_id: Uuid) -> StreamBroadcast {
         {
             let reg = self.broadcast_registry.read().await;
-            if let Some(tx) = reg.get(&stream_id) { return tx.clone(); }
+            if let Some(tx) = reg.get(&stream_id) {
+                return tx.clone();
+            }
         }
         let mut reg = self.broadcast_registry.write().await;
-        if let Some(tx) = reg.get(&stream_id) { return tx.clone(); }
+        if let Some(tx) = reg.get(&stream_id) {
+            return tx.clone();
+        }
         let (tx, _rx) = broadcast::channel(1024);
         reg.insert(stream_id, tx.clone());
         tx

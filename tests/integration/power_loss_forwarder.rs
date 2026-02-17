@@ -40,12 +40,19 @@ fn power_loss_wal_mode_and_sync_full() {
     let mode: String = conn
         .pragma_query_value(None, "journal_mode", |r| r.get(0))
         .unwrap();
-    assert_eq!(mode.to_lowercase(), "wal", "WAL mode required for power-loss safety");
+    assert_eq!(
+        mode.to_lowercase(),
+        "wal",
+        "WAL mode required for power-loss safety"
+    );
 
     let sync: i64 = conn
         .pragma_query_value(None, "synchronous", |r| r.get(0))
         .unwrap();
-    assert_eq!(sync, 2, "synchronous=FULL (2) required for power-loss safety");
+    assert_eq!(
+        sync, 2,
+        "synchronous=FULL (2) required for power-loss safety"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +260,10 @@ fn power_loss_multiple_streams_independent_recovery() {
 
         // Stream 2: all 3 events should be unacked.
         let s2_unacked = j.unacked_events("10.100.100.5", 1, 0).unwrap();
-        assert_eq!(s2_unacked.len(), 3, "stream 2 should have all 3 unacked events");
+        assert_eq!(
+            s2_unacked.len(),
+            3,
+            "stream 2 should have all 3 unacked events"
+        );
     }
 }

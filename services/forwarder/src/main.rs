@@ -13,10 +13,7 @@ fn main() {
         )
         .init();
 
-    info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "forwarder starting"
-    );
+    info!(version = env!("CARGO_PKG_VERSION"), "forwarder starting");
 
     // Load config from default path.
     // Later tasks will use the loaded config to initialize subsystems.

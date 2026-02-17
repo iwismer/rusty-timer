@@ -1,8 +1,8 @@
 /// Tests for the uplink WS client: hello handshake, event batch sending, ack processing.
 ///
 /// Uses MockWsServer from rt-test-utils to simulate a server.
-use forwarder::uplink::{UplinkSession, UplinkConfig};
-use rt_protocol::{ForwarderHello, WsMessage, ForwarderAck, AckEntry};
+use forwarder::uplink::{UplinkConfig, UplinkSession};
+use rt_protocol::{AckEntry, ForwarderAck, ForwarderHello, WsMessage};
 use rt_test_utils::MockWsServer;
 
 // ---------------------------------------------------------------------------
@@ -26,8 +26,14 @@ async fn uplink_sends_forwarder_hello_on_connect() {
 
     let mut session = UplinkSession::connect(cfg).await.expect("connect");
     let session_id = session.session_id().to_owned();
-    assert!(!session_id.is_empty(), "session_id must be assigned after hello");
-    assert!(!session.device_id().is_empty(), "device_id must be assigned from heartbeat");
+    assert!(
+        !session_id.is_empty(),
+        "session_id must be assigned after hello"
+    );
+    assert!(
+        !session.device_id().is_empty(),
+        "device_id must be assigned from heartbeat"
+    );
 }
 
 /// Test: uplink session returns correct device_id after handshake.
@@ -137,9 +143,17 @@ async fn uplink_ack_contains_high_water_marks() {
     let ack = session.send_batch(events).await.expect("send_batch");
     assert_eq!(ack.entries.len(), 2);
 
-    let e1 = ack.entries.iter().find(|e| e.reader_ip == "192.168.2.1").unwrap();
+    let e1 = ack
+        .entries
+        .iter()
+        .find(|e| e.reader_ip == "192.168.2.1")
+        .unwrap();
     assert_eq!(e1.last_seq, 7, "high water mark for .2.1 must be 7");
 
-    let e2 = ack.entries.iter().find(|e| e.reader_ip == "192.168.2.2").unwrap();
+    let e2 = ack
+        .entries
+        .iter()
+        .find(|e| e.reader_ip == "192.168.2.2")
+        .unwrap();
     assert_eq!(e2.last_seq, 5);
 }

@@ -7,7 +7,7 @@
 //! 4. late consumer connects and receives new data only
 //! 5. fanout on degraded/collision stream reports error
 
-use forwarder::local_fanout::{FanoutServer, FanoutError};
+use forwarder::local_fanout::{FanoutError, FanoutServer};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
@@ -26,7 +26,9 @@ async fn read_bytes(stream: &mut TcpStream, n: usize) -> Vec<u8> {
 #[tokio::test]
 async fn fanout_exact_byte_preservation() {
     // Bind on port 0 (OS assigns)
-    let server = FanoutServer::bind("127.0.0.1:0").await.expect("bind failed");
+    let server = FanoutServer::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed");
     let addr = server.local_addr();
 
     // Spawn the fanout server task
@@ -43,16 +45,23 @@ async fn fanout_exact_byte_preservation() {
     // Write raw bytes (simulating exact IPICO data — binary-safe)
     let raw_data: Vec<u8> = vec![0x01, 0x02, 0x0D, 0x0A, 0xFF, 0xFE, 0x00, 0x41];
     // Push data to the fanout
-    FanoutServer::push_to_addr(addr, raw_data.clone()).await.expect("push failed");
+    FanoutServer::push_to_addr(addr, raw_data.clone())
+        .await
+        .expect("push failed");
 
     // Consumer should receive the exact bytes
     let received = read_bytes(&mut consumer, raw_data.len()).await;
-    assert_eq!(received, raw_data, "bytes must be forwarded without modification");
+    assert_eq!(
+        received, raw_data,
+        "bytes must be forwarded without modification"
+    );
 }
 
 #[tokio::test]
 async fn fanout_multi_client_all_receive() {
-    let server = FanoutServer::bind("127.0.0.1:0").await.expect("bind failed");
+    let server = FanoutServer::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed");
     let addr = server.local_addr();
 
     tokio::spawn(async move {
@@ -67,7 +76,9 @@ async fn fanout_multi_client_all_receive() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let data = b"HELLO FANOUT\r\n";
-    FanoutServer::push_to_addr(addr, data.to_vec()).await.expect("push failed");
+    FanoutServer::push_to_addr(addr, data.to_vec())
+        .await
+        .expect("push failed");
 
     let r1 = read_bytes(&mut c1, data.len()).await;
     let r2 = read_bytes(&mut c2, data.len()).await;
@@ -80,7 +91,9 @@ async fn fanout_multi_client_all_receive() {
 
 #[tokio::test]
 async fn fanout_consumer_drop_does_not_crash_others() {
-    let server = FanoutServer::bind("127.0.0.1:0").await.expect("bind failed");
+    let server = FanoutServer::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed");
     let addr = server.local_addr();
 
     tokio::spawn(async move {
@@ -98,7 +111,9 @@ async fn fanout_consumer_drop_does_not_crash_others() {
 
     // c1 should still work
     let data = b"STILL ALIVE\r\n";
-    FanoutServer::push_to_addr(addr, data.to_vec()).await.expect("push after drop failed");
+    FanoutServer::push_to_addr(addr, data.to_vec())
+        .await
+        .expect("push after drop failed");
 
     let r1 = read_bytes(&mut c1, data.len()).await;
     assert_eq!(r1, data, "surviving consumer must still receive data");
@@ -108,7 +123,9 @@ async fn fanout_consumer_drop_does_not_crash_others() {
 async fn fanout_no_line_ending_rewrite() {
     // The spec says: "no line-ending rewrite or normalization"
     // We send \r\n and also bare \n to verify nothing changes.
-    let server = FanoutServer::bind("127.0.0.1:0").await.expect("bind failed");
+    let server = FanoutServer::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed");
     let addr = server.local_addr();
 
     tokio::spawn(async move {
@@ -120,13 +137,17 @@ async fn fanout_no_line_ending_rewrite() {
 
     // \r\n line
     let crlf_line = b"CRLF\r\n";
-    FanoutServer::push_to_addr(addr, crlf_line.to_vec()).await.expect("push failed");
+    FanoutServer::push_to_addr(addr, crlf_line.to_vec())
+        .await
+        .expect("push failed");
     let received_crlf = read_bytes(&mut consumer, crlf_line.len()).await;
     assert_eq!(received_crlf, crlf_line, "CRLF must not be rewritten");
 
     // Bare \n line
     let lf_line = b"LF\n";
-    FanoutServer::push_to_addr(addr, lf_line.to_vec()).await.expect("push failed");
+    FanoutServer::push_to_addr(addr, lf_line.to_vec())
+        .await
+        .expect("push failed");
     let received_lf = read_bytes(&mut consumer, lf_line.len()).await;
     assert_eq!(received_lf, lf_line, "LF must not be rewritten");
 }
@@ -135,7 +156,9 @@ async fn fanout_no_line_ending_rewrite() {
 async fn fanout_bind_collision_returns_error() {
     // Bind the same address twice — the second bind should fail with a
     // FanoutError indicating the port collision.
-    let server1 = FanoutServer::bind("127.0.0.1:0").await.expect("first bind failed");
+    let server1 = FanoutServer::bind("127.0.0.1:0")
+        .await
+        .expect("first bind failed");
     let addr = server1.local_addr();
 
     // Explicitly bind the same port
@@ -154,7 +177,9 @@ async fn fanout_bind_collision_returns_error() {
 
 #[tokio::test]
 async fn fanout_multiple_sequential_messages() {
-    let server = FanoutServer::bind("127.0.0.1:0").await.expect("bind failed");
+    let server = FanoutServer::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed");
     let addr = server.local_addr();
 
     tokio::spawn(async move {
@@ -166,7 +191,9 @@ async fn fanout_multiple_sequential_messages() {
 
     for i in 0u8..5 {
         let msg = vec![i; 8];
-        FanoutServer::push_to_addr(addr, msg.clone()).await.expect("push failed");
+        FanoutServer::push_to_addr(addr, msg.clone())
+            .await
+            .expect("push failed");
         let received = read_bytes(&mut consumer, 8).await;
         assert_eq!(received, msg, "message {} must match", i);
     }

@@ -13,11 +13,7 @@ use ipico_core::read::{ChipRead, ReadType, Timestamp};
 // Helper: load non-empty lines from a fixture file
 // ---------------------------------------------------------------------------
 fn fixture_lines(name: &str) -> Vec<String> {
-    let path = format!(
-        "{}/tests/fixtures/{}",
-        env!("CARGO_MANIFEST_DIR"),
-        name
-    );
+    let path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read fixture {}: {}", path, e))
         .lines()
@@ -58,10 +54,7 @@ fn raw_fixture_line_0_fields() {
 
     assert_eq!(read.tag_id, "000000012345");
     assert_eq!(read.read_type, ReadType::RAW);
-    assert_eq!(
-        read.timestamp,
-        Timestamp::new(1, 12, 30, 18, 45, 59, 390)
-    );
+    assert_eq!(read.timestamp, Timestamp::new(1, 12, 30, 18, 45, 59, 390));
 }
 
 #[test]
@@ -71,10 +64,7 @@ fn raw_fixture_line_1_fields() {
 
     assert_eq!(read.tag_id, "000000012345");
     assert_eq!(read.read_type, ReadType::RAW);
-    assert_eq!(
-        read.timestamp,
-        Timestamp::new(1, 12, 30, 18, 46, 0, 0)
-    );
+    assert_eq!(read.timestamp, Timestamp::new(1, 12, 30, 18, 46, 0, 0));
 }
 
 #[test]
@@ -85,10 +75,7 @@ fn raw_fixture_line_2_fields() {
     assert_eq!(read.tag_id, "00000000AABB");
     assert_eq!(read.read_type, ReadType::RAW);
     // 0x3f = 63 decimal, *10 = 630ms
-    assert_eq!(
-        read.timestamp,
-        Timestamp::new(26, 1, 1, 8, 30, 0, 630)
-    );
+    assert_eq!(read.timestamp, Timestamp::new(26, 1, 1, 8, 30, 0, 630));
 }
 
 // ===========================================================================
@@ -124,10 +111,7 @@ fn fsls_fixture_line_0_is_fs() {
     // Same data as RAW line 0, but with FS suffix
     assert_eq!(read.tag_id, "000000012345");
     assert_eq!(read.read_type, ReadType::FSLS);
-    assert_eq!(
-        read.timestamp,
-        Timestamp::new(1, 12, 30, 18, 45, 59, 390)
-    );
+    assert_eq!(read.timestamp, Timestamp::new(1, 12, 30, 18, 45, 59, 390));
 }
 
 #[test]
@@ -137,10 +121,7 @@ fn fsls_fixture_line_1_is_ls() {
 
     assert_eq!(read.tag_id, "000000012345");
     assert_eq!(read.read_type, ReadType::FSLS);
-    assert_eq!(
-        read.timestamp,
-        Timestamp::new(1, 12, 30, 18, 46, 0, 0)
-    );
+    assert_eq!(read.timestamp, Timestamp::new(1, 12, 30, 18, 46, 0, 0));
 }
 
 // ===========================================================================

@@ -119,8 +119,7 @@ pub fn load_scenario_from_str(yaml: &str) -> Result<ScenarioConfig, ScenarioErro
 
 /// Parse a YAML scenario from a file path.
 pub fn load_scenario_from_file(path: &std::path::Path) -> Result<ScenarioConfig, ScenarioError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| ScenarioError::Io(e.to_string()))?;
+    let content = std::fs::read_to_string(path).map_err(|e| ScenarioError::Io(e.to_string()))?;
     load_scenario_from_str(&content)
 }
 

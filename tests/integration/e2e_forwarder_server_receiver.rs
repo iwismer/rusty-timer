@@ -50,9 +50,7 @@ async fn start_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
         .expect("failed to bind server");
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, router)
-            .await
-            .expect("server error");
+        axum::serve(listener, router).await.expect("server error");
     });
     // Give the server a moment to start accepting connections.
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -208,7 +206,10 @@ async fn e2e_single_stream_forwarder_to_mock_receiver() {
 
     match rcv_msg {
         WsMessage::ReceiverEventBatch(batch) => {
-            assert!(!batch.events.is_empty(), "should receive at least one event");
+            assert!(
+                !batch.events.is_empty(),
+                "should receive at least one event"
+            );
             assert_eq!(batch.events[0].forwarder_id, "fwd-e2e-01");
             assert_eq!(batch.events[0].reader_ip, "192.168.10.1");
             assert_eq!(batch.events[0].seq, 1);
@@ -399,9 +400,12 @@ async fn e2e_receiver_subscribe_mid_session() {
     let mut fwd_client = MockWsClient::connect_with_token(&fwd_url, "fwd-e2e-token-03")
         .await
         .unwrap();
-    let fwd_session =
-        forwarder_handshake(&mut fwd_client, "fwd-e2e-03", vec!["192.168.30.1".to_owned()])
-            .await;
+    let fwd_session = forwarder_handshake(
+        &mut fwd_client,
+        "fwd-e2e-03",
+        vec!["192.168.30.1".to_owned()],
+    )
+    .await;
     fwd_client
         .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd_session,
@@ -447,7 +451,10 @@ async fn e2e_receiver_subscribe_mid_session() {
         .unwrap();
     match msg {
         WsMessage::ReceiverEventBatch(batch) => {
-            assert!(!batch.events.is_empty(), "should receive at least one event");
+            assert!(
+                !batch.events.is_empty(),
+                "should receive at least one event"
+            );
             assert_eq!(batch.events[0].reader_ip, "192.168.30.1");
         }
         other => panic!("expected ReceiverEventBatch, got {:?}", other),

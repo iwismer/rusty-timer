@@ -186,14 +186,16 @@ async fn chaos_network_flap_events_not_lost() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(final_count, 3, "retransmits after reconnect must not create duplicates");
+    assert_eq!(
+        final_count, 3,
+        "retransmits after reconnect must not create duplicates"
+    );
 
     // Retransmit count should be 3 (one per retransmitted event).
-    let retransmit_count: i64 =
-        sqlx::query_scalar("SELECT retransmit_count FROM stream_metrics")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let retransmit_count: i64 = sqlx::query_scalar("SELECT retransmit_count FROM stream_metrics")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(retransmit_count, 3, "each retransmit should be counted");
 }
 
@@ -267,15 +269,17 @@ async fn chaos_network_rapid_reconnects_no_duplication() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 3, "unique events must be exactly 3 regardless of reconnects");
+    assert_eq!(
+        count, 3,
+        "unique events must be exactly 3 regardless of reconnects"
+    );
 
     // Retransmit count: (num_reconnects - 1) * 3 retransmits (each reconnect after
     // the first sends all 3 events again as retransmits).
-    let retransmit_count: i64 =
-        sqlx::query_scalar("SELECT retransmit_count FROM stream_metrics")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let retransmit_count: i64 = sqlx::query_scalar("SELECT retransmit_count FROM stream_metrics")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(
         retransmit_count,
         ((num_reconnects - 1) * 3) as i64,
@@ -394,7 +398,10 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
         // Session dropped here.
     }
 
-    assert!(max_seq_session1 >= 1, "first receiver session should have gotten some events");
+    assert!(
+        max_seq_session1 >= 1,
+        "first receiver session should have gotten some events"
+    );
 
     // Receiver session 2: reconnects with cursor at max_seq_session1.
     // Should only get events after that cursor.
@@ -521,7 +528,10 @@ async fn chaos_two_streams_independent_under_flap() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(total_count, 6, "both streams should have all events in DB after flap");
+    assert_eq!(
+        total_count, 6,
+        "both streams should have all events in DB after flap"
+    );
 
     // Session 2: reconnect and send 1 more event per stream.
     {
@@ -582,5 +592,8 @@ async fn chaos_two_streams_independent_under_flap() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(final_count, 8, "after session 2, each stream should have 4 events");
+    assert_eq!(
+        final_count, 8,
+        "after session 2, each stream should have 4 events"
+    );
 }

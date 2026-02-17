@@ -44,7 +44,10 @@ fn range_expands_inclusive() {
 fn range_ips_are_in_ascending_order() {
     let result = expand_target("10.0.0.1-5:8080").expect("should parse");
     let ips: Vec<_> = result.iter().map(|e| e.ip.as_str()).collect();
-    assert_eq!(ips, ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]);
+    assert_eq!(
+        ips,
+        ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]
+    );
 }
 
 #[test]

@@ -10,14 +10,10 @@
 /// - UNIQUE constraint on (stream_key, stream_epoch, seq)
 /// - integrity_check passes on a fresh database
 /// - Duplicate inserts are rejected (not silently swallowed)
-
 use rusqlite::Connection;
 use std::path::Path;
 
-const SCHEMA_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/src/storage/schema.sql"
-);
+const SCHEMA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/storage/schema.sql");
 
 /// Helper: open an in-memory database and apply PRAGMAs + schema.
 fn open_memory_db() -> Connection {
@@ -72,11 +68,7 @@ fn wal_mode_is_set() {
     let mode: String = conn
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .expect("query journal_mode");
-    assert_eq!(
-        mode.to_lowercase(),
-        "wal",
-        "journal_mode must be WAL"
-    );
+    assert_eq!(mode.to_lowercase(), "wal", "journal_mode must be WAL");
 }
 
 #[test]
@@ -104,8 +96,7 @@ fn foreign_keys_enabled() {
 
 #[test]
 fn schema_file_exists_and_is_nonempty() {
-    let sql = std::fs::read_to_string(SCHEMA_PATH)
-        .expect("Schema file should exist");
+    let sql = std::fs::read_to_string(SCHEMA_PATH).expect("Schema file should exist");
     assert!(!sql.trim().is_empty(), "Schema file must not be empty");
 }
 

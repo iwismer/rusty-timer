@@ -10,19 +10,13 @@
 //! 7. Events are generated in deterministic order per reader
 //! 8. total_events count is respected per reader
 
-use emulator_v2::scenario::{EmulatorMode, load_scenario_from_str};
+use emulator_v2::scenario::{load_scenario_from_str, EmulatorMode};
 
-const SINGLE_READER_YAML: &str = include_str!(
-    "../test_assets/scenarios/single_reader.yaml"
-);
+const SINGLE_READER_YAML: &str = include_str!("../test_assets/scenarios/single_reader.yaml");
 
-const MULTI_READER_YAML: &str = include_str!(
-    "../test_assets/scenarios/multi_reader.yaml"
-);
+const MULTI_READER_YAML: &str = include_str!("../test_assets/scenarios/multi_reader.yaml");
 
-const FORWARDER_MODE_YAML: &str = include_str!(
-    "../test_assets/scenarios/forwarder_mode.yaml"
-);
+const FORWARDER_MODE_YAML: &str = include_str!("../test_assets/scenarios/forwarder_mode.yaml");
 
 // ---------------------------------------------------------------------------
 // Parser tests
@@ -66,7 +60,10 @@ fn parse_forwarder_mode_scenario() {
     assert_eq!(cfg.seed, 77);
 
     // Forwarder-mode fields
-    assert_eq!(cfg.server_url.as_deref(), Some("ws://127.0.0.1:9999/ws/v1/forwarders"));
+    assert_eq!(
+        cfg.server_url.as_deref(),
+        Some("ws://127.0.0.1:9999/ws/v1/forwarders")
+    );
     assert_eq!(cfg.token.as_deref(), Some("test-token-abc"));
     assert_eq!(cfg.forwarder_id.as_deref(), Some("emulated-fwd-1"));
     assert_eq!(cfg.readers.len(), 1);
@@ -168,7 +165,11 @@ fn events_seq_is_monotonic() {
     let seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
     assert_eq!(seqs[0], 1, "first seq must be 1");
     for i in 1..seqs.len() {
-        assert_eq!(seqs[i], seqs[i-1] + 1, "seq must be monotonically increasing by 1");
+        assert_eq!(
+            seqs[i],
+            seqs[i - 1] + 1,
+            "seq must be monotonically increasing by 1"
+        );
     }
 }
 
@@ -201,15 +202,14 @@ fn chip_ids_come_from_scenario_config() {
     let reader = &cfg.readers[0];
 
     let events = generate_reader_events(reader, cfg.seed);
-    let chip_ids_in_config: std::collections::HashSet<String> = reader
-        .chip_ids
-        .iter()
-        .map(|id| id.to_string())
-        .collect();
+    let chip_ids_in_config: std::collections::HashSet<String> =
+        reader.chip_ids.iter().map(|id| id.to_string()).collect();
 
     for event in &events {
         // The raw_read_line should contain a chip_id from the configured list
-        let found = chip_ids_in_config.iter().any(|id| event.raw_read_line.contains(id.as_str()));
+        let found = chip_ids_in_config
+            .iter()
+            .any(|id| event.raw_read_line.contains(id.as_str()));
         assert!(
             found,
             "event raw_read_line '{}' must contain a configured chip_id",

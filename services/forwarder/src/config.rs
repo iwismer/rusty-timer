@@ -138,8 +138,7 @@ pub fn load_config_from_str(
     toml_str: &str,
     _config_file_path: &Path,
 ) -> Result<ForwarderConfig, ConfigError> {
-    let raw: RawConfig =
-        toml::from_str(toml_str).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let raw: RawConfig = toml::from_str(toml_str).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
     // Validate schema_version
     let schema_version = raw

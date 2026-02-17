@@ -78,15 +78,27 @@ fn epoch_bump_does_not_delete_old_epoch_events() {
 
     // Write an event in epoch 1
     let seq1 = j.next_seq(stream_key).unwrap();
-    j.insert_event(stream_key, 1, seq1, Some("2026-01-01T00:00:00Z"), "aa01line", "RAW")
-        .expect("insert event epoch 1");
+    j.insert_event(
+        stream_key,
+        1,
+        seq1,
+        Some("2026-01-01T00:00:00Z"),
+        "aa01line",
+        "RAW",
+    )
+    .expect("insert event epoch 1");
 
     // Bump to epoch 2
     j.bump_epoch(stream_key, 2).expect("bump epoch");
 
     // Old epoch 1 event must still be in journal
-    let count = j.count_events_for_epoch(stream_key, 1).expect("count epoch 1");
-    assert_eq!(count, 1, "old-epoch events must not be deleted on epoch bump");
+    let count = j
+        .count_events_for_epoch(stream_key, 1)
+        .expect("count epoch 1");
+    assert_eq!(
+        count, 1,
+        "old-epoch events must not be deleted on epoch bump"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +123,10 @@ fn seq_resumes_from_persisted_state_after_reopen() {
     {
         let mut j = open_journal_at(&path);
         let resumed = j.next_seq("192.168.2.50").expect("resumed seq");
-        assert_eq!(resumed, 4, "seq must resume from persisted state after reopen");
+        assert_eq!(
+            resumed, 4,
+            "seq must resume from persisted state after reopen"
+        );
     }
 }
 
@@ -199,7 +214,8 @@ fn update_ack_cursor_advances_acked_seq() {
 
     for i in 1..=5 {
         let seq = j.next_seq("192.168.2.20").unwrap();
-        j.insert_event("192.168.2.20", 1, seq, None, "line", "RAW").unwrap();
+        j.insert_event("192.168.2.20", 1, seq, None, "line", "RAW")
+            .unwrap();
         assert_eq!(seq, i);
     }
 
@@ -211,7 +227,9 @@ fn update_ack_cursor_advances_acked_seq() {
     assert_eq!(acked_epoch, 1);
     assert_eq!(acked_seq, 3);
 
-    let unacked = j.unacked_events("192.168.2.20", 1, acked_seq).expect("unacked");
+    let unacked = j
+        .unacked_events("192.168.2.20", 1, acked_seq)
+        .expect("unacked");
     assert_eq!(unacked.len(), 2, "events 4 and 5 should be unacked");
     assert_eq!(unacked[0].seq, 4);
     assert_eq!(unacked[1].seq, 5);

@@ -11,13 +11,13 @@
 //!   POST /api/v1/connect        - initiate WS connection (async, 202)
 //!   POST /api/v1/disconnect     - close WS connection (async, 202)
 
-use std::sync::Arc;
-use axum::{Router, Json, extract::State, http::StatusCode, response::IntoResponse};
-use axum::routing::{get, put, post};
-use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, watch, RwLock};
-use tracing::info;
 use crate::db::{Db, Subscription};
+use axum::routing::{get, post, put};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::{watch, Mutex, RwLock};
+use tracing::info;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -118,13 +118,21 @@ pub struct LogsResponse {
 async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db = state.db.lock().await;
     match db.load_profile() {
-        Ok(Some(p)) => Json(ProfileResponse { server_url: p.server_url, token: p.token, log_level: p.log_level }).into_response(),
+        Ok(Some(p)) => Json(ProfileResponse {
+            server_url: p.server_url,
+            token: p.token,
+            log_level: p.log_level,
+        })
+        .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no profile").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-async fn put_profile(State(state): State<Arc<AppState>>, Json(body): Json<ProfileRequest>) -> impl IntoResponse {
+async fn put_profile(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ProfileRequest>,
+) -> impl IntoResponse {
     let db = state.db.lock().await;
     match db.save_profile(&body.server_url, &body.token, &body.log_level) {
         Ok(()) => {
@@ -157,27 +165,43 @@ async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
     };
 
-    let streams: Vec<StreamEntry> = subs.iter().map(|s| {
-        let port = s.local_port_override
-            .or_else(|| crate::ports::default_port(&s.reader_ip));
-        StreamEntry {
-            forwarder_id: s.forwarder_id.clone(),
-            reader_ip: s.reader_ip.clone(),
-            subscribed: true,
-            local_port: port,
-        }
-    }).collect();
+    let streams: Vec<StreamEntry> = subs
+        .iter()
+        .map(|s| {
+            let port = s
+                .local_port_override
+                .or_else(|| crate::ports::default_port(&s.reader_ip));
+            StreamEntry {
+                forwarder_id: s.forwarder_id.clone(),
+                reader_ip: s.reader_ip.clone(),
+                subscribed: true,
+                local_port: port,
+            }
+        })
+        .collect();
 
     let degraded = upstream_error.is_some();
-    Json(StreamsResponse { streams, degraded, upstream_error }).into_response()
+    Json(StreamsResponse {
+        streams,
+        degraded,
+        upstream_error,
+    })
+    .into_response()
 }
 
-async fn put_subscriptions(State(state): State<Arc<AppState>>, Json(body): Json<SubscriptionsBody>) -> impl IntoResponse {
-    let subs: Vec<Subscription> = body.subscriptions.into_iter().map(|s| Subscription {
-        forwarder_id: s.forwarder_id,
-        reader_ip: s.reader_ip,
-        local_port_override: s.local_port_override,
-    }).collect();
+async fn put_subscriptions(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SubscriptionsBody>,
+) -> impl IntoResponse {
+    let subs: Vec<Subscription> = body
+        .subscriptions
+        .into_iter()
+        .map(|s| Subscription {
+            forwarder_id: s.forwarder_id,
+            reader_ip: s.reader_ip,
+            local_port_override: s.local_port_override,
+        })
+        .collect();
     let db = state.db.lock().await;
     match db.replace_subscriptions(&subs) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -190,7 +214,12 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db = state.db.lock().await;
     let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = db.integrity_check().is_ok();
-    Json(StatusResponse { connection_state: conn, local_ok, streams_count }).into_response()
+    Json(StatusResponse {
+        connection_state: conn,
+        local_ok,
+        streams_count,
+    })
+    .into_response()
 }
 
 async fn get_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -227,12 +256,12 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/v1/profile",       get(get_profile).put(put_profile))
-        .route("/api/v1/streams",       get(get_streams))
+        .route("/api/v1/profile", get(get_profile).put(put_profile))
+        .route("/api/v1/streams", get(get_streams))
         .route("/api/v1/subscriptions", put(put_subscriptions))
-        .route("/api/v1/status",        get(get_status))
-        .route("/api/v1/logs",          get(get_logs))
-        .route("/api/v1/connect",       post(post_connect))
-        .route("/api/v1/disconnect",    post(post_disconnect))
+        .route("/api/v1/status", get(get_status))
+        .route("/api/v1/logs", get(get_logs))
+        .route("/api/v1/connect", post(post_connect))
+        .route("/api/v1/disconnect", post(post_disconnect))
         .with_state(state)
 }

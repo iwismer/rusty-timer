@@ -1,3 +1,4 @@
+use forwarder::replay::{ReplayEngine, ReplayResult};
 /// Tests for replay/resume behavior after disconnect/reconnect.
 ///
 /// Validates:
@@ -6,7 +7,6 @@
 /// - Events across epoch boundaries are replayed correctly
 /// - Journal state is updated correctly after ack receipt
 use forwarder::storage::journal::Journal;
-use forwarder::replay::{ReplayEngine, ReplayResult};
 use rt_test_utils::MockWsServer;
 use tempfile::NamedTempFile;
 
@@ -29,7 +29,8 @@ fn replay_starts_after_ack_cursor() {
     // Insert 5 events
     for i in 1..=5 {
         let seq = j.next_seq("192.168.2.10").unwrap();
-        j.insert_event("192.168.2.10", 1, seq, None, "line", "RAW").unwrap();
+        j.insert_event("192.168.2.10", 1, seq, None, "line", "RAW")
+            .unwrap();
         assert_eq!(seq, i);
     }
 
@@ -56,7 +57,8 @@ fn replay_returns_empty_when_fully_acked() {
 
     for _ in 1..=3 {
         let seq = j.next_seq("192.168.2.20").unwrap();
-        j.insert_event("192.168.2.20", 1, seq, None, "line", "RAW").unwrap();
+        j.insert_event("192.168.2.20", 1, seq, None, "line", "RAW")
+            .unwrap();
     }
 
     // Ack through seq 3 (all events acked)
@@ -65,7 +67,10 @@ fn replay_returns_empty_when_fully_acked() {
     let engine = ReplayEngine::new();
     let result = engine.pending_events(&j, "192.168.2.20").unwrap();
     let total_events: usize = result.iter().map(|b| b.events.len()).sum();
-    assert_eq!(total_events, 0, "no events should be pending when fully acked");
+    assert_eq!(
+        total_events, 0,
+        "no events should be pending when fully acked"
+    );
 }
 
 /// Test: replay returns events from multiple epochs when old-epoch events are unacked.
@@ -77,7 +82,8 @@ fn replay_includes_old_epoch_unacked_events() {
     // Write 2 events in epoch 1
     for _ in 1..=2 {
         let seq = j.next_seq("192.168.2.30").unwrap();
-        j.insert_event("192.168.2.30", 1, seq, None, "epoch1-event", "RAW").unwrap();
+        j.insert_event("192.168.2.30", 1, seq, None, "epoch1-event", "RAW")
+            .unwrap();
     }
 
     // Bump to epoch 2 WITHOUT acking epoch 1
@@ -86,7 +92,8 @@ fn replay_includes_old_epoch_unacked_events() {
     // Write 2 events in epoch 2
     for _ in 1..=2 {
         let seq = j.next_seq("192.168.2.30").unwrap();
-        j.insert_event("192.168.2.30", 2, seq, None, "epoch2-event", "RAW").unwrap();
+        j.insert_event("192.168.2.30", 2, seq, None, "epoch2-event", "RAW")
+            .unwrap();
     }
 
     let engine = ReplayEngine::new();
@@ -95,7 +102,10 @@ fn replay_includes_old_epoch_unacked_events() {
     // Should have both epoch 1 and epoch 2 batches
     assert!(result.len() >= 1, "should have pending events");
     let total_events: usize = result.iter().map(|b| b.events.len()).sum();
-    assert_eq!(total_events, 4, "all 4 unacked events (2 epoch1 + 2 epoch2) should be pending");
+    assert_eq!(
+        total_events, 4,
+        "all 4 unacked events (2 epoch1 + 2 epoch2) should be pending"
+    );
 }
 
 /// Test: after replay and ack, cursor advances correctly.
@@ -106,7 +116,8 @@ fn replay_cursor_advances_after_ack() {
 
     for _ in 1..=3 {
         let seq = j.next_seq("192.168.2.40").unwrap();
-        j.insert_event("192.168.2.40", 1, seq, None, "line", "RAW").unwrap();
+        j.insert_event("192.168.2.40", 1, seq, None, "line", "RAW")
+            .unwrap();
     }
 
     // Ack seq 2

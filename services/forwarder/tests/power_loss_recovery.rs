@@ -45,8 +45,15 @@ fn events_survive_close_and_reopen() {
         let mut j = Journal::open(&path).unwrap();
         j.ensure_stream_state("10.0.0.5", 1).unwrap();
         let seq = j.next_seq("10.0.0.5").unwrap();
-        j.insert_event("10.0.0.5", 1, seq, Some("2026-01-01T00:00:00Z"), "test-line", "RAW")
-            .unwrap();
+        j.insert_event(
+            "10.0.0.5",
+            1,
+            seq,
+            Some("2026-01-01T00:00:00Z"),
+            "test-line",
+            "RAW",
+        )
+        .unwrap();
     }
 
     {
@@ -67,7 +74,8 @@ fn ack_cursor_survives_close_and_reopen() {
         j.ensure_stream_state("10.0.0.6", 1).unwrap();
         for _ in 1..=3 {
             let seq = j.next_seq("10.0.0.6").unwrap();
-            j.insert_event("10.0.0.6", 1, seq, None, "line", "RAW").unwrap();
+            j.insert_event("10.0.0.6", 1, seq, None, "line", "RAW")
+                .unwrap();
         }
         j.update_ack_cursor("10.0.0.6", 1, 2).unwrap(); // ack through seq 2
     }
@@ -96,10 +104,14 @@ fn duplicate_stream_epoch_seq_is_rejected() {
     j.ensure_stream_state("10.0.0.7", 1).unwrap();
     let seq = j.next_seq("10.0.0.7").unwrap();
 
-    j.insert_event("10.0.0.7", 1, seq, None, "line", "RAW").unwrap();
+    j.insert_event("10.0.0.7", 1, seq, None, "line", "RAW")
+        .unwrap();
     // Try to insert the same (stream_key, epoch, seq) again
     let result = j.insert_event("10.0.0.7", 1, seq, None, "line-dup", "RAW");
-    assert!(result.is_err(), "duplicate (stream_key, epoch, seq) must be rejected");
+    assert!(
+        result.is_err(),
+        "duplicate (stream_key, epoch, seq) must be rejected"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +126,8 @@ fn prune_acked_events_first() {
 
     for _ in 1..=5 {
         let seq = j.next_seq("10.0.0.8").unwrap();
-        j.insert_event("10.0.0.8", 1, seq, None, "line", "RAW").unwrap();
+        j.insert_event("10.0.0.8", 1, seq, None, "line", "RAW")
+            .unwrap();
     }
 
     // Ack through seq 3
@@ -139,7 +152,8 @@ fn total_event_count_accessible() {
 
     for _ in 1..=7 {
         let seq = j.next_seq("10.0.0.9").unwrap();
-        j.insert_event("10.0.0.9", 1, seq, None, "line", "RAW").unwrap();
+        j.insert_event("10.0.0.9", 1, seq, None, "line", "RAW")
+            .unwrap();
     }
 
     let total = j.total_event_count().unwrap();

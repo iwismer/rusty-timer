@@ -30,21 +30,21 @@ fn round_trip(relative_path: &str) -> WsMessage {
     let serialized = serde_json::to_string(&value)
         .unwrap_or_else(|e| panic!("Failed to serialize {}: {}", file_path.display(), e));
 
-    let roundtripped: WsMessage = serde_json::from_str(&serialized)
-        .unwrap_or_else(|e| {
-            panic!(
-                "Failed to re-deserialize after serialize for {}: {}\nJSON: {}",
-                file_path.display(),
-                e,
-                serialized
-            )
-        });
+    let roundtripped: WsMessage = serde_json::from_str(&serialized).unwrap_or_else(|e| {
+        panic!(
+            "Failed to re-deserialize after serialize for {}: {}\nJSON: {}",
+            file_path.display(),
+            e,
+            serialized
+        )
+    });
 
     // Basic structural equality check via re-serializing both.
     let original_json: serde_json::Value = serde_json::from_str(&json_text).unwrap();
     let roundtrip_json: serde_json::Value = serde_json::from_str(&serialized).unwrap();
     assert_eq!(
-        original_json, roundtrip_json,
+        original_json,
+        roundtrip_json,
         "Round-trip mismatch for {}",
         file_path.display()
     );
@@ -58,7 +58,10 @@ fn forwarder_hello_round_trip() {
     let msg = round_trip("contracts/ws/v1/examples/forwarder_hello.json");
     match msg {
         WsMessage::ForwarderHello(inner) => {
-            assert!(!inner.forwarder_id.is_empty(), "forwarder_id must be non-empty");
+            assert!(
+                !inner.forwarder_id.is_empty(),
+                "forwarder_id must be non-empty"
+            );
             assert!(!inner.reader_ips.is_empty(), "reader_ips must be non-empty");
             // No session_id on hello.
         }
@@ -96,7 +99,10 @@ fn receiver_hello_round_trip() {
     let msg = round_trip("contracts/ws/v1/examples/receiver_hello.json");
     match msg {
         WsMessage::ReceiverHello(inner) => {
-            assert!(!inner.receiver_id.is_empty(), "receiver_id must be non-empty");
+            assert!(
+                !inner.receiver_id.is_empty(),
+                "receiver_id must be non-empty"
+            );
             // No session_id on hello.
         }
         other => panic!("Expected ReceiverHello, got {:?}", other),

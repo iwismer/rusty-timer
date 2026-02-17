@@ -340,8 +340,7 @@ fn apply_pragmas(conn: &Connection) -> Result<(), JournalError> {
 }
 
 fn run_integrity_check(conn: &Connection) -> Result<(), JournalError> {
-    let result: String = conn
-        .pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+    let result: String = conn.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
     if result != "ok" {
         return Err(JournalError::IntegrityCheckFailed(result));
     }

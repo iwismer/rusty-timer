@@ -1,8 +1,8 @@
-use tokio::net::TcpListener;
-use tokio::io::AsyncReadExt;
-use tokio::sync::broadcast;
-use rt_protocol::ReadEvent;
 use receiver::local_proxy::LocalProxy;
+use rt_protocol::ReadEvent;
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
 fn make_event(fwd: &str, ip: &str, seq: u64, raw: &str) -> ReadEvent {
     ReadEvent {
@@ -28,8 +28,11 @@ async fn free_port() -> u16 {
 async fn proxy_binds_immediately_before_events() {
     let (tx, _rx): (broadcast::Sender<ReadEvent>, _) = broadcast::channel(16);
     let port = free_port().await;
-    let proxy = LocalProxy::bind(port, tx).await.expect("bind should succeed");
-    tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await
+    let proxy = LocalProxy::bind(port, tx)
+        .await
+        .expect("bind should succeed");
+    tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
         .expect("should connect before any events arrive");
     proxy.shutdown();
 }
@@ -40,14 +43,17 @@ async fn proxy_delivers_event_to_single_consumer() {
     let port = free_port().await;
     let _proxy = LocalProxy::bind(port, tx.clone()).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    tx.send(make_event("f","192.168.1.100",1,"aa01,00:01:23.456")).unwrap();
+    tx.send(make_event("f", "192.168.1.100", 1, "aa01,00:01:23.456"))
+        .unwrap();
     let mut buf = vec![0u8; 64];
-    let n = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        client.read(&mut buf)
-    ).await.expect("read timed out").unwrap();
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+        .await
+        .expect("read timed out")
+        .unwrap();
     let s = std::str::from_utf8(&buf[..n]).unwrap();
     assert!(s.contains("aa01,00:01:23.456"), "got: {s:?}");
 }
@@ -58,15 +64,17 @@ async fn proxy_preserves_exact_bytes() {
     let port = free_port().await;
     let _proxy = LocalProxy::bind(port, tx.clone()).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let raw = "aa01,00:01:23.456";
-    tx.send(make_event("f","192.168.1.100",1,raw)).unwrap();
+    tx.send(make_event("f", "192.168.1.100", 1, raw)).unwrap();
     let mut buf = vec![0u8; 128];
-    let n = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        client.read(&mut buf)
-    ).await.expect("read timed out").unwrap();
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+        .await
+        .expect("read timed out")
+        .unwrap();
     let received = std::str::from_utf8(&buf[..n]).unwrap();
     assert_eq!(received, format!("{raw}\n"), "bytes must be exact");
 }
@@ -77,19 +85,29 @@ async fn proxy_multiple_consumers_all_receive() {
     let port = free_port().await;
     let _proxy = LocalProxy::bind(port, tx.clone()).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    let mut c1 = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
-    let mut c2 = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
-    let mut c3 = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let mut c1 = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let mut c2 = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let mut c3 = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    tx.send(make_event("f","192.168.1.100",1,"broadcast-line")).unwrap();
+    tx.send(make_event("f", "192.168.1.100", 1, "broadcast-line"))
+        .unwrap();
     let mut buf = vec![0u8; 64];
     for (i, c) in [&mut c1, &mut c2, &mut c3].iter_mut().enumerate() {
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            c.read(&mut buf)
-        ).await.unwrap_or_else(|_| panic!("consumer {i} read timed out")).unwrap();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("consumer {i} read timed out"))
+            .unwrap();
         let s = std::str::from_utf8(&buf[..n]).unwrap();
-        assert!(s.contains("broadcast-line"), "consumer {i} did not receive: {s:?}");
+        assert!(
+            s.contains("broadcast-line"),
+            "consumer {i} did not receive: {s:?}"
+        );
     }
 }
 
@@ -99,17 +117,22 @@ async fn proxy_multiple_events_in_sequence() {
     let port = free_port().await;
     let _proxy = LocalProxy::bind(port, tx.clone()).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     for i in 1u64..=3 {
-        tx.send(make_event("f","192.168.1.100",i,&format!("line{i}"))).unwrap();
+        tx.send(make_event("f", "192.168.1.100", i, &format!("line{i}")))
+            .unwrap();
     }
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let mut buf = vec![0u8; 256];
-    let n = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        client.read(&mut buf)
-    ).await.expect("read timed out").unwrap();
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
+        .await
+        .expect("read timed out")
+        .unwrap();
     let s = std::str::from_utf8(&buf[..n]).unwrap();
-    for i in 1..=3 { assert!(s.contains(&format!("line{i}")), "missing line{i} in: {s:?}"); }
+    for i in 1..=3 {
+        assert!(s.contains(&format!("line{i}")), "missing line{i} in: {s:?}");
+    }
 }

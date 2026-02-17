@@ -183,7 +183,10 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
             Ok(Err(_)) | Err(_) => break,
         }
     }
-    assert!(max_seq_seen >= 5, "first session should have received events up to seq 5");
+    assert!(
+        max_seq_seen >= 5,
+        "first session should have received events up to seq 5"
+    );
 
     // Forwarder sends 3 more events (seq 6..8).
     send_events(&mut fwd, &fwd_session, "fwd-rpl-01", "10.10.10.1", 1, 6, 3).await;
@@ -323,7 +326,11 @@ async fn e2e_replay_fresh_receiver_gets_all_events() {
         }
     }
 
-    assert!(total_events >= 4, "fresh receiver should get all 4 events, got {}", total_events);
+    assert!(
+        total_events >= 4,
+        "fresh receiver should get all 4 events, got {}",
+        total_events
+    );
     assert_eq!(min_seq, 1, "first event should be seq=1");
 }
 
@@ -367,7 +374,16 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
     };
 
     // Send epoch 1, seq 1 and 2.
-    send_events(&mut fwd, &fwd_session_ep1, "fwd-epoch-01", "10.30.30.1", 1, 1, 2).await;
+    send_events(
+        &mut fwd,
+        &fwd_session_ep1,
+        "fwd-epoch-01",
+        "10.30.30.1",
+        1,
+        1,
+        2,
+    )
+    .await;
 
     // Simulate epoch reset: forwarder re-hellos with epoch 2.
     // The server receives a new hello implying the epoch was reset.
@@ -390,7 +406,16 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
     };
 
     // Send epoch 2, seq 1.
-    send_events(&mut fwd, &fwd_session_ep2, "fwd-epoch-01", "10.30.30.1", 2, 1, 1).await;
+    send_events(
+        &mut fwd,
+        &fwd_session_ep2,
+        "fwd-epoch-01",
+        "10.30.30.1",
+        2,
+        1,
+        1,
+    )
+    .await;
 
     // Verify: DB should have 3 events total (epoch 1 seq 1,2 + epoch 2 seq 1).
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")

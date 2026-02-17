@@ -19,7 +19,10 @@ pub async fn validate_token(pool: &PgPool, raw_token: &str) -> Option<TokenClaim
     .fetch_optional(pool)
     .await
     .ok()??;
-    Some(TokenClaims { device_id: row.device_id, device_type: row.device_type })
+    Some(TokenClaims {
+        device_id: row.device_id,
+        device_type: row.device_type,
+    })
 }
 
 pub fn extract_bearer(authorization: &str) -> Option<&str> {

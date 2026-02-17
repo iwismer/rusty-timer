@@ -6,10 +6,7 @@
 /// NOTE: Full migration execution testing requires a PostgreSQL container
 /// (e.g., testcontainers-rs) and is deferred to the integration test phase.
 
-const MIGRATION_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/migrations/0001_init.sql"
-);
+const MIGRATION_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/0001_init.sql");
 
 fn read_migration() -> String {
     std::fs::read_to_string(MIGRATION_PATH)
@@ -177,10 +174,7 @@ fn streams_has_stream_epoch() {
 #[test]
 fn streams_has_online() {
     let sql = read_migration();
-    assert!(
-        sql.contains("online"),
-        "streams must have online column"
-    );
+    assert!(sql.contains("online"), "streams must have online column");
 }
 
 #[test]
@@ -188,7 +182,8 @@ fn streams_unique_forwarder_reader() {
     let sql = read_migration();
     // Allow either UNIQUE(...) or UNIQUE (...) syntax
     assert!(
-        sql.contains("UNIQUE(forwarder_id, reader_ip)") || sql.contains("UNIQUE (forwarder_id, reader_ip)"),
+        sql.contains("UNIQUE(forwarder_id, reader_ip)")
+            || sql.contains("UNIQUE (forwarder_id, reader_ip)"),
         "streams must have UNIQUE(forwarder_id, reader_ip) constraint"
     );
 }
@@ -311,7 +306,10 @@ fn stream_metrics_references_streams() {
     assert!(sm_start.is_some(), "stream_metrics table must exist");
     let sm_section = &sql[sm_start.unwrap()..];
     // Find the end of this table's CREATE statement
-    let next_create = sm_section[1..].find("create table").map(|i| i + 1).unwrap_or(sm_section.len());
+    let next_create = sm_section[1..]
+        .find("create table")
+        .map(|i| i + 1)
+        .unwrap_or(sm_section.len());
     let sm_block = &sm_section[..next_create];
     assert!(
         sm_block.contains("REFERENCES streams(stream_id)"),
