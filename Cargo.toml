@@ -47,6 +47,22 @@ path = "tests/integration/e2e_forwarder_server_receiver.rs"
 name = "e2e_replay_resume"
 path = "tests/integration/e2e_replay_resume.rs"
 
+[[test]]
+name = "chaos_network"
+path = "tests/integration/chaos_network.rs"
+
+[[test]]
+name = "power_loss_forwarder"
+path = "tests/integration/power_loss_forwarder.rs"
+
+[[test]]
+name = "server_restart"
+path = "tests/integration/server_restart.rs"
+
+[[test]]
+name = "disk_watermark_prune"
+path = "tests/integration/disk_watermark_prune.rs"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 testcontainers = "0.23"
@@ -60,3 +76,6 @@ server = { path = "services/server" }
 receiver = { path = "services/receiver" }
 tempfile = "3"
 axum = { version = "0.7", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+forwarder = { path = "services/forwarder" }
+serde_json = "1"
