@@ -1,0 +1,25 @@
+[package]
+name = "streamer"
+version = "1.0.0"
+edition = "2021"
+authors = ["iwismer <isaac@iwismer.ca>"]
+
+[lib]
+name = "streamer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "streamer"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+rusqlite = { version = "0.37", features = ["bundled"] }
+clap = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+timer-core = { path = "../../crates/timer-core" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
