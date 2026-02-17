@@ -1,3 +1,15 @@
+[workspace]
+members = [
+    ".",
+    "crates/ipico-core",
+    "crates/rt-protocol",
+    "crates/rt-test-utils",
+    "services/forwarder",
+    "services/server",
+    "services/receiver",
+]
+resolver = "2"
+
 [package]
 name = "rusty-timer"
 version = "1.0.0"
