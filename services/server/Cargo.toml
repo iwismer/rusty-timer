@@ -2,3 +2,24 @@
 name = "server"
 version = "0.1.0"
 edition = "2021"
+
+# TODO: Add sqlx dependency when server query code is implemented in later tasks.
+# sqlx 0.8.x has a libsqlite3-sys version conflict with rusqlite 0.37 in the
+# workspace (launchbadge/sqlx#3926). The fix is merged upstream but not yet
+# released. Add sqlx once 0.9 (or a patched 0.8.x) ships, or pin to a git rev.
+#
+# Required features when added:
+#   sqlx = { version = "0.9", default-features = false, features = [
+#     "runtime-tokio", "postgres", "migrate", "macros", "chrono"
+#   ] }
+#
+# TODO: Regenerate .sqlx/ offline query cache when queries are added in later tasks.
+# Run: DATABASE_URL=postgres://localhost/rt cargo sqlx prepare --workspace
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
