@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "stream_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1d1d85c25eda4f9ac98aa908fa409aac5eb470a81bcd2aff182d9caa77614cd0"
+}
