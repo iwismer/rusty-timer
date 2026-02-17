@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remote-forwarding/contracts/ws/v1/messages.schema.json",
+  "title": "Remote Forwarding WebSocket v1 Messages",
+  "description": "Discriminated union of all WebSocket messages exchanged in the Remote Forwarding Suite v1 protocol. All messages carry a top-level 'kind' field.",
+
+  "$defs": {
+
+    "ResumeCursor": {
+      "type": "object",
+      "description": "High-water mark cursor for a single (stream, epoch) pair.",
+      "required": ["forwarder_id", "reader_ip", "stream_epoch", "last_seq"],
+      "additionalProperties": false,
+      "properties": {
+        "forwarder_id": { "type": "string" },
+        "reader_ip":    { "type": "string" },
+        "stream_epoch": { "type": "integer", "minimum": 1 },
+        "last_seq":     { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "ReadEvent": {
+      "type": "object",
+      "description": "A single IPICO read event. forwarder_id is redundant for self-describing messages.",
+      "required": [
+        "forwarder_id", "reader_ip", "stream_epoch", "seq",
+        "reader_timestamp", "raw_read_line", "read_type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "forwarder_id":      { "type": "string" },
+        "reader_ip":         { "type": "string" },
+        "stream_epoch":      { "type": "integer", "minimum": 1 },
+        "seq":               { "type": "integer", "minimum": 1 },
+        "reader_timestamp":  { "type": "string", "description": "Device-reported timestamp; accepted as-is." },
+        "raw_read_line":     { "type": "string", "description": "UTF-8 text; ASCII IPICO payload expected." },
+        "read_type":         { "type": "string", "enum": ["RAW", "FSLS"] }
+      }
+    },
+
+    "AckEntry": {
+      "type": "object",
+      "description": "High-water mark acknowledgement for a (stream, epoch) pair.",
+      "required": ["forwarder_id", "reader_ip", "stream_epoch", "last_seq"],
+      "additionalProperties": false,
+      "properties": {
+        "forwarder_id": { "type": "string" },
+        "reader_ip":    { "type": "string" },
+        "stream_epoch": { "type": "integer", "minimum": 1 },
+        "last_seq":     { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "StreamRef": {
+      "type": "object",
+      "description": "Immutable stream identity reference.",
+      "required": ["forwarder_id", "reader_ip"],
+      "additionalProperties": false,
+      "properties": {
+        "forwarder_id": { "type": "string" },
+        "reader_ip":    { "type": "string" }
+      }
+    },
+
+    "ForwarderHello": {
+      "type": "object",
+      "description": "Sent by forwarder immediately after WS connection. session_id is NOT present; it will be assigned by the server and returned in the first heartbeat.",
+      "required": ["kind", "forwarder_id", "reader_ips"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":         { "const": "forwarder_hello" },
+        "forwarder_id": { "type": "string", "description": "Advisory; must match token claims if present." },
+        "reader_ips":   { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "resume": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ResumeCursor" },
+          "default": []
+        }
+      }
+    },
+
+    "ForwarderEventBatch": {
+      "type": "object",
+      "description": "Forwarder -> Server: a batch of read events. batch_id is an opaque correlation ID for logging only; the server does not use it for ack logic.",
+      "required": ["kind", "session_id", "batch_id", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":       { "const": "forwarder_event_batch" },
+        "session_id": { "type": "string" },
+        "batch_id":   { "type": "string", "description": "Opaque correlation ID. No semantic ack meaning." },
+        "events":     { "type": "array", "items": { "$ref": "#/$defs/ReadEvent" }, "minItems": 1 }
+      }
+    },
+
+    "ForwarderAck": {
+      "type": "object",
+      "description": "Server -> Forwarder: acknowledges persistence of a batch. One ack per persisted batch; may cover multiple (stream, epoch) pairs.",
+      "required": ["kind", "session_id", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":       { "const": "forwarder_ack" },
+        "session_id": { "type": "string" },
+        "entries":    { "type": "array", "items": { "$ref": "#/$defs/AckEntry" }, "minItems": 1 }
+      }
+    },
+
+    "ReceiverHello": {
+      "type": "object",
+      "description": "Sent by receiver immediately after WS connection. session_id is NOT present; it will be assigned by the server and returned in the first heartbeat.",
+      "required": ["kind", "receiver_id"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":        { "const": "receiver_hello" },
+        "receiver_id": { "type": "string", "description": "Advisory; must match token claims if present." },
+        "resume": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ResumeCursor" },
+          "default": []
+        }
+      }
+    },
+
+    "ReceiverSubscribe": {
+      "type": "object",
+      "description": "Receiver -> Server: subscribe to additional streams mid-session. There is no unsubscribe in v1.",
+      "required": ["kind", "session_id", "streams"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":       { "const": "receiver_subscribe" },
+        "session_id": { "type": "string" },
+        "streams":    { "type": "array", "items": { "$ref": "#/$defs/StreamRef" }, "minItems": 1 }
+      }
+    },
+
+    "ReceiverEventBatch": {
+      "type": "object",
+      "description": "Server -> Receiver: a batch of read events for delivery.",
+      "required": ["kind", "session_id", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":       { "const": "receiver_event_batch" },
+        "session_id": { "type": "string" },
+        "events":     { "type": "array", "items": { "$ref": "#/$defs/ReadEvent" }, "minItems": 1 }
+      }
+    },
+
+    "ReceiverAck": {
+      "type": "object",
+      "description": "Receiver -> Server: acknowledges processing of a batch. May cover multiple (stream, epoch) pairs.",
+      "required": ["kind", "session_id", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":       { "const": "receiver_ack" },
+        "session_id": { "type": "string" },
+        "entries":    { "type": "array", "items": { "$ref": "#/$defs/AckEntry" }, "minItems": 1 }
+      }
+    },
+
+    "Heartbeat": {
+      "type": "object",
+      "description": "Server -> Client. Sent every 30 s; 90 s timeout (3 missed). The initial heartbeat carries session_id (assigned by server) and device_id (resolved from token claims). Clients must not send heartbeats until they receive the first server heartbeat.",
+      "required": ["kind", "session_id", "device_id"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":       { "const": "heartbeat" },
+        "session_id": { "type": "string" },
+        "device_id":  { "type": "string", "description": "Resolved from token claims; devices use this to learn their own identity." }
+      }
+    },
+
+    "Error": {
+      "type": "object",
+      "description": "Server -> Client. Protocol error. Frozen v1 codes: INVALID_TOKEN (not retryable), SESSION_EXPIRED (retryable), PROTOCOL_ERROR (not retryable), IDENTITY_MISMATCH (not retryable), INTEGRITY_CONFLICT (not retryable), INTERNAL_ERROR (retryable).",
+      "required": ["kind", "code", "message", "retryable"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":      { "const": "error" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_TOKEN",
+            "SESSION_EXPIRED",
+            "PROTOCOL_ERROR",
+            "IDENTITY_MISMATCH",
+            "INTEGRITY_CONFLICT",
+            "INTERNAL_ERROR"
+          ]
+        },
+        "message":   { "type": "string" },
+        "retryable": { "type": "boolean" }
+      }
+    },
+
+    "EpochResetCommand": {
+      "type": "object",
+      "description": "Server -> Forwarder. Instructs the forwarder to start a new epoch for the specified stream. Unacked backlog from older epochs remains replayable. Forwarder confirms by sending a new forwarder_hello with updated epoch.",
+      "required": ["kind", "session_id", "forwarder_id", "reader_ip", "new_stream_epoch"],
+      "additionalProperties": false,
+      "properties": {
+        "kind":             { "const": "epoch_reset_command" },
+        "session_id":       { "type": "string" },
+        "forwarder_id":     { "type": "string" },
+        "reader_ip":        { "type": "string" },
+        "new_stream_epoch": { "type": "integer", "minimum": 2 }
+      }
+    }
+
+  },
+
+  "oneOf": [
+    { "$ref": "#/$defs/ForwarderHello" },
+    { "$ref": "#/$defs/ForwarderEventBatch" },
+    { "$ref": "#/$defs/ForwarderAck" },
+    { "$ref": "#/$defs/ReceiverHello" },
+    { "$ref": "#/$defs/ReceiverSubscribe" },
+    { "$ref": "#/$defs/ReceiverEventBatch" },
+    { "$ref": "#/$defs/ReceiverAck" },
+    { "$ref": "#/$defs/Heartbeat" },
+    { "$ref": "#/$defs/Error" },
+    { "$ref": "#/$defs/EpochResetCommand" }
+  ]
+}

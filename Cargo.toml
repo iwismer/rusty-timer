@@ -1,3 +1,15 @@
+[workspace]
+members = [
+    ".",
+    "crates/ipico-core",
+    "crates/rt-protocol",
+    "crates/rt-test-utils",
+    "services/forwarder",
+    "services/server",
+    "services/receiver",
+]
+resolver = "2"
+
 [package]
 name = "rusty-timer"
 version = "1.0.0"
@@ -10,6 +22,7 @@ clap = "4"
 chrono = "0.4"
 encoding = "0.2"
 futures = "0.3"
+ipico-core = { path = "crates/ipico-core" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 

@@ -1,0 +1,25 @@
+{
+  "kind": "forwarder_event_batch",
+  "session_id": "sess-abc123",
+  "batch_id": "batch-0042",
+  "events": [
+    {
+      "forwarder_id": "fwd-001",
+      "reader_ip": "192.168.1.10",
+      "stream_epoch": 1,
+      "seq": 4201,
+      "reader_timestamp": "2026-02-17T10:00:00.000Z",
+      "raw_read_line": "09001234567890123 12:00:00.000 1",
+      "read_type": "RAW"
+    },
+    {
+      "forwarder_id": "fwd-001",
+      "reader_ip": "192.168.1.10",
+      "stream_epoch": 1,
+      "seq": 4202,
+      "reader_timestamp": "2026-02-17T10:00:01.500Z",
+      "raw_read_line": "09001234567890124 12:00:01.500 1",
+      "read_type": "RAW"
+    }
+  ]
+}
