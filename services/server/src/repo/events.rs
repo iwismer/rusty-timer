@@ -62,9 +62,12 @@ pub async fn fetch_events_after_cursor(
 ) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
     let rows = sqlx::query_as!(
         crate::repo::EventRow,
-        r#"SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type FROM events
-           WHERE stream_id = $1 AND (stream_epoch > $2 OR (stream_epoch = $2 AND seq > $3))
-           ORDER BY stream_epoch ASC, seq ASC"#,
+        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
+                  s.forwarder_id, s.reader_ip
+           FROM events e
+           JOIN streams s ON s.stream_id = e.stream_id
+           WHERE e.stream_id = $1 AND (e.stream_epoch > $2 OR (e.stream_epoch = $2 AND e.seq > $3))
+           ORDER BY e.stream_epoch ASC, e.seq ASC"#,
         stream_id, after_epoch, after_seq
     ).fetch_all(pool).await?;
     Ok(rows)
