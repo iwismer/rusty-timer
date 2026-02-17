@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online\n               FROM streams ORDER BY created_at ASC",
+  "query": "SELECT stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online, created_at\n           FROM streams ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -68,6 +68,17 @@
             "name": "online"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "created_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -79,8 +90,9 @@
       false,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "6d0dbaa274fe2d54ec1f3823beb7b67a5328d028155413b406607542ad13d11c"
+  "hash": "6866a9d6b75c1b5ac7a48e1c76a08d30f868d335d83a961e1ae909d1d84bee84"
 }
