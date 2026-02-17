@@ -296,8 +296,8 @@ async fn replay_backlog(
     }
 
     let read_events: Vec<ReadEvent> = events.iter().map(|e| ReadEvent {
-        forwarder_id: String::new(),
-        reader_ip: String::new(),
+        forwarder_id: e.forwarder_id.clone(),
+        reader_ip: e.reader_ip.clone(),
         stream_epoch: e.stream_epoch as u64,
         seq: e.seq as u64,
         reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
