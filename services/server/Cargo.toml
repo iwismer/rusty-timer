@@ -28,3 +28,4 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 rt-test-utils = { path = "../../crates/rt-test-utils" }
 sha2 = "0.10"
 sqlx = { version = "0.9.0-alpha.1", default-features = false, features = ["runtime-tokio","postgres","migrate","macros","chrono","uuid"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
