@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type) VALUES ($1, $2, $3, $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0929e590dbeac5507e8cee8c24ec24b3843cbba4aec8ac76f07e40eb1c45a46d"
+}

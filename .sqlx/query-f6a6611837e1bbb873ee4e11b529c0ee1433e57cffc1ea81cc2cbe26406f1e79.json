@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO receiver_cursors (receiver_id, stream_id, stream_epoch, last_seq, updated_at) VALUES ($1, $2, $3, $4, now())\n           ON CONFLICT (receiver_id, stream_id) DO UPDATE SET stream_epoch = EXCLUDED.stream_epoch, last_seq = EXCLUDED.last_seq, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f6a6611837e1bbb873ee4e11b529c0ee1433e57cffc1ea81cc2cbe26406f1e79"
+}

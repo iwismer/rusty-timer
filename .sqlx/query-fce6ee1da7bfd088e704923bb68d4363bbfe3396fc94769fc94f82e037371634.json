@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO stream_metrics (stream_id) VALUES ($1) ON CONFLICT (stream_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fce6ee1da7bfd088e704923bb68d4363bbfe3396fc94769fc94f82e037371634"
+}

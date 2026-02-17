@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT forwarder_id, stream_epoch, reader_ip FROM streams WHERE stream_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "forwarder_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "forwarder_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "stream_epoch",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "stream_epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reader_ip",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "reader_ip"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1dcd35938fb7763514572e690204ee47b4ed8cea4f6c7838612b6bf5898de317"
+}
