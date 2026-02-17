@@ -29,14 +29,9 @@ authors = ["iwismer <isaac@iwismer.ca>"]
 edition = "2021"
 homepage = "https://github.com/iwismer/rusty-timer"
 
-[dependencies]
-clap = "4"
-chrono = "0.4"
-encoding = "0.2"
-futures = "0.3"
-ipico-core = { path = "crates/ipico-core" }
-rusqlite = { version = "0.37", features = ["bundled"] }
-tokio = { version = "1", features = ["full"] }
+[lib]
+name = "rusty_timer"
+path = "src/lib.rs"
 
 # ---------------------------------------------------------------------------
 # Integration test suites (Task 20-21)
@@ -68,6 +63,7 @@ path = "tests/integration/disk_watermark_prune.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 sqlx = { version = "0.9.0-alpha.1", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros", "chrono", "uuid"] }

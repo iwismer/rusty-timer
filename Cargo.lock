@@ -2314,12 +2314,7 @@ name = "rusty-timer"
 version = "1.0.0"
 dependencies = [
  "axum 0.7.9",
- "chrono",
- "clap",
- "encoding",
  "forwarder",
- "futures",
- "ipico-core",
  "receiver",
  "reqwest",
  "rt-protocol",
