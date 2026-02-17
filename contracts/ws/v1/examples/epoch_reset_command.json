@@ -1,0 +1,7 @@
+{
+  "kind": "epoch_reset_command",
+  "session_id": "sess-abc123",
+  "forwarder_id": "fwd-001",
+  "reader_ip": "192.168.1.10",
+  "new_stream_epoch": 4
+}

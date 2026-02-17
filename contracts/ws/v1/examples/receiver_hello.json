@@ -1,0 +1,12 @@
+{
+  "kind": "receiver_hello",
+  "receiver_id": "rcv-win-001",
+  "resume": [
+    {
+      "forwarder_id": "fwd-001",
+      "reader_ip": "192.168.1.10",
+      "stream_epoch": 1,
+      "last_seq": 4000
+    }
+  ]
+}
