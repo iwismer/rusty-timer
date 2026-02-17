@@ -819,6 +819,7 @@ dependencies = [
  "clap",
  "encoding",
  "futures",
+ "ipico-core",
  "rusqlite",
  "tokio",
 ]

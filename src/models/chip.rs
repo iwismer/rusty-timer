@@ -1,6 +1,6 @@
-use super::Timestamp;
-use std::convert::TryFrom;
-use std::fmt;
+// Re-export core IPICO parsing types from ipico-core.
+// The canonical implementation lives in crates/ipico-core/src/read.rs.
+pub use ipico_core::read::{ChipRead, ReadType};
 
 /// A struct for mapping a chip to a bib number
 #[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone)]
@@ -9,143 +9,10 @@ pub struct ChipBib {
     pub bib: i32,
 }
 
-/// Define a read as either raw, or first-seen/last-seen
-#[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Copy, Clone)]
-#[allow(clippy::upper_case_acronyms)]
-pub enum ReadType {
-    RAW = 38,
-    FSLS = 40,
-}
-
-impl fmt::Display for ReadType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            ReadType::RAW => write!(f, "Streaming"),
-            ReadType::FSLS => write!(f, "FSLS"),
-        }
-    }
-}
-
-impl TryFrom<&str> for ReadType {
-    type Error = &'static str;
-
-    fn try_from(type_str: &str) -> Result<Self, Self::Error> {
-        match type_str.to_lowercase().as_str() {
-            "raw" => Ok(ReadType::RAW),
-            "fsls" => Ok(ReadType::FSLS),
-            _ => Err("Invalid read type"),
-        }
-    }
-}
-
-#[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Clone)]
-pub struct ChipRead {
-    pub tag_id: String,
-    pub timestamp: Timestamp,
-    pub read_type: ReadType,
-}
-
-#[allow(dead_code)]
-impl ChipRead {
-    pub fn cmp(a: ChipRead, b: ChipRead) -> std::cmp::Ordering {
-        a.timestamp.cmp(&b.timestamp)
-    }
-
-    pub fn time_string(&self) -> String {
-        self.timestamp.time_string()
-    }
-}
-
-impl TryFrom<&str> for ChipRead {
-    type Error = &'static str;
-
-    fn try_from(read_str: &str) -> Result<Self, Self::Error> {
-        let chip_read = read_str
-            .split_whitespace()
-            .next()
-            .ok_or("Empty chip read")?;
-        if !(chip_read.len() == 36 || chip_read.len() == 38) {
-            return Err("Invalid read length");
-        }
-        let checksum = chip_read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
-        if format!("{:02x}", checksum) != chip_read[34..36] {
-            return Err("Checksum doesn't match");
-        }
-        let read_type = if chip_read.len() == 38 {
-            match &chip_read[36..38] {
-                "FS" | "LS" => ReadType::FSLS,
-                _ => return Err("Invalid read suffix"),
-            }
-        } else {
-            ReadType::RAW
-        };
-        if &chip_read[..2] != "aa" {
-            return Err("Invalid read prefix");
-        }
-        let tag_id = chip_read[4..16].to_owned();
-        let read_year = match chip_read[20..22].parse::<u16>() {
-            Err(_) => return Err("Invalid Chip Read"),
-            Ok(year) => year,
-        };
-        let read_month = match chip_read[22..24].parse::<u8>() {
-            Err(_) => return Err("Invalid Chip Read"),
-            Ok(month) => month,
-        };
-        let read_day = match chip_read[24..26].parse::<u8>() {
-            Err(_) => return Err("Invalid Chip Read"),
-            Ok(day) => day,
-        };
-        let read_hour = match chip_read[26..28].parse::<u8>() {
-            Err(_) => return Err("Invalid Chip Read"),
-            Ok(hour) => hour,
-        };
-        let read_min = match chip_read[28..30].parse::<u8>() {
-            Err(_) => return Err("Invalid Chip Read"),
-            Ok(min) => min,
-        };
-        let read_sec = match chip_read[30..32].parse::<u8>() {
-            Err(_) => return Err("Invalid Chip Read"),
-            Ok(sec) => sec,
-        };
-        let read_millis = match i32::from_str_radix(&chip_read[32..34], 16) {
-            Err(_) => return Err("Invalid Chip Read"),
-            Ok(millis) => {
-                if millis > 0x63 {
-                    return Err("Invalid Chip Read");
-                }
-                (millis * 10) as u16
-            }
-        };
-        let read_time: Timestamp = Timestamp::new(
-            read_year,
-            read_month,
-            read_day,
-            read_hour,
-            read_min,
-            read_sec,
-            read_millis,
-        );
-        Ok(ChipRead {
-            tag_id,
-            timestamp: read_time,
-            read_type,
-        })
-    }
-}
-
-impl fmt::Display for ChipRead {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "ID: {}, Type: {}, Timestamp: {}",
-            self.tag_id, self.read_type, self.timestamp
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Timestamp;
     use std::convert::TryFrom;
 
     fn raw_read_with_checksum(centisecond_hex: &str) -> String {
