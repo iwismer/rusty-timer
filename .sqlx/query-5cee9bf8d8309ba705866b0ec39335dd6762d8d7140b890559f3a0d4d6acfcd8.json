@@ -6,7 +6,7 @@
       {
         "ordinal": 0,
         "name": "stream_epoch",
-        "type_info": "Int4",
+        "type_info": "Int8",
         "origin": {
           "Table": {
             "table": "receiver_cursors",
@@ -29,7 +29,7 @@
     "parameters": {
       "Left": [
         "Text",
-        "Int8"
+        "Uuid"
       ]
     },
     "nullable": [

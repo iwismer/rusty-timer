@@ -1,12 +1,12 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT COUNT(*) FROM events WHERE stream_id = $1",
+  "query": "SELECT 1 AS one FROM streams WHERE stream_id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "count",
-        "type_info": "Int8",
+        "name": "one",
+        "type_info": "Int4",
         "origin": "Expression"
       }
     ],
@@ -19,5 +19,5 @@
       null
     ]
   },
-  "hash": "4138e5233958c5370307ad703363e9a5e74dee03569af92fe5a3636232fa935a"
+  "hash": "2b3bdf57b9e8475a19e6b12dba2b9d4ef58b2173a2ba13e130ce6a74aec5003a"
 }

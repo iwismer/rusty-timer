@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online, created_at\n           FROM streams ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "stream_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "forwarder_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "forwarder_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reader_ip",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "reader_ip"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "display_alias",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "display_alias"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "stream_epoch",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "stream_epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "online",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "online"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6866a9d6b75c1b5ac7a48e1c76a08d30f868d335d83a961e1ae909d1d84bee84"
+}
