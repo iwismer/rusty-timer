@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type\n           FROM events\n           WHERE stream_id = $1\n           ORDER BY stream_epoch ASC, seq ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_epoch",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "stream_epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reader_timestamp",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "reader_timestamp"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "raw_read_line",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "raw_read_line"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "read_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "read_type"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a6ced41f3e2e1c7446830575076d165b7ecce99cf09a608340080a56d3d3cb75"
+}
