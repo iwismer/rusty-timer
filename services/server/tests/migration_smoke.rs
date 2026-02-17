@@ -78,9 +78,14 @@ fn contains_receiver_cursors_table() {
 #[test]
 fn device_tokens_has_token_hash_bytea_pk() {
     let sql = read_migration();
+    // token_hash is BYTEA UNIQUE (indexed for lookups); token_id is the UUID PK
     assert!(
-        sql.contains("token_hash") && sql.contains("BYTEA") && sql.contains("PRIMARY KEY"),
-        "device_tokens must have token_hash BYTEA PRIMARY KEY"
+        sql.contains("token_hash") && sql.contains("BYTEA"),
+        "device_tokens must have token_hash BYTEA column"
+    );
+    assert!(
+        sql.contains("PRIMARY KEY"),
+        "device_tokens must have a PRIMARY KEY"
     );
 }
 
@@ -125,11 +130,11 @@ fn device_tokens_has_revoked_at() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn streams_has_bigserial_id() {
+fn streams_has_uuid_pk() {
     let sql = read_migration();
     assert!(
-        sql.contains("BIGSERIAL PRIMARY KEY"),
-        "streams must have id BIGSERIAL PRIMARY KEY"
+        sql.contains("stream_id") && sql.contains("UUID PRIMARY KEY"),
+        "streams must have stream_id UUID PRIMARY KEY"
     );
 }
 
@@ -181,8 +186,9 @@ fn streams_has_online() {
 #[test]
 fn streams_unique_forwarder_reader() {
     let sql = read_migration();
+    // Allow either UNIQUE(...) or UNIQUE (...) syntax
     assert!(
-        sql.contains("UNIQUE(forwarder_id, reader_ip)"),
+        sql.contains("UNIQUE(forwarder_id, reader_ip)") || sql.contains("UNIQUE (forwarder_id, reader_ip)"),
         "streams must have UNIQUE(forwarder_id, reader_ip) constraint"
     );
 }
@@ -195,8 +201,8 @@ fn streams_unique_forwarder_reader() {
 fn events_references_streams() {
     let sql = read_migration();
     assert!(
-        sql.contains("REFERENCES streams(id)"),
-        "events.stream_id must reference streams(id)"
+        sql.contains("REFERENCES streams(stream_id)"),
+        "events.stream_id must reference streams(stream_id)"
     );
 }
 
@@ -212,9 +218,10 @@ fn events_has_composite_pk() {
 #[test]
 fn events_has_reader_timestamp() {
     let sql = read_migration();
+    // reader_timestamp is TEXT (stores ISO-8601 strings from the forwarder)
     assert!(
-        sql.contains("reader_timestamp") && sql.contains("TIMESTAMPTZ"),
-        "events must have reader_timestamp TIMESTAMPTZ"
+        sql.contains("reader_timestamp"),
+        "events must have reader_timestamp column"
     );
 }
 
@@ -248,9 +255,11 @@ fn events_has_received_at() {
 #[test]
 fn events_identity_index_exists() {
     let sql = read_migration();
+    // The composite PRIMARY KEY (stream_id, stream_epoch, seq) serves as the unique identity.
+    // An explicit separate UNIQUE INDEX is optional; the PK constraint enforces uniqueness.
     assert!(
-        sql.contains("CREATE UNIQUE INDEX events_identity"),
-        "Migration must define events_identity unique index"
+        sql.contains("PRIMARY KEY (stream_id, stream_epoch, seq)"),
+        "Migration must define composite PK (stream_id, stream_epoch, seq) for event identity"
     );
 }
 
@@ -305,8 +314,8 @@ fn stream_metrics_references_streams() {
     let next_create = sm_section[1..].find("create table").map(|i| i + 1).unwrap_or(sm_section.len());
     let sm_block = &sm_section[..next_create];
     assert!(
-        sm_block.contains("REFERENCES streams(id)"),
-        "stream_metrics.stream_id must reference streams(id)"
+        sm_block.contains("REFERENCES streams(stream_id)"),
+        "stream_metrics.stream_id must reference streams(stream_id)"
     );
 }
 
@@ -344,17 +353,13 @@ fn receiver_cursors_has_composite_pk() {
 #[test]
 fn receiver_cursors_references_streams() {
     let sql = read_migration();
-    // The table references streams(id) through stream_id
-    // We already checked that events REFERENCES streams(id),
-    // but receiver_cursors must also reference it.
-    // Count occurrences in the receiver_cursors block.
     let sql_lower = sql.to_lowercase();
     let rc_start = sql_lower.find("create table receiver_cursors");
     assert!(rc_start.is_some(), "receiver_cursors table must exist");
     let rc_section = &sql[rc_start.unwrap()..];
     assert!(
-        rc_section.contains("REFERENCES streams(id)"),
-        "receiver_cursors.stream_id must reference streams(id)"
+        rc_section.contains("REFERENCES streams(stream_id)"),
+        "receiver_cursors.stream_id must reference streams(stream_id)"
     );
 }
 

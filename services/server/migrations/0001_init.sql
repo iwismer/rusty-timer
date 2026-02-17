@@ -5,7 +5,13 @@
 -- See docs/plans/2026-02-17-remote-forwarding-design/03-server-design.md
 -- for the authoritative schema definition.
 
+-- pgcrypto provides gen_random_uuid() on Postgres < 13.
+-- On Postgres 13+ it is a built-in; IF NOT EXISTS makes this a no-op.
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
 -- device_tokens
+-- token_hash stores SHA-256(raw_token_bytes) — always exactly 32 bytes.
+-- The server never stores raw bearer tokens.
 CREATE TABLE device_tokens (
     token_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     token_hash   BYTEA NOT NULL UNIQUE,

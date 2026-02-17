@@ -19,9 +19,23 @@ impl MockWsClient {
     }
 
     pub async fn connect_with_token(url: &str, token: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+        let uri: tokio_tungstenite::tungstenite::http::Uri = url.parse()?;
+        let host = uri.host().unwrap_or("localhost").to_owned();
+        let port = uri.port_u16();
+        let host_header = if let Some(p) = port {
+            format!("{}:{}", host, p)
+        } else {
+            host
+        };
         let request = Request::builder()
             .uri(url)
+            .header("Host", host_header)
             .header("Authorization", format!("Bearer {}", token))
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", generate_key())
             .body(())?;
         let (ws_stream, _response) = tokio_tungstenite::connect_async(request).await?;
         let (write, read) = ws_stream.split();
