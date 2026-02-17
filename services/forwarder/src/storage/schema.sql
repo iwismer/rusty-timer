@@ -1,5 +1,5 @@
--- Forwarder local SQLite schema
--- Durable journal for events read from IPICO timing hardware.
+-- Forwarder local SQLite schema (v1 Frozen)
+-- Task 6 schema — supersedes the Task 4 stub.
 --
 -- Required PRAGMAs (set at connection open, not in this file):
 --   PRAGMA journal_mode=WAL;
@@ -10,19 +10,21 @@
 -- At startup, run PRAGMA integrity_check; exit if result != 'ok'.
 
 CREATE TABLE IF NOT EXISTS journal (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    reader_ip    TEXT NOT NULL,
-    stream_epoch INTEGER NOT NULL,
-    seq          INTEGER NOT NULL,
-    reader_timestamp TEXT NOT NULL,
-    raw_read_line TEXT NOT NULL,
-    read_type    TEXT NOT NULL,
-    acked        INTEGER NOT NULL DEFAULT 0,  -- 0=unacked, 1=acked
-    received_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(reader_ip, stream_epoch, seq)
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_key      TEXT NOT NULL,
+    stream_epoch    BIGINT NOT NULL,
+    seq             BIGINT NOT NULL,
+    reader_timestamp TEXT,
+    raw_read_line   TEXT NOT NULL,
+    read_type       TEXT NOT NULL,
+    received_at     TEXT NOT NULL,
+    UNIQUE(stream_key, stream_epoch, seq)
 );
 
-CREATE TABLE IF NOT EXISTS config (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS stream_state (
+    stream_key          TEXT PRIMARY KEY,
+    stream_epoch        BIGINT NOT NULL,
+    next_seq            BIGINT NOT NULL,
+    acked_epoch         BIGINT NOT NULL DEFAULT 0,
+    acked_through_seq   BIGINT NOT NULL DEFAULT 0
 );

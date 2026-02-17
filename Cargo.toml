@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/emulator-v2",
     "crates/ipico-core",
     "crates/rt-protocol",
     "crates/rt-test-utils",
