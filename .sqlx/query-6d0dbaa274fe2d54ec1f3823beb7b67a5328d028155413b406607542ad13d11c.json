@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online\n               FROM streams ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "stream_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "forwarder_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "forwarder_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reader_ip",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "reader_ip"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "display_alias",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "display_alias"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "stream_epoch",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "stream_epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "online",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "online"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "6d0dbaa274fe2d54ec1f3823beb7b67a5328d028155413b406607542ad13d11c"
+}

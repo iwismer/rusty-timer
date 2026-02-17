@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO streams (forwarder_id, reader_ip) VALUES ($1, $2)\n           ON CONFLICT (forwarder_id, reader_ip) DO UPDATE SET forwarder_id = EXCLUDED.forwarder_id\n           RETURNING stream_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stream_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "stream_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6e9e83920e4eac9567226d083f69f135190bc8dbe35bca2a72f77c25cc3bc719"
+}

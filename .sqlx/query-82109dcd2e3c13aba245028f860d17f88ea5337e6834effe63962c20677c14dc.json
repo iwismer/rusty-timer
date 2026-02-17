@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sm.raw_count, sm.dedup_count, sm.retransmit_count FROM stream_metrics sm JOIN streams s ON s.stream_id = sm.stream_id WHERE s.reader_ip = '10.2.2.2'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "raw_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "raw_count"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "dedup_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "dedup_count"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "retransmit_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "retransmit_count"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "82109dcd2e3c13aba245028f860d17f88ea5337e6834effe63962c20677c14dc"
+}
