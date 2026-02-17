@@ -1,10 +1,13 @@
 /// SQLite durability and schema tests for the forwarder journal.
 ///
+/// Task 6 schema: uses `stream_key` (not `reader_ip`), `stream_state` table,
+/// no `acked` column, no `config` table.
+///
 /// Validates:
 /// - WAL journal mode is set correctly
 /// - synchronous=FULL is set
 /// - Write survives close/reopen cycle
-/// - UNIQUE constraint on (reader_ip, stream_epoch, seq)
+/// - UNIQUE constraint on (stream_key, stream_epoch, seq)
 /// - integrity_check passes on a fresh database
 /// - Duplicate inserts are rejected (not silently swallowed)
 
@@ -96,7 +99,7 @@ fn foreign_keys_enabled() {
 }
 
 // ---------------------------------------------------------------------------
-// Schema validation
+// Schema validation (Task 6 schema)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -107,20 +110,24 @@ fn schema_file_exists_and_is_nonempty() {
 }
 
 #[test]
-fn schema_creates_journal_table() {
+fn schema_creates_journal_table_with_stream_key() {
     let sql = std::fs::read_to_string(SCHEMA_PATH).unwrap();
     assert!(
         sql.contains("CREATE TABLE IF NOT EXISTS journal"),
         "Schema must define journal table"
     );
+    assert!(
+        sql.contains("stream_key"),
+        "Task 6 schema must use stream_key (not reader_ip)"
+    );
 }
 
 #[test]
-fn schema_creates_config_table() {
+fn schema_creates_stream_state_table() {
     let sql = std::fs::read_to_string(SCHEMA_PATH).unwrap();
     assert!(
-        sql.contains("CREATE TABLE IF NOT EXISTS config"),
-        "Schema must define config table"
+        sql.contains("CREATE TABLE IF NOT EXISTS stream_state"),
+        "Task 6 schema must define stream_state table"
     );
 }
 
@@ -153,9 +160,9 @@ fn write_survives_reopen() {
     {
         let conn = open_file_db(&db_path);
         conn.execute(
-            "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW"],
+            "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW", "2026-01-01T00:00:00Z"],
         )
         .expect("insert should succeed");
     }
@@ -180,7 +187,7 @@ fn write_survives_reopen() {
 }
 
 // ---------------------------------------------------------------------------
-// UNIQUE constraint on (reader_ip, stream_epoch, seq)
+// UNIQUE constraint on (stream_key, stream_epoch, seq)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -188,21 +195,21 @@ fn unique_constraint_rejects_duplicate() {
     let conn = open_memory_db();
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW", "2026-01-01T00:00:00Z"],
     )
     .expect("first insert should succeed");
 
     let result = conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW", "2026-01-01T00:00:00Z"],
     );
 
     assert!(
         result.is_err(),
-        "Duplicate (reader_ip, stream_epoch, seq) must be rejected, not silently swallowed"
+        "Duplicate (stream_key, stream_epoch, seq) must be rejected"
     );
 }
 
@@ -211,16 +218,16 @@ fn unique_constraint_allows_different_seq() {
     let conn = open_memory_db();
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01", "RAW", "2026-01-01T00:00:00Z"],
     )
     .expect("first insert should succeed");
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 1, 2, "2026-01-01T00:00:01Z", "aa02,00:01:24.567", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.100", 1, 2, "2026-01-01T00:00:01Z", "aa02", "RAW", "2026-01-01T00:00:01Z"],
     )
     .expect("different seq should be allowed");
 }
@@ -230,82 +237,61 @@ fn unique_constraint_allows_different_epoch() {
     let conn = open_memory_db();
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01", "RAW", "2026-01-01T00:00:00Z"],
     )
     .expect("first insert should succeed");
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 2, 1, "2026-01-01T00:00:01Z", "aa02,00:01:24.567", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.100", 2, 1, "2026-01-01T00:00:01Z", "aa02", "RAW", "2026-01-01T00:00:01Z"],
     )
     .expect("same seq but different epoch should be allowed");
 }
 
 #[test]
-fn unique_constraint_allows_different_reader_ip() {
+fn unique_constraint_allows_different_stream_key() {
     let conn = open_memory_db();
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01", "RAW", "2026-01-01T00:00:00Z"],
     )
     .expect("first insert should succeed");
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.200", 1, 1, "2026-01-01T00:00:01Z", "aa02,00:01:24.567", "RAW"],
+        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params!["192.168.1.200", 1, 1, "2026-01-01T00:00:01Z", "aa02", "RAW", "2026-01-01T00:00:01Z"],
     )
-    .expect("same seq and epoch but different reader_ip should be allowed");
+    .expect("same seq and epoch but different stream_key should be allowed");
 }
 
 // ---------------------------------------------------------------------------
-// Acked column default
+// stream_state table basic operations
 // ---------------------------------------------------------------------------
 
 #[test]
-fn acked_defaults_to_zero() {
+fn stream_state_insert_and_read() {
     let conn = open_memory_db();
 
     conn.execute(
-        "INSERT INTO journal (reader_ip, stream_epoch, seq, reader_timestamp, raw_read_line, read_type)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW"],
+        "INSERT INTO stream_state (stream_key, stream_epoch, next_seq, acked_epoch, acked_through_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params!["192.168.1.100", 1, 1, 0, 0],
     )
-    .expect("insert should succeed");
+    .expect("stream_state insert should succeed");
 
-    let acked: i64 = conn
-        .query_row("SELECT acked FROM journal WHERE seq = 1", [], |row| {
-            row.get(0)
-        })
-        .expect("select acked");
-    assert_eq!(acked, 0, "acked must default to 0 (unacked)");
-}
-
-// ---------------------------------------------------------------------------
-// Config table basic operations
-// ---------------------------------------------------------------------------
-
-#[test]
-fn config_table_insert_and_read() {
-    let conn = open_memory_db();
-
-    conn.execute(
-        "INSERT INTO config (key, value) VALUES (?1, ?2)",
-        rusqlite::params!["forwarder_id", "fwd-001"],
-    )
-    .expect("config insert should succeed");
-
-    let val: String = conn
+    let (epoch, next_seq): (i64, i64) = conn
         .query_row(
-            "SELECT value FROM config WHERE key = ?1",
-            rusqlite::params!["forwarder_id"],
-            |row| row.get(0),
+            "SELECT stream_epoch, next_seq FROM stream_state WHERE stream_key = ?1",
+            rusqlite::params!["192.168.1.100"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .expect("config read");
-    assert_eq!(val, "fwd-001");
+        .expect("stream_state read");
+    assert_eq!(epoch, 1);
+    assert_eq!(next_seq, 1);
 }
