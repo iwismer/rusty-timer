@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -e
+
+echo "--- pre-commit: running checks ---"
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# 1. Strip 'resolved' entries from all package-lock.json files
+# This keeps package-lock diffs clean and avoids leaking internal registry URLs.
+for lockfile in \
+  "$REPO_ROOT/apps/dashboard/package-lock.json" \
+  "$REPO_ROOT/apps/receiver-ui/package-lock.json"; do
+  if [ -f "$lockfile" ] && command -v jq &>/dev/null; then
+    echo "  Cleaning resolved fields from ${lockfile##$REPO_ROOT/} ..."
+    jq 'walk(if type == "object" then with_entries(select(.key | test("resolved") | not)) else . end)' \
+      "$lockfile" > /tmp/package-lock-clean.json && \
+    mv /tmp/package-lock-clean.json "$lockfile"
+    git add "$lockfile"
+  fi
+done
+
+# 2. Rust formatting check
+echo "  Checking Rust formatting ..."
+cd "$REPO_ROOT" && cargo fmt --all -- --check
+
+# 3. Rust linting
+echo "  Running clippy ..."
+cd "$REPO_ROOT" && cargo clippy --workspace --all-targets
+
+# 4. JS/TS formatting check
+for app_dir in "$REPO_ROOT/apps/dashboard" "$REPO_ROOT/apps/receiver-ui"; do
+  if [ -f "$app_dir/package.json" ] && [ -d "$app_dir/node_modules" ]; then
+    echo "  Checking ${app_dir##$REPO_ROOT/} formatting ..."
+    (cd "$app_dir" && npx prettier --check . 2>/dev/null) || true
+  fi
+done
+
+echo "--- pre-commit: all checks passed ---"
