@@ -2,92 +2,149 @@
 
 [![CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
 
-This contains a set of timing related utilities for the Ipico timing system.
+Timing utilities for the IPICO chip timing system, extended with a full remote forwarding suite for distributing race reads across a network.
+
+## Architecture
+
+```
+IPICO Reader ──TCP──► Streamer ──fanout──► Local Clients
+                          │
+                          └── Forwarder ──WS──► Server ──WS──► Receiver
+                                                     │
+                                               Dashboard (web)
+```
+
+| Component    | Location              | Description                                                      |
+|--------------|-----------------------|------------------------------------------------------------------|
+| streamer     | services/streamer/    | Connects to IPICO readers, fans out TCP to local clients         |
+| emulator     | services/emulator/    | Simulates IPICO reads for development/testing                    |
+| forwarder    | services/forwarder/   | Reads from IPICO hardware, journals to SQLite, forwards over WebSocket |
+| server       | services/server/      | Axum/Postgres: ingest, dedup, fanout, dashboard API              |
+| receiver     | services/receiver/    | Subscribes to server, proxies streams to local TCP ports         |
+| dashboard    | apps/dashboard/       | SvelteKit static web dashboard (served by server)                |
+| receiver-ui  | apps/receiver-ui/     | Tauri v2 + SvelteKit desktop app for the receiver                |
+| emulator-v2  | crates/emulator-v2/   | Deterministic multi-reader playback for integration testing      |
+
+## Quick Start
+
+**Prerequisites:**
+- Rust 1.89.0 (see `rust-toolchain.toml`)
+- Docker (for server/integration tests)
+- Node.js 20+
+
+See [docs/local-testing.md](docs/local-testing.md) for local development setup and [docs/docker-deployment.md](docs/docker-deployment.md) for production deployment.
 
 ## Read Streamer
 
-This is a chip read forwarding program designed for race timing. It allows timers to overcome the connection limits on some chip reader systems.
-This program connects to one or more readers, and forwards all the reads to any connected listening programs. There is no theoretical limit to the number of connected clients, but it has not been tested with more than 4 at a time. This program will also save all the collected reads to a file for backup.
+Connects to one or more IPICO readers and fans out all reads to any number of local TCP clients. Saves reads to a file for backup.
 
-### Features
+**Build and run:**
 
-- Multiple reader connections
-- Multiple client connections
-- Automatic reader reconnection on disconnect
-- Save reads to a file
-- Display participant information for each read
-- Performant: uses less than 1MB of memory, handles at least 1000 reads/second
+```bash
+cargo build --release --bin streamer
+# or run directly:
+cargo run --bin streamer -- [OPTIONS] <reader_ip>...
+```
 
-### Building
+```
+USAGE:
+    streamer [FLAGS] [OPTIONS] <reader_ip>...
 
-Run directly with: ```cargo run --bin streamer -- [args]```
+FLAGS:
+    -h, --help       Prints help information
+    -B, --buffer     Buffer the output. Use if high CPU use is encountered
+    -V, --version    Prints version information
 
-Build with ```cargo build --release --bin streamer```
+OPTIONS:
+    -b, --bibchip <bibchip>     The bib-chip file
+    -f, --file <file>           The file to output the reads to
+    -P, --ppl <participants>    The .ppl participant file (requires --bibchip)
+    -p, --port <port>           The local port to bind to [default: 10001]
+    -t, --type <read_type>      The read type [default: raw] [possible values: raw, fsls]
 
-### Running
+ARGS:
+    <reader_ip>...    Reader socket address, e.g. 192.168.0.52:10000
+```
 
-    USAGE:
-        streamer.exe [FLAGS] [OPTIONS] <reader_ip>...
+**Examples:**
 
-    FLAGS:
-        -h, --help       Prints help information
-        -B, --buffer     Buffer the output. Use if high CPU use in encountered
-        -V, --version    Prints version information
+```bash
+# Stream from one reader (OS-assigned local port)
+streamer 10.0.0.51:10000
 
-    OPTIONS:
-        -b, --bibchip <bibchip>     The bib-chip file
-        -f, --file <file>           The file to output the reads to
-        -P, --ppl <participants>    The .ppl participant file
-        -p, --port <port>           The port of the local machine to bind to [default: 10001]
-        -t, --type <read_type>      The type of read the reader is sending [default: raw]  [possible values: raw, fsls]
+# Stream from two readers on local port 10003
+streamer 10.0.0.51:10000 10.0.0.52:10000 -p 10003
 
-    ARGS:
-        <reader_ip>...    The socket address of the reader to connect to. Eg. 192.168.0.52:10000
-
-#### Examples
-
-In Windows, replace `streamer` with `streamer.exe` (and include the path to it, if it's not in the current directory). In linux use `./streamer`.
-
-Stream reads from a reader, leaving the local port assignment to the OS: ```streamer 10.0.0.51:10000```
-
-Stream reads from 2 readers, using a local port of 10003: ```streamer 10.0.0.51:10000 10.0.0.52:10000 -p 10003```
-
-Stream reads from a reader located at 10.0.0.51, specifying a local port of 10005 ```streamer -p 10005 10.0.0.51:10000```
-
-Stream reads from a reader and save all the reads to a file called reads.txt in the current directory ```streamer -f reads.txt 10.0.0.51:10000```
-
-### TODO
-
-- Better documentation
-- Basic GUI
-- Make compatible with binary records
+# Save reads to file
+streamer -f reads.txt 10.0.0.51:10000
+```
 
 ## Read Emulator
 
-This is a chip read emulation program designed for testing race timing software. It generates valid reads that are all the same chip, but use the current time. You can also use a reads file as input, and it will simply send one read after each delay cycle.
+Generates valid IPICO reads for testing. Can emit synthetic reads at a fixed interval or replay reads from a file.
 
-This can be used to test the read streaming program.
+**Build and run:**
 
-### Building
+```bash
+cargo build --release --bin emulator
+# or run directly:
+cargo run --bin emulator -- [OPTIONS]
+```
 
-Run with: ```cargo run --bin emulator -- [args]```
+```
+USAGE:
+    emulator [FLAGS] [OPTIONS]
 
-Build with ```cargo build --release --bin emulator```
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
 
-### Running
+OPTIONS:
+    -d, --delay <delay>       Delay between reads in ms [default: 1000]
+    -f, --file <file>         Reads file to replay
+    -p, --port <port>         Local port to listen on [default: 10001]
+    -t, --type <read_type>    Read type [default: raw] [possible values: raw, fsls]
+```
 
-    USAGE:
-        emulator.exe [OPTIONS]
+## Development
 
-    FLAGS:
-        -h, --help       Prints help information
-        -V, --version    Prints version information
+**Run tests:**
 
-    OPTIONS:
-        -d, --delay <delay>       Delay between reads [default: 1000]
-        -f, --file <file>         The file to get the reads from
-        -p, --port <port>         The port of the local machine to listen for connections [default: 10001]
-        -t, --type <read_type>    The type of read the reader is sending [default: raw]  [possible values: raw, fsls]
+```bash
+# Rust unit tests (no Docker required)
+cargo test --workspace --lib
+
+# All tests including integration (Docker required)
+cargo test --workspace -- --test-threads=4
+
+# Dashboard unit tests
+cd apps/dashboard && npm test
+
+# Packaging validation
+bash scripts/validate-packaging.sh
+```
+
+**Code quality:**
+
+```bash
+# Format Rust
+cargo fmt --all
+
+# Lint Rust
+cargo clippy --workspace --all-targets
+
+# Format JS/TS
+cd apps/dashboard && npm run format
+cd apps/receiver-ui && npm run format
+```
+
+**Git hooks** (run once per clone):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook checks Rust formatting, runs Clippy, and checks JS/TS formatting via Prettier.
 
 ## Licence
 
