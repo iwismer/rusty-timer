@@ -3064,6 +3064,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "timer-core"
+version = "0.1.0"
+dependencies = [
+ "encoding",
+ "futures",
+ "ipico-core",
+ "rusqlite",
+ "tokio",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

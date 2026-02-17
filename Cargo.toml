@@ -5,6 +5,7 @@ members = [
     "crates/ipico-core",
     "crates/rt-protocol",
     "crates/rt-test-utils",
+    "crates/timer-core",
     "services/forwarder",
     "services/server",
     "services/receiver",

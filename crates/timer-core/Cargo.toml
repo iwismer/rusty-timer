@@ -1,0 +1,15 @@
+[package]
+name = "timer-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "timer_core"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+encoding = "0.2"
+futures = "0.3"
+ipico-core = { path = "../ipico-core" }
