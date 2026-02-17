@@ -1,0 +1,22 @@
+[package]
+name = "emulator-v2"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "emulator_v2"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+rt-protocol = { path = "../rt-protocol" }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+rt-test-utils = { path = "../rt-test-utils" }
+tempfile = "3"
