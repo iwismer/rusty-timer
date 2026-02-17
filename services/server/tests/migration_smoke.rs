@@ -297,10 +297,15 @@ fn stream_metrics_has_last_canonical_event_received_at() {
 #[test]
 fn stream_metrics_references_streams() {
     let sql = read_migration();
-    // stream_metrics.stream_id is PK and references streams(id)
+    let sql_lower = sql.to_lowercase();
+    let sm_start = sql_lower.find("create table stream_metrics");
+    assert!(sm_start.is_some(), "stream_metrics table must exist");
+    let sm_section = &sql[sm_start.unwrap()..];
+    // Find the end of this table's CREATE statement
+    let next_create = sm_section[1..].find("create table").map(|i| i + 1).unwrap_or(sm_section.len());
+    let sm_block = &sm_section[..next_create];
     assert!(
-        sql.contains("stream_metrics")
-            && sql.contains("REFERENCES streams(id)"),
+        sm_block.contains("REFERENCES streams(id)"),
         "stream_metrics.stream_id must reference streams(id)"
     );
 }
