@@ -405,6 +405,38 @@ target = "192.168.2.156:10000"
 }
 
 // ---------------------------------------------------------------------------
+// load_config_from_path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn load_config_from_path_reads_toml_file() {
+    let token_file = write_token_file("dev-token");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "ws://127.0.0.1:8080"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "127.0.0.1:10001"
+"#,
+        token_file.path().display()
+    );
+    let mut config_file = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut config_file, toml.as_bytes()).unwrap();
+
+    let cfg = forwarder::config::load_config_from_path(config_file.path())
+        .expect("should load from arbitrary path");
+    assert_eq!(cfg.server.base_url, "ws://127.0.0.1:8080");
+    assert_eq!(cfg.token, "dev-token");
+    assert_eq!(cfg.readers[0].target, "127.0.0.1:10001");
+}
+
+// ---------------------------------------------------------------------------
 // Multiple readers
 // ---------------------------------------------------------------------------
 

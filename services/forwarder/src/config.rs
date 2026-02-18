@@ -121,12 +121,16 @@ struct RawReaderConfig {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Load forwarder config from a custom path.
+pub fn load_config_from_path(path: &Path) -> Result<ForwarderConfig, ConfigError> {
+    let toml_str = std::fs::read_to_string(path)
+        .map_err(|e| ConfigError::Io(format!("reading config file: {}", e)))?;
+    load_config_from_str(&toml_str, path)
+}
+
 /// Load forwarder config from the default path `/etc/rusty-timer/forwarder.toml`.
 pub fn load_config() -> Result<ForwarderConfig, ConfigError> {
-    let default_path = Path::new("/etc/rusty-timer/forwarder.toml");
-    let toml_str = std::fs::read_to_string(default_path)
-        .map_err(|e| ConfigError::Io(format!("reading config file: {}", e)))?;
-    load_config_from_str(&toml_str, default_path)
+    load_config_from_path(Path::new("/etc/rusty-timer/forwarder.toml"))
 }
 
 /// Load forwarder config from a TOML string.

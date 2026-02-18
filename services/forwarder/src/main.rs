@@ -15,9 +15,21 @@ fn main() {
 
     info!(version = env!("CARGO_PKG_VERSION"), "forwarder starting");
 
-    // Load config from default path.
-    // Later tasks will use the loaded config to initialize subsystems.
-    let _cfg = match forwarder::config::load_config() {
+    // Parse optional --config <path> argument.
+    // Defaults to /etc/rusty-timer/forwarder.toml when not supplied.
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = match args.iter().position(|a| a == "--config") {
+        Some(i) => match args.get(i + 1) {
+            Some(p) => std::path::PathBuf::from(p),
+            None => {
+                eprintln!("FATAL: --config requires a path argument");
+                std::process::exit(1);
+            }
+        },
+        None => std::path::PathBuf::from("/etc/rusty-timer/forwarder.toml"),
+    };
+
+    let _cfg = match forwarder::config::load_config_from_path(&config_path) {
         Ok(cfg) => {
             info!(
                 base_url = %cfg.server.base_url,
