@@ -19,6 +19,13 @@ async fn main() {
     db::run_migrations(&pool).await;
     info!("migrations applied");
 
+    // No forwarders are connected at startup, so mark all streams offline.
+    // This cleans up stale online=true from previous unclean shutdowns.
+    sqlx::query("UPDATE streams SET online = false WHERE online = true")
+        .execute(&pool)
+        .await
+        .expect("failed to reset stream online status");
+
     let state = AppState::new(pool);
     let router = server::build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
