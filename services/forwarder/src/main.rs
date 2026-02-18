@@ -7,7 +7,7 @@ use forwarder::config::ForwarderConfig;
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
 use forwarder::replay::ReplayEngine;
-use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus};
 use forwarder::storage::journal::Journal;
 use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkSession};
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
@@ -39,6 +39,57 @@ fn derive_forwarder_id(token: &str) -> String {
     format!("fwd-{}", &hex[..16])
 }
 
+/// Detect the local IP used to reach a given target IP.
+///
+/// Uses a UDP socket connect (no traffic sent) to let the OS choose the
+/// outgoing interface, then reads back the local address.
+fn detect_local_ip(target_ip: &str) -> Option<String> {
+    let dest = format!("{}:10000", target_ip);
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(&dest).ok()?;
+    let local_addr = socket.local_addr().ok()?;
+    Some(local_addr.ip().to_string())
+}
+
+async fn mark_reader_disconnected(status: &StatusServer, reader_ip: &str) {
+    status
+        .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
+        .await;
+}
+
+#[derive(Debug)]
+enum JournalAppendError {
+    StreamState(String),
+    NextSeq(String),
+    Insert(String),
+}
+
+fn append_read_to_journal(
+    journal: &mut Journal,
+    stream_key: &str,
+    reader_timestamp: Option<&str>,
+    raw_line: &str,
+    read_type: &str,
+) -> Result<(i64, i64), JournalAppendError> {
+    let (epoch, _) = journal
+        .current_epoch_and_next_seq(stream_key)
+        .map_err(|e| JournalAppendError::StreamState(e.to_string()))?;
+    let seq = journal
+        .next_seq(stream_key)
+        .map_err(|e| JournalAppendError::NextSeq(e.to_string()))?;
+    journal
+        .insert_event(
+            stream_key,
+            epoch,
+            seq,
+            reader_timestamp,
+            raw_line,
+            read_type,
+        )
+        .map_err(|e| JournalAppendError::Insert(e.to_string()))?;
+    Ok((epoch, seq))
+}
+
 // ---------------------------------------------------------------------------
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
@@ -50,6 +101,7 @@ async fn run_reader(
     fanout_addr: SocketAddr,
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    status: StatusServer,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
     let stream_key = reader_ip.clone();
@@ -64,10 +116,17 @@ async fn run_reader(
 
         info!(reader_ip = %reader_ip, target = %target_addr, "connecting to reader");
 
+        status
+            .update_reader_state(&reader_ip, ReaderConnectionState::Connecting)
+            .await;
+
         let stream = match TcpStream::connect(&target_addr).await {
             Ok(s) => {
                 info!(reader_ip = %reader_ip, "reader TCP connected");
                 backoff_secs = 1; // reset backoff on successful connect
+                status
+                    .update_reader_state(&reader_ip, ReaderConnectionState::Connected)
+                    .await;
                 s
             }
             Err(e) => {
@@ -77,6 +136,7 @@ async fn run_reader(
                     backoff_secs = backoff_secs,
                     "reader TCP connect failed, retrying"
                 );
+                mark_reader_disconnected(&status, &reader_ip).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -121,10 +181,12 @@ async fn run_reader(
             match read_result {
                 Err(e) => {
                     warn!(reader_ip = %reader_ip, error = %e, "TCP read error, reconnecting");
+                    mark_reader_disconnected(&status, &reader_ip).await;
                     break;
                 }
                 Ok(0) => {
                     warn!(reader_ip = %reader_ip, "TCP connection closed by reader, reconnecting");
+                    mark_reader_disconnected(&status, &reader_ip).await;
                     break;
                 }
                 Ok(_) => {}
@@ -150,35 +212,34 @@ async fn run_reader(
                 }
             }
 
-            // Write to journal
-            let (epoch, seq) = {
+            // Write to journal. Keep status updates out of the DB lock scope.
+            let append_result = {
                 let mut j = journal.lock().await;
-                let (epoch, _) = match j.current_epoch_and_next_seq(&stream_key) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!(reader_ip = %reader_ip, error = %e, "failed to get epoch");
-                        break;
-                    }
-                };
-                let seq = match j.next_seq(&stream_key) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(reader_ip = %reader_ip, error = %e, "failed to get next_seq");
-                        break;
-                    }
-                };
-                if let Err(e) = j.insert_event(
+                append_read_to_journal(
+                    &mut j,
                     &stream_key,
-                    epoch,
-                    seq,
                     reader_timestamp.as_deref(),
                     &raw_line,
                     &parsed_read_type,
-                ) {
-                    error!(reader_ip = %reader_ip, error = %e, "journal insert failed");
+                )
+            };
+            let (epoch, seq) = match append_result {
+                Ok(v) => v,
+                Err(JournalAppendError::StreamState(e)) => {
+                    error!(reader_ip = %reader_ip, error = %e, "failed to get epoch");
+                    mark_reader_disconnected(&status, &reader_ip).await;
                     break;
                 }
-                (epoch, seq)
+                Err(JournalAppendError::NextSeq(e)) => {
+                    error!(reader_ip = %reader_ip, error = %e, "failed to get next_seq");
+                    mark_reader_disconnected(&status, &reader_ip).await;
+                    break;
+                }
+                Err(JournalAppendError::Insert(e)) => {
+                    error!(reader_ip = %reader_ip, error = %e, "journal insert failed");
+                    mark_reader_disconnected(&status, &reader_ip).await;
+                    break;
+                }
             };
 
             info!(
@@ -194,6 +255,8 @@ async fn run_reader(
                 warn!(reader_ip = %reader_ip, error = %e, "local fanout push failed");
                 // Non-fatal: local fanout failure doesn't break uplink path
             }
+
+            status.record_read(&reader_ip).await;
         }
 
         // Reconnect with backoff
@@ -656,17 +719,46 @@ async fn main() {
         }
     }
 
+    // Initialize reader status tracking
+    status_server.init_readers(&all_reader_ips).await;
+
     if all_reader_ips.is_empty() {
         eprintln!("FATAL: no enabled readers configured");
         std::process::exit(1);
     }
 
+    // Seed historical totals once at startup to avoid per-request DB counting.
+    for reader_ip in &all_reader_ips {
+        let total = {
+            let j = journal.lock().await;
+            match j.event_count(reader_ip) {
+                Ok(count) => count,
+                Err(e) => {
+                    warn!(reader_ip = %reader_ip, error = %e, "failed to load reader total");
+                    0
+                }
+            }
+        };
+        status_server.set_reader_total(reader_ip, total).await;
+    }
+
+    // Set forwarder identity on status page
+    status_server.set_forwarder_id(&forwarder_id).await;
+
+    // Detect local IP from first reader
+    let local_ip = all_reader_ips.first().and_then(|ip| detect_local_ip(ip));
+    if let Some(ref ip) = local_ip {
+        info!(local_ip = %ip, "detected local IP");
+    }
+    status_server.set_local_ip(local_ip).await;
+
     // Spawn reader tasks
     for (reader_ip, reader_port, read_type, fanout_addr) in fanout_addrs {
         let j = journal.clone();
         let rx = shutdown_rx.clone();
+        let ss = status_server.clone();
         tokio::spawn(async move {
-            run_reader(reader_ip, reader_port, read_type, fanout_addr, j, rx).await;
+            run_reader(reader_ip, reader_port, read_type, fanout_addr, j, rx, ss).await;
         });
     }
 
@@ -737,6 +829,7 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use rt_protocol::{EpochResetCommand, Heartbeat, WsMessage};
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
@@ -965,5 +1058,72 @@ mod tests {
             Message::Text(text) => serde_json::from_str(&text).expect("parse ws json"),
             other => panic!("expected text ws frame, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn append_read_to_journal_returns_error_when_stream_missing() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let mut journal = Journal::open(&db_path).expect("open journal");
+
+        let result = append_read_to_journal(
+            &mut journal,
+            "10.0.0.42",
+            Some("2026-01-01T00:00:00Z"),
+            "aa400000000123450a2a01123018455927a7",
+            "raw",
+        );
+
+        assert!(
+            matches!(result, Err(JournalAppendError::StreamState(_))),
+            "missing stream state should return StreamState error, got: {:?}",
+            result
+        );
+    }
+
+    async fn http_get_body(addr: SocketAddr, path: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect failed");
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            path
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write failed");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("read failed");
+        response
+    }
+
+    #[tokio::test]
+    async fn journal_error_marks_reader_disconnected() {
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        status.init_readers(&["10.0.0.42".to_owned()]).await;
+        status
+            .update_reader_state("10.0.0.42", ReaderConnectionState::Connected)
+            .await;
+
+        mark_reader_disconnected(&status, "10.0.0.42").await;
+
+        let body = http_get_body(status.local_addr(), "/").await;
+        assert!(
+            body.contains("disconnected"),
+            "reader should be marked disconnected after journal error"
+        );
     }
 }

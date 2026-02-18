@@ -15,8 +15,10 @@
 //! No authentication in v1. Status page is read-only.
 
 use crate::storage::journal::Journal;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -38,6 +40,23 @@ pub struct StatusConfig {
 // Subsystem readiness
 // ---------------------------------------------------------------------------
 
+/// Connection state of a reader TCP socket.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReaderConnectionState {
+    Connecting,
+    Connected,
+    Disconnected,
+}
+
+/// Per-reader status tracked in memory.
+#[derive(Debug, Clone)]
+pub struct ReaderStatus {
+    pub state: ReaderConnectionState,
+    pub last_seen: Option<Instant>,
+    pub reads_since_restart: u64,
+    pub reads_total: i64,
+}
+
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
 ///
 /// Ready = config loaded + journal open + worker tasks started.
@@ -48,6 +67,9 @@ pub struct SubsystemStatus {
     reason: Option<String>,
     /// Uplink state is tracked for the status page but does NOT affect readiness.
     uplink_connected: bool,
+    forwarder_id: String,
+    local_ip: Option<String>,
+    readers: HashMap<String, ReaderStatus>,
 }
 
 impl SubsystemStatus {
@@ -57,6 +79,9 @@ impl SubsystemStatus {
             ready: true,
             reason: None,
             uplink_connected: false,
+            forwarder_id: String::new(),
+            local_ip: None,
+            readers: HashMap::new(),
         }
     }
 
@@ -66,6 +91,9 @@ impl SubsystemStatus {
             ready: false,
             reason: Some(reason),
             uplink_connected: false,
+            forwarder_id: String::new(),
+            local_ip: None,
+            readers: HashMap::new(),
         }
     }
 
@@ -114,6 +142,55 @@ impl StatusServer {
         self.subsystem.lock().await.set_uplink_connected(connected);
     }
 
+    /// Set the forwarder ID (call once at startup).
+    pub async fn set_forwarder_id(&self, id: &str) {
+        self.subsystem.lock().await.forwarder_id = id.to_owned();
+    }
+
+    /// Set the detected local IP (call once at startup).
+    pub async fn set_local_ip(&self, ip: Option<String>) {
+        self.subsystem.lock().await.local_ip = ip;
+    }
+
+    /// Pre-populate all configured reader IPs as Disconnected.
+    pub async fn init_readers(&self, reader_ips: &[String]) {
+        let mut ss = self.subsystem.lock().await;
+        for ip in reader_ips {
+            ss.readers.entry(ip.clone()).or_insert(ReaderStatus {
+                state: ReaderConnectionState::Disconnected,
+                last_seen: None,
+                reads_since_restart: 0,
+                reads_total: 0,
+            });
+        }
+    }
+
+    /// Seed a reader's total historical count from durable journal state.
+    pub async fn set_reader_total(&self, reader_ip: &str, total: i64) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.reads_total = total;
+        }
+    }
+
+    /// Update a reader's connection state.
+    pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.state = state;
+        }
+    }
+
+    /// Record a successful chip read for a reader.
+    pub async fn record_read(&self, reader_ip: &str) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.reads_since_restart += 1;
+            r.reads_total += 1;
+            r.last_seen = Some(Instant::now());
+        }
+    }
+
     /// Start the status HTTP server without a journal (epoch reset returns 404).
     pub async fn start(
         cfg: StatusConfig,
@@ -156,6 +233,9 @@ pub trait JournalAccess {
     ///
     /// Returns `Ok(new_epoch)` on success, `Err(NotFound)` if stream unknown.
     fn reset_epoch(&mut self, stream_key: &str) -> Result<i64, EpochResetError>;
+
+    /// Count total events for a stream_key.
+    fn event_count(&self, stream_key: &str) -> Result<i64, String>;
 }
 
 #[derive(Debug)]
@@ -181,6 +261,10 @@ impl JournalAccess for Journal {
             .map_err(|e| EpochResetError::Storage(e.to_string()))?;
         Ok(new_epoch)
     }
+
+    fn event_count(&self, stream_key: &str) -> Result<i64, String> {
+        Journal::event_count(self, stream_key).map_err(|e| e.to_string())
+    }
 }
 
 /// Sentinel "no journal" implementation: every reset returns NotFound.
@@ -189,6 +273,30 @@ struct NoJournal;
 impl JournalAccess for NoJournal {
     fn reset_epoch(&mut self, _stream_key: &str) -> Result<i64, EpochResetError> {
         Err(EpochResetError::NotFound)
+    }
+
+    fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
+        Ok(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn format_last_seen(instant: Option<Instant>) -> String {
+    match instant {
+        None => "never".to_owned(),
+        Some(t) => {
+            let elapsed = t.elapsed().as_secs();
+            if elapsed < 60 {
+                format!("{}s ago", elapsed)
+            } else if elapsed < 3600 {
+                format!("{}m ago", elapsed / 60)
+            } else {
+                format!("{}h ago", elapsed / 3600)
+            }
+        }
     }
 }
 
@@ -265,37 +373,95 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
             }
         }
         ("GET", "/") => {
-            let ss = subsystem.lock().await;
-            let uplink_state = if ss.uplink_connected() {
+            let (ready, uplink_connected, forwarder_id, local_ip, readers) = {
+                let ss = subsystem.lock().await;
+                let mut readers: Vec<_> = ss
+                    .readers
+                    .iter()
+                    .map(|(ip, r)| (ip.clone(), r.clone()))
+                    .collect();
+                readers.sort_by(|a, b| a.0.cmp(&b.0));
+                (
+                    ss.is_ready(),
+                    ss.uplink_connected(),
+                    ss.forwarder_id.clone(),
+                    ss.local_ip.clone(),
+                    readers,
+                )
+            };
+
+            let ready_state = if ready { "ready" } else { "not-ready" };
+            let ready_class = if ready { "ok" } else { "err" };
+            let uplink_state = if uplink_connected {
                 "connected"
             } else {
                 "disconnected"
             };
-            let ready_state = if ss.is_ready() { "ready" } else { "not-ready" };
+            let uplink_class = if uplink_connected { "ok" } else { "err" };
+            let local_ip_display = local_ip.as_deref().unwrap_or("unknown");
+
+            let mut reader_rows = String::new();
+            for (ip, r) in &readers {
+                let (state_text, state_class) = match r.state {
+                    ReaderConnectionState::Connected => ("connected", "ok"),
+                    ReaderConnectionState::Connecting => ("connecting", "warn"),
+                    ReaderConnectionState::Disconnected => ("disconnected", "err"),
+                };
+                let last_seen = format_last_seen(r.last_seen);
+                reader_rows.push_str(&format!(
+                    "<tr><td>{ip}</td>\
+                     <td><span class=\"status {sc}\">{st}</span></td>\
+                     <td>{session}</td>\
+                     <td>{total}</td>\
+                     <td>{ls}</td></tr>",
+                    ip = ip,
+                    sc = state_class,
+                    st = state_text,
+                    session = r.reads_since_restart,
+                    total = r.reads_total,
+                    ls = last_seen,
+                ));
+            }
+
             let html = format!(
                 "<!DOCTYPE html>\
                  <html><head><title>Forwarder Status</title>\
                  <style>\
-                 body{{font-family:system-ui,sans-serif;max-width:480px;margin:2rem auto;padding:0 1rem}}\
+                 body{{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem}}\
                  h1{{margin-bottom:.5rem}}\
+                 h2{{margin-top:1.5rem;margin-bottom:.5rem}}\
                  .status{{padding:.25rem .5rem;border-radius:4px;display:inline-block}}\
                  .ok{{background:#d4edda;color:#155724}}\
+                 .warn{{background:#fff3cd;color:#856404}}\
                  .err{{background:#f8d7da;color:#721c24}}\
+                 table{{border-collapse:collapse;width:100%}}\
+                 th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd}}\
+                 th{{font-weight:600}}\
                  </style>\
                  </head><body>\
                  <h1>Forwarder Status</h1>\
                  <p>Version: {version}</p>\
-                 <p>Readiness: <span class=\"status {ready_class}\">{ready}</span></p>\
-                 <p>Uplink: <span class=\"status {uplink_class}\">{uplink}</span></p>\
+                 <p>Forwarder ID: <code>{fwd_id}</code></p>\
+                 <p>Local IP: {local_ip}</p>\
+                 <p>Readiness: <span class=\"status {rc}\">{rs}</span></p>\
+                 <p>Uplink: <span class=\"status {uc}\">{us}</span></p>\
+                 <h2>Readers</h2>\
+                 <table>\
+                 <tr><th>Reader IP</th><th>Status</th><th>Reads (session)</th><th>Reads (total)</th><th>Last seen</th></tr>\
+                 {reader_rows}\
+                 </table>\
                  <script>\
                  setTimeout(()=>location.reload(),2000);\
                  </script>\
                  </body></html>",
                 version = *version,
-                ready = ready_state,
-                ready_class = if ss.is_ready() { "ok" } else { "err" },
-                uplink = uplink_state,
-                uplink_class = if ss.uplink_connected() { "ok" } else { "err" },
+                fwd_id = forwarder_id,
+                local_ip = local_ip_display,
+                rs = ready_state,
+                rc = ready_class,
+                us = uplink_state,
+                uc = uplink_class,
+                reader_rows = reader_rows,
             );
             send_response(&mut stream, 200, "text/html; charset=utf-8", &html).await;
         }
