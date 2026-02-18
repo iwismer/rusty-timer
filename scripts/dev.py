@@ -262,16 +262,17 @@ async def _iterm2_async() -> None:
         window = await app.async_create_window()
         tab = window.current_tab
         s0 = tab.current_session
-        # 2×3 layout:
+        # Physical layout after splits (row-major):
         #   s0 (top-left)  | s1 (top-right)
         #   s2 (mid-left)  | s4 (mid-right)
         #   s3 (bot-left)  | s5 (bot-right)
+        # Row-major sessions list: [s0, s1, s2, s4, s3, s5]
         s1 = await s0.async_split_pane(vertical=True)
         s2 = await s0.async_split_pane(vertical=False)
         s3 = await s2.async_split_pane(vertical=False)
         s4 = await s1.async_split_pane(vertical=False)
         s5 = await s4.async_split_pane(vertical=False)
-        sessions = [s0, s1, s2, s3, s4, s5]
+        sessions = [s0, s1, s2, s4, s3, s5]  # row-major: top-L, top-R, mid-L, mid-R, bot-L, bot-R
         for session, (title, cmd) in zip(sessions, PANES):
             await session.async_set_name(title)
             await session.async_send_text(f"cd {REPO_ROOT} && {cmd}\n")
