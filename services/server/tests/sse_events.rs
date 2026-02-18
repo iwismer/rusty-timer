@@ -64,13 +64,14 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     let expected_stream_id = Uuid::new_v4();
     let expected_created_at = "2026-01-01T00:00:00+00:00";
     sqlx::query(
-        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, stream_epoch, online, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz)",
     )
     .bind(expected_stream_id)
     .bind("fwd-sse")
     .bind("192.168.100.1:10000")
     .bind("Desk Reader")
+    .bind("My Forwarder")
     .bind(7_i64)
     .bind(false)
     .bind(expected_created_at)
@@ -103,7 +104,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
         forwarder_id: "fwd-sse".to_owned(),
         reader_ips: vec!["192.168.100.1:10000".to_owned()],
         resume: vec![],
-        display_name: None,
+        display_name: Some("My Forwarder".to_owned()),
     }))
     .await
     .unwrap();
@@ -204,6 +205,10 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     assert_eq!(
         stream_created_json["created_at"].as_str(),
         Some(expected_created_at)
+    );
+    assert_eq!(
+        stream_created_json["forwarder_display_name"].as_str(),
+        Some("My Forwarder")
     );
 
     let metrics_updated_data = find_sse_event_data(&collected, "metrics_updated")
