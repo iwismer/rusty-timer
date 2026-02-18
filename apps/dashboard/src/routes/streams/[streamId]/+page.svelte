@@ -1,34 +1,46 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
-  import type { StreamEntry, StreamMetrics } from "$lib/api";
+  import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
+  import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
 
-  let streamId = "";
-  let stream: StreamEntry | null = null;
-  let metrics: StreamMetrics | null = null;
-  let loadingMetrics = true;
-  let error: string | null = null;
   let resetResult: string | null = null;
   let resetBusy = false;
+  let requestedMetricStreamIds = new Set<string>();
+  let inFlightMetricStreamIds = new Set<string>();
 
-  // Derive stream_id from the URL parameter
   $: streamId = $page.params.streamId;
+  $: stream = $streamsStore.find((s) => s.stream_id === streamId) ?? null;
+  $: metrics = $metricsStore[streamId] ?? null;
+  $: void maybeFetchMetrics(streamId);
 
-  async function loadData(id: string) {
-    loadingMetrics = true;
-    error = null;
+  function maybeFetchMetrics(id: string): void {
+    if (
+      !shouldFetchMetrics(
+        id,
+        $metricsStore,
+        requestedMetricStreamIds,
+        inFlightMetricStreamIds,
+      )
+    ) {
+      return;
+    }
+
+    requestedMetricStreamIds = new Set(requestedMetricStreamIds).add(id);
+    inFlightMetricStreamIds = new Set(inFlightMetricStreamIds).add(id);
+    void loadMetrics(id);
+  }
+
+  async function loadMetrics(id: string): Promise<void> {
     try {
-      const [streamsResp, metricsResp] = await Promise.all([
-        api.getStreams(),
-        api.getMetrics(id),
-      ]);
-      stream = streamsResp.streams.find((s) => s.stream_id === id) ?? null;
-      metrics = metricsResp;
-    } catch (e) {
-      error = String(e);
+      const m = await api.getMetrics(id);
+      setMetrics(id, m);
+    } catch {
+      // SSE will populate eventually.
     } finally {
-      loadingMetrics = false;
+      const next = new Set(inFlightMetricStreamIds);
+      next.delete(id);
+      inFlightMetricStreamIds = next;
     }
   }
 
@@ -38,23 +50,11 @@
     try {
       await api.resetEpoch(streamId);
       resetResult = "Epoch reset command sent successfully.";
-      // Refresh data after reset
-      await loadData(streamId);
     } catch (e) {
       resetResult = `Error: ${String(e)}`;
     } finally {
       resetBusy = false;
     }
-  }
-
-  onMount(() => {
-    if (streamId) {
-      loadData(streamId);
-    }
-  });
-
-  $: if (streamId) {
-    loadData(streamId);
   }
 
   function formatLag(lag: number | null): string {
@@ -75,10 +75,6 @@
       — {streamId}
     {/if}
   </h1>
-
-  {#if error}
-    <p class="error">{error}</p>
-  {/if}
 
   {#if stream}
     <section class="meta-section">
@@ -104,9 +100,9 @@
   <!-- Metrics -->
   <section data-testid="metrics-section">
     <h2>Metrics</h2>
-    {#if loadingMetrics}
+    {#if !metrics}
       <p>Loading metrics…</p>
-    {:else if metrics}
+    {:else}
       <table>
         <tbody>
           <tr>

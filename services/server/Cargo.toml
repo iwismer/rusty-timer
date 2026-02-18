@@ -20,6 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rt-protocol = { path = "../../crates/rt-protocol" }
 futures-util = "0.3"
 tokio-tungstenite = "0.26"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

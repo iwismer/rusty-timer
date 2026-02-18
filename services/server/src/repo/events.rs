@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -85,6 +85,71 @@ pub async fn set_stream_online(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub struct StreamMetricsRow {
+    pub raw_count: i64,
+    pub dedup_count: i64,
+    pub retransmit_count: i64,
+    pub lag_ms: Option<u64>,
+}
+
+pub struct StreamSnapshotRow {
+    pub stream_id: Uuid,
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub display_alias: Option<String>,
+    pub online: bool,
+    pub stream_epoch: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn fetch_stream_metrics(
+    pool: &PgPool,
+    stream_id: Uuid,
+) -> Result<Option<StreamMetricsRow>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at
+           FROM stream_metrics WHERE stream_id = $1"#,
+        stream_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| {
+        let lag_ms = r
+            .last_canonical_event_received_at
+            .map(|ts| (chrono::Utc::now() - ts).num_milliseconds().max(0) as u64);
+        StreamMetricsRow {
+            raw_count: r.raw_count,
+            dedup_count: r.dedup_count,
+            retransmit_count: r.retransmit_count,
+            lag_ms,
+        }
+    }))
+}
+
+pub async fn fetch_stream_snapshot(
+    pool: &PgPool,
+    stream_id: Uuid,
+) -> Result<Option<StreamSnapshotRow>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, online, stream_epoch, created_at
+           FROM streams WHERE stream_id = $1"#,
+    )
+    .bind(stream_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| StreamSnapshotRow {
+        stream_id: r.get("stream_id"),
+        forwarder_id: r.get("forwarder_id"),
+        reader_ip: r.get("reader_ip"),
+        display_alias: r.get("display_alias"),
+        online: r.get("online"),
+        stream_epoch: r.get("stream_epoch"),
+        created_at: r.get("created_at"),
+    }))
 }
 
 pub async fn fetch_events_after_cursor(

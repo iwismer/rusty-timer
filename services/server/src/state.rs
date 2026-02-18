@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
+use crate::dashboard_events::DashboardEvent;
+
 pub type StreamBroadcast = broadcast::Sender<rt_protocol::ReadEvent>;
 pub type BroadcastRegistry = Arc<RwLock<HashMap<Uuid, StreamBroadcast>>>;
 pub type ForwarderCommandSenders =
@@ -15,15 +17,18 @@ pub struct AppState {
     pub active_forwarders: Arc<RwLock<HashMap<String, ()>>>,
     pub broadcast_registry: BroadcastRegistry,
     pub forwarder_command_senders: ForwarderCommandSenders,
+    pub dashboard_tx: broadcast::Sender<DashboardEvent>,
 }
 
 impl AppState {
     pub fn new(pool: PgPool) -> Self {
+        let (dashboard_tx, _) = broadcast::channel(256);
         Self {
             pool,
             active_forwarders: Arc::new(RwLock::new(HashMap::new())),
             broadcast_registry: Arc::new(RwLock::new(HashMap::new())),
             forwarder_command_senders: Arc::new(RwLock::new(HashMap::new())),
+            dashboard_tx,
         }
     }
 

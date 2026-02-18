@@ -1,31 +1,16 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import * as api from "$lib/api";
-  import type { StreamEntry } from "$lib/api";
-
-  let streams: StreamEntry[] = [];
-  let loading = true;
-  let error: string | null = null;
+  import { streamsStore } from "$lib/stores";
 
   // Per-stream rename state (keyed by stream_id)
   let renameValues: Record<string, string> = {};
   let renameBusy: Record<string, boolean> = {};
   let renameError: Record<string, string | null> = {};
 
-  async function loadStreams() {
-    loading = true;
-    error = null;
-    try {
-      const resp = await api.getStreams();
-      streams = resp.streams;
-      // Initialise rename inputs with current alias (or empty string)
-      for (const s of streams) {
-        renameValues[s.stream_id] = s.display_alias ?? "";
-      }
-    } catch (e) {
-      error = String(e);
-    } finally {
-      loading = false;
+  // Keep rename inputs in sync as streams arrive via SSE
+  $: for (const s of $streamsStore) {
+    if (!(s.stream_id in renameValues)) {
+      renameValues[s.stream_id] = s.display_alias ?? "";
     }
   }
 
@@ -33,91 +18,80 @@
     renameBusy[streamId] = true;
     renameError[streamId] = null;
     try {
-      const updated = await api.renameStream(streamId, renameValues[streamId]);
-      // Update the stream entry in place
-      streams = streams.map((s) => (s.stream_id === streamId ? updated : s));
+      await api.renameStream(streamId, renameValues[streamId]);
+      // SSE stream_updated event will update the store
     } catch (e) {
       renameError[streamId] = String(e);
     } finally {
       renameBusy[streamId] = false;
     }
   }
-
-  onMount(loadStreams);
 </script>
 
 <main>
   <h1 data-testid="streams-heading">Dashboard – Streams</h1>
 
-  {#if error}
-    <p class="error">{error}</p>
-  {/if}
-
-  {#if loading}
-    <p>Loading…</p>
-  {:else}
-    <ul data-testid="stream-list">
-      {#each streams as stream (stream.stream_id)}
-        <li data-testid="stream-item">
-          <div class="stream-header">
-            <!-- Display alias or fallback to forwarder_id / reader_ip -->
-            <a
-              data-testid="stream-detail-link"
-              href="/streams/{stream.stream_id}"
-            >
-              {#if stream.display_alias}
-                <strong>{stream.display_alias}</strong>
-              {:else}
-                <strong>{stream.forwarder_id}</strong> / {stream.reader_ip}
-              {/if}
-            </a>
-
-            {#if stream.online}
-              <span data-testid="stream-online-badge" class="badge online"
-                >online</span
-              >
+  <ul data-testid="stream-list">
+    {#each $streamsStore as stream (stream.stream_id)}
+      <li data-testid="stream-item">
+        <div class="stream-header">
+          <!-- Display alias or fallback to forwarder_id / reader_ip -->
+          <a
+            data-testid="stream-detail-link"
+            href="/streams/{stream.stream_id}"
+          >
+            {#if stream.display_alias}
+              <strong>{stream.display_alias}</strong>
             {:else}
-              <span data-testid="stream-offline-badge" class="badge offline"
-                >offline</span
-              >
+              <strong>{stream.forwarder_id}</strong> / {stream.reader_ip}
             {/if}
-          </div>
+          </a>
 
-          <div class="stream-meta">
-            <span>forwarder: {stream.forwarder_id}</span>
-            <span>reader: {stream.reader_ip}</span>
-            <span>epoch: {stream.stream_epoch}</span>
-          </div>
-
-          <!-- Rename form -->
-          <div class="rename-row">
-            <input
-              data-testid="rename-input"
-              type="text"
-              bind:value={renameValues[stream.stream_id]}
-              placeholder="Display alias"
-              aria-label="Rename stream {stream.stream_id}"
-            />
-            <button
-              data-testid="rename-btn"
-              on:click={() => handleRename(stream.stream_id)}
-              disabled={renameBusy[stream.stream_id]}
+          {#if stream.online}
+            <span data-testid="stream-online-badge" class="badge online"
+              >online</span
             >
-              {renameBusy[stream.stream_id] ? "Saving…" : "Rename"}
-            </button>
-          </div>
-
-          {#if renameError[stream.stream_id]}
-            <p class="error">{renameError[stream.stream_id]}</p>
+          {:else}
+            <span data-testid="stream-offline-badge" class="badge offline"
+              >offline</span
+            >
           {/if}
-        </li>
-      {/each}
+        </div>
 
-      {#if streams.length === 0}
-        <li>No streams found.</li>
-      {/if}
-    </ul>
-  {/if}
+        <div class="stream-meta">
+          <span>forwarder: {stream.forwarder_id}</span>
+          <span>reader: {stream.reader_ip}</span>
+          <span>epoch: {stream.stream_epoch}</span>
+        </div>
+
+        <!-- Rename form -->
+        <div class="rename-row">
+          <input
+            data-testid="rename-input"
+            type="text"
+            bind:value={renameValues[stream.stream_id]}
+            placeholder="Display alias"
+            aria-label="Rename stream {stream.stream_id}"
+          />
+          <button
+            data-testid="rename-btn"
+            on:click={() => handleRename(stream.stream_id)}
+            disabled={renameBusy[stream.stream_id]}
+          >
+            {renameBusy[stream.stream_id] ? "Saving…" : "Rename"}
+          </button>
+        </div>
+
+        {#if renameError[stream.stream_id]}
+          <p class="error">{renameError[stream.stream_id]}</p>
+        {/if}
+      </li>
+    {/each}
+
+    {#if $streamsStore.length === 0}
+      <li>No streams found.</li>
+    {/if}
+  </ul>
 </main>
 
 <style>
