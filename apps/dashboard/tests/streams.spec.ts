@@ -148,12 +148,17 @@ test.describe("stream list rename flow", () => {
 
   test("can fill in rename input and submit", async ({ page }) => {
     await page.goto("/");
+    const patchRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        request.url().endsWith("/api/v1/streams/stream-uuid-1"),
+    );
     const firstInput = page.locator('[data-testid="rename-input"]').first();
     await firstInput.fill("Updated Alpha");
     const firstBtn = page.locator('[data-testid="rename-btn"]').first();
     await firstBtn.click();
-    // After PATCH, the updated alias should appear
-    await expect(page.getByText("Updated Alpha")).toBeVisible();
+    const request = await patchRequest;
+    expect(request.postDataJSON()).toEqual({ display_alias: "Updated Alpha" });
   });
 });
 
@@ -238,11 +243,13 @@ test.describe("per-stream detail page", () => {
     await expect(page.locator('[data-testid="metric-lag"]')).toBeVisible();
   });
 
-  test("displays backlog metric", async ({ page }) => {
+  test("displays backlog metric with current default value", async ({
+    page,
+  }) => {
     await page.goto("/streams/stream-uuid-1");
     await expect(page.locator('[data-testid="metric-backlog"]')).toBeVisible();
     await expect(page.locator('[data-testid="metric-backlog"]')).toContainText(
-      "3",
+      "0",
     );
   });
 

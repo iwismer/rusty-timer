@@ -166,6 +166,7 @@ async fn e2e_export_txt_and_csv() {
         server_url: ws_url,
         token: String::from_utf8_lossy(FORWARDER_TOKEN).to_string(),
         forwarder_id: FORWARDER_DEVICE_ID.to_owned(),
+        display_name: None,
         batch_mode: "immediate".to_owned(),
         batch_flush_ms: 100,
         batch_max_events: 50,
