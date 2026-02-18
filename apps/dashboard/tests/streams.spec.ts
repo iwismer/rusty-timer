@@ -32,6 +32,19 @@ const MOCK_METRICS = {
   backlog: 3,
 };
 
+const MOCK_LIST_METRICS_RESPONSE = {
+  raw_count: 500,
+  dedup_count: 480,
+  retransmit_count: 20,
+  lag_ms: 2300,
+  epoch_raw_count: 120,
+  epoch_dedup_count: 110,
+  epoch_retransmit_count: 10,
+  epoch_lag_ms: 1500,
+  epoch_last_received_at: "2026-01-01T00:00:00Z",
+  unique_chips: 75,
+};
+
 test.describe("stream list page", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/v1/events", async (route) => {
@@ -98,6 +111,42 @@ test.describe("stream list page", () => {
   test("stream list shows epoch for each stream", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByText(/epoch/i).first()).toBeVisible();
+  });
+
+  test("retries metrics fetch after transient failure", async ({ page }) => {
+    let streamOneMetricsAttempts = 0;
+    await page.route("**/api/v1/streams/*/metrics", async (route) => {
+      const url = new URL(route.request().url());
+      const streamId = url.pathname.split("/")[4];
+
+      if (streamId === "stream-uuid-1") {
+        streamOneMetricsAttempts += 1;
+        if (streamOneMetricsAttempts === 1) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({
+              code: "INTERNAL_ERROR",
+              message: "temporary failure",
+            }),
+          });
+          return;
+        }
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_LIST_METRICS_RESPONSE),
+      });
+    });
+
+    await page.goto("/");
+
+    await expect
+      .poll(() => streamOneMetricsAttempts, { timeout: 10000 })
+      .toBeGreaterThan(1);
+    await expect(page.getByText("Reads: 120").first()).toBeVisible();
   });
 });
 

@@ -198,6 +198,31 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         publish_stream_created(&state, sid).await;
     }
 
+    let initial_display_name_patch = match &current_display_name {
+        Some(name) => OptionalStringPatch::Set(name.clone()),
+        None => OptionalStringPatch::Clear,
+    };
+    let initial_stream_ids = match fetch_stream_ids_by_forwarder(&state.pool, &device_id).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            error!(
+                device_id = %device_id,
+                error = %e,
+                "failed to list forwarder streams for initial display-name update"
+            );
+            stream_map.values().copied().collect()
+        }
+    };
+    for sid in initial_stream_ids {
+        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+            stream_id: sid,
+            online: None,
+            stream_epoch: None,
+            display_alias: None,
+            forwarder_display_name: Some(initial_display_name_patch.clone()),
+        });
+    }
+
     let hb_msg = WsMessage::Heartbeat(Heartbeat {
         session_id: session_id.clone(),
         device_id: device_id.clone(),

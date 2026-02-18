@@ -13,6 +13,8 @@
   // Metrics fetching state
   let requestedMetricStreamIds = new Set<string>();
   let inFlightMetricStreamIds = new Set<string>();
+  const METRICS_RETRY_DELAY_MS = 1000;
+  let metricsRetryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
   // Keep rename inputs in sync as streams arrive via SSE
   $: for (const s of $streamsStore) {
@@ -48,12 +50,23 @@
       const m = await api.getMetrics(id);
       setMetrics(id, m);
     } catch {
-      // SSE will populate eventually.
+      const nextRequested = new Set(requestedMetricStreamIds);
+      nextRequested.delete(id);
+      requestedMetricStreamIds = nextRequested;
+      scheduleMetricsRetry(id);
     } finally {
       const next = new Set(inFlightMetricStreamIds);
       next.delete(id);
       inFlightMetricStreamIds = next;
     }
+  }
+
+  function scheduleMetricsRetry(id: string): void {
+    if (metricsRetryTimers[id]) return;
+    metricsRetryTimers[id] = setTimeout(() => {
+      delete metricsRetryTimers[id];
+      void maybeFetchMetrics(id);
+    }, METRICS_RETRY_DELAY_MS);
   }
 
   // Group streams by forwarder_id.
@@ -83,7 +96,13 @@
   const timerHandle = setInterval(() => {
     tick++;
   }, 1000);
-  onDestroy(() => clearInterval(timerHandle));
+  onDestroy(() => {
+    clearInterval(timerHandle);
+    for (const timer of Object.values(metricsRetryTimers)) {
+      clearTimeout(timer);
+    }
+    metricsRetryTimers = {};
+  });
 
   // Aggregate stats per forwarder group
   function groupStats(streams: typeof $streamsStore) {

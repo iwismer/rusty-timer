@@ -323,9 +323,9 @@ async fn test_sse_emits_stream_updated_on_forwarder_display_name_change() {
         other => panic!("expected Heartbeat, got {:?}", other),
     }
 
-    // 8. Read SSE until stream_updated appears
+    // 8. Read SSE until a stream_updated payload contains the updated display_name.
     let mut collected = String::new();
-    let mut saw_stream_updated = false;
+    let mut saw_finish_line_update = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     while tokio::time::Instant::now() < deadline {
@@ -333,8 +333,14 @@ async fn test_sse_emits_stream_updated_on_forwarder_display_name_change() {
             Ok(Ok(Some(chunk))) => {
                 let text = String::from_utf8_lossy(&chunk);
                 collected.push_str(&text);
-                if collected.contains("event: stream_updated") {
-                    saw_stream_updated = true;
+                for data in find_all_sse_event_data(&collected, "stream_updated") {
+                    let payload: serde_json::Value = serde_json::from_str(&data).unwrap();
+                    if payload["forwarder_display_name"] == "Finish Line" {
+                        saw_finish_line_update = true;
+                        break;
+                    }
+                }
+                if saw_finish_line_update {
                     break;
                 }
             }
@@ -345,15 +351,16 @@ async fn test_sse_emits_stream_updated_on_forwarder_display_name_change() {
     }
 
     assert!(
-        saw_stream_updated,
-        "expected 'event: stream_updated' in SSE stream, got:\n{}",
+        saw_finish_line_update,
+        "expected stream_updated with forwarder_display_name='Finish Line', got:\n{}",
         collected
     );
 
-    let stream_updated_data = find_sse_event_data(&collected, "stream_updated")
-        .expect("missing stream_updated data payload");
-    let stream_updated_json: serde_json::Value =
-        serde_json::from_str(&stream_updated_data).unwrap();
+    let stream_updated_json = find_all_sse_event_data(&collected, "stream_updated")
+        .into_iter()
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+        .find(|payload| payload["forwarder_display_name"] == "Finish Line")
+        .expect("missing stream_updated payload for updated display name");
     assert_eq!(
         stream_updated_json["forwarder_display_name"].as_str(),
         Some("Finish Line")
@@ -421,7 +428,7 @@ async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear
     assert!(matches!(hb, WsMessage::Heartbeat(_)));
 
     let mut collected = String::new();
-    let mut saw_stream_updated = false;
+    let mut saw_clear_update = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     while tokio::time::Instant::now() < deadline {
@@ -429,8 +436,16 @@ async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear
             Ok(Ok(Some(chunk))) => {
                 let text = String::from_utf8_lossy(&chunk);
                 collected.push_str(&text);
-                if collected.contains("event: stream_updated") {
-                    saw_stream_updated = true;
+                for data in find_all_sse_event_data(&collected, "stream_updated") {
+                    let payload: serde_json::Value = serde_json::from_str(&data).unwrap();
+                    if payload.get("forwarder_display_name").is_some()
+                        && payload["forwarder_display_name"].is_null()
+                    {
+                        saw_clear_update = true;
+                        break;
+                    }
+                }
+                if saw_clear_update {
                     break;
                 }
             }
@@ -441,15 +456,19 @@ async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear
     }
 
     assert!(
-        saw_stream_updated,
-        "expected 'event: stream_updated' in SSE stream, got:\n{}",
+        saw_clear_update,
+        "expected stream_updated with forwarder_display_name=null, got:\n{}",
         collected
     );
 
-    let stream_updated_data = find_sse_event_data(&collected, "stream_updated")
-        .expect("missing stream_updated data payload");
-    let stream_updated_json: serde_json::Value =
-        serde_json::from_str(&stream_updated_data).unwrap();
+    let stream_updated_json = find_all_sse_event_data(&collected, "stream_updated")
+        .into_iter()
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+        .find(|payload| {
+            payload.get("forwarder_display_name").is_some()
+                && payload["forwarder_display_name"].is_null()
+        })
+        .expect("missing stream_updated payload for cleared display name");
     assert!(
         stream_updated_json.get("forwarder_display_name").is_some(),
         "stream_updated must include forwarder_display_name field when clearing display name"
@@ -581,6 +600,111 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_display_name
     assert_eq!(
         updated_ids, stream_ids,
         "expected stream_updated for all streams; collected:\n{}",
+        collected
+    );
+
+    std::mem::forget(container);
+}
+
+#[tokio::test]
+async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_initial_hello_display_name() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state))
+            .await
+            .unwrap();
+    });
+
+    insert_token(
+        &pool,
+        "fwd-sse-initial-update-all",
+        "forwarder",
+        b"sse-initial-update-all-token",
+    )
+    .await;
+
+    // Seed a historical stream for this forwarder that is not in initial hello reader_ips.
+    let historical_stream_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, stream_epoch, online, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now())",
+    )
+    .bind(historical_stream_id)
+    .bind("fwd-sse-initial-update-all")
+    .bind("192.168.111.99")
+    .bind(Option::<String>::None)
+    .bind("Old Name")
+    .bind(1_i64)
+    .bind(false)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO stream_metrics (stream_id) VALUES ($1)")
+        .bind(historical_stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let sse_url = format!("http://{}/api/v1/events", addr);
+    let mut sse_response = reqwest::Client::new().get(&sse_url).send().await.unwrap();
+    assert_eq!(sse_response.status(), 200);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let ws_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&ws_url, "sse-initial-update-all-token")
+        .await
+        .unwrap();
+
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-sse-initial-update-all".to_owned(),
+        reader_ips: vec!["192.168.111.1".to_owned()],
+        resume: vec![],
+        display_name: Some("Finish Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    let mut collected = String::new();
+    let mut updated_ids = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                let text = String::from_utf8_lossy(&chunk);
+                collected.push_str(&text);
+                for data in find_all_sse_event_data(&collected, "stream_updated") {
+                    let payload: serde_json::Value = serde_json::from_str(&data).unwrap();
+                    if payload["forwarder_display_name"] == "Finish Line" {
+                        if let Some(id) = payload["stream_id"].as_str() {
+                            updated_ids.insert(id.to_owned());
+                        }
+                    }
+                }
+
+                if updated_ids.contains(&historical_stream_id.to_string()) {
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => panic!("error reading SSE chunk: {:?}", e),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        updated_ids.contains(&historical_stream_id.to_string()),
+        "expected stream_updated for historical stream on initial hello display-name set; collected:\n{}",
         collected
     );
 
