@@ -130,6 +130,10 @@ async fn put_subscriptions_and_get_streams() {
         .find(|s| s["reader_ip"] == "192.168.1.100")
         .unwrap();
     assert_eq!(s1["local_port"], 10100);
+    assert_eq!(s1["subscribed"], true);
+    // In degraded mode (no server connection), online/display_alias are absent.
+    assert!(s1.get("online").is_none());
+    assert!(s1.get("display_alias").is_none());
     let s2 = streams
         .iter()
         .find(|s| s["reader_ip"] == "192.168.1.200")

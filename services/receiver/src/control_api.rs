@@ -14,10 +14,12 @@
 use crate::db::{Db, Subscription};
 use axum::routing::{get, post, put};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
+use rt_protocol::StreamInfo;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -90,6 +92,10 @@ pub struct StreamEntry {
     pub reader_ip: String,
     pub subscribed: bool,
     pub local_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_alias: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +115,62 @@ pub struct StatusResponse {
 #[derive(Debug, Serialize)]
 pub struct LogsResponse {
     pub entries: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Server stream fetching helpers
+// ---------------------------------------------------------------------------
+
+/// Response shape from the server's `GET /api/v1/streams`.
+#[derive(Debug, Deserialize)]
+struct ServerStreamsResponse {
+    streams: Vec<StreamInfo>,
+}
+
+/// Derive the HTTP base URL from a WebSocket URL.
+///
+/// `ws://host:port/ws/v1/receivers`  → `http://host:port`
+/// `wss://host:port/ws/v1/receivers` → `https://host:port`
+pub(crate) fn http_base_url(ws_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(ws_url).ok()?;
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        _ => return None,
+    };
+    let host = url.host_str()?;
+    match url.port() {
+        Some(port) => Some(format!("{scheme}://{host}:{port}")),
+        None => Some(format!("{scheme}://{host}")),
+    }
+}
+
+/// Fetch available streams from the upstream server.
+async fn fetch_server_streams(ws_url: &str) -> Result<Vec<StreamInfo>, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+    let url = format!("{base}/api/v1/streams");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+
+    let body: ServerStreamsResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid JSON: {e}"))?;
+
+    Ok(body.streams)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +207,7 @@ async fn put_profile(
 }
 
 async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // 1. Load local subscriptions from SQLite.
     let db = state.db.lock().await;
     let subs = match db.load_subscriptions() {
         Ok(s) => s,
@@ -152,33 +215,71 @@ async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
     drop(db);
 
+    // 2. Build a lookup map of local subscriptions: (forwarder_id, reader_ip) -> &Subscription
+    let sub_map: HashMap<(&str, &str), &Subscription> = subs
+        .iter()
+        .map(|s| ((s.forwarder_id.as_str(), s.reader_ip.as_str()), s))
+        .collect();
+
+    // 3. Attempt to fetch server streams if connected.
     let upstream_url = state.upstream_url.read().await.clone();
-    let upstream_error: Option<String> = match upstream_url {
-        None => Some("no profile configured".to_owned()),
-        Some(_) => {
-            let conn = state.connection_state.read().await.clone();
-            if conn != ConnectionState::Connected {
-                Some(format!("connection state: {conn:?}"))
-            } else {
-                None
-            }
+    let conn_state = state.connection_state.read().await.clone();
+
+    let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
+        (None, _) => (None, Some("no profile configured".to_owned())),
+        (_, cs) if *cs != ConnectionState::Connected => {
+            (None, Some(format!("connection state: {cs:?}")))
         }
+        (Some(url), _) => match fetch_server_streams(url).await {
+            Ok(streams) => (Some(streams), None),
+            Err(e) => {
+                warn!(error = %e, "failed to fetch server streams");
+                (None, Some(e))
+            }
+        },
     };
 
-    let streams: Vec<StreamEntry> = subs
-        .iter()
-        .map(|s| {
-            let port = s
-                .local_port_override
-                .or_else(|| crate::ports::default_port(&s.reader_ip));
-            StreamEntry {
-                forwarder_id: s.forwarder_id.clone(),
-                reader_ip: s.reader_ip.clone(),
-                subscribed: true,
+    // 4. Merge: server streams first, then any local-only subscriptions.
+    let mut streams: Vec<StreamEntry> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+
+    if let Some(ref server_streams) = server_streams {
+        for si in server_streams {
+            let key = (si.forwarder_id.clone(), si.reader_ip.clone());
+            let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
+            let port = local.and_then(|s| {
+                s.local_port_override
+                    .or_else(|| crate::ports::default_port(&s.reader_ip))
+            });
+            streams.push(StreamEntry {
+                forwarder_id: si.forwarder_id.clone(),
+                reader_ip: si.reader_ip.clone(),
+                subscribed: local.is_some(),
                 local_port: port,
-            }
-        })
-        .collect();
+                online: Some(si.online),
+                display_alias: si.display_alias.clone(),
+            });
+            seen.insert(key);
+        }
+    }
+
+    // Append local subscriptions not present in the server list.
+    for sub in &subs {
+        if seen.contains(&(sub.forwarder_id.clone(), sub.reader_ip.clone())) {
+            continue;
+        }
+        let port = sub
+            .local_port_override
+            .or_else(|| crate::ports::default_port(&sub.reader_ip));
+        streams.push(StreamEntry {
+            forwarder_id: sub.forwarder_id.clone(),
+            reader_ip: sub.reader_ip.clone(),
+            subscribed: true,
+            local_port: port,
+            online: None,
+            display_alias: None,
+        });
+    }
 
     let degraded = upstream_error.is_some();
     Json(StreamsResponse {
@@ -264,4 +365,43 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_base_url_ws_with_port() {
+        assert_eq!(
+            http_base_url("ws://127.0.0.1:8080/ws/v1/receivers"),
+            Some("http://127.0.0.1:8080".to_owned())
+        );
+    }
+
+    #[test]
+    fn http_base_url_wss_with_port() {
+        assert_eq!(
+            http_base_url("wss://server.example.com:8443/ws/v1/receivers"),
+            Some("https://server.example.com:8443".to_owned())
+        );
+    }
+
+    #[test]
+    fn http_base_url_wss_no_port() {
+        assert_eq!(
+            http_base_url("wss://server.example.com/ws/v1/receivers"),
+            Some("https://server.example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn http_base_url_invalid_scheme() {
+        assert_eq!(http_base_url("http://server.example.com"), None);
+    }
+
+    #[test]
+    fn http_base_url_invalid_url() {
+        assert_eq!(http_base_url("not a url"), None);
+    }
 }

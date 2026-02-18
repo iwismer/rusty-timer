@@ -2017,6 +2017,7 @@ dependencies = [
  "bytes",
  "dirs",
  "futures-util",
+ "reqwest",
  "rt-protocol",
  "rt-test-utils",
  "rusqlite",

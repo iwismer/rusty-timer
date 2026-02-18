@@ -163,13 +163,23 @@
       <p class="warning">{streams.upstream_error}</p>
     {/if}
     {#if streams?.streams.length === 0}
-      <p>No streams configured.</p>
+      <p>No streams available.</p>
     {:else}
       <ul>
         {#each streams?.streams ?? [] as stream}
           <li>
-            {stream.forwarder_id} / {stream.reader_ip} → port {stream.local_port ??
-              "auto"}
+            {stream.display_alias ??
+              `${stream.forwarder_id} / ${stream.reader_ip}`}
+            {#if stream.online !== undefined}
+              <span class={stream.online ? "online" : "offline"}
+                >{stream.online ? "(online)" : "(offline)"}</span
+              >
+            {/if}
+            {#if stream.subscribed}
+              → port {stream.local_port ?? "auto"}
+            {:else}
+              <em>(not subscribed)</em>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -236,6 +246,14 @@
   .degraded {
     color: orange;
     font-size: 0.8em;
+  }
+  .online {
+    color: green;
+    font-size: 0.85em;
+  }
+  .offline {
+    color: gray;
+    font-size: 0.85em;
   }
   .logs {
     font-family: monospace;
