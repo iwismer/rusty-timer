@@ -8,6 +8,12 @@ const SAMPLE_METRICS: StreamMetrics = {
   retransmit_count: 2,
   lag: 100,
   backlog: 0,
+  epoch_raw_count: 0,
+  epoch_dedup_count: 0,
+  epoch_retransmit_count: 0,
+  epoch_lag: null,
+  epoch_last_received_at: null,
+  unique_chips: 0,
 };
 
 describe("shouldFetchMetrics", () => {

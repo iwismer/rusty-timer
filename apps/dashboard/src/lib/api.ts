@@ -27,6 +27,14 @@ export interface StreamMetrics {
   /** Milliseconds since last canonical event, or null if no events yet. */
   lag: number | null;
   backlog: number;
+  epoch_raw_count: number;
+  epoch_dedup_count: number;
+  epoch_retransmit_count: number;
+  /** Milliseconds since last canonical event in current epoch, or null. */
+  epoch_lag: number | null;
+  /** ISO 8601 timestamp of last event in current epoch, or null. */
+  epoch_last_received_at: string | null;
+  unique_chips: number;
 }
 
 export interface ApiError {
@@ -72,7 +80,23 @@ export async function renameStream(
 
 /** GET /api/v1/streams/{stream_id}/metrics */
 export async function getMetrics(streamId: string): Promise<StreamMetrics> {
-  return apiFetch<StreamMetrics>(`/api/v1/streams/${streamId}/metrics`);
+  const data = await apiFetch<Record<string, unknown>>(
+    `/api/v1/streams/${streamId}/metrics`,
+  );
+  return {
+    raw_count: data.raw_count as number,
+    dedup_count: data.dedup_count as number,
+    retransmit_count: data.retransmit_count as number,
+    lag: (data.lag_ms as number | null) ?? null,
+    backlog: 0,
+    epoch_raw_count: data.epoch_raw_count as number,
+    epoch_dedup_count: data.epoch_dedup_count as number,
+    epoch_retransmit_count: data.epoch_retransmit_count as number,
+    epoch_lag: (data.epoch_lag_ms as number | null) ?? null,
+    epoch_last_received_at:
+      (data.epoch_last_received_at as string | null) ?? null,
+    unique_chips: data.unique_chips as number,
+  };
 }
 
 /** Returns the href for the export.txt streaming download (no fetch needed — direct link). */

@@ -252,6 +252,12 @@ async fn test_get_metrics_for_stream() {
         m["dedup_count"].as_i64().unwrap() + m["retransmit_count"].as_i64().unwrap()
     );
     assert_eq!(m["backlog"], 0i64, "no active receivers");
+    assert_eq!(m["epoch_raw_count"], 3i64);
+    assert_eq!(m["epoch_dedup_count"], 2i64);
+    assert_eq!(m["epoch_retransmit_count"], 1i64);
+    assert!(m["epoch_lag_ms"].is_number());
+    assert!(m["epoch_last_received_at"].is_string());
+    assert_eq!(m["unique_chips"], 0i64);
 }
 
 #[tokio::test]

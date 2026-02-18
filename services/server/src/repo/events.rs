@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -8,6 +10,12 @@ pub enum IngestResult {
     IntegrityConflict,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct UpsertEventOutcome {
+    pub ingest_result: IngestResult,
+    pub epoch_advanced_to: Option<i64>,
+}
+
 pub async fn upsert_event(
     pool: &PgPool,
     stream_id: Uuid,
@@ -16,36 +24,103 @@ pub async fn upsert_event(
     reader_timestamp: &str,
     raw_read_line: &str,
     read_type: &str,
-) -> Result<IngestResult, sqlx::Error> {
-    let existing =
-        sqlx::query!(
-        "SELECT raw_read_line FROM events WHERE stream_id = $1 AND stream_epoch = $2 AND seq = $3",
-        stream_id, stream_epoch, seq
+) -> Result<UpsertEventOutcome, sqlx::Error> {
+    let tag_id = ipico_core::read::ChipRead::try_from(raw_read_line)
+        .ok()
+        .map(|r| r.tag_id);
+    let mut tx = pool.begin().await?;
+    let mut current_stream_epoch = sqlx::query_scalar::<_, i64>(
+        "SELECT stream_epoch FROM streams WHERE stream_id = $1 FOR UPDATE",
     )
-        .fetch_optional(pool)
-        .await?;
+    .bind(stream_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .unwrap_or(stream_epoch);
+    let mut epoch_advanced_to = None;
 
-    if let Some(existing_row) = existing {
-        if existing_row.raw_read_line == raw_read_line {
-            sqlx::query!(
-                "UPDATE stream_metrics SET raw_count = raw_count + 1, retransmit_count = retransmit_count + 1 WHERE stream_id = $1",
-                stream_id
-            ).execute(pool).await?;
-            Ok(IngestResult::Retransmit)
+    if stream_epoch > current_stream_epoch {
+        sqlx::query("UPDATE streams SET stream_epoch = $2 WHERE stream_id = $1")
+            .bind(stream_id)
+            .bind(stream_epoch)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE stream_metrics SET epoch_raw_count = 0, epoch_dedup_count = 0, epoch_retransmit_count = 0, epoch_last_received_at = NULL WHERE stream_id = $1",
+        )
+        .bind(stream_id)
+        .execute(&mut *tx)
+        .await?;
+        current_stream_epoch = stream_epoch;
+        epoch_advanced_to = Some(stream_epoch);
+    }
+
+    let existing_raw_read_line = sqlx::query_scalar::<_, String>(
+        "SELECT raw_read_line FROM events WHERE stream_id = $1 AND stream_epoch = $2 AND seq = $3",
+    )
+    .bind(stream_id)
+    .bind(stream_epoch)
+    .bind(seq)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let is_current_epoch = stream_epoch == current_stream_epoch;
+
+    let ingest_result = if let Some(existing_raw_read_line) = existing_raw_read_line {
+        if existing_raw_read_line == raw_read_line {
+            if is_current_epoch {
+                sqlx::query(
+                    "UPDATE stream_metrics SET raw_count = raw_count + 1, retransmit_count = retransmit_count + 1, epoch_raw_count = epoch_raw_count + 1, epoch_retransmit_count = epoch_retransmit_count + 1 WHERE stream_id = $1",
+                )
+                .bind(stream_id)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(
+                    "UPDATE stream_metrics SET raw_count = raw_count + 1, retransmit_count = retransmit_count + 1 WHERE stream_id = $1",
+                )
+                .bind(stream_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            IngestResult::Retransmit
         } else {
-            Ok(IngestResult::IntegrityConflict)
+            IngestResult::IntegrityConflict
         }
     } else {
-        sqlx::query!(
-            r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type) VALUES ($1, $2, $3, $4, $5, $6)"#,
-            stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type
-        ).execute(pool).await?;
-        sqlx::query!(
-            "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now() WHERE stream_id = $1",
-            stream_id
-        ).execute(pool).await?;
-        Ok(IngestResult::Inserted)
-    }
+        sqlx::query(
+            r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+        )
+        .bind(stream_id)
+        .bind(stream_epoch)
+        .bind(seq)
+        .bind(reader_timestamp)
+        .bind(raw_read_line)
+        .bind(read_type)
+        .bind(tag_id.as_deref())
+        .execute(&mut *tx)
+        .await?;
+        if is_current_epoch {
+            sqlx::query(
+                "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now(), epoch_raw_count = epoch_raw_count + 1, epoch_dedup_count = epoch_dedup_count + 1, epoch_last_received_at = now() WHERE stream_id = $1",
+            )
+            .bind(stream_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now() WHERE stream_id = $1",
+            )
+            .bind(stream_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        IngestResult::Inserted
+    };
+
+    tx.commit().await?;
+    Ok(UpsertEventOutcome {
+        ingest_result,
+        epoch_advanced_to,
+    })
 }
 
 pub async fn upsert_stream(
@@ -92,6 +167,11 @@ pub struct StreamMetricsRow {
     pub dedup_count: i64,
     pub retransmit_count: i64,
     pub lag_ms: Option<u64>,
+    pub epoch_raw_count: i64,
+    pub epoch_dedup_count: i64,
+    pub epoch_retransmit_count: i64,
+    pub epoch_lag_ms: Option<u64>,
+    pub epoch_last_received_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct StreamSnapshotRow {
@@ -109,24 +189,49 @@ pub async fn fetch_stream_metrics(
     stream_id: Uuid,
 ) -> Result<Option<StreamMetricsRow>, sqlx::Error> {
     let row = sqlx::query!(
-        r#"SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at
+        r#"SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at,
+                  epoch_raw_count, epoch_dedup_count, epoch_retransmit_count, epoch_last_received_at
            FROM stream_metrics WHERE stream_id = $1"#,
         stream_id
     )
     .fetch_optional(pool)
     .await?;
 
+    let now = chrono::Utc::now();
     Ok(row.map(|r| {
         let lag_ms = r
             .last_canonical_event_received_at
-            .map(|ts| (chrono::Utc::now() - ts).num_milliseconds().max(0) as u64);
+            .map(|ts| (now - ts).num_milliseconds().max(0) as u64);
+        let epoch_lag_ms = r
+            .epoch_last_received_at
+            .map(|ts| (now - ts).num_milliseconds().max(0) as u64);
         StreamMetricsRow {
             raw_count: r.raw_count,
             dedup_count: r.dedup_count,
             retransmit_count: r.retransmit_count,
             lag_ms,
+            epoch_raw_count: r.epoch_raw_count,
+            epoch_dedup_count: r.epoch_dedup_count,
+            epoch_retransmit_count: r.epoch_retransmit_count,
+            epoch_lag_ms,
+            epoch_last_received_at: r.epoch_last_received_at,
         }
     }))
+}
+
+pub async fn count_unique_chips(
+    pool: &PgPool,
+    stream_id: Uuid,
+    stream_epoch: i64,
+) -> Result<i64, sqlx::Error> {
+    let count = sqlx::query_scalar!(
+        "SELECT COUNT(DISTINCT tag_id) FROM events WHERE stream_id = $1 AND stream_epoch = $2 AND tag_id IS NOT NULL",
+        stream_id,
+        stream_epoch
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(count.unwrap_or(0))
 }
 
 pub async fn fetch_stream_snapshot(

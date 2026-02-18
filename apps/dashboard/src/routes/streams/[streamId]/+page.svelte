@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
@@ -62,6 +63,40 @@
     if (lag < 1000) return `${lag} ms`;
     return `${(lag / 1000).toFixed(1)} s`;
   }
+
+  let timeSinceLastRead: string = "N/A";
+  let timerHandle: ReturnType<typeof setInterval> | null = null;
+
+  function formatDuration(ms: number): string {
+    if (ms < 1000) return "< 1s";
+    const totalSec = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSec / 3600);
+    const minutes = Math.floor((totalSec % 3600) / 60);
+    const seconds = totalSec % 60;
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+
+  function updateTimeSinceLastRead(): void {
+    if (metrics?.epoch_last_received_at) {
+      const elapsed =
+        Date.now() - new Date(metrics.epoch_last_received_at).getTime();
+      timeSinceLastRead = formatDuration(Math.max(0, elapsed));
+    } else {
+      timeSinceLastRead = "N/A (no events in epoch)";
+    }
+  }
+
+  $: {
+    if (timerHandle) clearInterval(timerHandle);
+    updateTimeSinceLastRead();
+    timerHandle = setInterval(updateTimeSinceLastRead, 1000);
+  }
+
+  onDestroy(() => {
+    if (timerHandle) clearInterval(timerHandle);
+  });
 </script>
 
 <main>
@@ -126,6 +161,50 @@
           <tr>
             <td>Backlog</td>
             <td data-testid="metric-backlog">{metrics.backlog}</td>
+          </tr>
+          <tr>
+            <td
+              colspan="2"
+              style="border-bottom: 2px solid #ccc; padding-top: 0.75rem;"
+            >
+              <strong>Current Epoch</strong>
+            </td>
+          </tr>
+          <tr>
+            <td>Raw count (epoch)</td>
+            <td data-testid="metric-epoch-raw-count"
+              >{metrics.epoch_raw_count}</td
+            >
+          </tr>
+          <tr>
+            <td>Dedup count (epoch)</td>
+            <td data-testid="metric-epoch-dedup-count"
+              >{metrics.epoch_dedup_count}</td
+            >
+          </tr>
+          <tr>
+            <td>Retransmit count (epoch)</td>
+            <td data-testid="metric-epoch-retransmit-count"
+              >{metrics.epoch_retransmit_count}</td
+            >
+          </tr>
+          <tr>
+            <td>Unique chips</td>
+            <td data-testid="metric-unique-chips">{metrics.unique_chips}</td>
+          </tr>
+          <tr>
+            <td>Last read</td>
+            <td data-testid="metric-last-read">
+              {metrics.epoch_last_received_at
+                ? new Date(metrics.epoch_last_received_at).toLocaleString()
+                : "N/A (no events in epoch)"}
+            </td>
+          </tr>
+          <tr>
+            <td>Time since last read</td>
+            <td data-testid="metric-time-since-last-read"
+              >{timeSinceLastRead}</td
+            >
           </tr>
         </tbody>
       </table>

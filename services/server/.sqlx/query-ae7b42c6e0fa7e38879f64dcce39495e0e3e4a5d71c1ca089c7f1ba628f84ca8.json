@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now(), epoch_raw_count = epoch_raw_count + 1, epoch_dedup_count = epoch_dedup_count + 1, epoch_last_received_at = now() WHERE stream_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ae7b42c6e0fa7e38879f64dcce39495e0e3e4a5d71c1ca089c7f1ba628f84ca8"
+}

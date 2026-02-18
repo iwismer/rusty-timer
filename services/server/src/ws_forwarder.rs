@@ -2,8 +2,8 @@ use crate::{
     auth::{extract_bearer, validate_token},
     dashboard_events::DashboardEvent,
     repo::events::{
-        fetch_stream_metrics, fetch_stream_snapshot, set_stream_online, upsert_event,
-        upsert_stream, IngestResult,
+        count_unique_chips, fetch_stream_metrics, fetch_stream_snapshot, set_stream_online,
+        upsert_event, upsert_stream, IngestResult,
     },
     state::AppState,
 };
@@ -273,6 +273,7 @@ async fn handle_event_batch(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut high_water: HashMap<(String, u64), u64> = HashMap::new();
     let mut had_conflict = false;
+    let mut epoch_transitions: HashMap<Uuid, i64> = HashMap::new();
 
     for event in &batch.events {
         let stream_id = if let Some(&sid) = stream_map.get(&event.reader_ip) {
@@ -296,7 +297,11 @@ async fn handle_event_batch(
         )
         .await?;
 
-        match result {
+        if let Some(new_epoch) = result.epoch_advanced_to {
+            epoch_transitions.insert(stream_id, new_epoch);
+        }
+
+        match result.ingest_result {
             IngestResult::Inserted => {
                 let tx = state.get_or_create_broadcast(stream_id).await;
                 let _ = tx.send(event.clone());
@@ -350,6 +355,15 @@ async fn handle_event_batch(
         socket.send(Message::Text(json)).await?;
     }
 
+    for (stream_id, new_epoch) in epoch_transitions {
+        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+            stream_id,
+            online: None,
+            stream_epoch: Some(new_epoch),
+            display_alias: None,
+        });
+    }
+
     // Notify dashboard of updated metrics
     let touched_streams: std::collections::HashSet<Uuid> = batch
         .events
@@ -357,15 +371,64 @@ async fn handle_event_batch(
         .filter_map(|e| stream_map.get(&e.reader_ip).copied())
         .collect();
     for sid in touched_streams {
-        if let Ok(Some(m)) = fetch_stream_metrics(&state.pool, sid).await {
-            let _ = state.dashboard_tx.send(DashboardEvent::MetricsUpdated {
-                stream_id: sid,
-                raw_count: m.raw_count,
-                dedup_count: m.dedup_count,
-                retransmit_count: m.retransmit_count,
-                lag_ms: m.lag_ms,
-            });
-        }
+        let m = match fetch_stream_metrics(&state.pool, sid).await {
+            Ok(Some(metrics)) => metrics,
+            Ok(None) => continue,
+            Err(e) => {
+                error!(
+                    stream_id = %sid,
+                    error = %e,
+                    "failed to fetch stream metrics for dashboard update"
+                );
+                continue;
+            }
+        };
+
+        let epoch = match sqlx::query_scalar::<_, i64>(
+            "SELECT stream_epoch FROM streams WHERE stream_id = $1",
+        )
+        .bind(sid)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(Some(epoch)) => epoch,
+            Ok(None) => continue,
+            Err(e) => {
+                error!(
+                    stream_id = %sid,
+                    error = %e,
+                    "failed to fetch stream epoch for dashboard update"
+                );
+                continue;
+            }
+        };
+
+        let unique_chips = match count_unique_chips(&state.pool, sid, epoch).await {
+            Ok(count) => count,
+            Err(e) => {
+                error!(
+                    stream_id = %sid,
+                    epoch,
+                    error = %e,
+                    "failed to count unique chips for dashboard update"
+                );
+                continue;
+            }
+        };
+
+        let _ = state.dashboard_tx.send(DashboardEvent::MetricsUpdated {
+            stream_id: sid,
+            raw_count: m.raw_count,
+            dedup_count: m.dedup_count,
+            retransmit_count: m.retransmit_count,
+            lag_ms: m.lag_ms,
+            epoch_raw_count: m.epoch_raw_count,
+            epoch_dedup_count: m.epoch_dedup_count,
+            epoch_retransmit_count: m.epoch_retransmit_count,
+            epoch_lag_ms: m.epoch_lag_ms,
+            epoch_last_received_at: m.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
+            unique_chips,
+        });
     }
 
     Ok(())

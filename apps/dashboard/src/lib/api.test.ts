@@ -92,8 +92,13 @@ describe("server_api client", () => {
       raw_count: 100,
       dedup_count: 90,
       retransmit_count: 10,
-      lag: 1500,
-      backlog: 5,
+      lag_ms: 1500,
+      epoch_raw_count: 50,
+      epoch_dedup_count: 45,
+      epoch_retransmit_count: 5,
+      epoch_lag_ms: 800,
+      epoch_last_received_at: "2026-02-18T12:00:00Z",
+      unique_chips: 10,
     };
     mockFetch.mockResolvedValue(makeResponse(200, metrics));
     const result = await getMetrics("abc-123");
@@ -105,7 +110,13 @@ describe("server_api client", () => {
     expect(result.dedup_count).toBe(90);
     expect(result.retransmit_count).toBe(10);
     expect(result.lag).toBe(1500);
-    expect(result.backlog).toBe(5);
+    expect(result.backlog).toBe(0);
+    expect(result.epoch_raw_count).toBe(50);
+    expect(result.epoch_dedup_count).toBe(45);
+    expect(result.epoch_retransmit_count).toBe(5);
+    expect(result.epoch_lag).toBe(800);
+    expect(result.epoch_last_received_at).toBe("2026-02-18T12:00:00Z");
+    expect(result.unique_chips).toBe(10);
   });
 
   it("getMetrics accepts null lag (no events yet)", async () => {
@@ -114,12 +125,19 @@ describe("server_api client", () => {
       raw_count: 0,
       dedup_count: 0,
       retransmit_count: 0,
-      lag: null,
-      backlog: 0,
+      lag_ms: null,
+      epoch_raw_count: 0,
+      epoch_dedup_count: 0,
+      epoch_retransmit_count: 0,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 0,
     };
     mockFetch.mockResolvedValue(makeResponse(200, metrics));
     const result = await getMetrics("abc-123");
     expect(result.lag).toBeNull();
+    expect(result.epoch_lag).toBeNull();
+    expect(result.epoch_last_received_at).toBeNull();
   });
 
   it("getMetrics throws on 404", async () => {

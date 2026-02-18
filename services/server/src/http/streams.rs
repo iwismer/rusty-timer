@@ -136,14 +136,6 @@ pub async fn reset_epoch(
                     new_stream_epoch: (s.stream_epoch + 1) as u64,
                 };
                 if tx.send(cmd).await.is_ok() {
-                    let _ = state.dashboard_tx.send(
-                        crate::dashboard_events::DashboardEvent::StreamUpdated {
-                            stream_id,
-                            online: None,
-                            stream_epoch: Some(s.stream_epoch + 1),
-                            display_alias: None,
-                        },
-                    );
                     return StatusCode::NO_CONTENT.into_response();
                 }
             }

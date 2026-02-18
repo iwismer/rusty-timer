@@ -138,12 +138,24 @@ describe("sse", () => {
         dedup_count: 40,
         retransmit_count: 2,
         lag_ms: 100,
+        epoch_raw_count: 10,
+        epoch_dedup_count: 9,
+        epoch_retransmit_count: 1,
+        epoch_lag_ms: 50,
+        epoch_last_received_at: "2026-02-18T12:00:00Z",
+        unique_chips: 5,
       }),
     );
 
     const m = get(metricsStore);
     expect(m.s1.raw_count).toBe(42);
     expect(m.s1.lag).toBe(100);
+    expect(m.s1.epoch_raw_count).toBe(10);
+    expect(m.s1.epoch_dedup_count).toBe(9);
+    expect(m.s1.epoch_retransmit_count).toBe(1);
+    expect(m.s1.epoch_lag).toBe(50);
+    expect(m.s1.epoch_last_received_at).toBe("2026-02-18T12:00:00Z");
+    expect(m.s1.unique_chips).toBe(5);
   });
 
   it("resync does not clear existing metrics", async () => {
@@ -154,6 +166,12 @@ describe("sse", () => {
       retransmit_count: 1,
       lag: 50,
       backlog: 0,
+      epoch_raw_count: 3,
+      epoch_dedup_count: 2,
+      epoch_retransmit_count: 1,
+      epoch_lag: 20,
+      epoch_last_received_at: "2026-02-18T12:00:00Z",
+      unique_chips: 2,
     });
 
     initSSE();

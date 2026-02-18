@@ -2545,6 +2545,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "ipico-core",
  "reqwest",
  "rt-protocol",
  "rt-test-utils",

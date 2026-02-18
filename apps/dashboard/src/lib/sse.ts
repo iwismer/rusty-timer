@@ -33,6 +33,12 @@ export function initSSE(): void {
       retransmit_count: data.retransmit_count,
       lag: data.lag_ms ?? null,
       backlog: 0,
+      epoch_raw_count: data.epoch_raw_count,
+      epoch_dedup_count: data.epoch_dedup_count,
+      epoch_retransmit_count: data.epoch_retransmit_count,
+      epoch_lag: data.epoch_lag_ms ?? null,
+      epoch_last_received_at: data.epoch_last_received_at ?? null,
+      unique_chips: data.unique_chips,
     };
     setMetrics(data.stream_id, metrics);
   });

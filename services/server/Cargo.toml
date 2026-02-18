@@ -18,6 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 rt-protocol = { path = "../../crates/rt-protocol" }
+ipico-core = { path = "../../crates/ipico-core" }
 futures-util = "0.3"
 tokio-tungstenite = "0.26"
 tokio-stream = { version = "0.1", features = ["sync"] }

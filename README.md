@@ -145,7 +145,9 @@ cd apps/receiver-ui && npm run format
 git config core.hooksPath .githooks
 ```
 
-The pre-commit hook checks Rust formatting, runs Clippy, and checks JS/TS formatting via Prettier.
+The pre-commit hook checks Rust formatting, runs Clippy, and for touched frontend apps runs:
+- `npm run lint`
+- `npm run check`
 
 ## Licence
 
