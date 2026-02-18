@@ -75,9 +75,9 @@ export async function getMetrics(streamId: string): Promise<StreamMetrics> {
   return apiFetch<StreamMetrics>(`/api/v1/streams/${streamId}/metrics`);
 }
 
-/** Returns the href for the export.raw streaming download (no fetch needed — direct link). */
+/** Returns the href for the export.txt streaming download (no fetch needed — direct link). */
 export function exportRawUrl(streamId: string): string {
-  return `${BASE}/api/v1/streams/${streamId}/export.raw`;
+  return `${BASE}/api/v1/streams/${streamId}/export.txt`;
 }
 
 /** Returns the href for the export.csv streaming download (no fetch needed — direct link). */

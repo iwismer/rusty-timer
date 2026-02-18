@@ -146,7 +146,7 @@
           href={api.exportRawUrl(streamId)}
           download
         >
-          Download export.raw (one raw_read_line per row)
+          Download export.txt (one raw_read_line per row)
         </a>
       </li>
       <li>

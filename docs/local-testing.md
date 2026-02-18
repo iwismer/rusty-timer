@@ -76,7 +76,7 @@ The server exposes:
 - `GET  /api/v1/streams` — list all known streams
 - `PATCH /api/v1/streams/:stream_id` — rename a stream (`display_alias`)
 - `GET  /api/v1/streams/:stream_id/metrics` — per-stream counters
-- `GET  /api/v1/streams/:stream_id/export.raw` — raw read export
+- `GET  /api/v1/streams/:stream_id/export.txt` — raw read export
 - `GET  /api/v1/streams/:stream_id/export.csv` — CSV read export
 - `POST /api/v1/streams/:stream_id/reset-epoch` — increment the stream epoch
 

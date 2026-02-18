@@ -9,7 +9,7 @@ use axum::{
 use rt_protocol::HttpErrorEnvelope;
 use uuid::Uuid;
 
-/// `GET /api/v1/streams/{stream_id}/export.raw`
+/// `GET /api/v1/streams/{stream_id}/export.txt`
 ///
 /// Streams canonical deduplicated events as bare `raw_read_line` values,
 /// one per line (`\n`-terminated), ordered by `(stream_epoch, seq)`.

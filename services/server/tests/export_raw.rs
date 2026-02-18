@@ -1,4 +1,4 @@
-//! Integration tests for export.raw endpoint.
+//! Integration tests for export.txt endpoint.
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
 use sha2::{Digest, Sha256};
@@ -104,7 +104,7 @@ async fn test_export_raw_canonical_events_ordered() {
 
     // Export raw
     let raw_resp = reqwest::get(format!(
-        "http://{}/api/v1/streams/{}/export.raw",
+        "http://{}/api/v1/streams/{}/export.txt",
         addr, stream_id
     ))
     .await
@@ -117,7 +117,7 @@ async fn test_export_raw_canonical_events_ordered() {
     assert_eq!(
         lines.len(),
         3,
-        "export.raw must have exactly 3 canonical lines, got:\n{}",
+        "export.txt must have exactly 3 canonical lines, got:\n{}",
         body
     );
     assert_eq!(lines[0], "EXPORT_LINE_1");
@@ -135,7 +135,7 @@ async fn test_export_raw_not_found() {
     let addr = make_server(pool).await;
 
     let resp = reqwest::get(format!(
-        "http://{}/api/v1/streams/00000000-0000-0000-0000-000000000000/export.raw",
+        "http://{}/api/v1/streams/00000000-0000-0000-0000-000000000000/export.txt",
         addr
     ))
     .await

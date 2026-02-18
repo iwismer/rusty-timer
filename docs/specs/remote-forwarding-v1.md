@@ -399,7 +399,7 @@ Instructs the server to send an `epoch_reset_command` to the connected forwarder
 
 ---
 
-### `GET /api/v1/streams/{stream_id}/export/raw`
+### `GET /api/v1/streams/{stream_id}/export.txt`
 
 Export canonical (deduplicated) events as raw lines.
 
@@ -416,7 +416,7 @@ Retransmits are excluded.
 
 ---
 
-### `GET /api/v1/streams/{stream_id}/export/csv`
+### `GET /api/v1/streams/{stream_id}/export.csv`
 
 Export canonical (deduplicated) events as CSV.
 
