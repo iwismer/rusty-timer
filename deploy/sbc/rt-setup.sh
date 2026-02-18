@@ -22,6 +22,52 @@ STATUS_BIND="0.0.0.0:8080"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+select_latest_forwarder_asset_from_pages() {
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+
+  printf '%s\n' "$@" | jq -rs '
+    [
+      .[]
+      | if type == "array" then .[] else empty end
+      | select((.tag_name // "") | startswith("forwarder-v"))
+      | select((.draft // false) | not)
+      | select((.prerelease // false) | not)
+    ]
+    | sort_by(.published_at // "")
+    | reverse
+    | .[]
+    | .assets[]?
+    | select((.name // "") | test("forwarder-.*-linux-arm64\\.tar\\.gz$"))
+    | .browser_download_url
+    | select(type == "string" and length > 0)
+  ' | head -n 1
+}
+
+status_probe_url_from_bind() {
+  local bind="$1"
+  local host
+  local port
+
+  if [[ "${bind}" =~ ^\[([0-9A-Fa-f:]+)\]:(.+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "${bind}" == *:* ]]; then
+    host="${bind%:*}"
+    port="${bind##*:}"
+  else
+    host="${bind}"
+    port="8080"
+  fi
+
+  if [[ -z "${host}" || "${host}" == "0.0.0.0" || "${host}" == "::" ]]; then
+    host="localhost"
+  fi
+
+  printf 'http://%s:%s/healthz' "${host}" "${port}"
+}
+
 require_root() {
   if [[ $EUID -ne 0 ]]; then
     echo "Error: this script must be run as root (sudo)." >&2
@@ -66,18 +112,20 @@ download_binary() {
 
   echo "Fetching latest forwarder release from GitHub..."
 
-  local releases_json
-  releases_json=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases")
+  local releases_pages=()
+  local page_json
+  local page
+  for page in {1..5}; do
+    page_json=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100&page=${page}")
+    if [[ "${page_json}" == "[]" ]]; then
+      break
+    fi
+    releases_pages+=("${page_json}")
+  done
 
-  # Find the latest release whose tag matches forwarder-v*
+  # Find the latest stable release whose tag matches forwarder-v*
   local download_url
-  download_url=$(echo "${releases_json}" | \
-    jq -r '
-      [ .[] | select(.tag_name | startswith("forwarder-v")) ] |
-      sort_by(.published_at) | reverse | .[0].assets[] |
-      select(.name | test("forwarder-.*-linux-arm64\\.tar\\.gz$")) |
-      .browser_download_url
-    ')
+  download_url=$(select_latest_forwarder_asset_from_pages "${releases_pages[@]}")
 
   if [[ -z "${download_url}" || "${download_url}" == "null" ]]; then
     echo "Error: could not find a forwarder arm64 release asset." >&2
@@ -275,7 +323,8 @@ verify() {
 
   sleep 3
 
-  local port="${STATUS_BIND##*:}"
+  local probe_url
+  probe_url="$(status_probe_url_from_bind "${STATUS_BIND}")"
   local failed=0
 
   if systemctl is-active --quiet rt-forwarder; then
@@ -285,11 +334,11 @@ verify() {
     failed=1
   fi
 
-  if curl -fsS "http://localhost:${port}/healthz"; then
+  if curl -fsS "${probe_url}"; then
     echo ""
     echo "Health check passed."
   else
-    echo "Health check failed."
+    echo "Health check failed at ${probe_url}."
     failed=1
   fi
 
@@ -314,4 +363,6 @@ main() {
   echo "Setup complete."
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main
+fi
