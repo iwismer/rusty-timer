@@ -69,6 +69,7 @@ async fn test_list_streams_after_forwarder_connect() {
         forwarder_id: "fwd-list".to_owned(),
         reader_ips: vec!["10.10.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -110,6 +111,7 @@ async fn test_patch_stream_rename() {
         forwarder_id: "fwd-rename".to_owned(),
         reader_ips: vec!["10.20.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -183,6 +185,7 @@ async fn test_get_metrics_for_stream() {
         forwarder_id: "fwd-metrics".to_owned(),
         reader_ips: vec!["10.30.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();

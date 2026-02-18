@@ -79,6 +79,7 @@ async fn server_restart_events_survive_in_postgres() {
         forwarder_id: "fwd-srv-01".to_owned(),
         reader_ips: vec!["10.110.110.1".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -196,6 +197,7 @@ async fn server_restart_new_forwarder_connection_works() {
         forwarder_id: "fwd-srv-02".to_owned(),
         reader_ips: vec!["10.120.120.1".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -240,6 +242,7 @@ async fn server_restart_new_forwarder_connection_works() {
             stream_epoch: 1,
             last_seq: 2,
         }],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -305,6 +308,7 @@ async fn server_restart_http_api_accessible_after_restart() {
         forwarder_id: "fwd-srv-03".to_owned(),
         reader_ips: vec!["10.130.130.1".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -321,6 +325,7 @@ async fn server_restart_http_api_accessible_after_restart() {
             forwarder_id: "fwd-srv-03".to_owned(),
             reader_ips: vec!["10.130.130.1".to_owned()],
             resume: vec![],
+            display_name: None,
         }))
         .await
         .unwrap();

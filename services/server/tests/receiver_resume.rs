@@ -48,6 +48,7 @@ async fn test_receiver_resume_from_cursor() {
         forwarder_id: "fwd-resume".to_owned(),
         reader_ips: vec!["10.2.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -138,6 +139,7 @@ async fn test_receiver_no_cursor_gets_all() {
         forwarder_id: "fwd-all".to_owned(),
         reader_ips: vec!["10.3.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();

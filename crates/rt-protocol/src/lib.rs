@@ -71,6 +71,10 @@ pub struct ForwarderHello {
     /// An empty list means the forwarder starts fresh (no prior history).
     #[serde(default)]
     pub resume: Vec<ResumeCursor>,
+    /// Human-friendly name for this forwarder (e.g. "Start Line").
+    /// Configured in the forwarder's TOML config. Optional for backward compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 /// A batch of read events from a forwarder.

@@ -68,6 +68,7 @@ async fn forwarder_handshake(
             forwarder_id: forwarder_id.to_owned(),
             reader_ips,
             resume: vec![],
+            display_name: None,
         }))
         .await
         .unwrap();

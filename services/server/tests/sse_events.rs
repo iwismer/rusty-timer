@@ -103,6 +103,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
         forwarder_id: "fwd-sse".to_owned(),
         reader_ips: vec!["192.168.100.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();

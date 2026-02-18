@@ -98,6 +98,7 @@ impl UplinkSession {
             forwarder_id: cfg.forwarder_id.clone(),
             reader_ips: vec![],
             resume: vec![],
+            display_name: None,
         });
         session.send_ws_message(&hello).await?;
 
@@ -154,6 +155,7 @@ impl UplinkSession {
             forwarder_id: cfg.forwarder_id.clone(),
             reader_ips,
             resume,
+            display_name: None,
         });
         session.send_ws_message(&hello).await?;
 
