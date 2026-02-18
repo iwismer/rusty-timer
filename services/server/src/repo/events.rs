@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -17,33 +19,50 @@ pub async fn upsert_event(
     raw_read_line: &str,
     read_type: &str,
 ) -> Result<IngestResult, sqlx::Error> {
-    let existing =
-        sqlx::query!(
+    let tag_id = ipico_core::read::ChipRead::try_from(raw_read_line)
+        .ok()
+        .map(|r| r.tag_id);
+
+    let existing = sqlx::query!(
         "SELECT raw_read_line FROM events WHERE stream_id = $1 AND stream_epoch = $2 AND seq = $3",
-        stream_id, stream_epoch, seq
+        stream_id,
+        stream_epoch,
+        seq
     )
-        .fetch_optional(pool)
-        .await?;
+    .fetch_optional(pool)
+    .await?;
 
     if let Some(existing_row) = existing {
         if existing_row.raw_read_line == raw_read_line {
             sqlx::query!(
-                "UPDATE stream_metrics SET raw_count = raw_count + 1, retransmit_count = retransmit_count + 1 WHERE stream_id = $1",
+                "UPDATE stream_metrics SET raw_count = raw_count + 1, retransmit_count = retransmit_count + 1, epoch_raw_count = epoch_raw_count + 1, epoch_retransmit_count = epoch_retransmit_count + 1 WHERE stream_id = $1",
                 stream_id
-            ).execute(pool).await?;
+            )
+            .execute(pool)
+            .await?;
             Ok(IngestResult::Retransmit)
         } else {
             Ok(IngestResult::IntegrityConflict)
         }
     } else {
         sqlx::query!(
-            r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type) VALUES ($1, $2, $3, $4, $5, $6)"#,
-            stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type
-        ).execute(pool).await?;
+            r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            stream_id,
+            stream_epoch,
+            seq,
+            reader_timestamp,
+            raw_read_line,
+            read_type,
+            tag_id.as_deref()
+        )
+        .execute(pool)
+        .await?;
         sqlx::query!(
-            "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now() WHERE stream_id = $1",
+            "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now(), epoch_raw_count = epoch_raw_count + 1, epoch_dedup_count = epoch_dedup_count + 1, epoch_last_received_at = now() WHERE stream_id = $1",
             stream_id
-        ).execute(pool).await?;
+        )
+        .execute(pool)
+        .await?;
         Ok(IngestResult::Inserted)
     }
 }
