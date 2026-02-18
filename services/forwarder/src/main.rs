@@ -104,7 +104,7 @@ async fn run_reader(
     status: StatusServer,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
-    let stream_key = reader_ip.clone();
+    let stream_key = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
 
     loop {
@@ -117,7 +117,7 @@ async fn run_reader(
         info!(reader_ip = %reader_ip, target = %target_addr, "connecting to reader");
 
         status
-            .update_reader_state(&reader_ip, ReaderConnectionState::Connecting)
+            .update_reader_state(&stream_key, ReaderConnectionState::Connecting)
             .await;
 
         let stream = match TcpStream::connect(&target_addr).await {
@@ -125,7 +125,7 @@ async fn run_reader(
                 info!(reader_ip = %reader_ip, "reader TCP connected");
                 backoff_secs = 1; // reset backoff on successful connect
                 status
-                    .update_reader_state(&reader_ip, ReaderConnectionState::Connected)
+                    .update_reader_state(&stream_key, ReaderConnectionState::Connected)
                     .await;
                 s
             }
@@ -136,7 +136,7 @@ async fn run_reader(
                     backoff_secs = backoff_secs,
                     "reader TCP connect failed, retrying"
                 );
-                mark_reader_disconnected(&status, &reader_ip).await;
+                mark_reader_disconnected(&status, &stream_key).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -181,12 +181,12 @@ async fn run_reader(
             match read_result {
                 Err(e) => {
                     warn!(reader_ip = %reader_ip, error = %e, "TCP read error, reconnecting");
-                    mark_reader_disconnected(&status, &reader_ip).await;
+                    mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Ok(0) => {
                     warn!(reader_ip = %reader_ip, "TCP connection closed by reader, reconnecting");
-                    mark_reader_disconnected(&status, &reader_ip).await;
+                    mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Ok(_) => {}
@@ -227,17 +227,17 @@ async fn run_reader(
                 Ok(v) => v,
                 Err(JournalAppendError::StreamState(e)) => {
                     error!(reader_ip = %reader_ip, error = %e, "failed to get epoch");
-                    mark_reader_disconnected(&status, &reader_ip).await;
+                    mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Err(JournalAppendError::NextSeq(e)) => {
                     error!(reader_ip = %reader_ip, error = %e, "failed to get next_seq");
-                    mark_reader_disconnected(&status, &reader_ip).await;
+                    mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Err(JournalAppendError::Insert(e)) => {
                     error!(reader_ip = %reader_ip, error = %e, "journal insert failed");
-                    mark_reader_disconnected(&status, &reader_ip).await;
+                    mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
             };
@@ -256,7 +256,7 @@ async fn run_reader(
                 // Non-fatal: local fanout failure doesn't break uplink path
             }
 
-            status.record_read(&reader_ip).await;
+            status.record_read(&stream_key).await;
         }
 
         // Reconnect with backoff
@@ -714,7 +714,7 @@ async fn main() {
                 fanout.run().await;
             });
 
-            all_reader_ips.push(ep.ip.clone());
+            all_reader_ips.push(ep.addr());
             fanout_addrs.push((ep.ip, ep.port, reader_cfg.read_type.clone(), fanout_addr));
         }
     }
@@ -746,7 +746,10 @@ async fn main() {
     status_server.set_forwarder_id(&forwarder_id).await;
 
     // Detect local IP from first reader
-    let local_ip = all_reader_ips.first().and_then(|ip| detect_local_ip(ip));
+    let local_ip = all_reader_ips.first().and_then(|addr| {
+        let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(addr);
+        detect_local_ip(ip)
+    });
     if let Some(ref ip) = local_ip {
         info!(local_ip = %ip, "detected local IP");
     }
@@ -1124,6 +1127,70 @@ mod tests {
         assert!(
             body.contains("disconnected"),
             "reader should be marked disconnected after journal error"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_reader_updates_status_for_ip_port_stream_key() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let reader_port = listener.local_addr().expect("listener local_addr").port();
+        let stream_key = format!("127.0.0.1:{reader_port}");
+
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+        status.init_readers(&[stream_key.clone()]).await;
+
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let reader_task = tokio::spawn(run_reader(
+            "127.0.0.1".to_owned(),
+            reader_port,
+            "raw".to_owned(),
+            "127.0.0.1:9".parse().expect("parse fanout addr"),
+            journal,
+            shutdown_rx,
+            status.clone(),
+        ));
+
+        let (_accepted, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
+            .await
+            .expect("reader connect timeout")
+            .expect("accept reader connection");
+
+        let expected_row =
+            format!("<tr><td>{stream_key}</td><td><span class=\"status ok\">connected</span></td>");
+        let mut body = String::new();
+        let mut found = false;
+        for _ in 0..50 {
+            body = http_get_body(status.local_addr(), "/").await;
+            if body.contains(&expected_row) {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(1), reader_task)
+            .await
+            .expect("reader shutdown timeout")
+            .expect("reader task join");
+
+        assert!(
+            found,
+            "expected connected status row for stream key {stream_key}, body was: {body}"
         );
     }
 }

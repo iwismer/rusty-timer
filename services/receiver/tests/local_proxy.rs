@@ -47,8 +47,13 @@ async fn proxy_delivers_event_to_single_consumer() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    tx.send(make_event("f", "192.168.1.100", 1, "aa01,00:01:23.456"))
-        .unwrap();
+    tx.send(make_event(
+        "f",
+        "192.168.1.100:10000",
+        1,
+        "aa01,00:01:23.456",
+    ))
+    .unwrap();
     let mut buf = vec![0u8; 64];
     let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
         .await
@@ -69,7 +74,8 @@ async fn proxy_preserves_exact_bytes() {
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let raw = "aa01,00:01:23.456";
-    tx.send(make_event("f", "192.168.1.100", 1, raw)).unwrap();
+    tx.send(make_event("f", "192.168.1.100:10000", 1, raw))
+        .unwrap();
     let mut buf = vec![0u8; 128];
     let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
         .await
@@ -95,7 +101,7 @@ async fn proxy_multiple_consumers_all_receive() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    tx.send(make_event("f", "192.168.1.100", 1, "broadcast-line"))
+    tx.send(make_event("f", "192.168.1.100:10000", 1, "broadcast-line"))
         .unwrap();
     let mut buf = vec![0u8; 64];
     for (i, c) in [&mut c1, &mut c2, &mut c3].iter_mut().enumerate() {
@@ -122,8 +128,13 @@ async fn proxy_multiple_events_in_sequence() {
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     for i in 1u64..=3 {
-        tx.send(make_event("f", "192.168.1.100", i, &format!("line{i}")))
-            .unwrap();
+        tx.send(make_event(
+            "f",
+            "192.168.1.100:10000",
+            i,
+            &format!("line{i}"),
+        ))
+        .unwrap();
     }
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let mut buf = vec![0u8; 256];

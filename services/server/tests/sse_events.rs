@@ -69,7 +69,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     )
     .bind(expected_stream_id)
     .bind("fwd-sse")
-    .bind("192.168.100.1")
+    .bind("192.168.100.1:10000")
     .bind("Desk Reader")
     .bind(7_i64)
     .bind(false)
@@ -101,7 +101,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     // 6. Send ForwarderHello with one reader_ip
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse".to_owned(),
-        reader_ips: vec!["192.168.100.1".to_owned()],
+        reader_ips: vec!["192.168.100.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -119,7 +119,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
         batch_id: "b001".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-sse".to_owned(),
-            reader_ip: "192.168.100.1".to_owned(),
+            reader_ip: "192.168.100.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T12:00:00.000Z".to_owned(),

@@ -118,7 +118,7 @@ async fn test_receiver_receives_realtime_events() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-rt".to_owned(),
-        reader_ips: vec!["10.0.0.1".to_owned()],
+        reader_ips: vec!["10.0.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -148,7 +148,7 @@ async fn test_receiver_receives_realtime_events() {
         session_id: String::new(),
         streams: vec![StreamRef {
             forwarder_id: "fwd-rt".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
         }],
     }))
     .await
@@ -163,7 +163,7 @@ async fn test_receiver_receives_realtime_events() {
         batch_id: "b1".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-rt".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -214,7 +214,7 @@ async fn test_receiver_ack_updates_cursor() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-ack".to_owned(),
-        reader_ips: vec!["10.1.0.1".to_owned()],
+        reader_ips: vec!["10.1.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -243,7 +243,7 @@ async fn test_receiver_ack_updates_cursor() {
         session_id: rcv_session.clone(),
         streams: vec![StreamRef {
             forwarder_id: "fwd-ack".to_owned(),
-            reader_ip: "10.1.0.1".to_owned(),
+            reader_ip: "10.1.0.1:10000".to_owned(),
         }],
     }))
     .await
@@ -257,7 +257,7 @@ async fn test_receiver_ack_updates_cursor() {
         batch_id: "b1".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-ack".to_owned(),
-            reader_ip: "10.1.0.1".to_owned(),
+            reader_ip: "10.1.0.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 5,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),

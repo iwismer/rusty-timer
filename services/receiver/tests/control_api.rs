@@ -140,7 +140,7 @@ async fn put_subscriptions_and_get_streams() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
     let app = build_router(state);
-    let body = json!({"subscriptions":[{"forwarder_id":"f","reader_ip":"192.168.1.100","local_port_override":null},{"forwarder_id":"f","reader_ip":"192.168.1.200","local_port_override":9900}]});
+    let body = json!({"subscriptions":[{"forwarder_id":"f","reader_ip":"192.168.1.100:10000","local_port_override":null},{"forwarder_id":"f","reader_ip":"192.168.1.200:10000","local_port_override":9900}]});
     assert_eq!(
         put_json(app.clone(), "/api/v1/subscriptions", body).await,
         StatusCode::NO_CONTENT
@@ -151,7 +151,7 @@ async fn put_subscriptions_and_get_streams() {
     assert_eq!(streams.len(), 2);
     let s1 = streams
         .iter()
-        .find(|s| s["reader_ip"] == "192.168.1.100")
+        .find(|s| s["reader_ip"] == "192.168.1.100:10000")
         .unwrap();
     assert_eq!(s1["local_port"], 10100);
     assert_eq!(s1["subscribed"], true);
@@ -160,7 +160,7 @@ async fn put_subscriptions_and_get_streams() {
     assert!(s1.get("display_alias").is_none());
     let s2 = streams
         .iter()
-        .find(|s| s["reader_ip"] == "192.168.1.200")
+        .find(|s| s["reader_ip"] == "192.168.1.200:10000")
         .unwrap();
     assert_eq!(s2["local_port"], 9900);
 }
@@ -176,7 +176,7 @@ async fn get_status_shows_streams_count() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
     let app = build_router(state);
-    put_json(app.clone(),"/api/v1/subscriptions",json!({"subscriptions":[{"forwarder_id":"f","reader_ip":"10.0.0.1","local_port_override":null}]})).await;
+    put_json(app.clone(),"/api/v1/subscriptions",json!({"subscriptions":[{"forwarder_id":"f","reader_ip":"10.0.0.1:10000","local_port_override":null}]})).await;
     let (_, val) = get_json(app, "/api/v1/status").await;
     assert_eq!(val["streams_count"], 1);
 }
@@ -225,8 +225,8 @@ async fn put_subscriptions_replaces_all() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
     let app = build_router(state);
-    put_json(app.clone(),"/api/v1/subscriptions",json!({"subscriptions":[{"forwarder_id":"f","reader_ip":"10.0.0.1","local_port_override":null}]})).await;
-    put_json(app.clone(),"/api/v1/subscriptions",json!({"subscriptions":[{"forwarder_id":"f2","reader_ip":"10.0.0.2","local_port_override":null}]})).await;
+    put_json(app.clone(),"/api/v1/subscriptions",json!({"subscriptions":[{"forwarder_id":"f","reader_ip":"10.0.0.1:10000","local_port_override":null}]})).await;
+    put_json(app.clone(),"/api/v1/subscriptions",json!({"subscriptions":[{"forwarder_id":"f2","reader_ip":"10.0.0.2:10000","local_port_override":null}]})).await;
     let (_, val) = get_json(app, "/api/v1/streams").await;
     let streams = val["streams"].as_array().unwrap();
     assert_eq!(streams.len(), 1);
@@ -281,7 +281,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
                 {
                     "stream_id":"11111111-1111-1111-1111-111111111111",
                     "forwarder_id":"f1",
-                    "reader_ip":"192.168.1.100",
+                    "reader_ip":"192.168.1.100:10000",
                     "display_alias":"Finish",
                     "stream_epoch":1,
                     "online":true
@@ -289,7 +289,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
                 {
                     "stream_id":"22222222-2222-2222-2222-222222222222",
                     "forwarder_id":"f2",
-                    "reader_ip":"192.168.1.200",
+                    "reader_ip":"192.168.1.200:10000",
                     "display_alias":null,
                     "stream_epoch":1,
                     "online":false
@@ -305,8 +305,8 @@ async fn get_streams_connected_merges_server_and_local_streams() {
     let app = build_router(state);
     let body = json!({
         "subscriptions":[
-            {"forwarder_id":"f1","reader_ip":"192.168.1.100","local_port_override":null},
-            {"forwarder_id":"f3","reader_ip":"192.168.1.250","local_port_override":9950}
+            {"forwarder_id":"f1","reader_ip":"192.168.1.100:10000","local_port_override":null},
+            {"forwarder_id":"f3","reader_ip":"192.168.1.250:10000","local_port_override":9950}
         ]
     });
     assert_eq!(
@@ -324,7 +324,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
 
     let matched = streams
         .iter()
-        .find(|s| s["forwarder_id"] == "f1" && s["reader_ip"] == "192.168.1.100")
+        .find(|s| s["forwarder_id"] == "f1" && s["reader_ip"] == "192.168.1.100:10000")
         .unwrap();
     assert_eq!(matched["subscribed"], true);
     assert_eq!(matched["online"], true);
@@ -333,7 +333,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
 
     let server_only = streams
         .iter()
-        .find(|s| s["forwarder_id"] == "f2" && s["reader_ip"] == "192.168.1.200")
+        .find(|s| s["forwarder_id"] == "f2" && s["reader_ip"] == "192.168.1.200:10000")
         .unwrap();
     assert_eq!(server_only["subscribed"], false);
     assert_eq!(server_only["online"], false);
@@ -342,7 +342,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
 
     let local_only = streams
         .iter()
-        .find(|s| s["forwarder_id"] == "f3" && s["reader_ip"] == "192.168.1.250")
+        .find(|s| s["forwarder_id"] == "f3" && s["reader_ip"] == "192.168.1.250:10000")
         .unwrap();
     assert_eq!(local_only["subscribed"], true);
     assert_eq!(local_only["local_port"], 9950);
@@ -367,7 +367,7 @@ async fn get_streams_connected_degrades_on_upstream_http_error() {
     let app = build_router(state);
     let body = json!({
         "subscriptions":[
-            {"forwarder_id":"f3","reader_ip":"192.168.1.250","local_port_override":9950}
+            {"forwarder_id":"f3","reader_ip":"192.168.1.250:10000","local_port_override":9950}
         ]
     });
     assert_eq!(
@@ -384,7 +384,7 @@ async fn get_streams_connected_degrades_on_upstream_http_error() {
     let streams = val["streams"].as_array().unwrap();
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0]["forwarder_id"], "f3");
-    assert_eq!(streams[0]["reader_ip"], "192.168.1.250");
+    assert_eq!(streams[0]["reader_ip"], "192.168.1.250:10000");
     assert_eq!(streams[0]["subscribed"], true);
     assert_eq!(streams[0]["local_port"], 9950);
     assert!(streams[0].get("online").is_none());
@@ -407,7 +407,7 @@ async fn get_streams_connected_degrades_on_invalid_upstream_json() {
     let app = build_router(state);
     let body = json!({
         "subscriptions":[
-            {"forwarder_id":"f4","reader_ip":"192.168.1.251","local_port_override":null}
+            {"forwarder_id":"f4","reader_ip":"192.168.1.251:10000","local_port_override":null}
         ]
     });
     assert_eq!(
@@ -424,7 +424,7 @@ async fn get_streams_connected_degrades_on_invalid_upstream_json() {
     let streams = val["streams"].as_array().unwrap();
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0]["forwarder_id"], "f4");
-    assert_eq!(streams[0]["reader_ip"], "192.168.1.251");
+    assert_eq!(streams[0]["reader_ip"], "192.168.1.251:10000");
     assert_eq!(streams[0]["subscribed"], true);
     assert_eq!(streams[0]["local_port"], 10251);
     assert!(streams[0].get("online").is_none());

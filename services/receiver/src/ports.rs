@@ -1,6 +1,9 @@
 //! Deterministic local port mapping for stream re-exposure.
 //!
-//! Default mapping: `10000 + reader_ip_last_octet`.
+//! Default mapping:
+//! - Legacy/default reader port (`:10000`): `10000 + reader_ip_last_octet`
+//! - Non-default reader port: deterministic hash in `12000..=65535`
+//!
 //! Port collisions: affected stream marked degraded, non-conflicting streams start normally.
 
 use crate::db::Subscription;
@@ -18,17 +21,54 @@ pub enum PortAssignment {
 /// Parse the last octet of an IPv4 address string.
 /// Returns `None` if the address is not a parseable IPv4 address.
 pub fn last_octet(ip: &str) -> Option<u8> {
-    let parts: Vec<&str> = ip.split('.').collect();
+    // Strip port suffix if present (e.g., "192.168.1.100:10000")
+    let ip_part = ip.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(ip);
+    let parts: Vec<&str> = ip_part.split('.').collect();
     if parts.len() != 4 {
         return None;
     }
     parts[3].parse::<u8>().ok()
 }
 
+fn parse_reader_source_port(reader_ip: &str) -> Option<Option<u16>> {
+    match reader_ip.rsplit_once(':') {
+        Some((_ip, port_str)) => {
+            let port = port_str.parse::<u16>().ok()?;
+            if port == 0 {
+                return None;
+            }
+            Some(Some(port))
+        }
+        None => Some(None),
+    }
+}
+
+fn fnv1a_64(input: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Compute the default port: `10000 + last_octet`.
-/// Returns `None` if the IP cannot be parsed as IPv4.
+/// For non-default reader ports (`!=10000`), map to a deterministic hashed port range.
+/// Returns `None` if the IP/port cannot be parsed.
 pub fn default_port(ip: &str) -> Option<u16> {
-    last_octet(ip).map(|o| 10000u16 + o as u16)
+    const LEGACY_READER_PORT: u16 = 10000;
+    const DYNAMIC_MIN_PORT: u16 = 12000;
+
+    let source_port = parse_reader_source_port(ip)?;
+    let octet = last_octet(ip)?;
+    let legacy = 10000u16 + u16::from(octet);
+    if source_port.is_none() || source_port == Some(LEGACY_READER_PORT) {
+        return Some(legacy);
+    }
+
+    let span = (u16::MAX as u32) - (DYNAMIC_MIN_PORT as u32) + 1;
+    let offset = (fnv1a_64(ip) % u64::from(span)) as u32;
+    Some((DYNAMIC_MIN_PORT as u32 + offset) as u16)
 }
 
 /// Resolve port assignments for a list of subscriptions.
@@ -121,19 +161,34 @@ mod tests {
         assert_eq!(default_port("10.0.0.1"), Some(10001));
         assert_eq!(default_port("10.0.0.200"), Some(10200));
         assert_eq!(default_port("10.0.0.255"), Some(10255));
+        // ip:port format
+        assert_eq!(default_port("192.168.1.100:10000"), Some(10100));
+        assert_eq!(default_port("10.0.0.1:10000"), Some(10001));
+        assert_eq!(default_port("10.0.0.200:10000"), Some(10200));
+        assert_eq!(default_port("10.0.0.255:10000"), Some(10255));
     }
 
     #[test]
     fn default_port_from_last_octet_zero() {
         assert_eq!(default_port("10.0.0.0"), Some(10000));
+        assert_eq!(default_port("10.0.0.0:10000"), Some(10000));
+    }
+
+    #[test]
+    fn default_port_non_default_reader_port_uses_distinct_values() {
+        let p1 = default_port("10.0.0.1:10001").expect("parse :10001");
+        let p2 = default_port("10.0.0.1:10002").expect("parse :10002");
+        assert_ne!(p1, p2, "same IP should not collide across source ports");
+        assert!(p1 >= 12000);
+        assert!(p2 >= 12000);
     }
 
     #[test]
     fn override_port_takes_priority() {
-        let subs = vec![sub("f", "192.168.1.100", Some(9999))];
+        let subs = vec![sub("f", "192.168.1.100:10000", Some(9999))];
         let r = resolve_ports(&subs);
         assert_eq!(
-            r[&stream_key("f", "192.168.1.100")],
+            r[&stream_key("f", "192.168.1.100:10000")],
             PortAssignment::Assigned(9999)
         );
     }
@@ -141,16 +196,16 @@ mod tests {
     #[test]
     fn no_collision_different_ips() {
         let subs = vec![
-            sub("f", "192.168.1.100", None),
-            sub("f", "192.168.1.200", None),
+            sub("f", "192.168.1.100:10000", None),
+            sub("f", "192.168.1.200:10000", None),
         ];
         let r = resolve_ports(&subs);
         assert_eq!(
-            r[&stream_key("f", "192.168.1.100")],
+            r[&stream_key("f", "192.168.1.100:10000")],
             PortAssignment::Assigned(10100)
         );
         assert_eq!(
-            r[&stream_key("f", "192.168.1.200")],
+            r[&stream_key("f", "192.168.1.200:10000")],
             PortAssignment::Assigned(10200)
         );
     }
@@ -158,13 +213,13 @@ mod tests {
     #[test]
     fn collision_same_last_octet_different_forwarder() {
         let subs = vec![
-            sub("f1", "192.168.1.100", None),
-            sub("f2", "10.0.0.100", None),
+            sub("f1", "192.168.1.100:10000", None),
+            sub("f2", "10.0.0.100:10000", None),
         ];
         let r = resolve_ports(&subs);
         // Both map to port 10100 - both should be Collision
-        let k1 = stream_key("f1", "192.168.1.100");
-        let k2 = stream_key("f2", "10.0.0.100");
+        let k1 = stream_key("f1", "192.168.1.100:10000");
+        let k2 = stream_key("f2", "10.0.0.100:10000");
         assert!(
             matches!(r[&k1], PortAssignment::Collision { wanted: 10100, .. }),
             "f1 should collide"
@@ -178,12 +233,12 @@ mod tests {
     #[test]
     fn collision_via_override() {
         let subs = vec![
-            sub("f", "192.168.1.100", Some(9500)),
-            sub("f", "192.168.1.200", Some(9500)),
+            sub("f", "192.168.1.100:10000", Some(9500)),
+            sub("f", "192.168.1.200:10000", Some(9500)),
         ];
         let r = resolve_ports(&subs);
-        let k1 = stream_key("f", "192.168.1.100");
-        let k2 = stream_key("f", "192.168.1.200");
+        let k1 = stream_key("f", "192.168.1.100:10000");
+        let k2 = stream_key("f", "192.168.1.200:10000");
         assert!(matches!(
             r[&k1],
             PortAssignment::Collision { wanted: 9500, .. }
@@ -197,12 +252,12 @@ mod tests {
     #[test]
     fn non_colliding_streams_not_marked_degraded() {
         let subs = vec![
-            sub("f", "10.0.0.1", None), // 10001
-            sub("f", "10.0.0.2", None), // 10002
-            sub("f", "10.0.0.3", None), // 10003
+            sub("f", "10.0.0.1:10000", None), // 10001
+            sub("f", "10.0.0.2:10000", None), // 10002
+            sub("f", "10.0.0.3:10000", None), // 10003
         ];
         let r = resolve_ports(&subs);
-        for ip in ["10.0.0.1", "10.0.0.2", "10.0.0.3"] {
+        for ip in ["10.0.0.1:10000", "10.0.0.2:10000", "10.0.0.3:10000"] {
             assert!(matches!(
                 r[&stream_key("f", ip)],
                 PortAssignment::Assigned(_)
@@ -213,21 +268,21 @@ mod tests {
     #[test]
     fn only_colliding_pair_marked_degraded_others_fine() {
         let subs = vec![
-            sub("f", "10.0.0.1", None),  // 10001 - ok
-            sub("f", "10.0.0.2", None),  // 10002 - ok
-            sub("f1", "10.0.0.1", None), // 10001 - collides with f:10.0.0.1
+            sub("f", "10.0.0.1:10000", None),  // 10001 - ok
+            sub("f", "10.0.0.2:10000", None),  // 10002 - ok
+            sub("f1", "10.0.0.1:10000", None), // 10001 - collides with f:10.0.0.1:10000
         ];
         let r = resolve_ports(&subs);
         assert!(matches!(
-            r[&stream_key("f", "10.0.0.2")],
+            r[&stream_key("f", "10.0.0.2:10000")],
             PortAssignment::Assigned(10002)
         ));
         assert!(matches!(
-            r[&stream_key("f", "10.0.0.1")],
+            r[&stream_key("f", "10.0.0.1:10000")],
             PortAssignment::Collision { .. }
         ));
         assert!(matches!(
-            r[&stream_key("f1", "10.0.0.1")],
+            r[&stream_key("f1", "10.0.0.1:10000")],
             PortAssignment::Collision { .. }
         ));
     }
@@ -240,9 +295,16 @@ mod tests {
     #[test]
     fn stream_key_format() {
         assert_eq!(
-            stream_key("fwd-001", "192.168.1.100"),
-            "fwd-001:192.168.1.100"
+            stream_key("fwd-001", "192.168.1.100:10000"),
+            "fwd-001:192.168.1.100:10000"
         );
+    }
+
+    #[test]
+    fn last_octet_with_port_suffix() {
+        assert_eq!(last_octet("192.168.1.100:10000"), Some(100));
+        assert_eq!(last_octet("10.0.0.1:10000"), Some(1));
+        assert_eq!(last_octet("10.0.0.255:10000"), Some(255));
     }
 
     #[test]

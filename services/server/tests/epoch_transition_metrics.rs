@@ -55,7 +55,7 @@ async fn test_reset_only_takes_effect_on_first_new_epoch_read() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-epoch-transition".to_owned(),
-        reader_ips: vec!["10.44.0.1".to_owned()],
+        reader_ips: vec!["10.44.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -71,7 +71,7 @@ async fn test_reset_only_takes_effect_on_first_new_epoch_read() {
             batch_id: format!("e1-{}", seq),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-epoch-transition".to_owned(),
-                reader_ip: "10.44.0.1".to_owned(),
+                reader_ip: "10.44.0.1:10000".to_owned(),
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-18T10:00:00.000Z".to_owned(),
@@ -141,7 +141,7 @@ async fn test_reset_only_takes_effect_on_first_new_epoch_read() {
         batch_id: "e2-1".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-epoch-transition".to_owned(),
-            reader_ip: "10.44.0.1".to_owned(),
+            reader_ip: "10.44.0.1:10000".to_owned(),
             stream_epoch: 2,
             seq: 1,
             reader_timestamp: "2026-02-18T10:01:00.000Z".to_owned(),

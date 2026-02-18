@@ -46,7 +46,7 @@ async fn test_receiver_resume_from_cursor() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-resume".to_owned(),
-        reader_ips: vec!["10.2.0.1".to_owned()],
+        reader_ips: vec!["10.2.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -62,7 +62,7 @@ async fn test_receiver_resume_from_cursor() {
             batch_id: format!("b{}", seq),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-resume".to_owned(),
-                reader_ip: "10.2.0.1".to_owned(),
+                reader_ip: "10.2.0.1:10000".to_owned(),
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -84,7 +84,7 @@ async fn test_receiver_resume_from_cursor() {
         receiver_id: "rcv-resume".to_owned(),
         resume: vec![ResumeCursor {
             forwarder_id: "fwd-resume".to_owned(),
-            reader_ip: "10.2.0.1".to_owned(),
+            reader_ip: "10.2.0.1:10000".to_owned(),
             stream_epoch: 1,
             last_seq: 2,
         }],
@@ -136,7 +136,7 @@ async fn test_receiver_no_cursor_gets_all() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-all".to_owned(),
-        reader_ips: vec!["10.3.0.1".to_owned()],
+        reader_ips: vec!["10.3.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -152,7 +152,7 @@ async fn test_receiver_no_cursor_gets_all() {
             batch_id: format!("b{}", seq),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-all".to_owned(),
-                reader_ip: "10.3.0.1".to_owned(),
+                reader_ip: "10.3.0.1:10000".to_owned(),
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -174,7 +174,7 @@ async fn test_receiver_no_cursor_gets_all() {
         receiver_id: "rcv-all".to_owned(),
         resume: vec![ResumeCursor {
             forwarder_id: "fwd-all".to_owned(),
-            reader_ip: "10.3.0.1".to_owned(),
+            reader_ip: "10.3.0.1:10000".to_owned(),
             stream_epoch: 1,
             last_seq: 0, // start from beginning
         }],

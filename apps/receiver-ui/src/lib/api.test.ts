@@ -100,7 +100,7 @@ describe("api client", () => {
     await putSubscriptions([
       {
         forwarder_id: "f",
-        reader_ip: "192.168.1.100",
+        reader_ip: "192.168.1.100:10000",
         local_port_override: null,
       },
     ]);

@@ -138,6 +138,35 @@ class MainValidationTests(unittest.TestCase):
         setup_mock.assert_not_called()
         detect_mock.assert_not_called()
 
+    @patch("scripts.dev.detect_and_launch")
+    @patch("scripts.dev.setup")
+    @patch("scripts.dev.parse_args")
+    @patch("scripts.dev.receiver_default_local_port", return_value=10001)
+    def test_main_exits_on_receiver_default_port_collision(
+        self, _receiver_port_mock, parse_args_mock, setup_mock, detect_mock
+    ) -> None:
+        parse_args_mock.return_value = argparse.Namespace(
+            no_build=False,
+            clear=False,
+            emulator=[dev.EmulatorSpec(port=10001)],
+        )
+        with self.assertRaises(SystemExit):
+            dev.main()
+        setup_mock.assert_not_called()
+        detect_mock.assert_not_called()
+
+
+class ReceiverDefaultPortTests(unittest.TestCase):
+    def test_reader_port_10000_uses_legacy_mapping(self) -> None:
+        self.assertEqual(dev.receiver_default_local_port("10.0.0.1:10000"), 10001)
+
+    def test_same_ip_different_reader_ports_map_to_different_defaults(self) -> None:
+        p1 = dev.receiver_default_local_port("10.0.0.1:10001")
+        p2 = dev.receiver_default_local_port("10.0.0.1:10002")
+        self.assertIsNotNone(p1)
+        self.assertIsNotNone(p2)
+        self.assertNotEqual(p1, p2)
+
 
 class ClearTests(unittest.TestCase):
     @patch("scripts.dev.console.print")

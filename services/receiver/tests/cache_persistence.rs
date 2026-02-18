@@ -35,14 +35,15 @@ fn profile_load_returns_none_when_empty() {
 #[test]
 fn subscriptions_save_and_load() {
     let db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100", Some(10100))
+    db.save_subscription("f", "192.168.1.100:10000", Some(10100))
         .unwrap();
-    db.save_subscription("f", "192.168.1.200", None).unwrap();
+    db.save_subscription("f", "192.168.1.200:10000", None)
+        .unwrap();
     let s = db.load_subscriptions().unwrap();
     assert_eq!(s.len(), 2);
     assert_eq!(
         s.iter()
-            .find(|x| x.reader_ip == "192.168.1.100")
+            .find(|x| x.reader_ip == "192.168.1.100:10000")
             .unwrap()
             .local_port_override,
         Some(10100)
@@ -51,10 +52,11 @@ fn subscriptions_save_and_load() {
 #[test]
 fn subscriptions_replace_all_replaces_existing() {
     let mut db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100", None).unwrap();
+    db.save_subscription("f", "192.168.1.100:10000", None)
+        .unwrap();
     db.replace_subscriptions(&[Subscription {
         forwarder_id: "f2".to_owned(),
-        reader_ip: "10.0.0.1".to_owned(),
+        reader_ip: "10.0.0.1:10000".to_owned(),
         local_port_override: Some(9900),
     }])
     .unwrap();
@@ -100,7 +102,7 @@ fn replace_subscriptions_is_atomic_on_duplicate_input() {
 #[test]
 fn cursor_save_and_load() {
     let db = Db::open_in_memory().unwrap();
-    db.save_cursor("f", "192.168.1.100", 3, 99).unwrap();
+    db.save_cursor("f", "192.168.1.100:10000", 3, 99).unwrap();
     let c = db.load_cursors().unwrap();
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].stream_epoch, 3);
@@ -109,8 +111,8 @@ fn cursor_save_and_load() {
 #[test]
 fn cursor_upsert_advances_position() {
     let db = Db::open_in_memory().unwrap();
-    db.save_cursor("f", "192.168.1.100", 1, 10).unwrap();
-    db.save_cursor("f", "192.168.1.100", 1, 50).unwrap();
+    db.save_cursor("f", "192.168.1.100:10000", 1, 10).unwrap();
+    db.save_cursor("f", "192.168.1.100:10000", 1, 50).unwrap();
     let c = db.load_cursors().unwrap();
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].last_seq, 50);
@@ -118,15 +120,15 @@ fn cursor_upsert_advances_position() {
 #[test]
 fn cursor_epoch_advance() {
     let db = Db::open_in_memory().unwrap();
-    db.save_cursor("f", "192.168.1.100", 1, 100).unwrap();
-    db.save_cursor("f", "192.168.1.100", 2, 5).unwrap();
+    db.save_cursor("f", "192.168.1.100:10000", 1, 100).unwrap();
+    db.save_cursor("f", "192.168.1.100:10000", 2, 5).unwrap();
     assert_eq!(db.load_cursors().unwrap()[0].stream_epoch, 2);
 }
 #[test]
 fn cursors_as_resume_list() {
     let db = Db::open_in_memory().unwrap();
-    db.save_cursor("f", "192.168.1.100", 2, 77).unwrap();
-    db.save_cursor("f", "192.168.1.200", 1, 33).unwrap();
+    db.save_cursor("f", "192.168.1.100:10000", 2, 77).unwrap();
+    db.save_cursor("f", "192.168.1.200:10000", 1, 33).unwrap();
     assert_eq!(db.load_resume_cursors().unwrap().len(), 2);
 }
 #[test]

@@ -41,7 +41,7 @@ async fn test_metrics_invariant_maintained() {
     client
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-metrics".to_owned(),
-            reader_ips: vec!["10.1.1.1".to_owned()],
+            reader_ips: vec!["10.1.1.1:10000".to_owned()],
             resume: vec![],
         }))
         .await
@@ -52,7 +52,7 @@ async fn test_metrics_invariant_maintained() {
     };
     let make_event = |seq: u64| ReadEvent {
         forwarder_id: "fwd-metrics".to_owned(),
-        reader_ip: "10.1.1.1".to_owned(),
+        reader_ip: "10.1.1.1:10000".to_owned(),
         stream_epoch: 1,
         seq,
         reader_timestamp: format!("2026-02-17T10:00:0{}.000Z", seq),
@@ -128,7 +128,7 @@ async fn test_multi_stream_metrics_independent() {
     client
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-multi".to_owned(),
-            reader_ips: vec!["10.2.2.1".to_owned(), "10.2.2.2".to_owned()],
+            reader_ips: vec!["10.2.2.1:10000".to_owned(), "10.2.2.2:10000".to_owned()],
             resume: vec![],
         }))
         .await
@@ -144,7 +144,7 @@ async fn test_multi_stream_metrics_independent() {
                 batch_id: format!("s1-{}", seq),
                 events: vec![ReadEvent {
                     forwarder_id: "fwd-multi".to_owned(),
-                    reader_ip: "10.2.2.1".to_owned(),
+                    reader_ip: "10.2.2.1:10000".to_owned(),
                     stream_epoch: 1,
                     seq,
                     reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -158,7 +158,7 @@ async fn test_multi_stream_metrics_independent() {
     }
     let e2 = ReadEvent {
         forwarder_id: "fwd-multi".to_owned(),
-        reader_ip: "10.2.2.2".to_owned(),
+        reader_ip: "10.2.2.2:10000".to_owned(),
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -183,11 +183,11 @@ async fn test_multi_stream_metrics_independent() {
         .await
         .unwrap();
     client.recv_message().await.unwrap();
-    let s1 = sqlx::query!(r#"SELECT sm.raw_count, sm.dedup_count, sm.retransmit_count FROM stream_metrics sm JOIN streams s ON s.stream_id = sm.stream_id WHERE s.reader_ip = '10.2.2.1'"#).fetch_one(&pool).await.unwrap();
+    let s1 = sqlx::query!(r#"SELECT sm.raw_count, sm.dedup_count, sm.retransmit_count FROM stream_metrics sm JOIN streams s ON s.stream_id = sm.stream_id WHERE s.reader_ip = '10.2.2.1:10000'"#).fetch_one(&pool).await.unwrap();
     assert_eq!(s1.raw_count, 2);
     assert_eq!(s1.dedup_count, 2);
     assert_eq!(s1.retransmit_count, 0);
-    let s2 = sqlx::query!(r#"SELECT sm.raw_count, sm.dedup_count, sm.retransmit_count FROM stream_metrics sm JOIN streams s ON s.stream_id = sm.stream_id WHERE s.reader_ip = '10.2.2.2'"#).fetch_one(&pool).await.unwrap();
+    let s2 = sqlx::query!(r#"SELECT sm.raw_count, sm.dedup_count, sm.retransmit_count FROM stream_metrics sm JOIN streams s ON s.stream_id = sm.stream_id WHERE s.reader_ip = '10.2.2.2:10000'"#).fetch_one(&pool).await.unwrap();
     assert_eq!(s2.raw_count, 2);
     assert_eq!(s2.dedup_count, 1);
     assert_eq!(s2.retransmit_count, 1);
