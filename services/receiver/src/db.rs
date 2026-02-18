@@ -96,11 +96,13 @@ impl Db {
         self.conn.execute("INSERT OR IGNORE INTO subscriptions (forwarder_id, reader_ip, local_port_override) VALUES (?1, ?2, ?3)", rusqlite::params![fwd, ip, port.map(|p| p as i64)])?;
         Ok(())
     }
-    pub fn replace_subscriptions(&self, subs: &[Subscription]) -> DbResult<()> {
-        self.conn.execute_batch("DELETE FROM subscriptions")?;
+    pub fn replace_subscriptions(&mut self, subs: &[Subscription]) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM subscriptions")?;
         for s in subs {
-            self.conn.execute("INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override) VALUES (?1, ?2, ?3)", rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64)])?;
+            tx.execute("INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override) VALUES (?1, ?2, ?3)", rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64)])?;
         }
+        tx.commit()?;
         Ok(())
     }
     pub fn load_resume_cursors(&self) -> DbResult<Vec<ResumeCursor>> {

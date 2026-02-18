@@ -50,7 +50,7 @@ fn subscriptions_save_and_load() {
 }
 #[test]
 fn subscriptions_replace_all_replaces_existing() {
-    let db = Db::open_in_memory().unwrap();
+    let mut db = Db::open_in_memory().unwrap();
     db.save_subscription("f", "192.168.1.100", None).unwrap();
     db.replace_subscriptions(&[Subscription {
         forwarder_id: "f2".to_owned(),
@@ -61,6 +61,41 @@ fn subscriptions_replace_all_replaces_existing() {
     let s = db.load_subscriptions().unwrap();
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].forwarder_id, "f2");
+}
+
+#[test]
+fn replace_subscriptions_is_atomic_on_duplicate_input() {
+    let mut db = Db::open_in_memory().unwrap();
+    let baseline = vec![
+        Subscription {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            local_port_override: None,
+        },
+        Subscription {
+            forwarder_id: "f2".to_owned(),
+            reader_ip: "10.0.0.2".to_owned(),
+            local_port_override: Some(9900),
+        },
+    ];
+    db.replace_subscriptions(&baseline).unwrap();
+
+    let duplicate_payload = vec![
+        Subscription {
+            forwarder_id: "dup".to_owned(),
+            reader_ip: "10.0.0.3".to_owned(),
+            local_port_override: None,
+        },
+        Subscription {
+            forwarder_id: "dup".to_owned(),
+            reader_ip: "10.0.0.3".to_owned(),
+            local_port_override: Some(9950),
+        },
+    ];
+
+    assert!(db.replace_subscriptions(&duplicate_payload).is_err());
+    let after = db.load_subscriptions().unwrap();
+    assert_eq!(after, baseline);
 }
 #[test]
 fn cursor_save_and_load() {

@@ -31,3 +31,7 @@ dist/
 # Python cache artifacts
 __pycache__/
 *.py[cod]
+
+# Local agent run markers
+.last-run
+.last-run.json
