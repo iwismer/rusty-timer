@@ -41,6 +41,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/streams/:stream_id/reset-epoch",
             post(http::streams::reset_epoch),
         )
+        .route("/api/v1/events", get(http::sse::dashboard_sse))
         .with_state(state)
 }
 

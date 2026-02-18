@@ -2552,6 +2552,7 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite 0.26.2",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -3176,6 +3177,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
