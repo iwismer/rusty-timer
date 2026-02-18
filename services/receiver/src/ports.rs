@@ -1,6 +1,8 @@
 //! Deterministic local port mapping for stream re-exposure.
 //!
-//! Default mapping: `10000 + reader_ip_last_octet`.
+//! Default mapping:
+//! - Legacy/default reader port (`:10000`): `10000 + reader_ip_last_octet`
+//! - Non-default reader port: deterministic hash in `12000..=65535`
 //! Port collisions: affected stream marked degraded, non-conflicting streams start normally.
 
 use crate::db::Subscription;
@@ -27,10 +29,45 @@ pub fn last_octet(ip: &str) -> Option<u8> {
     parts[3].parse::<u8>().ok()
 }
 
+fn parse_reader_source_port(reader_ip: &str) -> Option<Option<u16>> {
+    match reader_ip.rsplit_once(':') {
+        Some((_ip, port_str)) => {
+            let port = port_str.parse::<u16>().ok()?;
+            if port == 0 {
+                return None;
+            }
+            Some(Some(port))
+        }
+        None => Some(None),
+    }
+}
+
+fn fnv1a_64(input: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Compute the default port: `10000 + last_octet`.
-/// Returns `None` if the IP cannot be parsed as IPv4.
+/// For non-default reader ports (`!=10000`), map to a deterministic hashed port range.
+/// Returns `None` if the IP/port cannot be parsed.
 pub fn default_port(ip: &str) -> Option<u16> {
-    last_octet(ip).map(|o| 10000u16 + o as u16)
+    const LEGACY_READER_PORT: u16 = 10000;
+    const DYNAMIC_MIN_PORT: u16 = 12000;
+
+    let source_port = parse_reader_source_port(ip)?;
+    let octet = last_octet(ip)?;
+    let legacy = 10000u16 + u16::from(octet);
+    if source_port.is_none() || source_port == Some(LEGACY_READER_PORT) {
+        return Some(legacy);
+    }
+
+    let span = (u16::MAX as u32) - (DYNAMIC_MIN_PORT as u32) + 1;
+    let offset = (fnv1a_64(ip) % u64::from(span)) as u32;
+    Some((DYNAMIC_MIN_PORT as u32 + offset) as u16)
 }
 
 /// Resolve port assignments for a list of subscriptions.
@@ -134,6 +171,15 @@ mod tests {
     fn default_port_from_last_octet_zero() {
         assert_eq!(default_port("10.0.0.0"), Some(10000));
         assert_eq!(default_port("10.0.0.0:10000"), Some(10000));
+    }
+
+    #[test]
+    fn default_port_non_default_reader_port_uses_distinct_values() {
+        let p1 = default_port("10.0.0.1:10001").expect("parse :10001");
+        let p2 = default_port("10.0.0.1:10002").expect("parse :10002");
+        assert_ne!(p1, p2, "same IP should not collide across source ports");
+        assert!(p1 >= 12000);
+        assert!(p2 >= 12000);
     }
 
     #[test]

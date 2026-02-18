@@ -300,6 +300,39 @@ fn format_last_seen(instant: Option<Instant>) -> String {
     }
 }
 
+fn from_hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode_path_segment(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
+                let hi = from_hex_digit(bytes[i + 1])?;
+                let lo = from_hex_digit(bytes[i + 2])?;
+                out.push((hi << 4) | lo);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Server accept loop
 // ---------------------------------------------------------------------------
@@ -470,7 +503,19 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
         {
             // Extract reader_ip from: /api/v1/streams/{reader_ip}/reset-epoch
             let inner = &path["/api/v1/streams/".len()..path.len() - "/reset-epoch".len()];
-            let reader_ip = inner.to_owned();
+            let reader_ip = match percent_decode_path_segment(inner) {
+                Some(v) => v,
+                None => {
+                    send_response(
+                        &mut stream,
+                        400,
+                        "text/plain",
+                        "invalid percent-encoding in stream key",
+                    )
+                    .await;
+                    return;
+                }
+            };
 
             let result = journal.lock().await.reset_epoch(&reader_ip);
             match result {

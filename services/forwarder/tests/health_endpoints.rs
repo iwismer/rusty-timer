@@ -173,7 +173,7 @@ async fn epoch_reset_endpoint_returns_200() {
     let db_path = dir.path().join("test.sqlite3");
     let mut journal = Journal::open(&db_path).expect("journal open failed");
     journal
-        .ensure_stream_state("192.168.1.5", 1)
+        .ensure_stream_state("192.168.1.5:10000", 1)
         .expect("ensure stream failed");
 
     // Wrap journal in Arc<Mutex> for shared access
@@ -194,16 +194,74 @@ async fn epoch_reset_endpoint_returns_200() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // POST epoch reset
-    let (status, _body) = http_post(addr, "/api/v1/streams/192.168.1.5/reset-epoch", "").await;
+    let (status, _body) =
+        http_post(addr, "/api/v1/streams/192.168.1.5:10000/reset-epoch", "").await;
     assert_eq!(status, 200, "reset-epoch endpoint must return 200");
 
     // Verify epoch was bumped
     let mut j = shared_journal.lock().await;
     let (epoch, next_seq) = j
-        .current_epoch_and_next_seq("192.168.1.5")
+        .current_epoch_and_next_seq("192.168.1.5:10000")
         .expect("get epoch failed");
     assert_eq!(epoch, 2, "epoch must have been bumped to 2");
     assert_eq!(next_seq, 1, "next_seq must be reset to 1 after epoch bump");
+}
+
+#[tokio::test]
+async fn epoch_reset_endpoint_accepts_percent_encoded_stream_key() {
+    use forwarder::storage::journal::Journal;
+    use tempfile::tempdir;
+
+    let dir = tempdir().expect("tempdir failed");
+    let db_path = dir.path().join("test.sqlite3");
+    let mut journal = Journal::open(&db_path).expect("journal open failed");
+    journal
+        .ensure_stream_state("192.168.1.6:10000", 1)
+        .expect("ensure stream failed");
+
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    let shared_journal = Arc::new(Mutex::new(journal));
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start_with_journal(cfg, subsystem, shared_journal.clone())
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _body) =
+        http_post(addr, "/api/v1/streams/192.168.1.6%3A10000/reset-epoch", "").await;
+    assert_eq!(status, 200, "encoded reset path must return 200");
+
+    let mut j = shared_journal.lock().await;
+    let (epoch, _next_seq) = j
+        .current_epoch_and_next_seq("192.168.1.6:10000")
+        .expect("get epoch failed");
+    assert_eq!(epoch, 2, "encoded path must bump matching stream");
+}
+
+#[tokio::test]
+async fn epoch_reset_invalid_percent_encoding_returns_400() {
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start(cfg, subsystem)
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(addr, "/api/v1/streams/192.168.1.6%3/reset-epoch", "").await;
+    assert_eq!(status, 400, "invalid percent encoding must return 400");
 }
 
 #[tokio::test]

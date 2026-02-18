@@ -67,6 +67,7 @@ EMULATOR_VALID_TYPES = ("raw", "fsls")
 MIN_PORT = 1
 MAX_PORT = 65535
 FALLBACK_OFFSET = 1000
+RECEIVER_DYNAMIC_MIN_PORT = 12000
 
 
 @dataclass
@@ -218,6 +219,46 @@ stderr_console = Console(stderr=True)
 
 def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def fnv1a_64(text: str) -> int:
+    """Stable 64-bit FNV-1a hash."""
+    h = 0xCBF29CE484222325
+    for b in text.encode():
+        h ^= b
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def receiver_default_local_port(reader_ip: str) -> int | None:
+    """Mirror receiver default port resolution for a stream reader_ip."""
+    ip_part = reader_ip
+    source_port: int | None = None
+    if ":" in reader_ip:
+        ip_part, port_text = reader_ip.rsplit(":", 1)
+        try:
+            source_port = int(port_text)
+        except ValueError:
+            return None
+        if not (MIN_PORT <= source_port <= MAX_PORT):
+            return None
+
+    parts = ip_part.split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        last = int(parts[3])
+    except ValueError:
+        return None
+    if not (0 <= last <= 255):
+        return None
+
+    legacy = 10000 + last
+    if source_port is None or source_port == 10000:
+        return legacy
+
+    span = MAX_PORT - RECEIVER_DYNAMIC_MIN_PORT + 1
+    return RECEIVER_DYNAMIC_MIN_PORT + (fnv1a_64(reader_ip) % span)
 
 
 def clear() -> None:
@@ -705,12 +746,23 @@ def main() -> None:
 
     emulators: list[EmulatorSpec] = args.emulator or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)]
 
-    # Validate no duplicate ports (including fallback ports)
+    # Validate no duplicate ports across emulator, fallback, and receiver defaults.
     ports = [e.port for e in emulators]
     fallbacks = [e.port + FALLBACK_OFFSET for e in emulators]
-    all_ports = ports + fallbacks
+    receiver_defaults: list[int] = []
+    for e in emulators:
+        stream_key = f"127.0.0.1:{e.port}"
+        default_port = receiver_default_local_port(stream_key)
+        if default_port is None:
+            console.print(f"[red]Error: cannot derive receiver local port for {stream_key}[/red]")
+            sys.exit(1)
+        receiver_defaults.append(default_port)
+
+    all_ports = ports + fallbacks + receiver_defaults
     if len(all_ports) != len(set(all_ports)):
-        console.print("[red]Error: emulator port/fallback port collision[/red]")
+        console.print(
+            "[red]Error: emulator/fallback/receiver default port collision[/red]"
+        )
         sys.exit(1)
 
     console.print(Panel.fit(

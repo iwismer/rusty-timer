@@ -121,6 +121,32 @@ fn non_colliding_streams_unaffected_by_collision() {
         PortAssignment::Collision { .. }
     ));
 }
+
+#[test]
+fn same_ip_different_reader_ports_do_not_collide() {
+    let subs = vec![
+        Subscription {
+            forwarder_id: "f".to_owned(),
+            reader_ip: "10.0.0.1:10001".to_owned(),
+            local_port_override: None,
+        },
+        Subscription {
+            forwarder_id: "f".to_owned(),
+            reader_ip: "10.0.0.1:10002".to_owned(),
+            local_port_override: None,
+        },
+    ];
+    let r = resolve_ports(&subs);
+    let p1 = match r[&stream_key("f", "10.0.0.1:10001")] {
+        PortAssignment::Assigned(p) => p,
+        ref other => panic!("expected assigned port for :10001, got {other:?}"),
+    };
+    let p2 = match r[&stream_key("f", "10.0.0.1:10002")] {
+        PortAssignment::Assigned(p) => p,
+        ref other => panic!("expected assigned port for :10002, got {other:?}"),
+    };
+    assert_ne!(p1, p2, "same IP streams must not collide by default");
+}
 #[test]
 fn collision_via_override_ports() {
     let subs = vec![
