@@ -58,6 +58,9 @@ PG_PORT = 5432
 EMULATOR_DEFAULT_DELAY = 2000
 EMULATOR_DEFAULT_PORT = 10001
 EMULATOR_VALID_TYPES = ("raw", "fsls")
+MIN_PORT = 1
+MAX_PORT = 65535
+FALLBACK_OFFSET = 1000
 
 
 @dataclass
@@ -83,7 +86,7 @@ class EmulatorSpec:
             f'target              = "127.0.0.1:{self.port}"\n'
             f'read_type           = "{self.read_type}"\n'
             f"enabled             = true\n"
-            f"local_fallback_port = {self.port + 1000}\n"
+            f"local_fallback_port = {self.port + FALLBACK_OFFSET}\n"
         )
 
 
@@ -111,6 +114,15 @@ def parse_emulator_spec(value: str) -> EmulatorSpec:
         port = int(fields["port"])
     except ValueError:
         raise argparse.ArgumentTypeError(f"Invalid port: {fields['port']!r}")
+    if not (MIN_PORT <= port <= MAX_PORT):
+        raise argparse.ArgumentTypeError(
+            f"Invalid port {port}: out of range {MIN_PORT}..{MAX_PORT}"
+        )
+    fallback_port = port + FALLBACK_OFFSET
+    if fallback_port > MAX_PORT:
+        raise argparse.ArgumentTypeError(
+            f"Invalid port {port}: fallback port {fallback_port} exceeds {MAX_PORT}"
+        )
 
     delay = EMULATOR_DEFAULT_DELAY
     if "delay" in fields:
@@ -118,6 +130,10 @@ def parse_emulator_spec(value: str) -> EmulatorSpec:
             delay = int(fields["delay"])
         except ValueError:
             raise argparse.ArgumentTypeError(f"Invalid delay: {fields['delay']!r}")
+        if delay < 0:
+            raise argparse.ArgumentTypeError(
+                f"Invalid delay {delay}: must be non-negative"
+            )
 
     read_type = fields.get("type", "raw")
     if read_type not in EMULATOR_VALID_TYPES:
@@ -529,7 +545,7 @@ def main() -> None:
 
     # Validate no duplicate ports (including fallback ports)
     ports = [e.port for e in emulators]
-    fallbacks = [e.port + 1000 for e in emulators]
+    fallbacks = [e.port + FALLBACK_OFFSET for e in emulators]
     all_ports = ports + fallbacks
     if len(all_ports) != len(set(all_ports)):
         console.print("[red]Error: emulator port/fallback port collision[/red]")

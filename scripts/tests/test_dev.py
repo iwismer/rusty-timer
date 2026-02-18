@@ -64,6 +64,79 @@ class ParseEmulatorSpecErrorTests(unittest.TestCase):
             dev.parse_emulator_spec("port=abc")
         self.assertIn("Invalid port", str(ctx.exception))
 
+    def test_port_below_range_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=0")
+        self.assertIn("out of range", str(ctx.exception))
+
+    def test_port_above_range_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=65536")
+        self.assertIn("out of range", str(ctx.exception))
+
+    def test_negative_delay_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=10001,delay=-1")
+        self.assertIn("non-negative", str(ctx.exception))
+
+    def test_invalid_type_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=10001,type=bogus")
+        self.assertIn("Invalid type", str(ctx.exception))
+
+    def test_fallback_port_above_range_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=65000")
+        self.assertIn("fallback", str(ctx.exception))
+
+
+class BuildForwarderTomlTests(unittest.TestCase):
+    def test_build_forwarder_toml_contains_multiple_readers(self) -> None:
+        text = dev.build_forwarder_toml(
+            [
+                dev.EmulatorSpec(port=10001, read_type="raw"),
+                dev.EmulatorSpec(port=10002, read_type="fsls"),
+            ]
+        )
+        self.assertIn('target              = "127.0.0.1:10001"', text)
+        self.assertIn('target              = "127.0.0.1:10002"', text)
+        self.assertIn('read_type           = "raw"', text)
+        self.assertIn('read_type           = "fsls"', text)
+
+
+class MainValidationTests(unittest.TestCase):
+    @patch("scripts.dev.detect_and_launch")
+    @patch("scripts.dev.setup")
+    @patch("scripts.dev.parse_args")
+    def test_main_exits_on_emulator_port_collision(
+        self, parse_args_mock, setup_mock, detect_mock
+    ) -> None:
+        parse_args_mock.return_value = argparse.Namespace(
+            no_build=False,
+            clear=False,
+            emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=10001)],
+        )
+        with self.assertRaises(SystemExit):
+            dev.main()
+        setup_mock.assert_not_called()
+        detect_mock.assert_not_called()
+
+    @patch("scripts.dev.detect_and_launch")
+    @patch("scripts.dev.setup")
+    @patch("scripts.dev.parse_args")
+    def test_main_exits_on_port_fallback_collision(
+        self, parse_args_mock, setup_mock, detect_mock
+    ) -> None:
+        parse_args_mock.return_value = argparse.Namespace(
+            no_build=False,
+            clear=False,
+            emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=11001)],
+        )
+        with self.assertRaises(SystemExit):
+            dev.main()
+        setup_mock.assert_not_called()
+        detect_mock.assert_not_called()
+
 
 class ClearTests(unittest.TestCase):
     @patch("scripts.dev.console.print")
