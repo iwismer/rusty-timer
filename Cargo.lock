@@ -2317,6 +2317,7 @@ version = "1.0.0"
 dependencies = [
  "axum 0.7.9",
  "forwarder",
+ "ipico-core",
  "receiver",
  "reqwest",
  "rt-protocol",
