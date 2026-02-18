@@ -30,11 +30,10 @@ from rich.panel import Panel
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 TMP_DIR = Path("/tmp/rusty-timer-dev")
-DEV_DIR = TMP_DIR
 FORWARDER_TOML_PATH = TMP_DIR / "forwarder.toml"
 FORWARDER_TOKEN_PATH = TMP_DIR / "forwarder-token.txt"
 RECEIVER_TOKEN_PATH = TMP_DIR / "receiver-token.txt"
-FORWARDER_JOURNAL_PATH = DEV_DIR / "forwarder.sqlite3"
+FORWARDER_JOURNAL_PATH = TMP_DIR / "forwarder.sqlite3"
 
 FORWARDER_TOKEN_TEXT = "rusty-dev-forwarder"
 RECEIVER_TOKEN_TEXT = "rusty-dev-receiver"
@@ -160,6 +159,27 @@ def wait_for_postgres() -> None:
     sys.exit(1)
 
 
+def apply_migrations() -> None:
+    """Apply the server schema migration via psql.
+
+    Idempotent: running twice produces "table already exists" errors which psql
+    ignores by default (exit 0). A non-zero exit means psql could not connect.
+    """
+    console.print("Applying database migrations…")
+    migration_sql = REPO_ROOT / "services" / "server" / "migrations" / "0001_init.sql"
+    sql = migration_sql.read_text()
+    result = subprocess.run(
+        ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB],
+        input=sql,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]Migration failed (psql returned {result.returncode}):[/red]\n{result.stderr}")
+        sys.exit(1)
+    console.print("[green]✓[/green] Migrations applied")
+
+
 def write_config_files() -> None:
     console.print("[bold]Writing config files…[/bold]")
     TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -227,6 +247,7 @@ def setup(skip_build: bool = False) -> None:
     check_prereqs()
     start_postgres()
     wait_for_postgres()
+    apply_migrations()
     write_config_files()
     seed_tokens()
     build_rust(skip_build=skip_build)
