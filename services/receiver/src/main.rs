@@ -42,6 +42,7 @@ async fn main() {
     // -------------------------------------------------------------------------
     let (state, mut shutdown_rx) = AppState::new(db);
     info!("receiver started");
+    state.emit_log("Receiver started".to_owned()).await;
 
     // -------------------------------------------------------------------------
     // 4. Load profile and restore subscriptions
@@ -76,6 +77,9 @@ async fn main() {
             std::process::exit(1);
         });
     info!("control API listening on 127.0.0.1:9090");
+    state
+        .emit_log("Control API listening on 127.0.0.1:9090".to_owned())
+        .await;
 
     let api_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -143,6 +147,8 @@ async fn main() {
                 if current_subs != last_subs {
                     info!(n = current_subs.len(), "subscriptions changed, reconciling proxies");
                     reconcile_proxies(&current_subs, &mut proxies, &event_bus).await;
+                    state.emit_log(format!("Subscriptions changed ({} streams)", current_subs.len())).await;
+                    state.emit_streams_snapshot().await;
                     last_subs = current_subs;
                 }
             }
@@ -160,8 +166,8 @@ async fn main() {
                         match url_opt {
                             None => {
                                 warn!("connect requested but no upstream URL configured");
-                                *state.connection_state.write().await =
-                                    ConnectionState::Disconnected;
+                                state.emit_log("No upstream URL configured".to_owned()).await;
+                                state.set_connection_state(ConnectionState::Disconnected).await;
                             }
                             Some(url) => {
                                 // Read the token from the saved profile so we can
@@ -173,8 +179,8 @@ async fn main() {
                                 match token_opt {
                                   None => {
                                     warn!("connect requested but no auth token in profile");
-                                    *state.connection_state.write().await =
-                                        ConnectionState::Disconnected;
+                                    state.emit_log("No auth token in profile".to_owned()).await;
+                                    state.set_connection_state(ConnectionState::Disconnected).await;
                                   }
                                   Some(token) => {
                                 let ws_request =
@@ -182,16 +188,16 @@ async fn main() {
                                 match ws_request {
                                   Err(e) => {
                                     error!(error = %e, "failed to build WS request");
-                                    *state.connection_state.write().await =
-                                        ConnectionState::Disconnected;
+                                    state.emit_log(format!("Failed to build WS request: {e}")).await;
+                                    state.set_connection_state(ConnectionState::Disconnected).await;
                                   }
                                   Ok(ws_request) => {
                                 info!(url = %url, "initiating WS session");
                                 match connect_async(ws_request).await {
                                     Err(e) => {
                                         error!(error = %e, "WS connect failed");
-                                        *state.connection_state.write().await =
-                                            ConnectionState::Disconnected;
+                                        state.emit_log(format!("Connection failed: {e}")).await;
+                                        state.set_connection_state(ConnectionState::Disconnected).await;
                                     }
                                     Ok((ws, _)) => {
                                         // Perform the receiver hello / heartbeat handshake.
@@ -202,13 +208,14 @@ async fn main() {
                                         match (session_result, ws) {
                                             (Err(e), _) => {
                                                 error!(error = %e, "WS handshake failed");
-                                                *state.connection_state.write().await =
-                                                    ConnectionState::Disconnected;
+                                                state.emit_log(format!("Handshake failed: {e}")).await;
+                                                state.set_connection_state(ConnectionState::Disconnected).await;
                                             }
                                             (Ok(session_id), Some(ws)) => {
                                                 info!(session_id = %session_id, "WS session established");
-                                                *state.connection_state.write().await =
-                                                    ConnectionState::Connected;
+                                                state.emit_log(format!("Connected (session {session_id})")).await;
+                                                state.set_connection_state(ConnectionState::Connected).await;
+                                                state.emit_streams_snapshot().await;
 
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
@@ -233,12 +240,14 @@ async fn main() {
                                                             error!(error = %e, "WS session error");
                                                         }
                                                     }
-                                                    let mut cs =
-                                                        st.connection_state.write().await;
-                                                    if *cs == ConnectionState::Connected
-                                                        || *cs == ConnectionState::Disconnecting
-                                                    {
-                                                        *cs = ConnectionState::Disconnected;
+                                                    let should_disconnect = {
+                                                        let cs = st.connection_state.read().await;
+                                                        *cs == ConnectionState::Connected
+                                                            || *cs == ConnectionState::Disconnecting
+                                                    };
+                                                    if should_disconnect {
+                                                        st.set_connection_state(ConnectionState::Disconnected).await;
+                                                        st.emit_streams_snapshot().await;
                                                     }
                                                 });
                                                 session_task = Some(handle);
@@ -247,8 +256,8 @@ async fn main() {
                                             (Ok(_), None) => {
                                                 // Should not happen
                                                 error!("handshake succeeded but ws was None");
-                                                *state.connection_state.write().await =
-                                                    ConnectionState::Disconnected;
+                                                state.emit_log("Handshake succeeded but connection lost".to_owned()).await;
+                                                state.set_connection_state(ConnectionState::Disconnected).await;
                                             }
                                         }
                                     }
@@ -264,7 +273,8 @@ async fn main() {
                     ConnectionState::Disconnecting => {
                         info!("disconnecting: cancelling WS session");
                         cancel_session(&mut session_task, &mut session_cancel_tx).await;
-                        *state.connection_state.write().await = ConnectionState::Disconnected;
+                        state.set_connection_state(ConnectionState::Disconnected).await;
+                        state.emit_streams_snapshot().await;
                         info!("disconnected (local proxies remain open)");
                     }
 
