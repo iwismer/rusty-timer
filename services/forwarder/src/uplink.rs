@@ -32,6 +32,8 @@ pub struct UplinkConfig {
     pub token: String,
     /// Advisory forwarder identity (must match token claims).
     pub forwarder_id: String,
+    /// Optional human-readable name for this forwarder.
+    pub display_name: Option<String>,
     /// `"immediate"` or `"batched"`.
     pub batch_mode: String,
     /// Flush interval in ms when `batch_mode = "batched"`.
@@ -98,7 +100,7 @@ impl UplinkSession {
             forwarder_id: cfg.forwarder_id.clone(),
             reader_ips: vec![],
             resume: vec![],
-            display_name: None,
+            display_name: cfg.display_name.clone(),
         });
         session.send_ws_message(&hello).await?;
 
@@ -155,7 +157,7 @@ impl UplinkSession {
             forwarder_id: cfg.forwarder_id.clone(),
             reader_ips,
             resume,
-            display_name: None,
+            display_name: cfg.display_name.clone(),
         });
         session.send_ws_message(&hello).await?;
 

@@ -308,6 +308,7 @@ async fn run_uplink(
         server_url: ws_url.clone(),
         token: cfg.token.clone(),
         forwarder_id: forwarder_id.clone(),
+        display_name: cfg.display_name.clone(),
         batch_mode: cfg.uplink.batch_mode.clone(),
         batch_flush_ms: cfg.uplink.batch_flush_ms,
         batch_max_events: cfg.uplink.batch_max_events,
@@ -990,6 +991,7 @@ mod tests {
         let cfg = ForwarderConfig {
             schema_version: 1,
             token: "test-token".to_string(),
+            display_name: None,
             server: forwarder::config::ServerConfig {
                 base_url: format!("http://{}", addr),
                 forwarders_ws_path: "/ws/v1/forwarders".to_string(),
