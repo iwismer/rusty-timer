@@ -40,6 +40,29 @@ async fn post_empty(app: axum::Router, path: &str) -> StatusCode {
         .unwrap();
     app.oneshot(req).await.unwrap().status()
 }
+
+async fn spawn_upstream_streams_server(
+    status: StatusCode,
+    payload: Value,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let app = axum::Router::new().route(
+        "/api/v1/streams",
+        axum::routing::get(move || {
+            let status = status;
+            let payload = payload.clone();
+            async move { (status, axum::Json(payload)) }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (format!("ws://{addr}/ws/v1/receivers"), handle)
+}
+
 #[tokio::test]
 async fn get_profile_returns_404_when_no_profile() {
     let (status, _) = get_json(setup(), "/api/v1/profile").await;
@@ -207,4 +230,168 @@ async fn put_subscriptions_replaces_all() {
     let streams = val["streams"].as_array().unwrap();
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0]["forwarder_id"], "f2");
+}
+
+#[tokio::test]
+async fn get_streams_connected_merges_server_and_local_streams() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+
+    let (ws_url, upstream_handle) = spawn_upstream_streams_server(
+        StatusCode::OK,
+        json!({
+            "streams": [
+                {
+                    "stream_id":"11111111-1111-1111-1111-111111111111",
+                    "forwarder_id":"f1",
+                    "reader_ip":"192.168.1.100",
+                    "display_alias":"Finish",
+                    "stream_epoch":1,
+                    "online":true
+                },
+                {
+                    "stream_id":"22222222-2222-2222-2222-222222222222",
+                    "forwarder_id":"f2",
+                    "reader_ip":"192.168.1.200",
+                    "display_alias":null,
+                    "stream_epoch":1,
+                    "online":false
+                }
+            ]
+        }),
+    )
+    .await;
+
+    *state.upstream_url.write().await = Some(ws_url);
+    *state.connection_state.write().await = receiver::control_api::ConnectionState::Connected;
+
+    let app = build_router(state);
+    let body = json!({
+        "subscriptions":[
+            {"forwarder_id":"f1","reader_ip":"192.168.1.100","local_port_override":null},
+            {"forwarder_id":"f3","reader_ip":"192.168.1.250","local_port_override":9950}
+        ]
+    });
+    assert_eq!(
+        put_json(app.clone(), "/api/v1/subscriptions", body).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/streams").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["degraded"], false);
+    assert!(val["upstream_error"].is_null());
+
+    let streams = val["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 3);
+
+    let matched = streams
+        .iter()
+        .find(|s| s["forwarder_id"] == "f1" && s["reader_ip"] == "192.168.1.100")
+        .unwrap();
+    assert_eq!(matched["subscribed"], true);
+    assert_eq!(matched["online"], true);
+    assert_eq!(matched["display_alias"], "Finish");
+    assert_eq!(matched["local_port"], 10100);
+
+    let server_only = streams
+        .iter()
+        .find(|s| s["forwarder_id"] == "f2" && s["reader_ip"] == "192.168.1.200")
+        .unwrap();
+    assert_eq!(server_only["subscribed"], false);
+    assert_eq!(server_only["online"], false);
+    assert!(server_only["display_alias"].is_null());
+    assert!(server_only["local_port"].is_null());
+
+    let local_only = streams
+        .iter()
+        .find(|s| s["forwarder_id"] == "f3" && s["reader_ip"] == "192.168.1.250")
+        .unwrap();
+    assert_eq!(local_only["subscribed"], true);
+    assert_eq!(local_only["local_port"], 9950);
+    assert!(local_only.get("online").is_none());
+    assert!(local_only.get("display_alias").is_none());
+
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn get_streams_connected_degrades_on_upstream_http_error() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+
+    let (ws_url, upstream_handle) =
+        spawn_upstream_streams_server(StatusCode::INTERNAL_SERVER_ERROR, json!({"error":"boom"}))
+            .await;
+
+    *state.upstream_url.write().await = Some(ws_url);
+    *state.connection_state.write().await = receiver::control_api::ConnectionState::Connected;
+
+    let app = build_router(state);
+    let body = json!({
+        "subscriptions":[
+            {"forwarder_id":"f3","reader_ip":"192.168.1.250","local_port_override":9950}
+        ]
+    });
+    assert_eq!(
+        put_json(app.clone(), "/api/v1/subscriptions", body).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/streams").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["degraded"], true);
+    assert!(val["upstream_error"].is_string());
+    assert!(!val["upstream_error"].as_str().unwrap().is_empty());
+
+    let streams = val["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["forwarder_id"], "f3");
+    assert_eq!(streams[0]["reader_ip"], "192.168.1.250");
+    assert_eq!(streams[0]["subscribed"], true);
+    assert_eq!(streams[0]["local_port"], 9950);
+    assert!(streams[0].get("online").is_none());
+    assert!(streams[0].get("display_alias").is_none());
+
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn get_streams_connected_degrades_on_invalid_upstream_json() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+
+    let (ws_url, upstream_handle) =
+        spawn_upstream_streams_server(StatusCode::OK, json!({"invalid":"shape"})).await;
+
+    *state.upstream_url.write().await = Some(ws_url);
+    *state.connection_state.write().await = receiver::control_api::ConnectionState::Connected;
+
+    let app = build_router(state);
+    let body = json!({
+        "subscriptions":[
+            {"forwarder_id":"f4","reader_ip":"192.168.1.251","local_port_override":null}
+        ]
+    });
+    assert_eq!(
+        put_json(app.clone(), "/api/v1/subscriptions", body).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/streams").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["degraded"], true);
+    assert!(val["upstream_error"].is_string());
+    assert!(!val["upstream_error"].as_str().unwrap().is_empty());
+
+    let streams = val["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["forwarder_id"], "f4");
+    assert_eq!(streams[0]["reader_ip"], "192.168.1.251");
+    assert_eq!(streams[0]["subscribed"], true);
+    assert_eq!(streams[0]["local_port"], 10251);
+    assert!(streams[0].get("online").is_none());
+    assert!(streams[0].get("display_alias").is_none());
+
+    upstream_handle.abort();
 }
