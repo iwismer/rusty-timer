@@ -2,7 +2,7 @@
 // All UI-to-receiver communication goes through this module exclusively.
 // Base URL: http://127.0.0.1:9090
 
-const BASE = "http://127.0.0.1:9090";
+const BASE = import.meta.env.DEV ? "" : "http://127.0.0.1:9090";
 
 export interface Profile {
   server_url: string;
