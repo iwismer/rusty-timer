@@ -37,3 +37,4 @@ tempfile = "3"
 rt-test-utils = { path = "../../crates/rt-test-utils" }
 tokio = { version = "1", features = ["full", "test-util"] }
 axum = { version = "0.8", features = ["ws"] }
+http-body-util = "0.1"

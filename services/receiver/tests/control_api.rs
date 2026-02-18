@@ -3,6 +3,7 @@ use axum::http::{Method, Request, StatusCode};
 use receiver::control_api::{build_router, AppState, ConnectionState};
 use receiver::Db;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tower::ServiceExt;
 fn setup() -> axum::Router {
     let db = Db::open_in_memory().unwrap();
@@ -450,4 +451,50 @@ async fn emit_log_caps_at_max_entries() {
     assert_eq!(entries.len(), 500);
     // Oldest entries should have been drained
     assert!(entries[0].contains("msg 10"));
+}
+
+#[tokio::test]
+async fn sse_events_endpoint_returns_status_changed() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    // Spawn the SSE request
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/events")
+        .header("accept", "text/event-stream")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Publish an event
+    state
+        .set_connection_state(receiver::control_api::ConnectionState::Connecting)
+        .await;
+
+    // Read the SSE body — collect frames until we see "status_changed" or timeout
+    use http_body_util::BodyExt;
+    let mut body = resp.into_body();
+    let mut collected = String::new();
+    let timeout_result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(Ok(frame)) = body.frame().await {
+            if let Some(data) = frame.data_ref() {
+                collected.push_str(&String::from_utf8_lossy(data));
+                if collected.contains("status_changed") {
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+    let _ = timeout_result;
+
+    assert!(
+        collected.contains("event: status_changed"),
+        "Expected status_changed event in SSE stream, got: {collected}"
+    );
+    assert!(collected.contains("\"connecting\""));
 }

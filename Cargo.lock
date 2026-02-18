@@ -2018,6 +2018,7 @@ dependencies = [
  "chrono",
  "dirs",
  "futures-util",
+ "http-body-util",
  "reqwest",
  "rt-protocol",
  "rt-test-utils",

@@ -10,6 +10,7 @@
 //!   GET  /api/v1/logs           - recent log entries
 //!   POST /api/v1/connect        - initiate WS connection (async, 202)
 //!   POST /api/v1/disconnect     - close WS connection (async, 202)
+//!   GET  /api/v1/events         - SSE stream of receiver UI events
 
 use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
@@ -424,6 +425,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/logs", get(get_logs))
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
+        .route("/api/v1/events", get(crate::sse::receiver_sse))
         .with_state(state)
 }
 
