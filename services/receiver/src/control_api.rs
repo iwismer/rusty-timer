@@ -12,13 +12,14 @@
 //!   POST /api/v1/disconnect     - close WS connection (async, 202)
 
 use crate::db::{Db, Subscription};
+use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
 use rt_protocol::StreamInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -40,19 +41,63 @@ pub struct AppState {
     pub log_entries: Arc<RwLock<Vec<String>>>,
     pub shutdown_tx: watch::Sender<bool>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
+    pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
 }
 
 impl AppState {
     pub fn new(db: Db) -> (Arc<Self>, watch::Receiver<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (ui_tx, _) = broadcast::channel(256);
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
             connection_state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
             log_entries: Arc::new(RwLock::new(Vec::new())),
             shutdown_tx,
             upstream_url: Arc::new(RwLock::new(None)),
+            ui_tx,
         });
         (state, shutdown_rx)
+    }
+
+    /// Cap for the in-memory log ring buffer.
+    const MAX_LOG_ENTRIES: usize = 500;
+
+    /// Append a timestamped log entry and broadcast it to SSE clients.
+    pub async fn emit_log(&self, message: String) {
+        let entry = format!(
+            "{} {}",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            message
+        );
+        {
+            let mut entries = self.log_entries.write().await;
+            entries.push(entry.clone());
+            if entries.len() > Self::MAX_LOG_ENTRIES {
+                let excess = entries.len() - Self::MAX_LOG_ENTRIES;
+                entries.drain(..excess);
+            }
+        }
+        let _ = self.ui_tx.send(ReceiverUiEvent::LogEntry { entry });
+    }
+
+    /// Update connection state, broadcast status change, and emit a log entry.
+    pub async fn set_connection_state(&self, new_state: ConnectionState) {
+        *self.connection_state.write().await = new_state.clone();
+        let streams_count = {
+            let db = self.db.lock().await;
+            db.load_subscriptions().map(|s| s.len()).unwrap_or(0)
+        };
+        let _ = self.ui_tx.send(ReceiverUiEvent::StatusChanged {
+            connection_state: new_state.clone(),
+            streams_count,
+        });
+        let label = match &new_state {
+            ConnectionState::Disconnected => "Disconnected",
+            ConnectionState::Connecting => "Connecting",
+            ConnectionState::Connected => "Connected",
+            ConnectionState::Disconnecting => "Disconnecting",
+        };
+        self.emit_log(label.to_owned()).await;
     }
 }
 

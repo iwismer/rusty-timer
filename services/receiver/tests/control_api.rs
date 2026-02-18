@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use receiver::control_api::{build_router, AppState};
+use receiver::control_api::{build_router, AppState, ConnectionState};
 use receiver::Db;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -394,4 +394,60 @@ async fn get_streams_connected_degrades_on_invalid_upstream_json() {
     assert!(streams[0].get("display_alias").is_none());
 
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn emit_log_stores_entry_and_broadcasts() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let mut ui_rx = state.ui_tx.subscribe();
+
+    state.emit_log("test message".to_owned()).await;
+
+    let entries = state.log_entries.read().await;
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].contains("test message"));
+    drop(entries);
+
+    let event = ui_rx.try_recv().unwrap();
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "log_entry");
+    assert!(json["entry"].as_str().unwrap().contains("test message"));
+}
+
+#[tokio::test]
+async fn set_connection_state_updates_and_broadcasts() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let mut ui_rx = state.ui_tx.subscribe();
+
+    state.set_connection_state(ConnectionState::Connected).await;
+
+    let cs = state.connection_state.read().await.clone();
+    assert_eq!(cs, ConnectionState::Connected);
+
+    // First event: StatusChanged
+    let event = ui_rx.try_recv().unwrap();
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "status_changed");
+    assert_eq!(json["connection_state"], "connected");
+
+    // Second event: LogEntry from emit_log inside set_connection_state
+    let event2 = ui_rx.try_recv().unwrap();
+    let json2 = serde_json::to_value(&event2).unwrap();
+    assert_eq!(json2["type"], "log_entry");
+    assert!(json2["entry"].as_str().unwrap().contains("Connected"));
+}
+
+#[tokio::test]
+async fn emit_log_caps_at_max_entries() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    for i in 0..510 {
+        state.emit_log(format!("msg {i}")).await;
+    }
+    let entries = state.log_entries.read().await;
+    assert_eq!(entries.len(), 500);
+    // Oldest entries should have been drained
+    assert!(entries[0].contains("msg 10"));
 }
