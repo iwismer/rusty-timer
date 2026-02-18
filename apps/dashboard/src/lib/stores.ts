@@ -21,9 +21,7 @@ export function patchStream(
   fields: Partial<StreamEntry>,
 ): void {
   streamsStore.update((streams) =>
-    streams.map((s) =>
-      s.stream_id === streamId ? { ...s, ...fields } : s,
-    ),
+    streams.map((s) => (s.stream_id === streamId ? { ...s, ...fields } : s)),
   );
 }
 

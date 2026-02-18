@@ -38,8 +38,6 @@ describe("shouldFetchMetrics", () => {
   });
 
   it("returns true when navigating to a different stream id", () => {
-    expect(shouldFetchMetrics("s2", {}, new Set(["s1"]), new Set())).toBe(
-      true,
-    );
+    expect(shouldFetchMetrics("s2", {}, new Set(["s1"]), new Set())).toBe(true);
   });
 });
