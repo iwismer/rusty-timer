@@ -9,7 +9,8 @@ use forwarder::local_fanout::FanoutServer;
 use forwarder::replay::ReplayEngine;
 use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
 use forwarder::storage::journal::Journal;
-use forwarder::uplink::{UplinkConfig, UplinkSession};
+use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkSession};
+use forwarder::uplink_replay::should_reconnect_after_replay_send;
 use ipico_core::read::ChipRead;
 use rt_protocol::{ReadEvent, ResumeCursor};
 use sha2::{Digest, Sha256};
@@ -337,6 +338,7 @@ async fn run_uplink(
         };
 
         // Send replayed events
+        let mut reconnect_after_replay = false;
         for (stream_key, stream_epoch, events) in replay_results {
             if events.is_empty() {
                 continue;
@@ -361,8 +363,11 @@ async fn run_uplink(
                 "replaying unacked events"
             );
 
-            match session.send_batch(read_events).await {
-                Ok(ack) => {
+            let send_result = session.send_batch(read_events).await;
+            reconnect_after_replay = should_reconnect_after_replay_send(&send_result);
+
+            match send_result {
+                Ok(SendBatchResult::Ack(ack)) => {
                     let mut j = journal.lock().await;
                     for entry in &ack.entries {
                         if let Err(e) = j.update_ack_cursor(
@@ -374,11 +379,30 @@ async fn run_uplink(
                         }
                     }
                 }
-                Err(e) => {
-                    warn!(error = %e, "send_batch (replay) failed, reconnecting");
+                Ok(SendBatchResult::EpochReset(cmd)) => {
+                    info!(
+                        reader_ip = %cmd.reader_ip,
+                        new_epoch = cmd.new_stream_epoch,
+                        "epoch reset during replay, bumping journal and reconnecting"
+                    );
+                    let mut j = journal.lock().await;
+                    if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                        warn!(error = %e, "failed to bump epoch in journal");
+                    }
                     break;
                 }
+                Err(e) => {
+                    warn!(error = %e, "send_batch (replay) failed, reconnecting");
+                }
             }
+
+            if reconnect_after_replay {
+                break;
+            }
+        }
+
+        if reconnect_after_replay {
+            continue;
         }
 
         // Main uplink loop: periodically send new events and wait for acks
@@ -443,7 +467,7 @@ async fn run_uplink(
             info!(count = pending.len(), "sending event batch");
 
             match session.send_batch(pending).await {
-                Ok(ack) => {
+                Ok(SendBatchResult::Ack(ack)) => {
                     let mut j = journal.lock().await;
                     for entry in &ack.entries {
                         if let Err(e) = j.update_ack_cursor(
@@ -454,6 +478,18 @@ async fn run_uplink(
                             warn!(error = %e, "failed to update ack cursor");
                         }
                     }
+                }
+                Ok(SendBatchResult::EpochReset(cmd)) => {
+                    info!(
+                        reader_ip = %cmd.reader_ip,
+                        new_epoch = cmd.new_stream_epoch,
+                        "epoch reset received, bumping journal and reconnecting"
+                    );
+                    let mut j = journal.lock().await;
+                    if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                        warn!(error = %e, "failed to bump epoch in journal");
+                    }
+                    break 'uplink;
                 }
                 Err(e) => {
                     warn!(error = %e, "send_batch failed, reconnecting uplink");
@@ -688,4 +724,231 @@ async fn main() {
     sleep(Duration::from_millis(200)).await;
 
     info!("forwarder shutdown complete");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use rt_protocol::{EpochResetCommand, Heartbeat, WsMessage};
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    #[tokio::test]
+    async fn run_uplink_reconnects_after_replay_epoch_reset_before_main_loop() {
+        let reader_ip = "10.0.0.1".to_string();
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+
+        let mut journal = Journal::open(&db_path).expect("open journal");
+        journal
+            .ensure_stream_state(&reader_ip, 1)
+            .expect("ensure stream state");
+        journal
+            .insert_event(
+                &reader_ip,
+                1,
+                1,
+                Some("2026-01-01T00:00:00Z"),
+                "aa400000000123450a2a01123018455927a7",
+                "RAW",
+            )
+            .expect("insert replay event");
+
+        let journal = Arc::new(Mutex::new(journal));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (server_result_tx, server_result_rx) = oneshot::channel::<(bool, bool)>();
+
+        let server_task = tokio::spawn(async move {
+            let mut sent_extra_batch_on_first_session = false;
+
+            let (stream1, _) = listener.accept().await.expect("accept first session");
+            let ws1 = accept_async(stream1)
+                .await
+                .expect("ws accept first session");
+            let (mut write1, mut read1) = ws1.split();
+
+            let hello1 = read1
+                .next()
+                .await
+                .expect("hello on first session")
+                .expect("hello frame on first session");
+            let hello1 = parse_ws_text_message(hello1);
+            let forwarder_id = match hello1 {
+                WsMessage::ForwarderHello(h) => h.forwarder_id,
+                other => panic!("expected ForwarderHello on first session, got {:?}", other),
+            };
+
+            let heartbeat1 = WsMessage::Heartbeat(Heartbeat {
+                session_id: "session-1".to_string(),
+                device_id: forwarder_id.clone(),
+            });
+            write1
+                .send(Message::Text(
+                    serde_json::to_string(&heartbeat1).unwrap().into(),
+                ))
+                .await
+                .expect("send first heartbeat");
+
+            let replay_batch = read1
+                .next()
+                .await
+                .expect("replay batch on first session")
+                .expect("replay batch frame on first session");
+            let replay_batch = parse_ws_text_message(replay_batch);
+            match replay_batch {
+                WsMessage::ForwarderEventBatch(batch) => {
+                    assert_eq!(batch.events.len(), 1, "expected one replayed event");
+                }
+                other => panic!("expected replay batch on first session, got {:?}", other),
+            }
+
+            let reset = WsMessage::EpochResetCommand(EpochResetCommand {
+                session_id: "session-1".to_string(),
+                forwarder_id: forwarder_id.clone(),
+                reader_ip: "10.0.0.1".to_string(),
+                new_stream_epoch: 2,
+            });
+            write1
+                .send(Message::Text(serde_json::to_string(&reset).unwrap().into()))
+                .await
+                .expect("send epoch reset");
+
+            // Observe first-session traffic until reconnect accept window closes.
+            // Any ForwarderEventBatch here is an incorrect same-session fallthrough.
+            let second_accept = timeout(std::time::Duration::from_secs(2), listener.accept());
+            tokio::pin!(second_accept);
+
+            let mut second_stream = None;
+            let mut first_stream_open = true;
+            loop {
+                tokio::select! {
+                    accept_result = &mut second_accept => {
+                        if let Ok(Ok((stream2, _))) = accept_result {
+                            second_stream = Some(stream2);
+                        }
+                        break;
+                    }
+                    maybe_msg = read1.next(), if first_stream_open => {
+                        match maybe_msg {
+                            Some(Ok(Message::Text(text))) => {
+                                let parsed: WsMessage = serde_json::from_str(&text).expect("parse ws json");
+                                if let WsMessage::ForwarderEventBatch(_) = parsed {
+                                    sent_extra_batch_on_first_session = true;
+                                }
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(_)) | None => {
+                                first_stream_open = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let saw_second_session = second_stream.is_some();
+            drop(write1);
+
+            if let Some(stream2) = second_stream {
+                let ws2 = accept_async(stream2)
+                    .await
+                    .expect("ws accept second session");
+                let (mut write2, mut read2) = ws2.split();
+
+                let hello2 = read2
+                    .next()
+                    .await
+                    .expect("hello on second session")
+                    .expect("hello frame on second session");
+                let hello2 = parse_ws_text_message(hello2);
+                let second_forwarder_id = match hello2 {
+                    WsMessage::ForwarderHello(h) => h.forwarder_id,
+                    other => panic!("expected ForwarderHello on second session, got {:?}", other),
+                };
+
+                let heartbeat2 = WsMessage::Heartbeat(Heartbeat {
+                    session_id: "session-2".to_string(),
+                    device_id: second_forwarder_id.clone(),
+                });
+                write2
+                    .send(Message::Text(
+                        serde_json::to_string(&heartbeat2).unwrap().into(),
+                    ))
+                    .await
+                    .expect("send second heartbeat");
+            }
+
+            let _ = server_result_tx.send((sent_extra_batch_on_first_session, saw_second_session));
+        });
+
+        let cfg = ForwarderConfig {
+            schema_version: 1,
+            token: "test-token".to_string(),
+            server: forwarder::config::ServerConfig {
+                base_url: format!("http://{}", addr),
+                forwarders_ws_path: "/ws/v1/forwarders".to_string(),
+            },
+            journal: forwarder::config::JournalConfig {
+                sqlite_path: db_path.display().to_string(),
+                prune_watermark_pct: 80,
+            },
+            status_http: forwarder::config::StatusHttpConfig {
+                bind: "127.0.0.1:0".to_string(),
+            },
+            uplink: forwarder::config::UplinkConfig {
+                batch_mode: "immediate".to_string(),
+                batch_flush_ms: 50,
+                batch_max_events: 50,
+            },
+            readers: vec![forwarder::config::ReaderConfig {
+                target: reader_ip.clone(),
+                read_type: "raw".to_string(),
+                enabled: true,
+                local_fallback_port: None,
+            }],
+        };
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let uplink_task = tokio::spawn(run_uplink(
+            cfg,
+            "fwd-epoch-reconnect-test".to_string(),
+            vec![reader_ip],
+            journal,
+            shutdown_rx,
+        ));
+
+        let (sent_extra_batch_on_first_session, saw_second_session) =
+            timeout(std::time::Duration::from_secs(4), server_result_rx)
+                .await
+                .expect("server observation timeout")
+                .expect("server result");
+
+        assert!(
+            !sent_extra_batch_on_first_session,
+            "run_uplink sent a batch on the first session after replay EpochReset"
+        );
+        assert!(
+            saw_second_session,
+            "run_uplink did not reconnect after replay EpochReset"
+        );
+
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(2), uplink_task)
+            .await
+            .expect("uplink task shutdown timeout")
+            .expect("uplink task join");
+        server_task.await.expect("server task join");
+    }
+
+    fn parse_ws_text_message(msg: Message) -> WsMessage {
+        match msg {
+            Message::Text(text) => serde_json::from_str(&text).expect("parse ws json"),
+            other => panic!("expected text ws frame, got {:?}", other),
+        }
+    }
 }

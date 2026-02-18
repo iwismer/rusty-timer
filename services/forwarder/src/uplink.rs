@@ -12,7 +12,8 @@
 
 use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{
-    ForwarderAck, ForwarderEventBatch, ForwarderHello, ReadEvent, ResumeCursor, WsMessage,
+    EpochResetCommand, ForwarderAck, ForwarderEventBatch, ForwarderHello, ReadEvent, ResumeCursor,
+    WsMessage,
 };
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
@@ -37,6 +38,23 @@ pub struct UplinkConfig {
     pub batch_flush_ms: u64,
     /// Max events per batch when `batch_mode = "batched"`.
     pub batch_max_events: u32,
+}
+
+// ---------------------------------------------------------------------------
+// SendBatchResult
+// ---------------------------------------------------------------------------
+
+/// Outcome of a `send_batch` call.
+///
+/// The server may interleave an `EpochResetCommand` before the expected ack.
+/// Callers must handle both variants.
+#[derive(Debug)]
+pub enum SendBatchResult {
+    /// Normal ack — update journal ack cursors.
+    Ack(ForwarderAck),
+    /// Server requested an epoch bump — caller should update the journal and
+    /// reconnect with a fresh `ForwarderHello`.
+    EpochReset(EpochResetCommand),
 }
 
 // ---------------------------------------------------------------------------
@@ -172,14 +190,15 @@ impl UplinkSession {
         &self.device_id
     }
 
-    /// Send a batch of events and wait for the server's ForwarderAck.
+    /// Send a batch of events and wait for the server's response.
     ///
-    /// Returns the ack on success. The caller should update the journal
-    /// ack cursor based on the ack entries.
+    /// Returns [`SendBatchResult::Ack`] on normal ack, or
+    /// [`SendBatchResult::EpochReset`] if the server sends an epoch-reset
+    /// command before the ack arrives.  The caller must handle both.
     pub async fn send_batch(
         &mut self,
         events: Vec<ReadEvent>,
-    ) -> Result<ForwarderAck, UplinkError> {
+    ) -> Result<SendBatchResult, UplinkError> {
         let batch_id = Uuid::new_v4().to_string();
         let batch = WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: self.session_id.clone(),
@@ -188,24 +207,23 @@ impl UplinkSession {
         });
         self.send_ws_message(&batch).await?;
 
-        // Wait for ack
+        // Wait for ack or epoch reset
         loop {
             let msg = self.recv_ws_message().await?;
             match msg {
-                WsMessage::ForwarderAck(ack) => return Ok(ack),
+                WsMessage::ForwarderAck(ack) => return Ok(SendBatchResult::Ack(ack)),
                 WsMessage::Heartbeat(_) => {
                     // Heartbeat received mid-batch; ignore and continue waiting
                     debug!("heartbeat received while waiting for ack");
                     continue;
                 }
                 WsMessage::EpochResetCommand(cmd) => {
-                    // Epoch reset command; caller needs to handle this
-                    warn!(
+                    info!(
                         reader_ip = %cmd.reader_ip,
                         new_epoch = cmd.new_stream_epoch,
-                        "epoch reset command received while waiting for ack"
+                        "epoch reset command received, surfacing to caller"
                     );
-                    continue;
+                    return Ok(SendBatchResult::EpochReset(cmd));
                 }
                 WsMessage::Error(e) => {
                     return Err(UplinkError::Protocol(format!(
