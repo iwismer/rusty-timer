@@ -15,6 +15,8 @@ export interface StreamEntry {
   reader_ip: string;
   subscribed: boolean;
   local_port: number | null;
+  online?: boolean;
+  display_alias?: string;
 }
 
 export interface StreamsResponse {
