@@ -77,11 +77,22 @@ pub async fn patch_stream(
     .fetch_optional(&state.pool)
     .await
     {
-        Ok(Some(_)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "display_alias": display_alias })),
-        )
-            .into_response(),
+        Ok(Some(_)) => {
+            let _ =
+                state
+                    .dashboard_tx
+                    .send(crate::dashboard_events::DashboardEvent::StreamUpdated {
+                        stream_id,
+                        online: None,
+                        stream_epoch: None,
+                        display_alias: Some(display_alias.clone()),
+                    });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "display_alias": display_alias })),
+            )
+                .into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(HttpErrorEnvelope {
@@ -125,6 +136,14 @@ pub async fn reset_epoch(
                     new_stream_epoch: (s.stream_epoch + 1) as u64,
                 };
                 if tx.send(cmd).await.is_ok() {
+                    let _ = state.dashboard_tx.send(
+                        crate::dashboard_events::DashboardEvent::StreamUpdated {
+                            stream_id,
+                            online: None,
+                            stream_epoch: Some(s.stream_epoch + 1),
+                            display_alias: None,
+                        },
+                    );
                     return StatusCode::NO_CONTENT.into_response();
                 }
             }
