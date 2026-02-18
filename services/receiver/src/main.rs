@@ -164,8 +164,36 @@ async fn main() {
                                     ConnectionState::Disconnected;
                             }
                             Some(url) => {
+                                // Read the token from the saved profile so we can
+                                // authenticate the WebSocket upgrade request.
+                                let token_opt = {
+                                    let db = state.db.lock().await;
+                                    db.load_profile().ok().flatten().map(|p| p.token)
+                                };
+                                match token_opt {
+                                  None => {
+                                    warn!("connect requested but no auth token in profile");
+                                    *state.connection_state.write().await =
+                                        ConnectionState::Disconnected;
+                                  }
+                                  Some(token) => {
+                                use tokio_tungstenite::tungstenite::http::{header, Request};
+                                let ws_request = Request::builder()
+                                    .uri(url.as_str())
+                                    .header(
+                                        header::AUTHORIZATION,
+                                        format!("Bearer {token}"),
+                                    )
+                                    .body(());
+                                match ws_request {
+                                  Err(e) => {
+                                    error!(error = %e, "failed to build WS request");
+                                    *state.connection_state.write().await =
+                                        ConnectionState::Disconnected;
+                                  }
+                                  Ok(ws_request) => {
                                 info!(url = %url, "initiating WS session");
-                                match connect_async(&url).await {
+                                match connect_async(ws_request).await {
                                     Err(e) => {
                                         error!(error = %e, "WS connect failed");
                                         *state.connection_state.write().await =
@@ -230,10 +258,14 @@ async fn main() {
                                             }
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
+                                }       // match connect_async
+                                  }     // Ok(ws_request) =>
+                                }       // match ws_request
+                              }         // Some(token) =>
+                            }           // match token_opt
+                        }               // Some(url) =>
+                    }                   // match url_opt
+                }                       // ConnectionState::Connecting =>
 
                     ConnectionState::Disconnecting => {
                         info!("disconnecting: cancelling WS session");
