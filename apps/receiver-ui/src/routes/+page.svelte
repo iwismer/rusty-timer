@@ -248,18 +248,51 @@
     {:else}
       <ul>
         {#each streams?.streams ?? [] as stream}
+          {@const key = streamKey(stream.forwarder_id, stream.reader_ip)}
           <li>
-            {stream.display_alias ??
-              `${stream.forwarder_id} / ${stream.reader_ip}`}
+            <span>
+              {stream.display_alias ??
+                `${stream.forwarder_id} / ${stream.reader_ip}`}
+            </span>
             {#if stream.online !== undefined}
               <span class={stream.online ? "online" : "offline"}
                 >{stream.online ? "(online)" : "(offline)"}</span
               >
             {/if}
             {#if stream.subscribed}
-              → port {stream.local_port ?? "auto"}
+              <span>→ port {stream.local_port ?? "auto"}</span>
+              <button
+                data-testid="unsub-{key}"
+                on:click={() =>
+                  toggleSubscription(
+                    stream.forwarder_id,
+                    stream.reader_ip,
+                    true,
+                  )}
+                disabled={subscribeBusy[key]}
+              >
+                {subscribeBusy[key] ? "..." : "Unsubscribe"}
+              </button>
             {:else}
-              <em>(not subscribed)</em>
+              <input
+                data-testid="port-{key}"
+                type="number"
+                placeholder="port"
+                bind:value={portOverrides[key]}
+                style="width: 5em; margin-left: 0.5em;"
+              />
+              <button
+                data-testid="sub-{key}"
+                on:click={() =>
+                  toggleSubscription(
+                    stream.forwarder_id,
+                    stream.reader_ip,
+                    false,
+                  )}
+                disabled={subscribeBusy[key]}
+              >
+                {subscribeBusy[key] ? "..." : "Subscribe"}
+              </button>
             {/if}
           </li>
         {/each}
