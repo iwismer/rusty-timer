@@ -28,5 +28,11 @@ pub enum DashboardEvent {
         dedup_count: i64,
         retransmit_count: i64,
         lag_ms: Option<u64>,
+        epoch_raw_count: i64,
+        epoch_dedup_count: i64,
+        epoch_retransmit_count: i64,
+        epoch_lag_ms: Option<u64>,
+        epoch_last_received_at: Option<String>,
+        unique_chips: i64,
     },
 }
