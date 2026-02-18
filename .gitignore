@@ -14,6 +14,9 @@ ext_docs/
 # Docs — only exclude the plans directory; keep specs, runbooks, docker docs tracked
 docs/plans/
 
+# Python
+__pycache__/
+
 # Node / SvelteKit / Tauri build artifacts (applies across all apps/)
 node_modules/
 .svelte-kit/
