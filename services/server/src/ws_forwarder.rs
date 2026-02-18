@@ -2,7 +2,8 @@ use crate::{
     auth::{extract_bearer, validate_token},
     dashboard_events::DashboardEvent,
     repo::events::{
-        fetch_stream_metrics, set_stream_online, upsert_event, upsert_stream, IngestResult,
+        fetch_stream_metrics, fetch_stream_snapshot, set_stream_online, upsert_event,
+        upsert_stream, IngestResult,
     },
     state::AppState,
 };
@@ -44,6 +45,20 @@ async fn send_ws_error(socket: &mut WebSocket, code: &str, message: &str, retrya
     });
     if let Ok(json) = serde_json::to_string(&msg) {
         let _ = socket.send(Message::Text(json)).await;
+    }
+}
+
+async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
+    if let Ok(Some(stream)) = fetch_stream_snapshot(&state.pool, stream_id).await {
+        let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
+            stream_id: stream.stream_id,
+            forwarder_id: stream.forwarder_id,
+            reader_ip: stream.reader_ip,
+            display_alias: stream.display_alias,
+            online: stream.online,
+            stream_epoch: stream.stream_epoch,
+            created_at: stream.created_at.to_rfc3339(),
+        });
     }
 }
 
@@ -159,16 +174,8 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
 
     // Notify dashboard of streams coming online
-    for (reader_ip, &sid) in &stream_map {
-        let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
-            stream_id: sid,
-            forwarder_id: device_id.clone(),
-            reader_ip: reader_ip.clone(),
-            display_alias: None,
-            online: true,
-            stream_epoch: 1,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        });
+    for &sid in stream_map.values() {
+        publish_stream_created(&state, sid).await;
     }
 
     let hb_msg = WsMessage::Heartbeat(Heartbeat {
@@ -209,15 +216,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                             stream_map.insert(reader_ip.clone(), sid);
                                             let _ = set_stream_online(&state.pool, sid, true).await;
                                             state.get_or_create_broadcast(sid).await;
-                                            let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
-                                                stream_id: sid,
-                                                forwarder_id: device_id.clone(),
-                                                reader_ip: reader_ip.clone(),
-                                                display_alias: None,
-                                                online: true,
-                                                stream_epoch: 1,
-                                                created_at: chrono::Utc::now().to_rfc3339(),
-                                            });
+                                            publish_stream_created(&state, sid).await;
                                         }
                                     }
                                 }

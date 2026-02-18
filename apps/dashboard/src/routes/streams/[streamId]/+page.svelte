@@ -1,27 +1,48 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
+  import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
 
   let resetResult: string | null = null;
   let resetBusy = false;
+  let requestedMetricStreamIds = new Set<string>();
+  let inFlightMetricStreamIds = new Set<string>();
 
   $: streamId = $page.params.streamId;
   $: stream = $streamsStore.find((s) => s.stream_id === streamId) ?? null;
   $: metrics = $metricsStore[streamId] ?? null;
+  $: void maybeFetchMetrics(streamId);
 
-  // Fetch metrics on mount if not yet in store (e.g., direct navigation)
-  onMount(async () => {
-    if (streamId && !$metricsStore[streamId]) {
-      try {
-        const m = await api.getMetrics(streamId);
-        setMetrics(streamId, m);
-      } catch {
-        // SSE will populate eventually
-      }
+  function maybeFetchMetrics(id: string): void {
+    if (
+      !shouldFetchMetrics(
+        id,
+        $metricsStore,
+        requestedMetricStreamIds,
+        inFlightMetricStreamIds,
+      )
+    ) {
+      return;
     }
-  });
+
+    requestedMetricStreamIds = new Set(requestedMetricStreamIds).add(id);
+    inFlightMetricStreamIds = new Set(inFlightMetricStreamIds).add(id);
+    void loadMetrics(id);
+  }
+
+  async function loadMetrics(id: string): Promise<void> {
+    try {
+      const m = await api.getMetrics(id);
+      setMetrics(id, m);
+    } catch {
+      // SSE will populate eventually.
+    } finally {
+      const next = new Set(inFlightMetricStreamIds);
+      next.delete(id);
+      inFlightMetricStreamIds = next;
+    }
+  }
 
   async function handleResetEpoch() {
     resetBusy = true;

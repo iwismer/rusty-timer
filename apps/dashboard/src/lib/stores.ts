@@ -31,6 +31,10 @@ export function setMetrics(streamId: string, metrics: StreamMetrics): void {
   metricsStore.update((m) => ({ ...m, [streamId]: metrics }));
 }
 
+export function replaceStreams(streams: StreamEntry[]): void {
+  streamsStore.set(streams);
+}
+
 export function resetStores(): void {
   streamsStore.set([]);
   metricsStore.set({});

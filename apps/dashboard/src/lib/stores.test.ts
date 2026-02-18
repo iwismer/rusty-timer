@@ -7,6 +7,7 @@ import {
   patchStream,
   setMetrics,
   resetStores,
+  replaceStreams,
 } from "./stores";
 import type { StreamEntry, StreamMetrics } from "./api";
 
@@ -78,5 +79,29 @@ describe("stores", () => {
     resetStores();
     expect(get(streamsStore)).toEqual([]);
     expect(get(metricsStore)).toEqual({});
+  });
+
+  it("replaceStreams updates stream list without clearing metrics", () => {
+    addOrUpdateStream(STREAM_A);
+    setMetrics("aaa", METRICS_A);
+
+    replaceStreams([
+      {
+        ...STREAM_A,
+        stream_id: "bbb",
+        forwarder_id: "fwd-2",
+        reader_ip: "10.0.0.2",
+      },
+    ]);
+
+    expect(get(streamsStore)).toEqual([
+      {
+        ...STREAM_A,
+        stream_id: "bbb",
+        forwarder_id: "fwd-2",
+        reader_ip: "10.0.0.2",
+      },
+    ]);
+    expect(get(metricsStore)).toEqual({ aaa: METRICS_A });
   });
 });

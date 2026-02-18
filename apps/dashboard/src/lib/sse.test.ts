@@ -47,7 +47,7 @@ class MockEventSource {
 }
 vi.stubGlobal("EventSource", MockEventSource);
 
-import { streamsStore, metricsStore, resetStores } from "./stores";
+import { streamsStore, metricsStore, resetStores, setMetrics } from "./stores";
 import type { StreamEntry } from "./api";
 
 // Helper to make a mock Response
@@ -144,5 +144,21 @@ describe("sse", () => {
     const m = get(metricsStore);
     expect(m.s1.raw_count).toBe(42);
     expect(m.s1.lag).toBe(100);
+  });
+
+  it("resync does not clear existing metrics", async () => {
+    const { initSSE } = await import("./sse");
+    setMetrics("s1", {
+      raw_count: 7,
+      dedup_count: 6,
+      retransmit_count: 1,
+      lag: 50,
+      backlog: 0,
+    });
+
+    initSSE();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(get(metricsStore).s1.raw_count).toBe(7);
   });
 });

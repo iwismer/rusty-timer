@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
+use uuid::Uuid;
 
 async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, raw_token: &[u8]) {
     let hash = Sha256::digest(raw_token);
@@ -17,6 +18,24 @@ async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, r
     .execute(pool)
     .await
     .unwrap();
+}
+
+fn find_sse_event_data(collected: &str, event_name: &str) -> Option<String> {
+    for block in collected.split("\n\n") {
+        let mut name: Option<&str> = None;
+        let mut data: Option<&str> = None;
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("event: ") {
+                name = Some(rest);
+            } else if let Some(rest) = line.strip_prefix("data: ") {
+                data = Some(rest);
+            }
+        }
+        if name == Some(event_name) {
+            return data.map(ToOwned::to_owned);
+        }
+    }
+    None
 }
 
 #[tokio::test]
@@ -40,6 +59,30 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
 
     // 3. Insert a forwarder token
     insert_token(&pool, "fwd-sse", "forwarder", b"sse-test-token").await;
+
+    // Seed an existing stream so StreamCreated should reflect persisted fields.
+    let expected_stream_id = Uuid::new_v4();
+    let expected_created_at = "2026-01-01T00:00:00+00:00";
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
+    )
+    .bind(expected_stream_id)
+    .bind("fwd-sse")
+    .bind("192.168.100.1")
+    .bind("Desk Reader")
+    .bind(7_i64)
+    .bind(false)
+    .bind(expected_created_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO stream_metrics (stream_id) VALUES ($1)")
+        .bind(expected_stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // 4. Connect SSE client FIRST (before forwarder) so it doesn't miss events
     let sse_url = format!("http://{}/api/v1/events", addr);
@@ -141,6 +184,25 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
         saw_metrics_updated,
         "expected 'event: metrics_updated' in SSE stream, got:\n{}",
         collected
+    );
+
+    let stream_created_data = find_sse_event_data(&collected, "stream_created")
+        .expect("missing stream_created data payload");
+    let stream_created_json: serde_json::Value =
+        serde_json::from_str(&stream_created_data).unwrap();
+    let expected_stream_id_str = expected_stream_id.to_string();
+    assert_eq!(
+        stream_created_json["stream_id"].as_str(),
+        Some(expected_stream_id_str.as_str())
+    );
+    assert_eq!(
+        stream_created_json["display_alias"].as_str(),
+        Some("Desk Reader")
+    );
+    assert_eq!(stream_created_json["stream_epoch"].as_i64(), Some(7));
+    assert_eq!(
+        stream_created_json["created_at"].as_str(),
+        Some(expected_created_at)
     );
 
     // Keep the container alive until the end of the test

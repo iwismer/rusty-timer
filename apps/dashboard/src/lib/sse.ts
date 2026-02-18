@@ -1,8 +1,8 @@
 import {
   addOrUpdateStream,
   patchStream,
+  replaceStreams,
   setMetrics,
-  resetStores,
 } from "./stores";
 import { getStreams } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
@@ -49,10 +49,7 @@ export function initSSE(): void {
 async function resync(): Promise<void> {
   try {
     const resp = await getStreams();
-    resetStores();
-    for (const stream of resp.streams) {
-      addOrUpdateStream(stream);
-    }
+    replaceStreams(resp.streams);
   } catch {
     // Resync failed — SSE will keep trying via auto-reconnect
   }
