@@ -9,7 +9,7 @@ use forwarder::local_fanout::FanoutServer;
 use forwarder::replay::ReplayEngine;
 use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
 use forwarder::storage::journal::Journal;
-use forwarder::uplink::{UplinkConfig, UplinkSession};
+use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkSession};
 use ipico_core::read::ChipRead;
 use rt_protocol::{ReadEvent, ResumeCursor};
 use sha2::{Digest, Sha256};
@@ -362,7 +362,7 @@ async fn run_uplink(
             );
 
             match session.send_batch(read_events).await {
-                Ok(ack) => {
+                Ok(SendBatchResult::Ack(ack)) => {
                     let mut j = journal.lock().await;
                     for entry in &ack.entries {
                         if let Err(e) = j.update_ack_cursor(
@@ -373,6 +373,18 @@ async fn run_uplink(
                             warn!(error = %e, "failed to update ack cursor");
                         }
                     }
+                }
+                Ok(SendBatchResult::EpochReset(cmd)) => {
+                    info!(
+                        reader_ip = %cmd.reader_ip,
+                        new_epoch = cmd.new_stream_epoch,
+                        "epoch reset during replay, bumping journal and reconnecting"
+                    );
+                    let mut j = journal.lock().await;
+                    if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                        warn!(error = %e, "failed to bump epoch in journal");
+                    }
+                    break;
                 }
                 Err(e) => {
                     warn!(error = %e, "send_batch (replay) failed, reconnecting");
@@ -443,7 +455,7 @@ async fn run_uplink(
             info!(count = pending.len(), "sending event batch");
 
             match session.send_batch(pending).await {
-                Ok(ack) => {
+                Ok(SendBatchResult::Ack(ack)) => {
                     let mut j = journal.lock().await;
                     for entry in &ack.entries {
                         if let Err(e) = j.update_ack_cursor(
@@ -454,6 +466,18 @@ async fn run_uplink(
                             warn!(error = %e, "failed to update ack cursor");
                         }
                     }
+                }
+                Ok(SendBatchResult::EpochReset(cmd)) => {
+                    info!(
+                        reader_ip = %cmd.reader_ip,
+                        new_epoch = cmd.new_stream_epoch,
+                        "epoch reset received, bumping journal and reconnecting"
+                    );
+                    let mut j = journal.lock().await;
+                    if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                        warn!(error = %e, "failed to bump epoch in journal");
+                    }
+                    break 'uplink;
                 }
                 Err(e) => {
                     warn!(error = %e, "send_batch failed, reconnecting uplink");
