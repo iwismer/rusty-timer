@@ -151,6 +151,19 @@ class ClearTests(unittest.TestCase):
         run_mock.assert_not_called()
 
 
+class CheckPrereqsTests(unittest.TestCase):
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.sys.exit", side_effect=SystemExit)
+    @patch("scripts.dev.shutil.which")
+    def test_check_prereqs_exits_when_curl_missing(
+        self, which_mock, _exit_mock, _print_mock
+    ) -> None:
+        which_mock.side_effect = lambda tool: None if tool == "curl" else f"/usr/bin/{tool}"
+
+        with self.assertRaises(SystemExit):
+            dev.check_prereqs()
+
+
 class ConfigureReceiverDevTests(unittest.TestCase):
     @patch("scripts.dev.urllib.request.urlopen")
     def test_configure_receiver_dev_success_calls_expected_endpoints(self, urlopen_mock) -> None:
@@ -221,6 +234,21 @@ class DetectAndLaunchTests(unittest.TestCase):
 
         auto_config_mock.assert_called_once_with()
         launch_iterm2_mock.assert_called_once()
+
+
+class StartReceiverAutoConfigTests(unittest.TestCase):
+    @patch("threading.Thread")
+    def test_start_receiver_auto_config_spawns_daemon_thread(self, thread_cls) -> None:
+        thread_mock = thread_cls.return_value
+
+        dev.start_receiver_auto_config()
+
+        thread_cls.assert_called_once_with(
+            target=dev.configure_receiver_dev,
+            name="receiver-auto-config",
+            daemon=True,
+        )
+        thread_mock.start.assert_called_once_with()
 
 
 if __name__ == "__main__":

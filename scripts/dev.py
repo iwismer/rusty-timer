@@ -27,6 +27,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -266,7 +267,7 @@ def clear() -> None:
 def check_prereqs() -> None:
     console.print("[bold]Checking prerequisites…[/bold]")
     missing = []
-    for tool in ("docker", "cargo", "npm"):
+    for tool in ("docker", "cargo", "npm", "curl"):
         if shutil.which(tool) is None:
             missing.append(tool)
         else:
@@ -650,13 +651,13 @@ def configure_receiver_dev() -> None:
 
 
 def start_receiver_auto_config() -> None:
-    """Run generated receiver configuration script in the background."""
-    subprocess.Popen(
-        ["bash", str(RECEIVER_CONFIG_SCRIPT_PATH)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+    """Run receiver auto-config in a background daemon thread."""
+    thread = threading.Thread(
+        target=configure_receiver_dev,
+        name="receiver-auto-config",
+        daemon=True,
     )
+    thread.start()
 
 
 def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
