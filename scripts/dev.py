@@ -16,7 +16,6 @@ Usage:
     uv run scripts/dev.py --no-build
 """
 
-import asyncio
 import hashlib
 import shutil
 import subprocess
@@ -160,23 +159,53 @@ def wait_for_postgres() -> None:
 
 
 def apply_migrations() -> None:
-    """Apply the server schema migration via psql.
+    """Apply the server schema migration via psql, recording it in _sqlx_migrations.
 
-    Idempotent: running twice produces "table already exists" errors which psql
-    ignores by default (exit 0). A non-zero exit means psql could not connect.
+    sqlx validates on startup that each migration's SHA-384 checksum matches the
+    recorded value. By inserting the tracking row here, the server skips re-applying
+    the migration and avoids the "relation already exists" error.
     """
     console.print("Applying database migrations…")
-    migration_sql = REPO_ROOT / "services" / "server" / "migrations" / "0001_init.sql"
-    sql = migration_sql.read_text()
+    migration_path = REPO_ROOT / "services" / "server" / "migrations" / "0001_init.sql"
+    migration_bytes = migration_path.read_bytes()
+
+    # Step 1: apply the migration SQL.
     result = subprocess.run(
         ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB],
-        input=sql,
+        input=migration_bytes.decode(),
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         console.print(f"[red]Migration failed (psql returned {result.returncode}):[/red]\n{result.stderr}")
         sys.exit(1)
+
+    # Step 2: record the migration in _sqlx_migrations so the server does not re-run it.
+    # sqlx 0.8 uses SHA-384 of the raw migration file bytes as the checksum.
+    checksum_hex = hashlib.sha384(migration_bytes).hexdigest()
+    tracking_sql = (
+        "CREATE TABLE IF NOT EXISTS _sqlx_migrations ("
+        "  version BIGINT PRIMARY KEY,"
+        "  description TEXT NOT NULL,"
+        "  installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),"
+        "  success BOOLEAN NOT NULL,"
+        "  checksum BYTEA NOT NULL,"
+        "  execution_time BIGINT NOT NULL"
+        ");"
+        f"INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time)"
+        f" VALUES (1, 'init', NOW(), true, decode('{checksum_hex}', 'hex'), 0)"
+        f" ON CONFLICT (version) DO NOTHING;"
+    )
+    result = subprocess.run(
+        ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB],
+        input=tracking_sql,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]Migration tracking record failed:[/red]\n{result.stderr}")
+        sys.exit(1)
+
     console.print("[green]✓[/green] Migrations applied")
 
 
@@ -279,30 +308,30 @@ def launch_tmux() -> None:
 # ---------------------------------------------------------------------------
 
 def launch_iterm2() -> None:
-    asyncio.run(_iterm2_async())
-
-
-async def _iterm2_async() -> None:
     import iterm2  # lazy import — only used on iTerm2 path
-    async with iterm2.Connection.async_create() as connection:
-        app = await iterm2.async_get_app(connection)
-        window = await app.async_create_window()
-        tab = window.current_tab
-        s0 = tab.current_session
-        # Physical layout after splits (row-major):
-        #   s0 (top-left)  | s1 (top-right)
-        #   s2 (mid-left)  | s4 (mid-right)
-        #   s3 (bot-left)  | s5 (bot-right)
-        # Row-major sessions list: [s0, s1, s2, s4, s3, s5]
-        s1 = await s0.async_split_pane(vertical=True)
-        s2 = await s0.async_split_pane(vertical=False)
-        s3 = await s2.async_split_pane(vertical=False)
-        s4 = await s1.async_split_pane(vertical=False)
-        s5 = await s4.async_split_pane(vertical=False)
-        sessions = [s0, s1, s2, s4, s3, s5]  # row-major: top-L, top-R, mid-L, mid-R, bot-L, bot-R
-        for session, (title, cmd) in zip(sessions, PANES):
-            await session.async_set_name(title)
-            await session.async_send_text(f'cd "{REPO_ROOT}" && {cmd}\n')
+    iterm2.run_until_complete(_iterm2_async)
+
+
+async def _iterm2_async(connection) -> None:
+    import iterm2  # noqa: PLC0415
+    await iterm2.async_get_app(connection)  # initialises Session.delegate and other internal state
+    window = await iterm2.Window.async_create(connection)
+    tab = window.tabs[0]
+    s0 = tab.sessions[0]
+    # Physical layout after splits (row-major):
+    #   s0 (top-left)  | s1 (top-right)
+    #   s2 (mid-left)  | s4 (mid-right)
+    #   s3 (bot-left)  | s5 (bot-right)
+    # Row-major sessions list: [s0, s1, s2, s4, s3, s5]
+    s1 = await s0.async_split_pane(vertical=True)
+    s2 = await s0.async_split_pane(vertical=False)
+    s3 = await s2.async_split_pane(vertical=False)
+    s4 = await s1.async_split_pane(vertical=False)
+    s5 = await s4.async_split_pane(vertical=False)
+    sessions = [s0, s1, s2, s4, s3, s5]  # row-major: top-L, top-R, mid-L, mid-R, bot-L, bot-R
+    for session, (title, cmd) in zip(sessions, PANES):
+        await session.async_set_name(title)
+        await session.async_send_text(f'cd "{REPO_ROOT}" && {cmd}\n')
 
 
 # ---------------------------------------------------------------------------
