@@ -87,6 +87,7 @@ pub async fn patch_stream(
                         online: None,
                         stream_epoch: None,
                         display_alias: Some(display_alias.clone()),
+                        forwarder_display_name: None,
                     });
             (
                 StatusCode::OK,

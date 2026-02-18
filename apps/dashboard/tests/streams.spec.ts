@@ -34,6 +34,13 @@ const MOCK_METRICS = {
 
 test.describe("stream list page", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
     // Intercept the streams API call
     await page.route("**/api/v1/streams", async (route) => {
       await route.fulfill({
@@ -51,7 +58,9 @@ test.describe("stream list page", () => {
 
   test("renders list of streams", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator('[data-testid="stream-list"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="stream-list"]').first(),
+    ).toBeVisible();
     const items = page.locator('[data-testid="stream-item"]');
     await expect(items).toHaveCount(2);
   });
@@ -88,12 +97,19 @@ test.describe("stream list page", () => {
 
   test("stream list shows epoch for each stream", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByText(/epoch/i)).toBeVisible();
+    await expect(page.getByText(/epoch/i).first()).toBeVisible();
   });
 });
 
 test.describe("stream list rename flow", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
     await page.route("**/api/v1/streams", async (route) => {
       await route.fulfill({
         status: 200,
@@ -143,6 +159,13 @@ test.describe("stream list rename flow", () => {
 
 test.describe("per-stream detail page", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
     await page.route("**/api/v1/streams", async (route) => {
       await route.fulfill({
         status: 200,

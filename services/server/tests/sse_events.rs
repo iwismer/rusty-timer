@@ -234,3 +234,110 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     // Keep the container alive until the end of the test
     std::mem::forget(container);
 }
+
+#[tokio::test]
+async fn test_sse_emits_stream_updated_on_forwarder_display_name_change() {
+    // 1. Start Postgres container
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    // 2. Build state, start server on ephemeral port
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state))
+            .await
+            .unwrap();
+    });
+
+    // 3. Insert a forwarder token
+    insert_token(&pool, "fwd-sse-updated", "forwarder", b"sse-updated-token").await;
+
+    // 4. Connect SSE client FIRST (before forwarder) so it doesn't miss events
+    let sse_url = format!("http://{}/api/v1/events", addr);
+    let mut sse_response = reqwest::Client::new().get(&sse_url).send().await.unwrap();
+    assert_eq!(sse_response.status(), 200);
+
+    // Give the SSE subscription a moment to be fully established
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 5. Connect forwarder via WebSocket
+    let ws_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&ws_url, "sse-updated-token")
+        .await
+        .unwrap();
+
+    // 6. Initial hello creates stream with first display_name
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-sse-updated".to_owned(),
+        reader_ips: vec!["192.168.100.2".to_owned()],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+
+    // Wait for heartbeat response
+    match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(_) => {}
+        other => panic!("expected Heartbeat, got {:?}", other),
+    }
+
+    // 7. Send updated hello with a new display_name
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-sse-updated".to_owned(),
+        reader_ips: vec!["192.168.100.2".to_owned()],
+        resume: vec![],
+        display_name: Some("Finish Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+
+    match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(_) => {}
+        other => panic!("expected Heartbeat, got {:?}", other),
+    }
+
+    // 8. Read SSE until stream_updated appears
+    let mut collected = String::new();
+    let mut saw_stream_updated = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                let text = String::from_utf8_lossy(&chunk);
+                collected.push_str(&text);
+                if collected.contains("event: stream_updated") {
+                    saw_stream_updated = true;
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => panic!("error reading SSE chunk: {:?}", e),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        saw_stream_updated,
+        "expected 'event: stream_updated' in SSE stream, got:\n{}",
+        collected
+    );
+
+    let stream_updated_data = find_sse_event_data(&collected, "stream_updated")
+        .expect("missing stream_updated data payload");
+    let stream_updated_json: serde_json::Value =
+        serde_json::from_str(&stream_updated_data).unwrap();
+    assert_eq!(
+        stream_updated_json["forwarder_display_name"].as_str(),
+        Some("Finish Line")
+    );
+
+    // Keep the container alive until the end of the test
+    std::mem::forget(container);
+}

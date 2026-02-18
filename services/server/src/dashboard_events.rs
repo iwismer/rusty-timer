@@ -22,6 +22,8 @@ pub enum DashboardEvent {
         stream_epoch: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         display_alias: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        forwarder_display_name: Option<String>,
     },
     MetricsUpdated {
         stream_id: Uuid,

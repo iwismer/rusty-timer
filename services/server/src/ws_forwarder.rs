@@ -239,6 +239,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 }
                             }
                             Ok(WsMessage::ForwarderHello(new_hello)) => {
+                                let previous_display_name = current_display_name.clone();
                                 current_display_name = new_hello.display_name.clone();
                                 if let Err(e) = update_forwarder_display_name(
                                     &state.pool,
@@ -252,6 +253,17 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         error = %e,
                                         "failed to update forwarder display name"
                                     );
+                                }
+                                if previous_display_name != current_display_name {
+                                    for &sid in stream_map.values() {
+                                        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+                                            stream_id: sid,
+                                            online: None,
+                                            stream_epoch: None,
+                                            display_alias: None,
+                                            forwarder_display_name: current_display_name.clone(),
+                                        });
+                                    }
                                 }
                                 for reader_ip in &new_hello.reader_ips {
                                     if let Ok(sid) = upsert_stream(
@@ -303,6 +315,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
             online: Some(false),
             stream_epoch: None,
             display_alias: None,
+            forwarder_display_name: None,
         });
     }
     {
@@ -418,6 +431,7 @@ async fn handle_event_batch(
             online: None,
             stream_epoch: Some(new_epoch),
             display_alias: None,
+            forwarder_display_name: None,
         });
     }
 

@@ -23,6 +23,9 @@ node_modules/
 build/
 dist/
 .tauri/
+apps/*/test-results/
+apps/*/playwright-report/
+apps/*/blob-report/
 *.log
 .env
 .env.local
