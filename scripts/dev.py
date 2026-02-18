@@ -37,6 +37,12 @@ FORWARDER_JOURNAL_PATH = TMP_DIR / "forwarder.sqlite3"
 FORWARDER_TOKEN_TEXT = "rusty-dev-forwarder"
 RECEIVER_TOKEN_TEXT = "rusty-dev-receiver"
 
+# device_id values must match what each service sends in its hello message:
+#   forwarder: "fwd-" + sha256(token_bytes).hex()[:16]  (see services/forwarder/src/main.rs)
+#   receiver:  "receiver-main"                          (see services/receiver/src/main.rs)
+FORWARDER_DEVICE_ID = "fwd-" + hashlib.sha256(FORWARDER_TOKEN_TEXT.encode()).hexdigest()[:16]
+RECEIVER_DEVICE_ID  = "receiver-main"
+
 PG_CONTAINER = "rt-postgres"
 PG_USER = "rt"
 PG_PASSWORD = "secret"
@@ -78,9 +84,10 @@ batch_flush_ms   = 100
 batch_max_events = 50
 
 [[readers]]
-target    = "127.0.0.1:10001"
-read_type = "raw"
-enabled   = true
+target              = "127.0.0.1:10001"
+read_type           = "raw"
+enabled             = true
+local_fallback_port = 11001
 """
 
 console = Console()
@@ -222,17 +229,17 @@ def write_config_files() -> None:
 
 def seed_tokens() -> None:
     console.print("[bold]Seeding dev tokens into Postgres…[/bold]")
-    for token_text, device_type in [
-        (FORWARDER_TOKEN_TEXT, "forwarder"),
-        (RECEIVER_TOKEN_TEXT, "receiver"),
+    for token_text, device_type, device_id in [
+        (FORWARDER_TOKEN_TEXT, "forwarder", FORWARDER_DEVICE_ID),
+        (RECEIVER_TOKEN_TEXT,  "receiver",  RECEIVER_DEVICE_ID),
     ]:
         hex_hash = sha256_hex(token_text)
-        # hex_hash is [0-9a-f] only (SHA-256 output); device_type is a hardcoded string literal.
-        # Neither comes from external input, so f-string interpolation is safe here.
+        # hex_hash and device_id are [0-9a-f] / known safe strings; device_type is a
+        # hardcoded literal.  None comes from external input, so f-string interpolation is safe.
         sql = (
             f"INSERT INTO device_tokens (token_hash, device_type, device_id) "
-            f"VALUES (decode('{hex_hash}', 'hex'), '{device_type}', 'dev') "
-            f"ON CONFLICT (token_hash) DO NOTHING;"
+            f"VALUES (decode('{hex_hash}', 'hex'), '{device_type}', '{device_id}') "
+            f"ON CONFLICT (token_hash) DO UPDATE SET device_id = EXCLUDED.device_id;"
         )
         result = subprocess.run(
             [
@@ -245,7 +252,7 @@ def seed_tokens() -> None:
         if result.returncode != 0:
             console.print(f"[red]Failed to seed token for {device_type}:[/red]\n{result.stderr}")
             sys.exit(1)
-        console.print(f"  [green]Seeded[/green] {device_type} token (sha256={hex_hash[:16]}…)")
+        console.print(f"  [green]Seeded[/green] {device_type} token (sha256={hex_hash[:16]}… device_id={device_id})")
 
 
 def build_rust(skip_build: bool) -> None:
