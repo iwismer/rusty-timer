@@ -57,6 +57,39 @@ async fn mark_reader_disconnected(status: &StatusServer, reader_ip: &str) {
         .await;
 }
 
+#[derive(Debug)]
+enum JournalAppendError {
+    StreamState(String),
+    NextSeq(String),
+    Insert(String),
+}
+
+fn append_read_to_journal(
+    journal: &mut Journal,
+    stream_key: &str,
+    reader_timestamp: Option<&str>,
+    raw_line: &str,
+    read_type: &str,
+) -> Result<(i64, i64), JournalAppendError> {
+    let (epoch, _) = journal
+        .current_epoch_and_next_seq(stream_key)
+        .map_err(|e| JournalAppendError::StreamState(e.to_string()))?;
+    let seq = journal
+        .next_seq(stream_key)
+        .map_err(|e| JournalAppendError::NextSeq(e.to_string()))?;
+    journal
+        .insert_event(
+            stream_key,
+            epoch,
+            seq,
+            reader_timestamp,
+            raw_line,
+            read_type,
+        )
+        .map_err(|e| JournalAppendError::Insert(e.to_string()))?;
+    Ok((epoch, seq))
+}
+
 // ---------------------------------------------------------------------------
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
@@ -179,38 +212,34 @@ async fn run_reader(
                 }
             }
 
-            // Write to journal
-            let (epoch, seq) = {
+            // Write to journal. Keep status updates out of the DB lock scope.
+            let append_result = {
                 let mut j = journal.lock().await;
-                let (epoch, _) = match j.current_epoch_and_next_seq(&stream_key) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!(reader_ip = %reader_ip, error = %e, "failed to get epoch");
-                        mark_reader_disconnected(&status, &reader_ip).await;
-                        break;
-                    }
-                };
-                let seq = match j.next_seq(&stream_key) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(reader_ip = %reader_ip, error = %e, "failed to get next_seq");
-                        mark_reader_disconnected(&status, &reader_ip).await;
-                        break;
-                    }
-                };
-                if let Err(e) = j.insert_event(
+                append_read_to_journal(
+                    &mut j,
                     &stream_key,
-                    epoch,
-                    seq,
                     reader_timestamp.as_deref(),
                     &raw_line,
                     &parsed_read_type,
-                ) {
+                )
+            };
+            let (epoch, seq) = match append_result {
+                Ok(v) => v,
+                Err(JournalAppendError::StreamState(e)) => {
+                    error!(reader_ip = %reader_ip, error = %e, "failed to get epoch");
+                    mark_reader_disconnected(&status, &reader_ip).await;
+                    break;
+                }
+                Err(JournalAppendError::NextSeq(e)) => {
+                    error!(reader_ip = %reader_ip, error = %e, "failed to get next_seq");
+                    mark_reader_disconnected(&status, &reader_ip).await;
+                    break;
+                }
+                Err(JournalAppendError::Insert(e)) => {
                     error!(reader_ip = %reader_ip, error = %e, "journal insert failed");
                     mark_reader_disconnected(&status, &reader_ip).await;
                     break;
                 }
-                (epoch, seq)
             };
 
             info!(
@@ -1029,6 +1058,27 @@ mod tests {
             Message::Text(text) => serde_json::from_str(&text).expect("parse ws json"),
             other => panic!("expected text ws frame, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn append_read_to_journal_returns_error_when_stream_missing() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let mut journal = Journal::open(&db_path).expect("open journal");
+
+        let result = append_read_to_journal(
+            &mut journal,
+            "10.0.0.42",
+            Some("2026-01-01T00:00:00Z"),
+            "aa400000000123450a2a01123018455927a7",
+            "raw",
+        );
+
+        assert!(
+            matches!(result, Err(JournalAppendError::StreamState(_))),
+            "missing stream state should return StreamState error, got: {:?}",
+            result
+        );
     }
 
     async fn http_get_body(addr: SocketAddr, path: &str) -> String {
