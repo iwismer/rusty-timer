@@ -41,7 +41,7 @@ The pre-commit hook automatically:
 1. Strips `"resolved"` fields from `apps/*/package-lock.json`
 2. Checks Rust formatting: `cargo fmt --all -- --check`
 3. Runs Clippy: `cargo clippy --workspace --all-targets`
-4. Checks JS/TS formatting via Prettier
+4. For touched frontend apps, runs `npm run lint` and `npm run check` (blocking)
 
 To run the pre-commit hook manually before committing:
 ```bash

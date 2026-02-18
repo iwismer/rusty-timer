@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 echo "--- pre-commit: running checks ---"
 
@@ -27,12 +27,31 @@ cd "$REPO_ROOT" && cargo fmt --all -- --check
 echo "  Running clippy ..."
 cd "$REPO_ROOT" && cargo clippy --workspace --all-targets
 
-# 4. JS/TS formatting check
-for app_dir in "$REPO_ROOT/apps/dashboard" "$REPO_ROOT/apps/receiver-ui"; do
-  if [ -f "$app_dir/package.json" ] && [ -d "$app_dir/node_modules" ]; then
-    echo "  Checking ${app_dir##$REPO_ROOT/} formatting ..."
-    (cd "$app_dir" && npx prettier --check . 2>/dev/null) || true
+run_js_checks() {
+  local app_dir="$1"
+  local app_name="${app_dir##$REPO_ROOT/}"
+
+  if [ ! -d "$app_dir/node_modules" ]; then
+    echo "  ERROR: $app_name dependencies are not installed."
+    echo "  Run: (cd $app_name && npm ci)"
+    exit 1
   fi
-done
+
+  echo "  Running $app_name lint ..."
+  (cd "$app_dir" && npm run lint)
+  echo "  Running $app_name type check ..."
+  (cd "$app_dir" && npm run check)
+}
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+
+# 4. JS/TS checks for touched frontend apps (blocking)
+if echo "$staged_files" | grep -q '^apps/dashboard/'; then
+  run_js_checks "$REPO_ROOT/apps/dashboard"
+fi
+
+if echo "$staged_files" | grep -q '^apps/receiver-ui/'; then
+  run_js_checks "$REPO_ROOT/apps/receiver-ui"
+fi
 
 echo "--- pre-commit: all checks passed ---"
