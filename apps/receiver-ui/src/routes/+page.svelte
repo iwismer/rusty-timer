@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import * as api from "$lib/api";
+  import { buildUpdatedSubscriptions } from "$lib/subscriptions";
   import { initSSE, destroySSE } from "$lib/sse";
   import type {
     Profile,
@@ -23,7 +24,8 @@
   let connectBusy = false;
   let sseConnected = false;
   let portOverrides: Record<string, string> = {};
-  let subscribeBusy: Record<string, boolean> = {};
+  let subscriptionsBusy = false;
+  let activeSubscriptionKey: string | null = null;
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
     return `${forwarder_id}/${reader_ip}`;
@@ -34,44 +36,30 @@
     reader_ip: string,
     currentlySubscribed: boolean,
   ) {
-    const key = streamKey(forwarder_id, reader_ip);
-    subscribeBusy = { ...subscribeBusy, [key]: true };
-    try {
-      const allStreams = streams?.streams ?? [];
-      let newSubs: import("$lib/api").SubscriptionItem[];
+    if (subscriptionsBusy) {
+      return;
+    }
 
-      if (currentlySubscribed) {
-        // Unsubscribe: keep all other subscribed streams
-        newSubs = allStreams
-          .filter(
-            (s) =>
-              s.subscribed &&
-              !(s.forwarder_id === forwarder_id && s.reader_ip === reader_ip),
-          )
-          .map((s) => ({
-            forwarder_id: s.forwarder_id,
-            reader_ip: s.reader_ip,
-            local_port_override: s.local_port ?? null,
-          }));
-      } else {
-        // Subscribe: keep all existing + add this one
-        newSubs = allStreams
-          .filter((s) => s.subscribed)
-          .map((s) => ({
-            forwarder_id: s.forwarder_id,
-            reader_ip: s.reader_ip,
-            local_port_override: s.local_port ?? null,
-          }));
-        const raw = portOverrides[key];
-        const portOverride = raw ? parseInt(raw, 10) : null;
-        newSubs.push({
+    const key = streamKey(forwarder_id, reader_ip);
+    subscriptionsBusy = true;
+    activeSubscriptionKey = key;
+    try {
+      const updated = buildUpdatedSubscriptions({
+        allStreams: streams?.streams ?? [],
+        target: {
           forwarder_id,
           reader_ip,
-          local_port_override: Number.isNaN(portOverride) ? null : portOverride,
-        });
+          currentlySubscribed,
+        },
+        rawPortOverride: portOverrides[key],
+      });
+      if (updated.error) {
+        error = updated.error;
+        return;
       }
 
-      await api.putSubscriptions(newSubs);
+      await api.putSubscriptions(updated.subscriptions ?? []);
+      streams = await api.getStreams();
       if (!currentlySubscribed) {
         const { [key]: _, ...rest } = portOverrides;
         portOverrides = rest;
@@ -79,7 +67,8 @@
     } catch (e) {
       error = String(e);
     } finally {
-      subscribeBusy = { ...subscribeBusy, [key]: false };
+      subscriptionsBusy = false;
+      activeSubscriptionKey = null;
     }
   }
 
@@ -273,9 +262,11 @@
                     stream.reader_ip,
                     true,
                   )}
-                disabled={subscribeBusy[key]}
+                disabled={subscriptionsBusy}
               >
-                {subscribeBusy[key] ? "..." : "Unsubscribe"}
+                {subscriptionsBusy && activeSubscriptionKey === key
+                  ? "..."
+                  : "Unsubscribe"}
               </button>
             {:else}
               <input
@@ -286,6 +277,7 @@
                 max="65535"
                 placeholder="port"
                 bind:value={portOverrides[key]}
+                disabled={subscriptionsBusy}
               />
               <button
                 data-testid="sub-{key}"
@@ -295,9 +287,11 @@
                     stream.reader_ip,
                     false,
                   )}
-                disabled={subscribeBusy[key]}
+                disabled={subscriptionsBusy}
               >
-                {subscribeBusy[key] ? "..." : "Subscribe"}
+                {subscriptionsBusy && activeSubscriptionKey === key
+                  ? "..."
+                  : "Subscribe"}
               </button>
             {/if}
           </li>
