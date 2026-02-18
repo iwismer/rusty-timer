@@ -9,6 +9,7 @@ import type { StreamEntry, StreamMetrics } from "./api";
 
 let eventSource: EventSource | null = null;
 let resyncInFlight = false;
+let resyncQueued = false;
 
 export function initSSE(): void {
   if (eventSource) return;
@@ -54,13 +55,24 @@ export function initSSE(): void {
 }
 
 async function resync(): Promise<void> {
-  if (resyncInFlight) return;
+  if (resyncInFlight) {
+    resyncQueued = true;
+    return;
+  }
+
   resyncInFlight = true;
   try {
-    const resp = await getStreams();
-    replaceStreams(resp.streams);
-  } catch {
-    // Resync failed — SSE will keep trying via auto-reconnect
+    // Coalesce multiple resync triggers into a single follow-up fetch.
+    while (true) {
+      resyncQueued = false;
+      try {
+        const resp = await getStreams();
+        replaceStreams(resp.streams);
+      } catch {
+        // Resync failed — SSE will keep trying via auto-reconnect
+      }
+      if (!resyncQueued) break;
+    }
   } finally {
     resyncInFlight = false;
   }
@@ -72,4 +84,5 @@ export function destroySSE(): void {
     eventSource = null;
   }
   resyncInFlight = false;
+  resyncQueued = false;
 }
