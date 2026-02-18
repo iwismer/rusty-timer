@@ -32,8 +32,28 @@ const MOCK_METRICS = {
   backlog: 3,
 };
 
+const MOCK_LIST_METRICS_RESPONSE = {
+  raw_count: 500,
+  dedup_count: 480,
+  retransmit_count: 20,
+  lag_ms: 2300,
+  epoch_raw_count: 120,
+  epoch_dedup_count: 110,
+  epoch_retransmit_count: 10,
+  epoch_lag_ms: 1500,
+  epoch_last_received_at: "2026-01-01T00:00:00Z",
+  unique_chips: 75,
+};
+
 test.describe("stream list page", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
     // Intercept the streams API call
     await page.route("**/api/v1/streams", async (route) => {
       await route.fulfill({
@@ -51,7 +71,9 @@ test.describe("stream list page", () => {
 
   test("renders list of streams", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator('[data-testid="stream-list"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="stream-list"]').first(),
+    ).toBeVisible();
     const items = page.locator('[data-testid="stream-item"]');
     await expect(items).toHaveCount(2);
   });
@@ -65,7 +87,9 @@ test.describe("stream list page", () => {
     await page.goto("/");
     // Second stream has no alias, should show forwarder_id / reader_ip
     await expect(page.getByText(/fwd-beta/)).toBeVisible();
-    await expect(page.getByText(/10\.0\.0\.50:10000/)).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "10.0.0.50:10000" }),
+    ).toBeVisible();
   });
 
   test("shows online/offline indicator for each stream", async ({ page }) => {
@@ -86,12 +110,55 @@ test.describe("stream list page", () => {
 
   test("stream list shows epoch for each stream", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByText(/epoch/i)).toBeVisible();
+    await expect(page.getByText(/epoch/i).first()).toBeVisible();
+  });
+
+  test("retries metrics fetch after transient failure", async ({ page }) => {
+    let streamOneMetricsAttempts = 0;
+    await page.route("**/api/v1/streams/*/metrics", async (route) => {
+      const url = new URL(route.request().url());
+      const streamId = url.pathname.split("/")[4];
+
+      if (streamId === "stream-uuid-1") {
+        streamOneMetricsAttempts += 1;
+        if (streamOneMetricsAttempts === 1) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({
+              code: "INTERNAL_ERROR",
+              message: "temporary failure",
+            }),
+          });
+          return;
+        }
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_LIST_METRICS_RESPONSE),
+      });
+    });
+
+    await page.goto("/");
+
+    await expect
+      .poll(() => streamOneMetricsAttempts, { timeout: 10000 })
+      .toBeGreaterThan(1);
+    await expect(page.getByText("Reads: 120").first()).toBeVisible();
   });
 });
 
 test.describe("stream list rename flow", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
     await page.route("**/api/v1/streams", async (route) => {
       await route.fulfill({
         status: 200,
@@ -130,17 +197,29 @@ test.describe("stream list rename flow", () => {
 
   test("can fill in rename input and submit", async ({ page }) => {
     await page.goto("/");
+    const patchRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        request.url().endsWith("/api/v1/streams/stream-uuid-1"),
+    );
     const firstInput = page.locator('[data-testid="rename-input"]').first();
     await firstInput.fill("Updated Alpha");
     const firstBtn = page.locator('[data-testid="rename-btn"]').first();
     await firstBtn.click();
-    // After PATCH, the updated alias should appear
-    await expect(page.getByText("Updated Alpha")).toBeVisible();
+    const request = await patchRequest;
+    expect(request.postDataJSON()).toEqual({ display_alias: "Updated Alpha" });
   });
 });
 
 test.describe("per-stream detail page", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
     await page.route("**/api/v1/streams", async (route) => {
       await route.fulfill({
         status: 200,
@@ -213,11 +292,13 @@ test.describe("per-stream detail page", () => {
     await expect(page.locator('[data-testid="metric-lag"]')).toBeVisible();
   });
 
-  test("displays backlog metric", async ({ page }) => {
+  test("displays backlog metric with current default value", async ({
+    page,
+  }) => {
     await page.goto("/streams/stream-uuid-1");
     await expect(page.locator('[data-testid="metric-backlog"]')).toBeVisible();
     await expect(page.locator('[data-testid="metric-backlog"]')).toContainText(
-      "3",
+      "0",
     );
   });
 

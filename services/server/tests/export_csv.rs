@@ -44,6 +44,7 @@ async fn test_export_csv_header_and_rows() {
         forwarder_id: "fwd-csv".to_owned(),
         reader_ips: vec!["10.50.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();

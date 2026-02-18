@@ -43,6 +43,7 @@ async fn test_metrics_invariant_maintained() {
             forwarder_id: "fwd-metrics".to_owned(),
             reader_ips: vec!["10.1.1.1:10000".to_owned()],
             resume: vec![],
+            display_name: None,
         }))
         .await
         .unwrap();
@@ -130,6 +131,7 @@ async fn test_multi_stream_metrics_independent() {
             forwarder_id: "fwd-multi".to_owned(),
             reader_ips: vec!["10.2.2.1:10000".to_owned(), "10.2.2.2:10000".to_owned()],
             resume: vec![],
+            display_name: None,
         }))
         .await
         .unwrap();

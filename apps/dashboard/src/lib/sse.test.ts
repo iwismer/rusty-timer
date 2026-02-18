@@ -92,6 +92,7 @@ describe("sse", () => {
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       display_alias: null,
+      forwarder_display_name: null,
       online: true,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
@@ -111,6 +112,7 @@ describe("sse", () => {
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       display_alias: null,
+      forwarder_display_name: null,
       online: true,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
@@ -124,6 +126,62 @@ describe("sse", () => {
     );
 
     expect(get(streamsStore)[0].online).toBe(false);
+  });
+
+  it("handles stream_updated forwarder_display_name patch", async () => {
+    const { initSSE } = await import("./sse");
+
+    const { addOrUpdateStream } = await import("./stores");
+    addOrUpdateStream({
+      stream_id: "s1",
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1",
+      display_alias: null,
+      forwarder_display_name: "Start Line",
+      online: true,
+      stream_epoch: 1,
+      created_at: "2026-01-01T00:00:00Z",
+    });
+
+    initSSE();
+    const es = MockEventSource.instances[0];
+    es.emit(
+      "stream_updated",
+      JSON.stringify({
+        stream_id: "s1",
+        forwarder_display_name: "Finish Line",
+      }),
+    );
+
+    expect(get(streamsStore)[0].forwarder_display_name).toBe("Finish Line");
+  });
+
+  it("handles stream_updated forwarder_display_name clear patch", async () => {
+    const { initSSE } = await import("./sse");
+
+    const { addOrUpdateStream } = await import("./stores");
+    addOrUpdateStream({
+      stream_id: "s1",
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1",
+      display_alias: null,
+      forwarder_display_name: "Start Line",
+      online: true,
+      stream_epoch: 1,
+      created_at: "2026-01-01T00:00:00Z",
+    });
+
+    initSSE();
+    const es = MockEventSource.instances[0];
+    es.emit(
+      "stream_updated",
+      JSON.stringify({
+        stream_id: "s1",
+        forwarder_display_name: null,
+      }),
+    );
+
+    expect(get(streamsStore)[0].forwarder_display_name).toBeNull();
   });
 
   it("handles metrics_updated by setting in store", async () => {
@@ -186,6 +244,7 @@ describe("sse", () => {
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
       display_alias: null,
+      forwarder_display_name: null,
       online: false,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",

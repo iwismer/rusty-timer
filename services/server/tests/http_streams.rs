@@ -69,6 +69,7 @@ async fn test_list_streams_after_forwarder_connect() {
         forwarder_id: "fwd-list".to_owned(),
         reader_ips: vec!["10.10.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -110,6 +111,7 @@ async fn test_patch_stream_rename() {
         forwarder_id: "fwd-rename".to_owned(),
         reader_ips: vec!["10.20.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -183,6 +185,7 @@ async fn test_get_metrics_for_stream() {
         forwarder_id: "fwd-metrics".to_owned(),
         reader_ips: vec!["10.30.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -297,4 +300,200 @@ async fn test_healthz_and_readyz() {
         .await
         .unwrap();
     assert_eq!(r2.status(), 200);
+}
+
+#[tokio::test]
+async fn test_forwarder_display_name_in_streams_list() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(&pool, "fwd-dn", "forwarder", b"fwd-dn-token").await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn".to_owned(),
+        reader_ips: vec!["10.40.0.1".to_owned()],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["forwarder_display_name"], "Start Line");
+}
+
+#[tokio::test]
+async fn test_forwarder_display_name_on_event_batch_created_stream() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(&pool, "fwd-dn-batch", "forwarder", b"fwd-dn-batch-token").await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-batch-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-batch".to_owned(),
+        reader_ips: vec![],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let session_id = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {:?}", other),
+    };
+
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id,
+        batch_id: "batch-1".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-dn-batch".to_owned(),
+            reader_ip: "10.41.0.1".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-18T10:00:00.000Z".to_owned(),
+            raw_read_line: "LINE_1".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    let ack = fwd.recv_message().await.unwrap();
+    assert!(matches!(ack, WsMessage::ForwarderAck(_)));
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["forwarder_display_name"], "Start Line");
+}
+
+#[tokio::test]
+async fn test_forwarder_display_name_cleared_when_hello_omits_value() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(&pool, "fwd-dn-clear", "forwarder", b"fwd-dn-clear-token").await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-clear-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-clear".to_owned(),
+        reader_ips: vec!["10.42.0.1".to_owned()],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-clear".to_owned(),
+        reader_ips: vec!["10.42.0.1".to_owned()],
+        resume: vec![],
+        display_name: None,
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert!(
+        streams[0]["forwarder_display_name"].is_null(),
+        "display name should clear when hello omits display_name"
+    );
+}
+
+#[tokio::test]
+async fn test_forwarder_display_name_refreshes_all_forwarder_streams() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(
+        &pool,
+        "fwd-dn-refresh-all",
+        "forwarder",
+        b"fwd-dn-refresh-all-token",
+    )
+    .await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-refresh-all-token")
+        .await
+        .unwrap();
+
+    // Initial hello creates two streams with the same display name.
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-refresh-all".to_owned(),
+        reader_ips: vec!["10.43.0.1".to_owned(), "10.43.0.2".to_owned()],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    // Subsequent hello updates display name but only includes one reader IP.
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-refresh-all".to_owned(),
+        reader_ips: vec!["10.43.0.1".to_owned()],
+        resume: vec![],
+        display_name: Some("Finish Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 2);
+    for stream in streams {
+        assert_eq!(stream["forwarder_id"], "fwd-dn-refresh-all");
+        assert_eq!(stream["forwarder_display_name"], "Finish Line");
+    }
 }

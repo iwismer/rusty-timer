@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online, created_at\n           FROM streams ORDER BY created_at ASC",
+  "query": "SELECT stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, stream_epoch, online, created_at\n           FROM streams ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,17 @@
       },
       {
         "ordinal": 4,
+        "name": "forwarder_display_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "streams",
+            "name": "forwarder_display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "stream_epoch",
         "type_info": "Int8",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "online",
         "type_info": "Bool",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -89,10 +100,11 @@
       false,
       false,
       true,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "6866a9d6b75c1b5ac7a48e1c76a08d30f868d335d83a961e1ae909d1d84bee84"
+  "hash": "8b3d795ff20e115fd518100d910f0c0d4c8167a44d8cfebf739a365226ca6865"
 }

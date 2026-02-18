@@ -66,6 +66,7 @@ async fn connect_forwarder(
             forwarder_id: forwarder_id.to_owned(),
             reader_ips,
             resume,
+            display_name: None,
         }))
         .await
         .unwrap();

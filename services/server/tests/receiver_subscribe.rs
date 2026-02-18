@@ -120,6 +120,7 @@ async fn test_receiver_receives_realtime_events() {
         forwarder_id: "fwd-rt".to_owned(),
         reader_ips: vec!["10.0.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -216,6 +217,7 @@ async fn test_receiver_ack_updates_cursor() {
         forwarder_id: "fwd-ack".to_owned(),
         reader_ips: vec!["10.1.0.1:10000".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();

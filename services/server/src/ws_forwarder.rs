@@ -1,9 +1,10 @@
 use crate::{
     auth::{extract_bearer, validate_token},
-    dashboard_events::DashboardEvent,
+    dashboard_events::{DashboardEvent, OptionalStringPatch},
     repo::events::{
-        count_unique_chips, fetch_stream_metrics, fetch_stream_snapshot, set_stream_online,
-        upsert_event, upsert_stream, IngestResult,
+        count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
+        fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
+        upsert_stream, IngestResult,
     },
     state::AppState,
 };
@@ -55,6 +56,7 @@ async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
             forwarder_id: stream.forwarder_id,
             reader_ip: stream.reader_ip,
             display_alias: stream.display_alias,
+            forwarder_display_name: stream.forwarder_display_name,
             online: stream.online,
             stream_epoch: stream.stream_epoch,
             created_at: stream.created_at.to_rfc3339(),
@@ -164,9 +166,27 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         return;
     }
 
+    let mut current_display_name = hello.display_name.clone();
+    if let Err(e) =
+        update_forwarder_display_name(&state.pool, &device_id, current_display_name.as_deref())
+            .await
+    {
+        error!(
+            device_id = %device_id,
+            error = %e,
+            "failed to update forwarder display name"
+        );
+    }
     let mut stream_map: HashMap<String, Uuid> = HashMap::new();
     for reader_ip in &hello.reader_ips {
-        if let Ok(sid) = upsert_stream(&state.pool, &device_id, reader_ip).await {
+        if let Ok(sid) = upsert_stream(
+            &state.pool,
+            &device_id,
+            reader_ip,
+            current_display_name.as_deref(),
+        )
+        .await
+        {
             stream_map.insert(reader_ip.clone(), sid);
             let _ = set_stream_online(&state.pool, sid, true).await;
             state.get_or_create_broadcast(sid).await;
@@ -176,6 +196,31 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     // Notify dashboard of streams coming online
     for &sid in stream_map.values() {
         publish_stream_created(&state, sid).await;
+    }
+
+    let initial_display_name_patch = match &current_display_name {
+        Some(name) => OptionalStringPatch::Set(name.clone()),
+        None => OptionalStringPatch::Clear,
+    };
+    let initial_stream_ids = match fetch_stream_ids_by_forwarder(&state.pool, &device_id).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            error!(
+                device_id = %device_id,
+                error = %e,
+                "failed to list forwarder streams for initial display-name update"
+            );
+            stream_map.values().copied().collect()
+        }
+    };
+    for sid in initial_stream_ids {
+        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+            stream_id: sid,
+            online: None,
+            stream_epoch: None,
+            display_alias: None,
+            forwarder_display_name: Some(initial_display_name_patch.clone()),
+        });
     }
 
     let hb_msg = WsMessage::Heartbeat(Heartbeat {
@@ -205,14 +250,77 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                     Ok(Some(Ok(Message::Text(text)))) => {
                         match serde_json::from_str::<WsMessage>(&text) {
                             Ok(WsMessage::ForwarderEventBatch(batch)) => {
-                                if let Err(e) = handle_event_batch(&mut socket, &state, &device_id, &session_id, &mut stream_map, batch).await {
+                                if let Err(e) = handle_event_batch(
+                                    &mut socket,
+                                    &state,
+                                    &device_id,
+                                    &session_id,
+                                    &mut stream_map,
+                                    current_display_name.as_deref(),
+                                    batch,
+                                )
+                                .await
+                                {
                                     error!(device_id = %device_id, error = %e, "error handling event batch"); break;
                                 }
                             }
                             Ok(WsMessage::ForwarderHello(new_hello)) => {
+                                let previous_display_name = current_display_name.clone();
+                                current_display_name = new_hello.display_name.clone();
+                                if let Err(e) = update_forwarder_display_name(
+                                    &state.pool,
+                                    &device_id,
+                                    current_display_name.as_deref(),
+                                )
+                                .await
+                                {
+                                    error!(
+                                        device_id = %device_id,
+                                        error = %e,
+                                        "failed to update forwarder display name"
+                                    );
+                                }
+                                if previous_display_name != current_display_name {
+                                    let display_name_patch = match &current_display_name {
+                                        Some(name) => OptionalStringPatch::Set(name.clone()),
+                                        None => OptionalStringPatch::Clear,
+                                    };
+                                    let stream_ids = match fetch_stream_ids_by_forwarder(
+                                        &state.pool,
+                                        &device_id,
+                                    )
+                                    .await
+                                    {
+                                        Ok(ids) => ids,
+                                        Err(e) => {
+                                            error!(
+                                                device_id = %device_id,
+                                                error = %e,
+                                                "failed to list forwarder streams for display-name update"
+                                            );
+                                            stream_map.values().copied().collect()
+                                        }
+                                    };
+                                    for sid in stream_ids {
+                                        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+                                            stream_id: sid,
+                                            online: None,
+                                            stream_epoch: None,
+                                            display_alias: None,
+                                            forwarder_display_name: Some(display_name_patch.clone()),
+                                        });
+                                    }
+                                }
                                 for reader_ip in &new_hello.reader_ips {
-                                    if !stream_map.contains_key(reader_ip) {
-                                        if let Ok(sid) = upsert_stream(&state.pool, &device_id, reader_ip).await {
+                                    if let Ok(sid) = upsert_stream(
+                                        &state.pool,
+                                        &device_id,
+                                        reader_ip,
+                                        current_display_name.as_deref(),
+                                    )
+                                    .await
+                                    {
+                                        if !stream_map.contains_key(reader_ip) {
                                             stream_map.insert(reader_ip.clone(), sid);
                                             let _ = set_stream_online(&state.pool, sid, true).await;
                                             state.get_or_create_broadcast(sid).await;
@@ -253,6 +361,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
             online: Some(false),
             stream_epoch: None,
             display_alias: None,
+            forwarder_display_name: None,
         });
     }
     {
@@ -269,6 +378,7 @@ async fn handle_event_batch(
     device_id: &str,
     session_id: &str,
     stream_map: &mut HashMap<String, Uuid>,
+    forwarder_display_name: Option<&str>,
     batch: rt_protocol::ForwarderEventBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut high_water: HashMap<(String, u64), u64> = HashMap::new();
@@ -279,7 +389,13 @@ async fn handle_event_batch(
         let stream_id = if let Some(&sid) = stream_map.get(&event.reader_ip) {
             sid
         } else {
-            let sid = upsert_stream(&state.pool, device_id, &event.reader_ip).await?;
+            let sid = upsert_stream(
+                &state.pool,
+                device_id,
+                &event.reader_ip,
+                forwarder_display_name,
+            )
+            .await?;
             stream_map.insert(event.reader_ip.clone(), sid);
             let _ = set_stream_online(&state.pool, sid, true).await;
             state.get_or_create_broadcast(sid).await;
@@ -361,6 +477,7 @@ async fn handle_event_batch(
             online: None,
             stream_epoch: Some(new_epoch),
             display_alias: None,
+            forwarder_display_name: None,
         });
     }
 

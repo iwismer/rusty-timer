@@ -117,6 +117,7 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
         forwarder_id: "fwd-rpl-01".to_owned(),
         reader_ips: vec!["10.10.10.1".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -273,6 +274,7 @@ async fn e2e_replay_fresh_receiver_gets_all_events() {
         forwarder_id: "fwd-rpl-02".to_owned(),
         reader_ips: vec!["10.20.20.1".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -365,6 +367,7 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
         forwarder_id: "fwd-epoch-01".to_owned(),
         reader_ips: vec!["10.30.30.1".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -396,6 +399,7 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
             stream_epoch: 2,
             last_seq: 0,
         }],
+        display_name: None,
     }))
     .await
     .unwrap();
@@ -495,6 +499,7 @@ async fn e2e_receiver_ack_advances_cursor() {
         forwarder_id: "fwd-rpl-03".to_owned(),
         reader_ips: vec!["10.40.40.1".to_owned()],
         resume: vec![],
+        display_name: None,
     }))
     .await
     .unwrap();

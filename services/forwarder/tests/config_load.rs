@@ -163,6 +163,55 @@ readers = []
 }
 
 // ---------------------------------------------------------------------------
+// display_name
+// ---------------------------------------------------------------------------
+
+#[test]
+fn display_name_is_loaded_when_present() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+display_name = "Start Line"
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert_eq!(cfg.display_name.as_deref(), Some("Start Line"));
+}
+
+#[test]
+fn display_name_defaults_to_none() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert!(cfg.display_name.is_none());
+}
+
+// ---------------------------------------------------------------------------
 // Default values
 // ---------------------------------------------------------------------------
 
