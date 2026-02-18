@@ -156,6 +156,9 @@ pub trait JournalAccess {
     ///
     /// Returns `Ok(new_epoch)` on success, `Err(NotFound)` if stream unknown.
     fn reset_epoch(&mut self, stream_key: &str) -> Result<i64, EpochResetError>;
+
+    /// Count total events for a stream_key.
+    fn event_count(&self, stream_key: &str) -> Result<i64, String>;
 }
 
 #[derive(Debug)]
@@ -181,6 +184,10 @@ impl JournalAccess for Journal {
             .map_err(|e| EpochResetError::Storage(e.to_string()))?;
         Ok(new_epoch)
     }
+
+    fn event_count(&self, stream_key: &str) -> Result<i64, String> {
+        Journal::event_count(self, stream_key).map_err(|e| e.to_string())
+    }
 }
 
 /// Sentinel "no journal" implementation: every reset returns NotFound.
@@ -189,6 +196,10 @@ struct NoJournal;
 impl JournalAccess for NoJournal {
     fn reset_epoch(&mut self, _stream_key: &str) -> Result<i64, EpochResetError> {
         Err(EpochResetError::NotFound)
+    }
+
+    fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
+        Ok(0)
     }
 }
 

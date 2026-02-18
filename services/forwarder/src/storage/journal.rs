@@ -264,6 +264,16 @@ impl Journal {
         Ok(count)
     }
 
+    /// Count total events for a stream_key (across all epochs).
+    pub fn event_count(&self, stream_key: &str) -> Result<i64, JournalError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM journal WHERE stream_key = ?1",
+            params![stream_key],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Count total events in the journal (across all streams and epochs).
     pub fn total_event_count(&self) -> Result<i64, JournalError> {
         let count: i64 = self
