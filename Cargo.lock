@@ -861,11 +861,13 @@ name = "forwarder"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "ipico-core",
  "rt-protocol",
  "rt-test-utils",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",

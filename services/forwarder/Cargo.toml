@@ -22,7 +22,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 rt-protocol = { path = "../../crates/rt-protocol" }
+ipico-core = { path = "../../crates/ipico-core" }
 
 [dev-dependencies]
 tempfile = "3"
