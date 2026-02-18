@@ -3,6 +3,7 @@
   import * as api from "$lib/api";
   import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
+  import { groupStreamsByForwarder } from "$lib/groupStreams";
 
   // Per-stream rename state (keyed by stream_id)
   let renameValues: Record<string, string> = {};
@@ -55,27 +56,8 @@
     }
   }
 
-  // Group streams by forwarder_id
-  $: groupedStreams = (() => {
-    const groups = new Map<
-      string,
-      { displayName: string | null; streams: typeof $streamsStore }
-    >();
-    for (const s of $streamsStore) {
-      if (!groups.has(s.forwarder_id)) {
-        groups.set(s.forwarder_id, {
-          displayName: s.forwarder_display_name,
-          streams: [],
-        });
-      }
-      groups.get(s.forwarder_id)!.streams.push(s);
-    }
-    return [...groups.entries()].map(([fid, g]) => ({
-      forwarderId: fid,
-      displayName: g.displayName ?? fid,
-      streams: g.streams,
-    }));
-  })();
+  // Group streams by forwarder_id.
+  $: groupedStreams = groupStreamsByForwarder($streamsStore);
 
   // Time-since-last-read helpers
   function formatDuration(ms: number): string {

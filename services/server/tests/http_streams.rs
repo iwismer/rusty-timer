@@ -335,3 +335,107 @@ async fn test_forwarder_display_name_in_streams_list() {
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0]["forwarder_display_name"], "Start Line");
 }
+
+#[tokio::test]
+async fn test_forwarder_display_name_on_event_batch_created_stream() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(&pool, "fwd-dn-batch", "forwarder", b"fwd-dn-batch-token").await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-batch-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-batch".to_owned(),
+        reader_ips: vec![],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let session_id = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {:?}", other),
+    };
+
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id,
+        batch_id: "batch-1".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-dn-batch".to_owned(),
+            reader_ip: "10.41.0.1".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-18T10:00:00.000Z".to_owned(),
+            raw_read_line: "LINE_1".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    let ack = fwd.recv_message().await.unwrap();
+    assert!(matches!(ack, WsMessage::ForwarderAck(_)));
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["forwarder_display_name"], "Start Line");
+}
+
+#[tokio::test]
+async fn test_forwarder_display_name_cleared_when_hello_omits_value() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(&pool, "fwd-dn-clear", "forwarder", b"fwd-dn-clear-token").await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-clear-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-clear".to_owned(),
+        reader_ips: vec!["10.42.0.1".to_owned()],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-clear".to_owned(),
+        reader_ips: vec!["10.42.0.1".to_owned()],
+        resume: vec![],
+        display_name: None,
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert!(
+        streams[0]["forwarder_display_name"].is_null(),
+        "display name should clear when hello omits display_name"
+    );
+}

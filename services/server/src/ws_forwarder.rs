@@ -165,13 +165,14 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         return;
     }
 
+    let mut current_display_name = hello.display_name.clone();
     let mut stream_map: HashMap<String, Uuid> = HashMap::new();
     for reader_ip in &hello.reader_ips {
         if let Ok(sid) = upsert_stream(
             &state.pool,
             &device_id,
             reader_ip,
-            hello.display_name.as_deref(),
+            current_display_name.as_deref(),
         )
         .await
         {
@@ -213,14 +214,32 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                     Ok(Some(Ok(Message::Text(text)))) => {
                         match serde_json::from_str::<WsMessage>(&text) {
                             Ok(WsMessage::ForwarderEventBatch(batch)) => {
-                                if let Err(e) = handle_event_batch(&mut socket, &state, &device_id, &session_id, &mut stream_map, batch).await {
+                                if let Err(e) = handle_event_batch(
+                                    &mut socket,
+                                    &state,
+                                    &device_id,
+                                    &session_id,
+                                    &mut stream_map,
+                                    current_display_name.as_deref(),
+                                    batch,
+                                )
+                                .await
+                                {
                                     error!(device_id = %device_id, error = %e, "error handling event batch"); break;
                                 }
                             }
                             Ok(WsMessage::ForwarderHello(new_hello)) => {
+                                current_display_name = new_hello.display_name.clone();
                                 for reader_ip in &new_hello.reader_ips {
-                                    if !stream_map.contains_key(reader_ip) {
-                                        if let Ok(sid) = upsert_stream(&state.pool, &device_id, reader_ip, new_hello.display_name.as_deref()).await {
+                                    if let Ok(sid) = upsert_stream(
+                                        &state.pool,
+                                        &device_id,
+                                        reader_ip,
+                                        current_display_name.as_deref(),
+                                    )
+                                    .await
+                                    {
+                                        if !stream_map.contains_key(reader_ip) {
                                             stream_map.insert(reader_ip.clone(), sid);
                                             let _ = set_stream_online(&state.pool, sid, true).await;
                                             state.get_or_create_broadcast(sid).await;
@@ -277,6 +296,7 @@ async fn handle_event_batch(
     device_id: &str,
     session_id: &str,
     stream_map: &mut HashMap<String, Uuid>,
+    forwarder_display_name: Option<&str>,
     batch: rt_protocol::ForwarderEventBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut high_water: HashMap<(String, u64), u64> = HashMap::new();
@@ -287,7 +307,13 @@ async fn handle_event_batch(
         let stream_id = if let Some(&sid) = stream_map.get(&event.reader_ip) {
             sid
         } else {
-            let sid = upsert_stream(&state.pool, device_id, &event.reader_ip, None).await?;
+            let sid = upsert_stream(
+                &state.pool,
+                device_id,
+                &event.reader_ip,
+                forwarder_display_name,
+            )
+            .await?;
             stream_map.insert(event.reader_ip.clone(), sid);
             let _ = set_stream_online(&state.pool, sid, true).await;
             state.get_or_create_broadcast(sid).await;
