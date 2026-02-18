@@ -14,8 +14,12 @@ One-command local dev environment setup and launch.
 Usage:
     uv run scripts/dev.py
     uv run scripts/dev.py --no-build
+    uv run scripts/dev.py --clear
+    uv run scripts/dev.py --emulator-file data/reads.txt
+    uv run scripts/dev.py --emulator-delay 500
 """
 
+import argparse
 import hashlib
 import shutil
 import subprocess
@@ -49,6 +53,8 @@ PG_PASSWORD = "secret"
 PG_DB = "rusty_timer"
 PG_PORT = 5432
 
+EMULATOR_DEFAULT_DELAY = 2000
+
 PANES = [
     ("Postgres",  f"docker logs -f {PG_CONTAINER}"),
     (
@@ -56,12 +62,19 @@ PANES = [
         f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
         f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server",
     ),
-    ("Emulator",  "cargo run -p emulator -- --port 10001 --delay 2000 --type raw"),
+    ("Emulator",  f"cargo run -p emulator -- --port 10001 --delay {EMULATOR_DEFAULT_DELAY} --type raw"),
     ("Forwarder", f"cargo run -p forwarder -- --config {FORWARDER_TOML_PATH}"),
     ("Receiver",     "cargo run -p receiver"),
     ("Dashboard",    "cd apps/dashboard && npm run dev"),
     ("Receiver UI",  "cd apps/receiver-ui && npm run dev"),
 ]
+
+
+def build_emulator_cmd(delay: int, file_path: str | None) -> str:
+    cmd = f"cargo run -p emulator -- --port 10001 --delay {delay} --type raw"
+    if file_path:
+        cmd += f" --file {file_path}"
+    return cmd
 
 FORWARDER_TOML = f"""\
 schema_version = 1
@@ -100,6 +113,47 @@ console = Console()
 
 def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def clear() -> None:
+    """Remove all dev artifacts: tmux session, Docker container, tmp files."""
+    console.print(Panel.fit(
+        "[bold red]Rusty Timer Dev Cleanup[/bold red]\n"
+        "Removing dev environment artifacts…",
+        border_style="red",
+    ))
+
+    # 1. Kill tmux session
+    if shutil.which("tmux"):
+        result = subprocess.run(
+            ["tmux", "kill-session", "-t", "rusty-dev"],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            console.print("  [green]Killed[/green] tmux session: rusty-dev")
+        else:
+            console.print("  [dim]No tmux session found[/dim]")
+    else:
+        console.print("  [dim]tmux not installed — skipping[/dim]")
+
+    # 2. Stop and remove Docker container
+    result = subprocess.run(
+        ["docker", "rm", "-f", PG_CONTAINER],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        console.print(f"  [green]Removed[/green] Docker container: {PG_CONTAINER}")
+    else:
+        console.print(f"  [dim]No Docker container found: {PG_CONTAINER}[/dim]")
+
+    # 3. Remove tmp directory
+    if TMP_DIR.exists():
+        shutil.rmtree(TMP_DIR)
+        console.print(f"  [green]Removed[/green] {TMP_DIR}")
+    else:
+        console.print(f"  [dim]No tmp directory found: {TMP_DIR}[/dim]")
+
+    console.print("\n[bold green]Cleanup complete.[/bold green]")
 
 
 def check_prereqs() -> None:
@@ -367,14 +421,42 @@ def detect_and_launch() -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Rusty Timer Dev Launcher")
+    parser.add_argument("--no-build", action="store_true", help="Skip the Rust build step")
+    parser.add_argument("--clear", action="store_true", help="Tear down dev artifacts and exit")
+    parser.add_argument(
+        "--emulator-file", metavar="PATH",
+        help="File of chip reads to replay through the emulator",
+    )
+    parser.add_argument(
+        "--emulator-delay", metavar="MS", type=int, default=EMULATOR_DEFAULT_DELAY,
+        help=f"Delay between emulator reads in ms (default: {EMULATOR_DEFAULT_DELAY})",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    skip_build = "--no-build" in sys.argv
+    args = parse_args()
+
+    if args.clear:
+        clear()
+        return
+
+    # Override the Emulator pane command if custom flags were provided
+    if args.emulator_file or args.emulator_delay != EMULATOR_DEFAULT_DELAY:
+        emulator_cmd = build_emulator_cmd(args.emulator_delay, args.emulator_file)
+        for i, (name, _cmd) in enumerate(PANES):
+            if name == "Emulator":
+                PANES[i] = ("Emulator", emulator_cmd)
+                break
+
     console.print(Panel.fit(
         "[bold cyan]Rusty Timer Dev Launcher[/bold cyan]\n"
         "Setting up local dev environment…",
         border_style="cyan",
     ))
-    setup(skip_build=skip_build)
+    setup(skip_build=args.no_build)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
     detect_and_launch()
 
