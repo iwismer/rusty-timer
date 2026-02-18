@@ -190,7 +190,7 @@ async fn test_receiver_no_cursor_gets_all() {
     match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert!(
-                batch.events.len() >= 1,
+                !batch.events.is_empty(),
                 "should get at least 1 replayed event"
             );
             // Events should start from seq=1 since cursor was at 0

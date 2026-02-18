@@ -40,7 +40,7 @@ async fn send_ws_error(socket: &mut WebSocket, code: &str, message: &str, retrya
         retryable,
     });
     if let Ok(json) = serde_json::to_string(&msg) {
-        let _ = socket.send(Message::Text(json.into())).await;
+        let _ = socket.send(Message::Text(json)).await;
     }
 }
 
@@ -160,7 +160,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         device_id: device_id.clone(),
     });
     if let Ok(json) = serde_json::to_string(&hb_msg) {
-        if socket.send(Message::Text(json.into())).await.is_err() {
+        if socket.send(Message::Text(json)).await.is_err() {
             state.unregister_forwarder(&device_id).await;
             return;
         }
@@ -197,7 +197,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     }
                                 }
                                 let hb = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
-                                if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json.into())).await.is_err() { break; } }
+                                if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
@@ -213,11 +213,11 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
             }
             _ = heartbeat_interval.tick() => {
                 let hb = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
-                if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json.into())).await.is_err() { break; } }
+                if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
             }
             Some(cmd) = cmd_rx.recv() => {
                 let msg = WsMessage::EpochResetCommand(cmd);
-                if let Ok(json) = serde_json::to_string(&msg) { if socket.send(Message::Text(json.into())).await.is_err() { break; } }
+                if let Ok(json) = serde_json::to_string(&msg) { if socket.send(Message::Text(json)).await.is_err() { break; } }
             }
         }
     }
@@ -298,7 +298,7 @@ async fn handle_event_batch(
             retryable: false,
         });
         if let Ok(json) = serde_json::to_string(&msg) {
-            socket.send(Message::Text(json.into())).await?;
+            socket.send(Message::Text(json)).await?;
         }
         return Ok(());
     }
@@ -317,7 +317,7 @@ async fn handle_event_batch(
         entries,
     });
     if let Ok(json) = serde_json::to_string(&ack) {
-        socket.send(Message::Text(json.into())).await?;
+        socket.send(Message::Text(json)).await?;
     }
     Ok(())
 }

@@ -126,14 +126,9 @@ impl FanoutServer {
     /// Run the fanout accept loop.  This consumes `self` and runs until the
     /// listener is dropped.
     pub async fn run(self) {
-        loop {
-            match self.listener.accept().await {
-                Ok((stream, _peer_addr)) => {
-                    let rx = self.tx.subscribe();
-                    tokio::spawn(serve_consumer(stream, rx));
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _peer_addr)) = self.listener.accept().await {
+            let rx = self.tx.subscribe();
+            tokio::spawn(serve_consumer(stream, rx));
         }
     }
 }

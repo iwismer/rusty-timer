@@ -54,7 +54,7 @@ pub struct UplinkSession {
     ws: WsStream,
     session_id: String,
     device_id: String,
-    forwarder_id: String,
+    _forwarder_id: String,
 }
 
 impl UplinkSession {
@@ -72,7 +72,7 @@ impl UplinkSession {
             ws,
             session_id: String::new(),
             device_id: String::new(),
-            forwarder_id: cfg.forwarder_id.clone(),
+            _forwarder_id: cfg.forwarder_id.clone(),
         };
 
         // Send ForwarderHello
@@ -129,7 +129,7 @@ impl UplinkSession {
             ws,
             session_id: String::new(),
             device_id: String::new(),
-            forwarder_id: cfg.forwarder_id.clone(),
+            _forwarder_id: cfg.forwarder_id.clone(),
         };
 
         let hello = WsMessage::ForwarderHello(ForwarderHello {
