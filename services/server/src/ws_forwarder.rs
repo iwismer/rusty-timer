@@ -55,6 +55,7 @@ async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
             forwarder_id: stream.forwarder_id,
             reader_ip: stream.reader_ip,
             display_alias: stream.display_alias,
+            forwarder_display_name: stream.forwarder_display_name,
             online: stream.online,
             stream_epoch: stream.stream_epoch,
             created_at: stream.created_at.to_rfc3339(),
@@ -166,7 +167,14 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
 
     let mut stream_map: HashMap<String, Uuid> = HashMap::new();
     for reader_ip in &hello.reader_ips {
-        if let Ok(sid) = upsert_stream(&state.pool, &device_id, reader_ip).await {
+        if let Ok(sid) = upsert_stream(
+            &state.pool,
+            &device_id,
+            reader_ip,
+            hello.display_name.as_deref(),
+        )
+        .await
+        {
             stream_map.insert(reader_ip.clone(), sid);
             let _ = set_stream_online(&state.pool, sid, true).await;
             state.get_or_create_broadcast(sid).await;
@@ -212,7 +220,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Ok(WsMessage::ForwarderHello(new_hello)) => {
                                 for reader_ip in &new_hello.reader_ips {
                                     if !stream_map.contains_key(reader_ip) {
-                                        if let Ok(sid) = upsert_stream(&state.pool, &device_id, reader_ip).await {
+                                        if let Ok(sid) = upsert_stream(&state.pool, &device_id, reader_ip, new_hello.display_name.as_deref()).await {
                                             stream_map.insert(reader_ip.clone(), sid);
                                             let _ = set_stream_online(&state.pool, sid, true).await;
                                             state.get_or_create_broadcast(sid).await;
@@ -279,7 +287,7 @@ async fn handle_event_batch(
         let stream_id = if let Some(&sid) = stream_map.get(&event.reader_ip) {
             sid
         } else {
-            let sid = upsert_stream(&state.pool, device_id, &event.reader_ip).await?;
+            let sid = upsert_stream(&state.pool, device_id, &event.reader_ip, None).await?;
             stream_map.insert(event.reader_ip.clone(), sid);
             let _ = set_stream_online(&state.pool, sid, true).await;
             state.get_or_create_broadcast(sid).await;

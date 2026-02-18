@@ -9,6 +9,7 @@ pub enum DashboardEvent {
         forwarder_id: String,
         reader_ip: String,
         display_alias: Option<String>,
+        forwarder_display_name: Option<String>,
         online: bool,
         stream_epoch: i64,
         created_at: String,

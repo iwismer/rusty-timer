@@ -127,13 +127,15 @@ pub async fn upsert_stream(
     pool: &PgPool,
     forwarder_id: &str,
     reader_ip: &str,
+    forwarder_display_name: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
     let row = sqlx::query!(
-        r#"INSERT INTO streams (forwarder_id, reader_ip) VALUES ($1, $2)
-           ON CONFLICT (forwarder_id, reader_ip) DO UPDATE SET forwarder_id = EXCLUDED.forwarder_id
+        r#"INSERT INTO streams (forwarder_id, reader_ip, forwarder_display_name) VALUES ($1, $2, $3)
+           ON CONFLICT (forwarder_id, reader_ip) DO UPDATE SET forwarder_display_name = EXCLUDED.forwarder_display_name
            RETURNING stream_id"#,
         forwarder_id,
-        reader_ip
+        reader_ip,
+        forwarder_display_name
     )
     .fetch_one(pool)
     .await?;
@@ -179,6 +181,7 @@ pub struct StreamSnapshotRow {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub display_alias: Option<String>,
+    pub forwarder_display_name: Option<String>,
     pub online: bool,
     pub stream_epoch: i64,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -239,7 +242,7 @@ pub async fn fetch_stream_snapshot(
     stream_id: Uuid,
 ) -> Result<Option<StreamSnapshotRow>, sqlx::Error> {
     let row = sqlx::query(
-        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, online, stream_epoch, created_at
+        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, online, stream_epoch, created_at
            FROM streams WHERE stream_id = $1"#,
     )
     .bind(stream_id)
@@ -251,6 +254,7 @@ pub async fn fetch_stream_snapshot(
         forwarder_id: r.get("forwarder_id"),
         reader_ip: r.get("reader_ip"),
         display_alias: r.get("display_alias"),
+        forwarder_display_name: r.get("forwarder_display_name"),
         online: r.get("online"),
         stream_epoch: r.get("stream_epoch"),
         created_at: r.get("created_at"),

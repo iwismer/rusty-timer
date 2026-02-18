@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
     let rows = sqlx::query!(
-        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, stream_epoch, online, created_at
+        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, stream_epoch, online, created_at
            FROM streams ORDER BY created_at ASC"#
     )
     .fetch_all(&state.pool)
@@ -26,6 +26,7 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
                         "forwarder_id": r.forwarder_id,
                         "reader_ip": r.reader_ip,
                         "display_alias": r.display_alias,
+                        "forwarder_display_name": r.forwarder_display_name,
                         "stream_epoch": r.stream_epoch,
                         "online": r.online,
                         "created_at": r.created_at.to_rfc3339(),
