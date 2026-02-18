@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "forwarder-v*"
+      - "receiver-v*"
+      - "streamer-v*"
+      - "emulator-v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve-matrix:
+    name: Resolve build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      service: ${{ steps.parse.outputs.service }}
+      version: ${{ steps.parse.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Parse tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG" =~ ^(forwarder|receiver|streamer|emulator)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            SERVICE="${BASH_REMATCH[1]}"
+            VERSION="${BASH_REMATCH[2]}"
+          else
+            echo "::error::Invalid tag format: ${TAG}"
+            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|receiver|streamer|emulator"
+            exit 1
+          fi
+          echo "service=${SERVICE}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Parsed tag: service=${SERVICE}, version=${VERSION}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          SERVICE="${{ steps.parse.outputs.service }}"
+          VERSION="${{ steps.parse.outputs.version }}"
+          CARGO_VERSION=$(python3 - "$SERVICE" <<'PY'
+          import sys
+          import tomllib
+
+          service = sys.argv[1]
+          with open(f"services/{service}/Cargo.toml", "rb") as f:
+              data = tomllib.load(f)
+          print(data["package"]["version"])
+          PY
+          )
+          echo "Tag version: ${VERSION}"
+          echo "Cargo.toml version: ${CARGO_VERSION}"
+          if [ "${VERSION}" != "${CARGO_VERSION}" ]; then
+            echo "::error::Version mismatch! Tag says ${VERSION} but services/${SERVICE}/Cargo.toml says ${CARGO_VERSION}"
+            exit 1
+          fi
+
+      - name: Build matrix
+        id: matrix
+        run: |
+          SERVICE="${{ steps.parse.outputs.service }}"
+          case "$SERVICE" in
+            forwarder|emulator)
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm"},{"os":"windows","arch":"x86_64","runner":"windows-latest"}]}'
+              ;;
+            receiver|streamer)
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest"},{"os":"windows","arch":"x86_64","runner":"windows-latest"}]}'
+              ;;
+            *)
+              echo "::error::Unknown service: $SERVICE"
+              exit 1
+              ;;
+          esac
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+          echo "Matrix: ${MATRIX}"
+
+  build:
+    name: Build ${{ needs.resolve-matrix.outputs.service }} (${{ matrix.os }}-${{ matrix.arch }})
+    needs: resolve-matrix
+    runs-on: ${{ matrix.runner }}
+    env:
+      SERVICE: ${{ needs.resolve-matrix.outputs.service }}
+      VERSION: ${{ needs.resolve-matrix.outputs.version }}
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJson(needs.resolve-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Install OpenSSL dev headers
+        if: matrix.os == 'linux' && env.SERVICE == 'forwarder'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Build release binary
+        run: cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }}
+
+      - name: Package (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "$ARCHIVE" -C target/release ${{ env.SERVICE }}
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-windows-${{ matrix.arch }}.zip"
+          7z a "$ARCHIVE" ./target/release/${{ env.SERVICE }}.exe
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: [resolve-matrix, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lhR artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "${{ needs.resolve-matrix.outputs.service }} v${{ needs.resolve-matrix.outputs.version }}"
+          generate_release_notes: true
+          files: artifacts/*
