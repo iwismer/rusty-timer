@@ -104,10 +104,6 @@ jobs:
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
 
-      - name: Install OpenSSL dev headers
-        if: matrix.os == 'linux' && env.SERVICE == 'forwarder'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-
       - name: Build release binary
         run: cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }}
 

@@ -22,11 +22,9 @@ FROM rust:1.89.0-bookworm AS builder
 
 WORKDIR /build
 
-# Install build dependencies.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# No additional build dependencies required.
+# SQLite is compiled from source via rusqlite's "bundled" feature.
+# TLS uses pure-Rust rustls (no system OpenSSL).
 
 # Copy workspace manifests for dependency layer caching.
 COPY Cargo.toml Cargo.lock ./
@@ -48,9 +46,11 @@ RUN cargo build --release --package forwarder --bin forwarder
 FROM debian:bookworm-slim AS runtime
 
 # Install runtime dependencies.
+# Only ca-certificates is needed; TLS is handled by rustls with bundled
+# webpki roots, but ca-certificates is still useful for curl in the
+# HEALTHCHECK directive.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root service user.
