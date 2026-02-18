@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
-use tracing::{info, warn};
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -366,7 +366,11 @@ async fn put_subscriptions(
         .collect();
     let db = state.db.lock().await;
     match db.replace_subscriptions(&subs) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            drop(db);
+            state.emit_streams_snapshot().await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -392,23 +396,23 @@ async fn get_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let current = state.connection_state.read().await.clone();
     if current == ConnectionState::Connected {
-        info!("already connected, no-op");
         return StatusCode::OK.into_response();
     }
-    *state.connection_state.write().await = ConnectionState::Connecting;
-    info!("connect requested (async)");
+    state
+        .set_connection_state(ConnectionState::Connecting)
+        .await;
     StatusCode::ACCEPTED.into_response()
 }
 
 async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let current = state.connection_state.read().await.clone();
     if current == ConnectionState::Disconnected {
-        info!("already disconnected, no-op");
         return StatusCode::OK.into_response();
     }
-    *state.connection_state.write().await = ConnectionState::Disconnecting;
+    state
+        .set_connection_state(ConnectionState::Disconnecting)
+        .await;
     let _ = state.shutdown_tx.send(true);
-    info!("disconnect requested (async)");
     StatusCode::ACCEPTED.into_response()
 }
 
