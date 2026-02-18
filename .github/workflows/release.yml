@@ -112,6 +112,7 @@ jobs:
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-linux-${{ matrix.arch }}.tar.gz"
           tar -czf "$ARCHIVE" -C target/release ${{ env.SERVICE }}
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
@@ -120,13 +121,16 @@ jobs:
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-windows-${{ matrix.arch }}.zip"
           7z a "$ARCHIVE" ./target/release/${{ env.SERVICE }}.exe
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARCHIVE }}
-          path: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
           retention-days: 1
 
   release:

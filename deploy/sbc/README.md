@@ -88,6 +88,9 @@ sudo bash rt-setup.sh
 sudo bash deploy/sbc/rt-setup.sh
 ```
 
+The setup script downloads both the release archive and its `.sha256` file,
+then verifies the checksum before installing.
+
 The wizard will prompt you for:
 
 | Prompt | Example | Notes |
@@ -99,8 +102,11 @@ The wizard will prompt you for:
 
 ## Step 5 -- Verify
 
-The setup script runs verification automatically after installation. You can
-also check manually at any time:
+The setup script runs verification automatically after installation. If you
+choose not to restart an already-running service, the script skips verification
+and prints follow-up commands to run after restart.
+
+You can also check manually at any time:
 
 ```bash
 # Check the service is running
@@ -142,7 +148,7 @@ for full configuration options and operational procedures.
 | Problem | Cause | Solution |
 |---|---|---|
 | Can't SSH into Pi | cloud-init still running, or wrong hostname | Wait 2--3 minutes after boot. Try the IP address instead of the hostname. |
-| Setup script fails: "missing required commands" | One or more required tools are missing (`curl`, `jq`, `tar`) | Run `sudo apt-get install -y curl jq tar` |
+| Setup script fails: "missing required commands" | One or more required tools are missing (`curl`, `jq`, `tar`, `sha256sum`) | Run `sudo apt-get install -y curl jq tar coreutils` |
 | Setup script fails to download binary | No internet access on Pi | Check the network connection. Ensure the Pi can reach the internet. |
 | Forwarder won't start | Bad config or unreachable readers | Check logs: `journalctl -u rt-forwarder -n 50` |
 | "permission denied" errors | Script not running as root | Run with `sudo bash rt-setup.sh` |

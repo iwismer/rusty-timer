@@ -19,6 +19,7 @@ CONFIG_DIR="/etc/rusty-timer"
 DATA_DIR="/var/lib/rusty-timer"
 SERVICE_USER="rt-forwarder"
 STATUS_BIND="0.0.0.0:8080"
+VERIFY_POLICY="run_verify"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -47,15 +48,57 @@ select_latest_forwarder_asset_from_pages() {
 
 status_probe_url_from_bind() {
   local bind="$1"
+  local host="localhost"
   local port="8080"
 
-  if [[ "${bind}" =~ ^\[[0-9A-Fa-f:]+\]:(.+)$ ]]; then
-    port="${BASH_REMATCH[1]}"
-  elif [[ "${bind}" == *:* ]]; then
-    port="${bind##*:}"
+  if [[ "${bind}" =~ ^\[([0-9A-Fa-f:]+)\]:([0-9]+)$ ]]; then
+    local ipv6_host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+    if [[ "${ipv6_host}" != "::" ]]; then
+      host="[${ipv6_host}]"
+    fi
+  elif [[ "${bind}" =~ ^([^:]+):([0-9]+)$ ]]; then
+    local ipv4_host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+    if [[ "${ipv4_host}" != "0.0.0.0" ]]; then
+      host="${ipv4_host}"
+    fi
   fi
 
-  printf 'http://localhost:%s/healthz' "${port}"
+  printf 'http://%s:%s/healthz' "${host}" "${port}"
+}
+
+checksum_for_asset_from_sha256sums() {
+  local checksums="$1"
+  local asset_name="$2"
+
+  if [[ -z "${checksums}" || -z "${asset_name}" ]]; then
+    return 0
+  fi
+
+  printf '%s\n' "${checksums}" | awk -v asset="${asset_name}" '
+    NF >= 2 {
+      hash = $1
+      file = $2
+      sub(/^\*/, "", file)
+      sub(/^\.?\//, "", file)
+      if (file == asset) {
+        print hash
+        exit
+      }
+    }
+  '
+}
+
+install_verify_policy() {
+  local service_was_active="$1"
+  local restart_answer="$2"
+
+  if [[ "${service_was_active}" == "yes" && "${restart_answer}" =~ ^[Nn]$ ]]; then
+    printf 'skip_verify\n'
+  else
+    printf 'run_verify\n'
+  fi
 }
 
 require_root() {
@@ -69,12 +112,19 @@ ensure_prerequisites() {
   echo "── Prerequisites ──"
 
   local missing=()
-  for cmd in curl jq tar; do
-      command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}")
+  local install_pkgs=()
+  for cmd in curl jq tar sha256sum; do
+      if ! command -v "${cmd}" >/dev/null 2>&1; then
+        missing+=("${cmd}")
+        case "${cmd}" in
+          sha256sum) install_pkgs+=("coreutils") ;;
+          *) install_pkgs+=("${cmd}") ;;
+        esac
+      fi
   done
   if [[ ${#missing[@]} -gt 0 ]]; then
       echo "Error: missing required commands: ${missing[*]}" >&2
-      echo "Install with: sudo apt-get install -y ${missing[*]}" >&2
+      echo "Install with: sudo apt-get install -y ${install_pkgs[*]}" >&2
       exit 1
   fi
 
@@ -125,10 +175,31 @@ download_binary() {
   echo "Downloading: ${download_url}"
 
   local tmp_dir
+  local asset_name
+  local checksum_url
+  local expected_checksum
+  local actual_checksum
   tmp_dir=$(mktemp -d)
   trap 'rm -rf "${tmp_dir}"' EXIT
 
+  asset_name="${download_url##*/}"
+  checksum_url="${download_url}.sha256"
+
   curl -fsSL "${download_url}" -o "${tmp_dir}/forwarder.tar.gz"
+  curl -fsSL "${checksum_url}" -o "${tmp_dir}/forwarder.tar.gz.sha256"
+
+  expected_checksum="$(checksum_for_asset_from_sha256sums "$(cat "${tmp_dir}/forwarder.tar.gz.sha256")" "${asset_name}")"
+  if [[ -z "${expected_checksum}" ]]; then
+    echo "Error: checksum file did not contain an entry for ${asset_name}" >&2
+    exit 1
+  fi
+
+  actual_checksum="$(sha256sum "${tmp_dir}/forwarder.tar.gz" | awk '{print $1}')"
+  if [[ "${expected_checksum}" != "${actual_checksum}" ]]; then
+    echo "Error: checksum mismatch for ${asset_name}" >&2
+    exit 1
+  fi
+
   tar -xzf "${tmp_dir}/forwarder.tar.gz" -C "${tmp_dir}"
   mv "${tmp_dir}/forwarder" "${INSTALL_DIR}/rt-forwarder"
   chmod +x "${INSTALL_DIR}/rt-forwarder"
@@ -293,14 +364,19 @@ EOF
   systemctl daemon-reload
   systemctl enable rt-forwarder
 
+  local restart_answer=""
+
   if systemctl is-active --quiet rt-forwarder; then
     read -rp "Service is already running. Restart now? [Y/n] " answer
-    if [[ "${answer}" =~ ^[Nn]$ ]]; then
+    restart_answer="${answer}"
+    VERIFY_POLICY="$(install_verify_policy "yes" "${restart_answer}")"
+    if [[ "${VERIFY_POLICY}" == "skip_verify" ]]; then
       echo "Service not restarted. Run 'sudo systemctl restart rt-forwarder' when ready."
       return
     fi
     systemctl restart rt-forwarder
   else
+    VERIFY_POLICY="$(install_verify_policy "no" "${restart_answer}")"
     systemctl start rt-forwarder
   fi
 
@@ -348,7 +424,17 @@ main() {
   download_binary
   configure
   install_service
-  verify
+
+  if [[ "${VERIFY_POLICY}" == "run_verify" ]]; then
+    verify
+  else
+    local probe_url
+    probe_url="$(status_probe_url_from_bind "${STATUS_BIND}")"
+    echo "Verification skipped because restart was deferred."
+    echo "After restarting, verify with:"
+    echo "  sudo systemctl restart rt-forwarder"
+    echo "  curl -fsS ${probe_url}"
+  fi
 
   echo ""
   echo "Setup complete."

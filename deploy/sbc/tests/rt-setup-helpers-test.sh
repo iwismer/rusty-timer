@@ -38,8 +38,20 @@ assert_nonempty "${url}" "release URL should be found across multiple pages"
 assert_eq "https://example.com/fwd.tar.gz" "${url}" "release URL should match expected arm64 asset"
 
 # --- probe URL derivation from bind ---
-assert_eq "http://localhost:8080/healthz" "$(status_probe_url_from_bind '0.0.0.0:8080')" "wildcard bind should map to localhost"
-assert_eq "http://localhost:9090/healthz" "$(status_probe_url_from_bind '127.0.0.1:9090')" "bind host should not affect probe host"
-assert_eq "http://localhost:7070/healthz" "$(status_probe_url_from_bind '[::1]:7070')" "ipv6 bind should parse port and probe localhost"
+assert_eq "http://localhost:8080/healthz" "$(status_probe_url_from_bind '0.0.0.0:8080')" "wildcard ipv4 bind should map to localhost"
+assert_eq "http://localhost:6060/healthz" "$(status_probe_url_from_bind '[::]:6060')" "wildcard ipv6 bind should map to localhost"
+assert_eq "http://127.0.0.1:9090/healthz" "$(status_probe_url_from_bind '127.0.0.1:9090')" "explicit ipv4 bind should preserve probe host"
+assert_eq "http://192.168.1.50:8080/healthz" "$(status_probe_url_from_bind '192.168.1.50:8080')" "specific ipv4 bind should preserve probe host"
+assert_eq "http://[::1]:7070/healthz" "$(status_probe_url_from_bind '[::1]:7070')" "explicit ipv6 bind should preserve probe host"
+
+# --- checksum extraction helper ---
+checksums=$'aaaaaaaa  forwarder-v1.2.3-linux-arm64.tar.gz\nbbbbbbbb  forwarder-v1.2.3-linux-x86_64.tar.gz\n'
+assert_eq "aaaaaaaa" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-linux-arm64.tar.gz")" "should pick checksum for requested asset"
+assert_eq "" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-linux-armv7.tar.gz")" "should return empty when asset missing"
+
+# --- verify policy helper ---
+assert_eq "skip_verify" "$(install_verify_policy yes n)" "active service + no restart should skip verify"
+assert_eq "run_verify" "$(install_verify_policy yes y)" "active service + yes restart should run verify"
+assert_eq "run_verify" "$(install_verify_policy no '')" "inactive service should run verify"
 
 echo "PASS: rt-setup helper tests"
