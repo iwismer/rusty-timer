@@ -39,6 +39,18 @@ fn derive_forwarder_id(token: &str) -> String {
     format!("fwd-{}", &hex[..16])
 }
 
+/// Detect the local IP used to reach a given target IP.
+///
+/// Uses a UDP socket connect (no traffic sent) to let the OS choose the
+/// outgoing interface, then reads back the local address.
+fn detect_local_ip(target_ip: &str) -> Option<String> {
+    let dest = format!("{}:10000", target_ip);
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(&dest).ok()?;
+    let local_addr = socket.local_addr().ok()?;
+    Some(local_addr.ip().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
