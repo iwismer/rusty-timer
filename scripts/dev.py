@@ -27,7 +27,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -209,6 +208,7 @@ def build_panes(emulators: list[EmulatorSpec]) -> list[tuple[str, str]]:
     return PANES_BEFORE_EMULATOR + emu_panes + PANES_AFTER_EMULATOR
 
 console = Console()
+stderr_console = Console(stderr=True)
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +599,6 @@ async def _iterm2_async(connection, panes: list[tuple[str, str]]) -> None:
 def configure_receiver_dev() -> None:
     """Poll the receiver control API and configure the dev profile.
 
-    Intended to run in a daemon thread so it does not block the main launcher.
     Logs warnings to stderr on failure — the user can re-run
     /tmp/rusty-timer-dev/configure-receiver.sh manually if needed.
     """
@@ -611,10 +610,9 @@ def configure_receiver_dev() -> None:
             break
         except (urllib.error.URLError, OSError):
             if attempt == 59:  # Only log on final attempt
-                console.print(
+                stderr_console.print(
                     f"[yellow]Warning:[/yellow] Receiver control API not ready after 60s. "
                     f"Run /tmp/rusty-timer-dev/configure-receiver.sh manually.",
-                    file=sys.stderr,
                 )
             time.sleep(1)
     else:
@@ -634,10 +632,9 @@ def configure_receiver_dev() -> None:
     try:
         urllib.request.urlopen(req, timeout=5)
     except (urllib.error.URLError, OSError):
-        console.print(
+        stderr_console.print(
             f"[yellow]Warning:[/yellow] Failed to set receiver profile. "
             f"Run /tmp/rusty-timer-dev/configure-receiver.sh manually.",
-            file=sys.stderr,
         )
         return
 
@@ -645,19 +642,27 @@ def configure_receiver_dev() -> None:
     try:
         urllib.request.urlopen(req, timeout=5)
     except (urllib.error.URLError, OSError):
-        console.print(
+        stderr_console.print(
             f"[yellow]Warning:[/yellow] Failed to connect receiver. "
             f"Run /tmp/rusty-timer-dev/configure-receiver.sh manually.",
-            file=sys.stderr,
         )
         return
+
+
+def start_receiver_auto_config() -> None:
+    """Run generated receiver configuration script in the background."""
+    subprocess.Popen(
+        ["bash", str(RECEIVER_CONFIG_SCRIPT_PATH)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
     panes = build_panes(emulators)
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
-    thread = threading.Thread(target=configure_receiver_dev, daemon=True)
-    thread.start()
+    start_receiver_auto_config()
     if shutil.which("tmux"):
         console.print("[blue]Multiplexer:[/blue] tmux")
         launch_tmux(panes)

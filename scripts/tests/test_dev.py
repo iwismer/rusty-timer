@@ -1,6 +1,7 @@
 import argparse
 import sys
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import scripts.dev as dev
@@ -148,6 +149,78 @@ class ClearTests(unittest.TestCase):
         dev.clear()
 
         run_mock.assert_not_called()
+
+
+class ConfigureReceiverDevTests(unittest.TestCase):
+    @patch("scripts.dev.urllib.request.urlopen")
+    def test_configure_receiver_dev_success_calls_expected_endpoints(self, urlopen_mock) -> None:
+        urlopen_mock.side_effect = [object(), object(), object()]
+
+        dev.configure_receiver_dev()
+
+        self.assertEqual(urlopen_mock.call_count, 3)
+
+        health_args, health_kwargs = urlopen_mock.call_args_list[0]
+        self.assertEqual(health_args[0], "http://127.0.0.1:9090/healthz")
+        self.assertEqual(health_kwargs["timeout"], 2)
+
+        profile_req = urlopen_mock.call_args_list[1].args[0]
+        self.assertEqual(profile_req.get_method(), "PUT")
+        self.assertEqual(profile_req.full_url, "http://127.0.0.1:9090/api/v1/profile")
+        self.assertEqual(profile_req.get_header("Content-type"), "application/json")
+        self.assertEqual(profile_req.data, b'{"server_url": "ws://127.0.0.1:8080", "token": "rusty-dev-receiver", "log_level": "info"}')
+        self.assertEqual(urlopen_mock.call_args_list[1].kwargs["timeout"], 5)
+
+        connect_req = urlopen_mock.call_args_list[2].args[0]
+        self.assertEqual(connect_req.get_method(), "POST")
+        self.assertEqual(connect_req.full_url, "http://127.0.0.1:9090/api/v1/connect")
+        self.assertEqual(connect_req.data, b"")
+        self.assertEqual(urlopen_mock.call_args_list[2].kwargs["timeout"], 5)
+
+    @patch("scripts.dev.time.sleep")
+    @patch("scripts.dev.urllib.request.urlopen")
+    def test_configure_receiver_dev_returns_after_health_timeout(
+        self, urlopen_mock, sleep_mock
+    ) -> None:
+        urlopen_mock.side_effect = urllib.error.URLError("down")
+
+        dev.configure_receiver_dev()
+
+        self.assertEqual(urlopen_mock.call_count, 60)
+        self.assertEqual(sleep_mock.call_count, 60)
+
+    @patch("scripts.dev.urllib.request.urlopen")
+    def test_configure_receiver_dev_stops_when_profile_fails(self, urlopen_mock) -> None:
+        urlopen_mock.side_effect = [object(), urllib.error.URLError("bad profile")]
+
+        dev.configure_receiver_dev()
+
+        self.assertEqual(urlopen_mock.call_count, 2)
+
+
+class DetectAndLaunchTests(unittest.TestCase):
+    @patch("scripts.dev.launch_tmux")
+    @patch("scripts.dev.start_receiver_auto_config")
+    @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
+    def test_detect_and_launch_tmux_starts_auto_config(
+        self, _which_mock, auto_config_mock, launch_tmux_mock
+    ) -> None:
+        dev.detect_and_launch([dev.EmulatorSpec(port=10001)])
+
+        auto_config_mock.assert_called_once_with()
+        launch_tmux_mock.assert_called_once()
+
+    @patch("scripts.dev.launch_iterm2")
+    @patch("scripts.dev.Path.exists", return_value=True)
+    @patch("scripts.dev.start_receiver_auto_config")
+    @patch("scripts.dev.shutil.which", return_value=None)
+    def test_detect_and_launch_iterm_starts_auto_config(
+        self, _which_mock, auto_config_mock, _exists_mock, launch_iterm2_mock
+    ) -> None:
+        dev.detect_and_launch([dev.EmulatorSpec(port=10001)])
+
+        auto_config_mock.assert_called_once_with()
+        launch_iterm2_mock.assert_called_once()
 
 
 if __name__ == "__main__":
