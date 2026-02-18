@@ -375,4 +375,18 @@
     max-height: 300px;
     overflow-y: auto;
   }
+  section ul:not(.logs) {
+    list-style: none;
+    padding: 0;
+  }
+  section ul:not(.logs) li {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.35em 0;
+    border-bottom: 1px solid #eee;
+  }
+  section ul:not(.logs) li:last-child {
+    border-bottom: none;
+  }
 </style>
