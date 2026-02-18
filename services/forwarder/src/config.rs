@@ -25,6 +25,8 @@ pub struct ForwarderConfig {
     pub schema_version: u32,
     /// The bearer token (read from the token file, not the file path).
     pub token: String,
+    /// Optional human-readable name for this forwarder (e.g. "Start Line").
+    pub display_name: Option<String>,
     pub server: ServerConfig,
     pub journal: JournalConfig,
     pub status_http: StatusHttpConfig,
@@ -72,6 +74,7 @@ pub struct ReaderConfig {
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     schema_version: Option<u32>,
+    display_name: Option<String>,
     server: Option<RawServerConfig>,
     auth: Option<RawAuthConfig>,
     journal: Option<RawJournalConfig>,
@@ -238,6 +241,7 @@ pub fn load_config_from_str(
     Ok(ForwarderConfig {
         schema_version,
         token,
+        display_name: raw.display_name,
         server: ServerConfig {
             base_url,
             forwarders_ws_path,
