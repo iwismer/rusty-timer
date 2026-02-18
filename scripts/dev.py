@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import hashlib
+import math
 import shlex
 import shutil
 import subprocess
@@ -475,21 +476,61 @@ def launch_iterm2(panes: list[tuple[str, str]]) -> None:
     iterm2.run_until_complete(lambda conn: _iterm2_async(conn, panes))
 
 
+async def _split_n(session, n: int, *, vertical: bool) -> list:
+    """Split one iTerm2 session into *n* sub-panes along the given axis.
+
+    Uses balanced binary splitting so that all resulting panes are
+    approximately equal in size.  Returns sessions in visual order
+    (top-to-bottom for horizontal, left-to-right for vertical).
+    """
+    if n <= 1:
+        return [session]
+    first_half = n // 2
+    second_half = n - first_half
+    new_session = await session.async_split_pane(vertical=vertical)
+    first_sessions = await _split_n(session, first_half, vertical=vertical)
+    second_sessions = await _split_n(new_session, second_half, vertical=vertical)
+    return first_sessions + second_sessions
+
+
 async def _iterm2_async(connection, panes: list[tuple[str, str]]) -> None:
     import iterm2
     await iterm2.async_get_app(connection)
     window = await iterm2.Window.async_create(connection)
     tab = window.tabs[0]
-    first_session = tab.sessions[0]
+    root = tab.sessions[0]
 
-    # Create additional sessions by splitting
-    sessions = [first_session]
-    for _ in range(len(panes) - 1):
-        # Alternate vertical/horizontal splits for a reasonable layout
-        new_session = await sessions[-1].async_split_pane(
-            vertical=(len(sessions) % 2 == 0)
-        )
-        sessions.append(new_session)
+    n = len(panes)
+    if n <= 1:
+        sessions = [root]
+    else:
+        cols = min(2, n)
+
+        # Phase 1: split into columns
+        col_roots = await _split_n(root, cols, vertical=True)
+
+        # Phase 2: determine rows per column (left column gets extra if odd)
+        rows_per_col: list[int] = []
+        remaining = n
+        for c in range(cols):
+            rows_here = math.ceil(remaining / (cols - c))
+            rows_per_col.append(rows_here)
+            remaining -= rows_here
+
+        # Phase 3: split each column into rows
+        col_sessions: list[list] = []
+        for c in range(cols):
+            row_sessions = await _split_n(
+                col_roots[c], rows_per_col[c], vertical=False
+            )
+            col_sessions.append(row_sessions)
+
+        # Interleave columns for row-major order
+        sessions = []
+        for r in range(max(rows_per_col)):
+            for c in range(cols):
+                if r < rows_per_col[c]:
+                    sessions.append(col_sessions[c][r])
 
     for session, (title, cmd) in zip(sessions, panes):
         await session.async_set_name(title)
