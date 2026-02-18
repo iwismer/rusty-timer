@@ -27,6 +27,12 @@ const METRICS_A: StreamMetrics = {
   retransmit_count: 2,
   lag: 500,
   backlog: 0,
+  epoch_raw_count: 5,
+  epoch_dedup_count: 4,
+  epoch_retransmit_count: 1,
+  epoch_lag: 200,
+  epoch_last_received_at: "2026-02-18T12:00:00Z",
+  unique_chips: 3,
 };
 
 describe("stores", () => {
