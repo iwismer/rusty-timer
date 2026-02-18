@@ -8,3 +8,4 @@ pub mod replay;
 pub mod status_http;
 pub mod storage;
 pub mod uplink;
+pub mod uplink_replay;
