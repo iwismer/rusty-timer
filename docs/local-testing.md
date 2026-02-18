@@ -244,10 +244,16 @@ All control API calls go to `http://127.0.0.1:9090`.
 ```bash
 curl -s -X PUT http://127.0.0.1:9090/api/v1/profile \
   -H 'Content-Type: application/json' \
-  -d '{"server_url":"ws://127.0.0.1:8080","token":"my-dev-token","log_level":"info"}'
+  -d '{"server_url":"ws://127.0.0.1:8080","token":"rusty-dev-receiver","log_level":"info"}'
 ```
 
 Returns `204 No Content` on success.
+
+The `server_url` is the base URL of the server (just the scheme, host, and port). The
+receiver automatically appends `/ws/v1/receivers` when connecting, so the full WebSocket
+URL becomes `ws://127.0.0.1:8080/ws/v1/receivers`.
+
+The default dev token for the receiver is `rusty-dev-receiver`.
 
 ### Connect to the server
 

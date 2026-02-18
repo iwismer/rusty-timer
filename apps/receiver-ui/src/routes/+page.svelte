@@ -147,7 +147,7 @@
       <input
         data-testid="server-url-input"
         bind:value={editServerUrl}
-        placeholder="wss://server:8080/ws/v1/receivers"
+        placeholder="wss://server:8080"
       />
     </label>
     <label>
