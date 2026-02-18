@@ -42,42 +42,39 @@ Connects to one or more IPICO readers and fans out all reads to any number of lo
 **Build and run:**
 
 ```bash
-cargo build --release --bin streamer
+cargo build --release -p streamer
 # or run directly:
-cargo run --bin streamer -- [OPTIONS] <reader_ip>...
+cargo run -p streamer -- [OPTIONS] <reader_ip>...
 ```
 
 ```
-USAGE:
-    streamer [FLAGS] [OPTIONS] <reader_ip>...
+Usage: streamer [OPTIONS] <reader_ip>...
 
-FLAGS:
-    -h, --help       Prints help information
-    -B, --buffer     Buffer the output. Use if high CPU use is encountered
-    -V, --version    Prints version information
+Arguments:
+  <reader_ip>...  The socket address of the reader to connect to. Eg. 192.168.0.52:10000
 
-OPTIONS:
-    -b, --bibchip <bibchip>     The bib-chip file
-    -f, --file <file>           The file to output the reads to
-    -P, --ppl <participants>    The .ppl participant file (requires --bibchip)
-    -p, --port <port>           The local port to bind to [default: 10001]
-    -t, --type <read_type>      The read type [default: raw] [possible values: raw, fsls]
-
-ARGS:
-    <reader_ip>...    Reader socket address, e.g. 192.168.0.52:10000
+Options:
+  -p, --port <port>         The port of the local machine to bind to [default: 10001]
+  -t, --type <read_type>    The type of read the reader is sending [default: raw] (raw, fsls)
+  -f, --file <file>         The file to output the reads to
+  -b, --bibchip <bibchip>   The bib-chip file
+  -P, --ppl <participants>  The .ppl participant file (requires --bibchip)
+  -B, --buffer              Buffer the output. Use if high CPU use is encountered
+  -h, --help                Print help
+  -V, --version             Print version
 ```
 
 **Examples:**
 
 ```bash
-# Stream from one reader (OS-assigned local port)
-streamer 10.0.0.51:10000
+# Stream from one reader
+cargo run -p streamer -- 10.0.0.51:10000
 
 # Stream from two readers on local port 10003
-streamer 10.0.0.51:10000 10.0.0.52:10000 -p 10003
+cargo run -p streamer -- 10.0.0.51:10000 10.0.0.52:10000 -p 10003
 
 # Save reads to file
-streamer -f reads.txt 10.0.0.51:10000
+cargo run -p streamer -- -f reads.txt 10.0.0.51:10000
 ```
 
 ## Read Emulator
@@ -87,24 +84,21 @@ Generates valid IPICO reads for testing. Can emit synthetic reads at a fixed int
 **Build and run:**
 
 ```bash
-cargo build --release --bin emulator
+cargo build --release -p emulator
 # or run directly:
-cargo run --bin emulator -- [OPTIONS]
+cargo run -p emulator -- [OPTIONS]
 ```
 
 ```
-USAGE:
-    emulator [FLAGS] [OPTIONS]
+Usage: emulator [OPTIONS]
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-OPTIONS:
-    -d, --delay <delay>       Delay between reads in ms [default: 1000]
-    -f, --file <file>         Reads file to replay
-    -p, --port <port>         Local port to listen on [default: 10001]
-    -t, --type <read_type>    Read type [default: raw] [possible values: raw, fsls]
+Options:
+  -p, --port <port>       The port of the local machine to listen for connections [default: 10001]
+  -f, --file <file>       The file to get the reads from
+  -d, --delay <delay>     Delay between reads in ms [default: 1000]
+  -t, --type <read_type>  The type of read the reader is sending [default: raw] (raw, fsls)
+  -h, --help              Print help
+  -V, --version           Print version
 ```
 
 ## Development
