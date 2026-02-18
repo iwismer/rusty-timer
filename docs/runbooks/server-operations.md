@@ -203,7 +203,7 @@ are excluded.
 
 ```bash
 # Export raw reads for a stream.
-curl http://localhost:8080/api/v1/streams/{stream_id}/export.raw \
+curl http://localhost:8080/api/v1/streams/{stream_id}/export.txt \
   -o export-raw-$(date +%Y%m%d).txt
 
 # Export CSV for a stream.

@@ -134,7 +134,7 @@ describe("server_api client", () => {
   it("exportRawUrl returns correct URL for stream", async () => {
     const { exportRawUrl } = await import("./api");
     const url = exportRawUrl("abc-123");
-    expect(url).toContain("/api/v1/streams/abc-123/export.raw");
+    expect(url).toContain("/api/v1/streams/abc-123/export.txt");
   });
 
   it("exportCsvUrl returns correct URL for stream", async () => {

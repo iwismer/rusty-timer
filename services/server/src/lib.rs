@@ -30,7 +30,7 @@ pub fn build_router(state: AppState) -> Router {
             get(http::metrics::get_metrics),
         )
         .route(
-            "/api/v1/streams/:stream_id/export.raw",
+            "/api/v1/streams/:stream_id/export.txt",
             get(http::export::export_raw),
         )
         .route(

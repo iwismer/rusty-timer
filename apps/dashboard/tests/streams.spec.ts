@@ -226,12 +226,12 @@ test.describe("per-stream detail page", () => {
     await expect(page.locator('[data-testid="export-section"]')).toBeVisible();
   });
 
-  test("export.raw link points to correct API URL", async ({ page }) => {
+  test("export.txt link points to correct API URL", async ({ page }) => {
     await page.goto("/streams/stream-uuid-1");
     const rawLink = page.locator('[data-testid="export-raw-link"]');
     await expect(rawLink).toBeVisible();
     const href = await rawLink.getAttribute("href");
-    expect(href).toContain("/api/v1/streams/stream-uuid-1/export.raw");
+    expect(href).toContain("/api/v1/streams/stream-uuid-1/export.txt");
   });
 
   test("export.csv link points to correct API URL", async ({ page }) => {
