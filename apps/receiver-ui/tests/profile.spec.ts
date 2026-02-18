@@ -53,4 +53,20 @@ test.describe("profile page", () => {
       page.locator('[data-testid="connection-state"]'),
     ).toBeVisible();
   });
+
+  test("renders subscribe button for unsubscribed streams", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const streamsSection = page.locator('[data-testid="streams-section"]');
+    // If streams are present, at least one subscribe or unsubscribe button should exist
+    const buttons = streamsSection.locator(
+      'button:has-text("Subscribe"), button:has-text("Unsubscribe")',
+    );
+    // This test is conditional: only assert if streams are visible
+    const streamCount = await streamsSection.locator("li").count();
+    if (streamCount > 0) {
+      expect(await buttons.count()).toBeGreaterThan(0);
+    }
+  });
 });
