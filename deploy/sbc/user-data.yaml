@@ -1,0 +1,42 @@
+#cloud-config
+# deploy/sbc/user-data.yaml
+#
+# cloud-init user-data template for Raspberry Pi running rt-forwarder.
+#
+# BEFORE FLASHING: Edit the two lines marked CHANGEME below.
+#
+# How to use:
+#   1. Flash Raspberry Pi OS (64-bit, Lite) with Raspberry Pi Imager
+#   2. Edit this file (hostname + SSH key)
+#   3. Copy this file to the SD card boot partition as "user-data"
+#   4. Boot the Pi — cloud-init runs on first boot
+#   5. SSH in and run rt-setup.sh to install the forwarder
+#
+# See deploy/sbc/README.md for full instructions.
+
+# CHANGEME: Set a unique hostname for this device (e.g. rt-fwd-01)
+hostname: rt-fwd-01
+
+# System user for the forwarder service (non-login, dedicated).
+users:
+  - default
+  - name: rt-forwarder
+    system: true
+    shell: /bin/false
+    homedir: /var/lib/rusty-timer
+    no_create_home: false
+
+# Ensure required packages are present.
+packages:
+  - ca-certificates
+  - jq
+
+# Create required directories and set ownership.
+runcmd:
+  - mkdir -p /etc/rusty-timer
+  - mkdir -p /var/lib/rusty-timer
+  - chown rt-forwarder:rt-forwarder /var/lib/rusty-timer
+
+# CHANGEME: Replace with your SSH public key.
+ssh_authorized_keys:
+  - ssh-ed25519 AAAA_YOUR_KEY_HERE user@host

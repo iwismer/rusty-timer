@@ -34,8 +34,8 @@ ExecStart=/usr/local/bin/rt-forwarder
 WorkingDirectory=/var/lib/rusty-timer
 
 # Environment — forwarder reads TOML config, not env vars.
-# LOG_LEVEL can be set here for log verbosity override.
-Environment=LOG_LEVEL=info
+# RUST_LOG can be set here for log verbosity override (e.g. debug, trace).
+Environment=RUST_LOG=info
 
 # Restart policy: always restart on failure, 5-second delay between attempts.
 # This handles transient network failures and system reboots.
