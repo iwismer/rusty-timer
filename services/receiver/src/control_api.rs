@@ -99,6 +99,101 @@ impl AppState {
         };
         self.emit_log(label.to_owned()).await;
     }
+
+    /// Build the merged streams response from local subscriptions and upstream server.
+    pub async fn build_streams_response(&self) -> StreamsResponse {
+        let db = self.db.lock().await;
+        let subs = match db.load_subscriptions() {
+            Ok(s) => s,
+            Err(_) => {
+                return StreamsResponse {
+                    streams: vec![],
+                    degraded: true,
+                    upstream_error: Some("failed to load subscriptions".to_owned()),
+                }
+            }
+        };
+        drop(db);
+
+        let sub_map: HashMap<(&str, &str), &Subscription> = subs
+            .iter()
+            .map(|s| ((s.forwarder_id.as_str(), s.reader_ip.as_str()), s))
+            .collect();
+
+        let upstream_url = self.upstream_url.read().await.clone();
+        let conn_state = self.connection_state.read().await.clone();
+
+        let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
+            (None, _) => (None, Some("no profile configured".to_owned())),
+            (_, cs) if *cs != ConnectionState::Connected => {
+                (None, Some(format!("connection state: {cs:?}")))
+            }
+            (Some(url), _) => match fetch_server_streams(url).await {
+                Ok(streams) => (Some(streams), None),
+                Err(e) => {
+                    warn!(error = %e, "failed to fetch server streams");
+                    (None, Some(e))
+                }
+            },
+        };
+
+        let mut streams: Vec<StreamEntry> = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+
+        if let Some(ref server_streams) = server_streams {
+            for si in server_streams {
+                let key = (si.forwarder_id.clone(), si.reader_ip.clone());
+                let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
+                let port = local.and_then(|s| {
+                    s.local_port_override
+                        .or_else(|| crate::ports::default_port(&s.reader_ip))
+                });
+                streams.push(StreamEntry {
+                    forwarder_id: si.forwarder_id.clone(),
+                    reader_ip: si.reader_ip.clone(),
+                    subscribed: local.is_some(),
+                    local_port: port,
+                    online: Some(si.online),
+                    display_alias: si.display_alias.clone(),
+                });
+                seen.insert(key);
+            }
+        }
+
+        for sub in &subs {
+            if seen.contains(&(sub.forwarder_id.clone(), sub.reader_ip.clone())) {
+                continue;
+            }
+            let port = sub
+                .local_port_override
+                .or_else(|| crate::ports::default_port(&sub.reader_ip));
+            streams.push(StreamEntry {
+                forwarder_id: sub.forwarder_id.clone(),
+                reader_ip: sub.reader_ip.clone(),
+                subscribed: true,
+                local_port: port,
+                online: None,
+                display_alias: None,
+            });
+        }
+
+        let degraded = upstream_error.is_some();
+        StreamsResponse {
+            streams,
+            degraded,
+            upstream_error,
+        }
+    }
+
+    /// Build and broadcast a streams snapshot to SSE clients.
+    pub async fn emit_streams_snapshot(&self) {
+        let response = self.build_streams_response().await;
+        let _ = self.ui_tx.send(ReceiverUiEvent::StreamsSnapshot {
+            streams: response.streams,
+            degraded: response.degraded,
+            upstream_error: response.upstream_error,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,87 +347,7 @@ async fn put_profile(
 }
 
 async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // 1. Load local subscriptions from SQLite.
-    let db = state.db.lock().await;
-    let subs = match db.load_subscriptions() {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    drop(db);
-
-    // 2. Build a lookup map of local subscriptions: (forwarder_id, reader_ip) -> &Subscription
-    let sub_map: HashMap<(&str, &str), &Subscription> = subs
-        .iter()
-        .map(|s| ((s.forwarder_id.as_str(), s.reader_ip.as_str()), s))
-        .collect();
-
-    // 3. Attempt to fetch server streams if connected.
-    let upstream_url = state.upstream_url.read().await.clone();
-    let conn_state = state.connection_state.read().await.clone();
-
-    let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
-        (None, _) => (None, Some("no profile configured".to_owned())),
-        (_, cs) if *cs != ConnectionState::Connected => {
-            (None, Some(format!("connection state: {cs:?}")))
-        }
-        (Some(url), _) => match fetch_server_streams(url).await {
-            Ok(streams) => (Some(streams), None),
-            Err(e) => {
-                warn!(error = %e, "failed to fetch server streams");
-                (None, Some(e))
-            }
-        },
-    };
-
-    // 4. Merge: server streams first, then any local-only subscriptions.
-    let mut streams: Vec<StreamEntry> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-
-    if let Some(ref server_streams) = server_streams {
-        for si in server_streams {
-            let key = (si.forwarder_id.clone(), si.reader_ip.clone());
-            let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
-            let port = local.and_then(|s| {
-                s.local_port_override
-                    .or_else(|| crate::ports::default_port(&s.reader_ip))
-            });
-            streams.push(StreamEntry {
-                forwarder_id: si.forwarder_id.clone(),
-                reader_ip: si.reader_ip.clone(),
-                subscribed: local.is_some(),
-                local_port: port,
-                online: Some(si.online),
-                display_alias: si.display_alias.clone(),
-            });
-            seen.insert(key);
-        }
-    }
-
-    // Append local subscriptions not present in the server list.
-    for sub in &subs {
-        if seen.contains(&(sub.forwarder_id.clone(), sub.reader_ip.clone())) {
-            continue;
-        }
-        let port = sub
-            .local_port_override
-            .or_else(|| crate::ports::default_port(&sub.reader_ip));
-        streams.push(StreamEntry {
-            forwarder_id: sub.forwarder_id.clone(),
-            reader_ip: sub.reader_ip.clone(),
-            subscribed: true,
-            local_port: port,
-            online: None,
-            display_alias: None,
-        });
-    }
-
-    let degraded = upstream_error.is_some();
-    Json(StreamsResponse {
-        streams,
-        degraded,
-        upstream_error,
-    })
-    .into_response()
+    Json(state.build_streams_response().await).into_response()
 }
 
 async fn put_subscriptions(
