@@ -111,7 +111,7 @@ configure() {
       echo "Skipping configuration."
       # Read existing bind address for verify() to use
       local existing_bind
-      existing_bind=$(grep -oP '^bind\s*=\s*"\K[^"]+' "${CONFIG_DIR}/forwarder.toml" 2>/dev/null || true)
+      existing_bind=$(sed -n 's/^bind\s*=\s*"\([^"]*\)".*/\1/p' "${CONFIG_DIR}/forwarder.toml" 2>/dev/null || true)
       if [[ -n "${existing_bind}" ]]; then
         STATUS_BIND="${existing_bind}"
       fi
@@ -233,7 +233,7 @@ User=rt-forwarder
 Group=rt-forwarder
 ExecStart=/usr/local/bin/rt-forwarder
 WorkingDirectory=/var/lib/rusty-timer
-Environment=LOG_LEVEL=info
+Environment=RUST_LOG=info
 Restart=on-failure
 RestartSec=5s
 StartLimitInterval=60s

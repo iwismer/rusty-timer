@@ -26,9 +26,10 @@ users:
     homedir: /var/lib/rusty-timer
     no_create_home: false
 
-# Ensure TLS root certificates are present.
+# Ensure required packages are present.
 packages:
   - ca-certificates
+  - jq
 
 # Create required directories and set ownership.
 runcmd:
