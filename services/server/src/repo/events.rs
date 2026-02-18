@@ -163,6 +163,18 @@ pub async fn update_forwarder_display_name(
     Ok(result.rows_affected())
 }
 
+pub async fn fetch_stream_ids_by_forwarder(
+    pool: &PgPool,
+    forwarder_id: &str,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows =
+        sqlx::query_scalar::<_, Uuid>("SELECT stream_id FROM streams WHERE forwarder_id = $1")
+            .bind(forwarder_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows)
+}
+
 pub async fn set_stream_online(
     pool: &PgPool,
     stream_id: Uuid,

@@ -1,9 +1,10 @@
 use crate::{
     auth::{extract_bearer, validate_token},
-    dashboard_events::DashboardEvent,
+    dashboard_events::{DashboardEvent, OptionalStringPatch},
     repo::events::{
-        count_unique_chips, fetch_stream_metrics, fetch_stream_snapshot, set_stream_online,
-        update_forwarder_display_name, upsert_event, upsert_stream, IngestResult,
+        count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
+        fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
+        upsert_stream, IngestResult,
     },
     state::AppState,
 };
@@ -255,13 +256,33 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     );
                                 }
                                 if previous_display_name != current_display_name {
-                                    for &sid in stream_map.values() {
+                                    let display_name_patch = match &current_display_name {
+                                        Some(name) => OptionalStringPatch::Set(name.clone()),
+                                        None => OptionalStringPatch::Clear,
+                                    };
+                                    let stream_ids = match fetch_stream_ids_by_forwarder(
+                                        &state.pool,
+                                        &device_id,
+                                    )
+                                    .await
+                                    {
+                                        Ok(ids) => ids,
+                                        Err(e) => {
+                                            error!(
+                                                device_id = %device_id,
+                                                error = %e,
+                                                "failed to list forwarder streams for display-name update"
+                                            );
+                                            stream_map.values().copied().collect()
+                                        }
+                                    };
+                                    for sid in stream_ids {
                                         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
                                             stream_id: sid,
                                             online: None,
                                             stream_epoch: None,
                                             display_alias: None,
-                                            forwarder_display_name: current_display_name.clone(),
+                                            forwarder_display_name: Some(display_name_patch.clone()),
                                         });
                                     }
                                 }
