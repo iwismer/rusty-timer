@@ -72,6 +72,10 @@
       }
 
       await api.putSubscriptions(newSubs);
+      if (!currentlySubscribed) {
+        const { [key]: _, ...rest } = portOverrides;
+        portOverrides = rest;
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -275,11 +279,13 @@
               </button>
             {:else}
               <input
+                class="port-input"
                 data-testid="port-{key}"
                 type="number"
+                min="1"
+                max="65535"
                 placeholder="port"
                 bind:value={portOverrides[key]}
-                style="width: 5em; margin-left: 0.5em;"
               />
               <button
                 data-testid="sub-{key}"
@@ -388,5 +394,9 @@
   }
   section ul:not(.logs) li:last-child {
     border-bottom: none;
+  }
+  .port-input {
+    width: 5em;
+    display: inline-block;
   }
 </style>
