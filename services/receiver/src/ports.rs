@@ -3,6 +3,7 @@
 //! Default mapping:
 //! - Legacy/default reader port (`:10000`): `10000 + reader_ip_last_octet`
 //! - Non-default reader port: deterministic hash in `12000..=65535`
+//!
 //! Port collisions: affected stream marked degraded, non-conflicting streams start normally.
 
 use crate::db::Subscription;
