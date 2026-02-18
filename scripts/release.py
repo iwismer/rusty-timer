@@ -233,7 +233,7 @@ def main() -> None:
             print(f"  cargo check passed")
 
             # Stage, commit, tag
-            run(["git", "add", cargo_path])
+            run(["git", "add", cargo_path, "Cargo.lock"])
             commit_msg = f"chore({service}): bump version to {new}"
             run(["git", "commit", "-m", commit_msg])
             print(f"  Committed: {commit_msg}")

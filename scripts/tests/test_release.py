@@ -113,6 +113,10 @@ class PushTests(unittest.TestCase):
             release.main()
 
         self.assertIn(
+            ["git", "add", "services/forwarder/Cargo.toml", "Cargo.lock"],
+            calls,
+        )
+        self.assertIn(
             ["git", "push", "--atomic", "origin", "master", "forwarder-v0.1.1"],
             calls,
         )

@@ -27,9 +27,14 @@ jobs:
         id: parse
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          # Extract service name (everything before the last -v<semver>)
-          SERVICE="${TAG%-v*}"
-          VERSION="${TAG#*-v}"
+          if [[ "$TAG" =~ ^(forwarder|receiver|streamer|emulator)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            SERVICE="${BASH_REMATCH[1]}"
+            VERSION="${BASH_REMATCH[2]}"
+          else
+            echo "::error::Invalid tag format: ${TAG}"
+            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|receiver|streamer|emulator"
+            exit 1
+          fi
           echo "service=${SERVICE}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Parsed tag: service=${SERVICE}, version=${VERSION}"
@@ -41,7 +46,16 @@ jobs:
         run: |
           SERVICE="${{ steps.parse.outputs.service }}"
           VERSION="${{ steps.parse.outputs.version }}"
-          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "services/${SERVICE}/Cargo.toml")
+          CARGO_VERSION=$(python3 - "$SERVICE" <<'PY'
+          import sys
+          import tomllib
+
+          service = sys.argv[1]
+          with open(f"services/{service}/Cargo.toml", "rb") as f:
+              data = tomllib.load(f)
+          print(data["package"]["version"])
+          PY
+          )
           echo "Tag version: ${VERSION}"
           echo "Cargo.toml version: ${CARGO_VERSION}"
           if [ "${VERSION}" != "${CARGO_VERSION}" ]; then
