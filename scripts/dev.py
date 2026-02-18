@@ -53,7 +53,7 @@ PANES = [
         f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server",
     ),
     ("Emulator",  "cargo run -p emulator -- --port 10001 --delay 2000 --type raw"),
-    ("Forwarder", "cargo run -p forwarder -- --config /tmp/rusty-timer-dev/forwarder.toml"),
+    ("Forwarder", f"cargo run -p forwarder -- --config {FORWARDER_TOML_PATH}"),
     ("Receiver",  "cargo run -p receiver"),
     ("Dashboard", "cd apps/dashboard && npm run dev"),
 ]
