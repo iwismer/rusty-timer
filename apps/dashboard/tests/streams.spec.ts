@@ -65,7 +65,9 @@ test.describe("stream list page", () => {
     await page.goto("/");
     // Second stream has no alias, should show forwarder_id / reader_ip
     await expect(page.getByText(/fwd-beta/)).toBeVisible();
-    await expect(page.getByText(/10\.0\.0\.50:10000/)).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "10.0.0.50:10000" }),
+    ).toBeVisible();
   });
 
   test("shows online/offline indicator for each stream", async ({ page }) => {

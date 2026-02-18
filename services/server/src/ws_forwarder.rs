@@ -3,7 +3,7 @@ use crate::{
     dashboard_events::DashboardEvent,
     repo::events::{
         count_unique_chips, fetch_stream_metrics, fetch_stream_snapshot, set_stream_online,
-        upsert_event, upsert_stream, IngestResult,
+        update_forwarder_display_name, upsert_event, upsert_stream, IngestResult,
     },
     state::AppState,
 };
@@ -166,6 +166,16 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
 
     let mut current_display_name = hello.display_name.clone();
+    if let Err(e) =
+        update_forwarder_display_name(&state.pool, &device_id, current_display_name.as_deref())
+            .await
+    {
+        error!(
+            device_id = %device_id,
+            error = %e,
+            "failed to update forwarder display name"
+        );
+    }
     let mut stream_map: HashMap<String, Uuid> = HashMap::new();
     for reader_ip in &hello.reader_ips {
         if let Ok(sid) = upsert_stream(
@@ -230,6 +240,19 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             }
                             Ok(WsMessage::ForwarderHello(new_hello)) => {
                                 current_display_name = new_hello.display_name.clone();
+                                if let Err(e) = update_forwarder_display_name(
+                                    &state.pool,
+                                    &device_id,
+                                    current_display_name.as_deref(),
+                                )
+                                .await
+                                {
+                                    error!(
+                                        device_id = %device_id,
+                                        error = %e,
+                                        "failed to update forwarder display name"
+                                    );
+                                }
                                 for reader_ip in &new_hello.reader_ips {
                                     if let Ok(sid) = upsert_stream(
                                         &state.pool,

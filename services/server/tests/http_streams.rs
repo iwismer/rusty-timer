@@ -439,3 +439,61 @@ async fn test_forwarder_display_name_cleared_when_hello_omits_value() {
         "display name should clear when hello omits display_name"
     );
 }
+
+#[tokio::test]
+async fn test_forwarder_display_name_refreshes_all_forwarder_streams() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(
+        &pool,
+        "fwd-dn-refresh-all",
+        "forwarder",
+        b"fwd-dn-refresh-all-token",
+    )
+    .await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-refresh-all-token")
+        .await
+        .unwrap();
+
+    // Initial hello creates two streams with the same display name.
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-refresh-all".to_owned(),
+        reader_ips: vec!["10.43.0.1".to_owned(), "10.43.0.2".to_owned()],
+        resume: vec![],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    // Subsequent hello updates display name but only includes one reader IP.
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-refresh-all".to_owned(),
+        reader_ips: vec!["10.43.0.1".to_owned()],
+        resume: vec![],
+        display_name: Some("Finish Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 2);
+    for stream in streams {
+        assert_eq!(stream["forwarder_id"], "fwd-dn-refresh-all");
+        assert_eq!(stream["forwarder_display_name"], "Finish Line");
+    }
+}

@@ -149,6 +149,20 @@ pub async fn upsert_stream(
     Ok(stream_id)
 }
 
+pub async fn update_forwarder_display_name(
+    pool: &PgPool,
+    forwarder_id: &str,
+    forwarder_display_name: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    let result =
+        sqlx::query("UPDATE streams SET forwarder_display_name = $1 WHERE forwarder_id = $2")
+            .bind(forwarder_display_name)
+            .bind(forwarder_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn set_stream_online(
     pool: &PgPool,
     stream_id: Uuid,
