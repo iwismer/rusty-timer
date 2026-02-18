@@ -179,4 +179,41 @@ describe("sse", () => {
 
     expect(get(metricsStore).s1.raw_count).toBe(7);
   });
+
+  it("runs a follow-up resync when resync events arrive during an in-flight resync", async () => {
+    const streamA: StreamEntry = {
+      stream_id: "s1",
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1",
+      display_alias: null,
+      online: false,
+      stream_epoch: 1,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    const streamB: StreamEntry = { ...streamA, online: true };
+
+    let resolveFirst!: (value: ReturnType<typeof makeResponse>) => void;
+    const first = new Promise<ReturnType<typeof makeResponse>>((resolve) => {
+      resolveFirst = resolve;
+    });
+
+    mockFetch.mockReset();
+    mockFetch.mockImplementationOnce(() => first);
+    mockFetch.mockResolvedValueOnce(makeResponse({ streams: [streamB] }));
+
+    const { initSSE } = await import("./sse");
+    initSSE();
+    const es = MockEventSource.instances[0];
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    es.emit("resync", "{}");
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    resolveFirst(makeResponse({ streams: [streamA] }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(get(streamsStore)[0].online).toBe(true);
+  });
 });
