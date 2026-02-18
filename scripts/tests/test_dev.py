@@ -1,3 +1,4 @@
+import argparse
 import sys
 import unittest
 from unittest.mock import patch
@@ -5,28 +6,136 @@ from unittest.mock import patch
 import scripts.dev as dev
 
 
-class ParseArgsTests(unittest.TestCase):
-    def test_parse_args_reads_emulator_flags(self) -> None:
+class EmulatorSpecToCmdTests(unittest.TestCase):
+    def test_to_cmd_quotes_file_path_with_spaces(self) -> None:
+        spec = dev.EmulatorSpec(port=10001, delay=500, file="data/my reads.txt")
+        cmd = spec.to_cmd()
+        self.assertEqual(
+            cmd,
+            "cargo run -p emulator -- --port 10001 --delay 500 --type raw"
+            " --file 'data/my reads.txt'",
+        )
+
+    def test_to_cmd_quotes_file_path_with_special_chars(self) -> None:
+        spec = dev.EmulatorSpec(port=10001, delay=500, file="data/reads;echo pwned.txt")
+        cmd = spec.to_cmd()
+        self.assertIn("'data/reads;echo pwned.txt'", cmd)
+
+    def test_to_cmd_no_file(self) -> None:
+        spec = dev.EmulatorSpec(port=10001, delay=2000)
+        cmd = spec.to_cmd()
+        self.assertEqual(
+            cmd,
+            "cargo run -p emulator -- --port 10001 --delay 2000 --type raw",
+        )
+
+
+class ParseArgsEmulatorFlagTests(unittest.TestCase):
+    def test_parse_args_reads_emulator_spec(self) -> None:
         with patch.object(
             sys,
             "argv",
-            ["dev.py", "--emulator-file", "data/reads.txt", "--emulator-delay", "500"],
+            ["dev.py", "--emulator", "port=10001,delay=500,file=data/reads.txt"],
         ):
             args = dev.parse_args()
 
-        self.assertEqual(args.emulator_file, "data/reads.txt")
-        self.assertEqual(args.emulator_delay, 500)
-        self.assertFalse(args.no_build)
-        self.assertFalse(args.clear)
+        self.assertEqual(len(args.emulator), 1)
+        spec = args.emulator[0]
+        self.assertIsInstance(spec, dev.EmulatorSpec)
+        self.assertEqual(spec.port, 10001)
+        self.assertEqual(spec.delay, 500)
+        self.assertEqual(spec.file, "data/reads.txt")
+        self.assertEqual(spec.read_type, "raw")
 
 
-class EmulatorCommandTests(unittest.TestCase):
-    def test_build_emulator_cmd_quotes_file_path(self) -> None:
-        cmd = dev.build_emulator_cmd(500, "data/my reads;echo pwned.txt")
-        self.assertEqual(
-            cmd,
-            "cargo run -p emulator -- --port 10001 --delay 500 --type raw --file 'data/my reads;echo pwned.txt'",
+class ParseEmulatorSpecErrorTests(unittest.TestCase):
+    def test_missing_port_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("delay=500")
+        self.assertIn("port", str(ctx.exception))
+
+    def test_unknown_key_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=10001,bogus=xyz")
+        self.assertIn("Unknown emulator key", str(ctx.exception))
+
+    def test_invalid_port_value_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=abc")
+        self.assertIn("Invalid port", str(ctx.exception))
+
+    def test_port_below_range_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=0")
+        self.assertIn("out of range", str(ctx.exception))
+
+    def test_port_above_range_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=65536")
+        self.assertIn("out of range", str(ctx.exception))
+
+    def test_negative_delay_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=10001,delay=-1")
+        self.assertIn("non-negative", str(ctx.exception))
+
+    def test_invalid_type_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=10001,type=bogus")
+        self.assertIn("Invalid type", str(ctx.exception))
+
+    def test_fallback_port_above_range_raises(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            dev.parse_emulator_spec("port=65000")
+        self.assertIn("fallback", str(ctx.exception))
+
+
+class BuildForwarderTomlTests(unittest.TestCase):
+    def test_build_forwarder_toml_contains_multiple_readers(self) -> None:
+        text = dev.build_forwarder_toml(
+            [
+                dev.EmulatorSpec(port=10001, read_type="raw"),
+                dev.EmulatorSpec(port=10002, read_type="fsls"),
+            ]
         )
+        self.assertIn('target              = "127.0.0.1:10001"', text)
+        self.assertIn('target              = "127.0.0.1:10002"', text)
+        self.assertIn('read_type           = "raw"', text)
+        self.assertIn('read_type           = "fsls"', text)
+
+
+class MainValidationTests(unittest.TestCase):
+    @patch("scripts.dev.detect_and_launch")
+    @patch("scripts.dev.setup")
+    @patch("scripts.dev.parse_args")
+    def test_main_exits_on_emulator_port_collision(
+        self, parse_args_mock, setup_mock, detect_mock
+    ) -> None:
+        parse_args_mock.return_value = argparse.Namespace(
+            no_build=False,
+            clear=False,
+            emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=10001)],
+        )
+        with self.assertRaises(SystemExit):
+            dev.main()
+        setup_mock.assert_not_called()
+        detect_mock.assert_not_called()
+
+    @patch("scripts.dev.detect_and_launch")
+    @patch("scripts.dev.setup")
+    @patch("scripts.dev.parse_args")
+    def test_main_exits_on_port_fallback_collision(
+        self, parse_args_mock, setup_mock, detect_mock
+    ) -> None:
+        parse_args_mock.return_value = argparse.Namespace(
+            no_build=False,
+            clear=False,
+            emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=11001)],
+        )
+        with self.assertRaises(SystemExit):
+            dev.main()
+        setup_mock.assert_not_called()
+        detect_mock.assert_not_called()
 
 
 class ClearTests(unittest.TestCase):

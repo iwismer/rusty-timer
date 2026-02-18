@@ -15,8 +15,8 @@ Usage:
     uv run scripts/dev.py
     uv run scripts/dev.py --no-build
     uv run scripts/dev.py --clear
-    uv run scripts/dev.py --emulator-file data/reads.txt
-    uv run scripts/dev.py --emulator-delay 500
+    uv run scripts/dev.py --emulator port=10001,delay=500,file=start.txt
+    uv run scripts/dev.py --emulator port=10001 --emulator port=10002,delay=500
 """
 
 import argparse
@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -55,29 +56,116 @@ PG_DB = "rusty_timer"
 PG_PORT = 5432
 
 EMULATOR_DEFAULT_DELAY = 2000
+EMULATOR_DEFAULT_PORT = 10001
+EMULATOR_VALID_TYPES = ("raw", "fsls")
+MIN_PORT = 1
+MAX_PORT = 65535
+FALLBACK_OFFSET = 1000
 
-PANES = [
+
+@dataclass
+class EmulatorSpec:
+    port: int
+    delay: int = EMULATOR_DEFAULT_DELAY
+    file: str | None = None
+    read_type: str = "raw"
+
+    def __post_init__(self) -> None:
+        if self.read_type not in EMULATOR_VALID_TYPES:
+            raise ValueError(f"Invalid read_type {self.read_type!r}")
+
+    def to_cmd(self) -> str:
+        cmd = f"cargo run -p emulator -- --port {self.port} --delay {self.delay} --type {self.read_type}"
+        if self.file:
+            cmd += f" --file {shlex.quote(self.file)}"
+        return cmd
+
+    def to_reader_toml(self) -> str:
+        return (
+            f"[[readers]]\n"
+            f'target              = "127.0.0.1:{self.port}"\n'
+            f'read_type           = "{self.read_type}"\n'
+            f"enabled             = true\n"
+            f"local_fallback_port = {self.port + FALLBACK_OFFSET}\n"
+        )
+
+
+def parse_emulator_spec(value: str) -> EmulatorSpec:
+    """Parse 'port=10001,delay=500,file=start.txt,type=raw' into an EmulatorSpec."""
+    fields: dict[str, str] = {}
+    for pair in value.split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            raise argparse.ArgumentTypeError(
+                f"Invalid emulator spec: expected key=value, got {pair!r}"
+            )
+        key, val = pair.split("=", 1)
+        key = key.strip()
+        if key not in ("port", "delay", "file", "type"):
+            raise argparse.ArgumentTypeError(
+                f"Unknown emulator key {key!r}. Valid keys: port, delay, file, type"
+            )
+        fields[key] = val.strip()
+
+    if "port" not in fields:
+        raise argparse.ArgumentTypeError("Emulator spec must include 'port'")
+
+    try:
+        port = int(fields["port"])
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid port: {fields['port']!r}")
+    if not (MIN_PORT <= port <= MAX_PORT):
+        raise argparse.ArgumentTypeError(
+            f"Invalid port {port}: out of range {MIN_PORT}..{MAX_PORT}"
+        )
+    fallback_port = port + FALLBACK_OFFSET
+    if fallback_port > MAX_PORT:
+        raise argparse.ArgumentTypeError(
+            f"Invalid port {port}: fallback port {fallback_port} exceeds {MAX_PORT}"
+        )
+
+    delay = EMULATOR_DEFAULT_DELAY
+    if "delay" in fields:
+        try:
+            delay = int(fields["delay"])
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Invalid delay: {fields['delay']!r}")
+        if delay < 0:
+            raise argparse.ArgumentTypeError(
+                f"Invalid delay {delay}: must be non-negative"
+            )
+
+    read_type = fields.get("type", "raw")
+    if read_type not in EMULATOR_VALID_TYPES:
+        raise argparse.ArgumentTypeError(
+            f"Invalid type {read_type!r}. Valid types: {', '.join(EMULATOR_VALID_TYPES)}"
+        )
+
+    return EmulatorSpec(
+        port=port,
+        delay=delay,
+        file=fields.get("file"),
+        read_type=read_type,
+    )
+
+
+PANES_BEFORE_EMULATOR = [
     ("Postgres",  f"docker logs -f {PG_CONTAINER}"),
     (
         "Server",
         f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
         f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server",
     ),
-    ("Emulator",  f"cargo run -p emulator -- --port 10001 --delay {EMULATOR_DEFAULT_DELAY} --type raw"),
+]
+
+PANES_AFTER_EMULATOR = [
     ("Forwarder", f"cargo run -p forwarder -- --config {FORWARDER_TOML_PATH}"),
     ("Receiver",     "cargo run -p receiver"),
     ("Dashboard",    "cd apps/dashboard && npm run dev"),
     ("Receiver UI",  "cd apps/receiver-ui && npm run dev"),
 ]
 
-
-def build_emulator_cmd(delay: int, file_path: str | None) -> str:
-    cmd = f"cargo run -p emulator -- --port 10001 --delay {delay} --type raw"
-    if file_path:
-        cmd += f" --file {shlex.quote(file_path)}"
-    return cmd
-
-FORWARDER_TOML = f"""\
+FORWARDER_TOML_HEADER = f"""\
 schema_version = 1
 
 [server]
@@ -97,13 +185,22 @@ bind = "0.0.0.0:8081"
 batch_mode       = "immediate"
 batch_flush_ms   = 100
 batch_max_events = 50
-
-[[readers]]
-target              = "127.0.0.1:10001"
-read_type           = "raw"
-enabled             = true
-local_fallback_port = 11001
 """
+
+
+def build_forwarder_toml(emulators: list[EmulatorSpec]) -> str:
+    readers = "\n".join(e.to_reader_toml() for e in emulators)
+    return FORWARDER_TOML_HEADER + "\n" + readers
+
+
+def build_panes(emulators: list[EmulatorSpec]) -> list[tuple[str, str]]:
+    if len(emulators) == 1:
+        emu_panes = [("Emulator", emulators[0].to_cmd())]
+    else:
+        emu_panes = [
+            (f"Emulator {i + 1}", e.to_cmd()) for i, e in enumerate(emulators)
+        ]
+    return PANES_BEFORE_EMULATOR + emu_panes + PANES_AFTER_EMULATOR
 
 console = Console()
 
@@ -275,10 +372,10 @@ def apply_migrations() -> None:
     console.print("[green]✓[/green] Migrations applied")
 
 
-def write_config_files() -> None:
+def write_config_files(emulators: list[EmulatorSpec]) -> None:
     console.print("[bold]Writing config files…[/bold]")
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-    FORWARDER_TOML_PATH.write_text(FORWARDER_TOML)
+    FORWARDER_TOML_PATH.write_text(build_forwarder_toml(emulators))
     console.print(f"  [green]Wrote[/green] {FORWARDER_TOML_PATH}")
     FORWARDER_TOKEN_PATH.write_text(FORWARDER_TOKEN_TEXT)
     console.print(f"  [green]Wrote[/green] {FORWARDER_TOKEN_PATH}")
@@ -338,12 +435,12 @@ def npm_install() -> None:
             console.print("  [green]npm install complete.[/green]")
 
 
-def setup(skip_build: bool = False) -> None:
+def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None) -> None:
     check_prereqs()
     start_postgres()
     wait_for_postgres()
     apply_migrations()
-    write_config_files()
+    write_config_files(emulators or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)])
     seed_tokens()
     build_rust(skip_build=skip_build)
     npm_install()
@@ -353,15 +450,15 @@ def setup(skip_build: bool = False) -> None:
 # tmux launcher
 # ---------------------------------------------------------------------------
 
-def launch_tmux() -> None:
+def launch_tmux(panes: list[tuple[str, str]]) -> None:
     session = "rusty-dev"
     subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
     subprocess.run(["tmux", "new-session", "-d", "-s", session], check=True)
-    for _ in range(len(PANES) - 1):
+    for _ in range(len(panes) - 1):
         subprocess.run(["tmux", "split-window", "-t", session], check=True)
         subprocess.run(["tmux", "select-layout", "-t", session, "tiled"], check=True)
     subprocess.run(["tmux", "select-layout", "-t", session, "tiled"], check=True)
-    for i, (title, cmd) in enumerate(PANES):
+    for i, (title, cmd) in enumerate(panes):
         pane = f"{session}:0.{i}"
         subprocess.run(["tmux", "select-pane", "-t", pane, "-T", title], check=True)
         full_cmd = f'cd "{REPO_ROOT}" && {cmd}'
@@ -373,31 +470,28 @@ def launch_tmux() -> None:
 # iTerm2 launcher (iterm2 Python API)
 # ---------------------------------------------------------------------------
 
-def launch_iterm2() -> None:
-    import iterm2  # lazy import — only used on iTerm2 path
-    iterm2.run_until_complete(_iterm2_async)
+def launch_iterm2(panes: list[tuple[str, str]]) -> None:
+    import iterm2
+    iterm2.run_until_complete(lambda conn: _iterm2_async(conn, panes))
 
 
-async def _iterm2_async(connection) -> None:
-    import iterm2  # noqa: PLC0415
-    await iterm2.async_get_app(connection)  # initialises Session.delegate and other internal state
+async def _iterm2_async(connection, panes: list[tuple[str, str]]) -> None:
+    import iterm2
+    await iterm2.async_get_app(connection)
     window = await iterm2.Window.async_create(connection)
     tab = window.tabs[0]
-    s0 = tab.sessions[0]
-    # Physical layout after splits (row-major):
-    #   s0 (row0-left)  | s1 (row0-right)
-    #   s2 (row1-left)  | s4 (row1-right)
-    #   s3 (row2-left)  | s5 (row2-right)
-    #   s6 (row3-left)  |
-    # Row-major sessions list: [s0, s1, s2, s4, s3, s5, s6]
-    s1 = await s0.async_split_pane(vertical=True)
-    s2 = await s0.async_split_pane(vertical=False)
-    s3 = await s2.async_split_pane(vertical=False)
-    s4 = await s1.async_split_pane(vertical=False)
-    s5 = await s4.async_split_pane(vertical=False)
-    s6 = await s3.async_split_pane(vertical=False)
-    sessions = [s0, s1, s2, s4, s3, s5, s6]  # row-major: top-L, top-R, mid-L, mid-R, bot-L, bot-R, ext-L
-    for session, (title, cmd) in zip(sessions, PANES):
+    first_session = tab.sessions[0]
+
+    # Create additional sessions by splitting
+    sessions = [first_session]
+    for _ in range(len(panes) - 1):
+        # Alternate vertical/horizontal splits for a reasonable layout
+        new_session = await sessions[-1].async_split_pane(
+            vertical=(len(sessions) % 2 == 0)
+        )
+        sessions.append(new_session)
+
+    for session, (title, cmd) in zip(sessions, panes):
         await session.async_set_name(title)
         await session.async_send_text(f'cd "{REPO_ROOT}" && {cmd}\n')
 
@@ -406,14 +500,15 @@ async def _iterm2_async(connection) -> None:
 # Detect and launch
 # ---------------------------------------------------------------------------
 
-def detect_and_launch() -> None:
+def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
+    panes = build_panes(emulators)
     if shutil.which("tmux"):
         console.print("[blue]Multiplexer:[/blue] tmux")
-        launch_tmux()
+        launch_tmux(panes)
     elif Path("/Applications/iTerm.app").exists():
         console.print("[blue]Multiplexer:[/blue] iTerm2")
         console.print("[dim]Note: requires Preferences → General → Magic → Enable Python API[/dim]")
-        launch_iterm2()
+        launch_iterm2(panes)
     else:
         console.print("[red]No multiplexer found.[/red]")
         console.print("Install tmux:  brew install tmux")
@@ -430,12 +525,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-build", action="store_true", help="Skip the Rust build step")
     parser.add_argument("--clear", action="store_true", help="Tear down dev artifacts and exit")
     parser.add_argument(
-        "--emulator-file", metavar="PATH",
-        help="File of chip reads to replay through the emulator",
-    )
-    parser.add_argument(
-        "--emulator-delay", metavar="MS", type=int, default=EMULATOR_DEFAULT_DELAY,
-        help=f"Delay between emulator reads in ms (default: {EMULATOR_DEFAULT_DELAY})",
+        "--emulator", action="append", type=parse_emulator_spec, metavar="SPEC",
+        help=(
+            "Emulator instance spec as key=value pairs: port=N,delay=MS,file=PATH,type=raw|fsls. "
+            "Repeatable for multiple emulators. Default: single emulator on port 10001."
+        ),
     )
     return parser.parse_args()
 
@@ -447,22 +541,24 @@ def main() -> None:
         clear()
         return
 
-    # Override the Emulator pane command if custom flags were provided
-    if args.emulator_file or args.emulator_delay != EMULATOR_DEFAULT_DELAY:
-        emulator_cmd = build_emulator_cmd(args.emulator_delay, args.emulator_file)
-        for i, (name, _cmd) in enumerate(PANES):
-            if name == "Emulator":
-                PANES[i] = ("Emulator", emulator_cmd)
-                break
+    emulators: list[EmulatorSpec] = args.emulator or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)]
+
+    # Validate no duplicate ports (including fallback ports)
+    ports = [e.port for e in emulators]
+    fallbacks = [e.port + FALLBACK_OFFSET for e in emulators]
+    all_ports = ports + fallbacks
+    if len(all_ports) != len(set(all_ports)):
+        console.print("[red]Error: emulator port/fallback port collision[/red]")
+        sys.exit(1)
 
     console.print(Panel.fit(
         "[bold cyan]Rusty Timer Dev Launcher[/bold cyan]\n"
         "Setting up local dev environment…",
         border_style="cyan",
     ))
-    setup(skip_build=args.no_build)
+    setup(skip_build=args.no_build, emulators=emulators)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
-    detect_and_launch()
+    detect_and_launch(emulators)
 
 
 if __name__ == "__main__":
