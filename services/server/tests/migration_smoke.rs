@@ -6,10 +6,20 @@
 /// NOTE: Full migration execution testing requires a PostgreSQL container
 /// (e.g., testcontainers-rs) and is deferred to the integration test phase.
 const MIGRATION_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/0001_init.sql");
+const INDEX_MIGRATION_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/migrations/0003_events_epoch_tag_index.sql"
+);
 
 fn read_migration() -> String {
     std::fs::read_to_string(MIGRATION_PATH)
         .expect("Migration file should exist at services/server/migrations/0001_init.sql")
+}
+
+fn read_index_migration() -> String {
+    std::fs::read_to_string(INDEX_MIGRATION_PATH).expect(
+        "Migration file should exist at services/server/migrations/0003_events_epoch_tag_index.sql",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -402,4 +412,21 @@ fn all_five_tables_defined() {
             table
         );
     }
+}
+
+#[test]
+fn unique_chip_index_migration_exists_and_has_expected_index() {
+    let sql = read_index_migration();
+    assert!(
+        sql.contains("idx_events_stream_epoch_tag_id_not_null"),
+        "Index migration must define idx_events_stream_epoch_tag_id_not_null"
+    );
+    assert!(
+        sql.contains("ON events (stream_id, stream_epoch, tag_id)"),
+        "Index migration must index (stream_id, stream_epoch, tag_id)"
+    );
+    assert!(
+        sql.contains("WHERE tag_id IS NOT NULL"),
+        "Index migration must be partial on tag_id IS NOT NULL"
+    );
 }

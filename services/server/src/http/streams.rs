@@ -1,6 +1,4 @@
-use crate::{
-    dashboard_events::DashboardEvent, repo::events::fetch_stream_metrics, state::AppState,
-};
+use crate::state::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -138,38 +136,6 @@ pub async fn reset_epoch(
                     new_stream_epoch: (s.stream_epoch + 1) as u64,
                 };
                 if tx.send(cmd).await.is_ok() {
-                    // Reset epoch counters in the DB
-                    let _ = sqlx::query(
-                        "UPDATE stream_metrics SET epoch_raw_count = 0, epoch_dedup_count = 0, epoch_retransmit_count = 0, epoch_last_received_at = NULL WHERE stream_id = $1",
-                    )
-                    .bind(stream_id)
-                    .execute(&state.pool)
-                    .await;
-
-                    let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
-                        stream_id,
-                        online: None,
-                        stream_epoch: Some(s.stream_epoch + 1),
-                        display_alias: None,
-                    });
-
-                    // Emit MetricsUpdated with zeroed epoch values
-                    if let Ok(Some(m)) = fetch_stream_metrics(&state.pool, stream_id).await {
-                        let _ = state.dashboard_tx.send(DashboardEvent::MetricsUpdated {
-                            stream_id,
-                            raw_count: m.raw_count,
-                            dedup_count: m.dedup_count,
-                            retransmit_count: m.retransmit_count,
-                            lag_ms: m.lag_ms,
-                            epoch_raw_count: 0,
-                            epoch_dedup_count: 0,
-                            epoch_retransmit_count: 0,
-                            epoch_lag_ms: None,
-                            epoch_last_received_at: None,
-                            unique_chips: 0,
-                        });
-                    }
-
                     return StatusCode::NO_CONTENT.into_response();
                 }
             }

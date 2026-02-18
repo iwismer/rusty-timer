@@ -205,6 +205,26 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
         Some(expected_created_at)
     );
 
+    let metrics_updated_data = find_sse_event_data(&collected, "metrics_updated")
+        .expect("missing metrics_updated payload");
+    let metrics_updated_json: serde_json::Value =
+        serde_json::from_str(&metrics_updated_data).unwrap();
+    assert_eq!(metrics_updated_json["raw_count"].as_i64(), Some(1));
+    assert_eq!(metrics_updated_json["dedup_count"].as_i64(), Some(1));
+    assert_eq!(metrics_updated_json["retransmit_count"].as_i64(), Some(0));
+    assert_eq!(metrics_updated_json["epoch_raw_count"].as_i64(), Some(0));
+    assert_eq!(metrics_updated_json["epoch_dedup_count"].as_i64(), Some(0));
+    assert_eq!(
+        metrics_updated_json["epoch_retransmit_count"].as_i64(),
+        Some(0)
+    );
+    assert_eq!(metrics_updated_json["epoch_lag_ms"].as_i64(), None);
+    assert_eq!(
+        metrics_updated_json["epoch_last_received_at"].as_str(),
+        None
+    );
+    assert_eq!(metrics_updated_json["unique_chips"].as_i64(), Some(0));
+
     // Keep the container alive until the end of the test
     std::mem::forget(container);
 }

@@ -41,17 +41,51 @@ pub async fn get_metrics(
         }
     };
 
-    let epoch: i64 = sqlx::query_scalar("SELECT stream_epoch FROM streams WHERE stream_id = $1")
-        .bind(stream_id)
-        .fetch_optional(&state.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(1);
+    let epoch =
+        match sqlx::query_scalar::<_, i64>("SELECT stream_epoch FROM streams WHERE stream_id = $1")
+            .bind(stream_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(Some(epoch)) => epoch,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(HttpErrorEnvelope {
+                        code: "NOT_FOUND".to_owned(),
+                        message: "stream not found".to_owned(),
+                        details: None,
+                    }),
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(HttpErrorEnvelope {
+                        code: "INTERNAL_ERROR".to_owned(),
+                        message: e.to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response()
+            }
+        };
 
-    let unique_chips = count_unique_chips(&state.pool, stream_id, epoch)
-        .await
-        .unwrap_or(0);
+    let unique_chips = match count_unique_chips(&state.pool, stream_id, epoch).await {
+        Ok(count) => count,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
 
     (
         StatusCode::OK,
