@@ -270,6 +270,26 @@ impl JournalAccess for NoJournal {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn format_last_seen(instant: Option<Instant>) -> String {
+    match instant {
+        None => "never".to_owned(),
+        Some(t) => {
+            let elapsed = t.elapsed().as_secs();
+            if elapsed < 60 {
+                format!("{}s ago", elapsed)
+            } else if elapsed < 3600 {
+                format!("{}m ago", elapsed / 60)
+            } else {
+                format!("{}h ago", elapsed / 3600)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Server accept loop
 // ---------------------------------------------------------------------------
 
@@ -342,37 +362,96 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
             }
         }
         ("GET", "/") => {
-            let ss = subsystem.lock().await;
-            let uplink_state = if ss.uplink_connected() {
+            let (ready, uplink_connected, forwarder_id, local_ip, readers) = {
+                let ss = subsystem.lock().await;
+                let mut readers: Vec<_> = ss
+                    .readers
+                    .iter()
+                    .map(|(ip, r)| (ip.clone(), r.clone()))
+                    .collect();
+                readers.sort_by(|a, b| a.0.cmp(&b.0));
+                (
+                    ss.is_ready(),
+                    ss.uplink_connected(),
+                    ss.forwarder_id.clone(),
+                    ss.local_ip.clone(),
+                    readers,
+                )
+            };
+
+            let ready_state = if ready { "ready" } else { "not-ready" };
+            let ready_class = if ready { "ok" } else { "err" };
+            let uplink_state = if uplink_connected {
                 "connected"
             } else {
                 "disconnected"
             };
-            let ready_state = if ss.is_ready() { "ready" } else { "not-ready" };
+            let uplink_class = if uplink_connected { "ok" } else { "err" };
+            let local_ip_display = local_ip.as_deref().unwrap_or("unknown");
+
+            let mut reader_rows = String::new();
+            for (ip, r) in &readers {
+                let total = journal.lock().await.event_count(ip).unwrap_or(0);
+                let (state_text, state_class) = match r.state {
+                    ReaderConnectionState::Connected => ("connected", "ok"),
+                    ReaderConnectionState::Connecting => ("connecting", "warn"),
+                    ReaderConnectionState::Disconnected => ("disconnected", "err"),
+                };
+                let last_seen = format_last_seen(r.last_seen);
+                reader_rows.push_str(&format!(
+                    "<tr><td>{ip}</td>\
+                     <td><span class=\"status {sc}\">{st}</span></td>\
+                     <td>{session}</td>\
+                     <td>{total}</td>\
+                     <td>{ls}</td></tr>",
+                    ip = ip,
+                    sc = state_class,
+                    st = state_text,
+                    session = r.reads_since_restart,
+                    total = total,
+                    ls = last_seen,
+                ));
+            }
+
             let html = format!(
                 "<!DOCTYPE html>\
                  <html><head><title>Forwarder Status</title>\
                  <style>\
-                 body{{font-family:system-ui,sans-serif;max-width:480px;margin:2rem auto;padding:0 1rem}}\
+                 body{{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem}}\
                  h1{{margin-bottom:.5rem}}\
+                 h2{{margin-top:1.5rem;margin-bottom:.5rem}}\
                  .status{{padding:.25rem .5rem;border-radius:4px;display:inline-block}}\
                  .ok{{background:#d4edda;color:#155724}}\
+                 .warn{{background:#fff3cd;color:#856404}}\
                  .err{{background:#f8d7da;color:#721c24}}\
+                 table{{border-collapse:collapse;width:100%}}\
+                 th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd}}\
+                 th{{font-weight:600}}\
                  </style>\
                  </head><body>\
                  <h1>Forwarder Status</h1>\
                  <p>Version: {version}</p>\
-                 <p>Readiness: <span class=\"status {ready_class}\">{ready}</span></p>\
-                 <p>Uplink: <span class=\"status {uplink_class}\">{uplink}</span></p>\
+                 <p>Forwarder ID: <code>{fwd_id}</code></p>\
+                 <p>Local IP: {local_ip}</p>\
+                 <p>Readiness: <span class=\"status {rc}\">{rs}</span></p>\
+                 <p>Uplink: <span class=\"status {uc}\">{us}</span></p>\
+                 <h2>Readers</h2>\
+                 <table>\
+                 <tr><th>Reader IP</th><th>Status</th><th>Reads (session)</th><th>Reads (total)</th><th>Last seen</th></tr>\
+                 {reader_rows}\
+                 </table>\
                  <script>\
                  setTimeout(()=>location.reload(),2000);\
                  </script>\
                  </body></html>",
                 version = *version,
-                ready = ready_state,
-                ready_class = if ss.is_ready() { "ok" } else { "err" },
-                uplink = uplink_state,
-                uplink_class = if ss.uplink_connected() { "ok" } else { "err" },
+                fwd_id = forwarder_id,
+                local_ip = local_ip_display,
+                rs = ready_state,
+                rc = ready_class,
+                us = uplink_state,
+                uc = uplink_class,
+                reader_rows = reader_rows,
             );
             send_response(&mut stream, 200, "text/html; charset=utf-8", &html).await;
         }
