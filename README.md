@@ -1,6 +1,7 @@
 # Rusty Timer
 
-[![CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
+[![Rust CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
+[![Dashboard CI](https://github.com/iwismer/rusty-timer/actions/workflows/dashboard.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/dashboard.yml)
 
 Timing utilities for the IPICO chip timing system, extended with a full remote forwarding suite for distributing race reads across a network.
 

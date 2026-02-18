@@ -1,0 +1,47 @@
+name: Dashboard CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "apps/dashboard/**"
+      - ".github/workflows/dashboard.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "apps/dashboard/**"
+      - ".github/workflows/dashboard.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Dashboard Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dashboard
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prettier check
+        run: npm run lint
+
+      - name: Svelte type check
+        run: npm run check
+
+      - name: Vitest
+        run: npm test

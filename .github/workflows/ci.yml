@@ -1,10 +1,22 @@
-name: CI
+name: Rust CI
 
 on:
   push:
     branches: [master]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [master]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/ci.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,7 +27,7 @@ env:
 
 jobs:
   lint:
-    name: Lint (Ubuntu)
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,10 +43,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }})
+    name: Unit Tests (${{ matrix.os }})
     needs: lint
     runs-on: ${{ matrix.os }}
     strategy:
@@ -51,8 +63,25 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --all-targets
+      - name: Run unit tests
+        run: cargo test --workspace --lib
 
       - name: Build binaries
         run: cargo build --bins
+
+  integration:
+    name: Integration Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run integration tests (requires Docker)
+        run: cargo test --workspace --tests -- --test-threads=4

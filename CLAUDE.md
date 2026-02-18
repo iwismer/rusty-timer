@@ -5,8 +5,8 @@
 This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust workspace with two SvelteKit frontend apps.
 
 ### Components
-- `src/streamer.rs` — Connects to IPICO readers, fans out TCP to local clients (workspace root binary)
-- `src/emulator.rs` — Simulates IPICO reads for development/testing (workspace root binary)
+- `services/streamer/` — Connects to IPICO readers, fans out TCP to local clients
+- `services/emulator/` — Simulates IPICO reads for development/testing
 - `services/forwarder/` — Reads from IPICO hardware, journals to SQLite, forwards over WebSocket
 - `services/server/` — Axum/Postgres: ingest, dedup, fanout, dashboard API
 - `services/receiver/` — Windows app: subscribes to server, proxies streams to local TCP ports
