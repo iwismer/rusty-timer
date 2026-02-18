@@ -39,6 +39,7 @@ assert_eq "https://example.com/fwd.tar.gz" "${url}" "release URL should match ex
 
 # --- probe URL derivation from bind ---
 assert_eq "http://localhost:8080/healthz" "$(status_probe_url_from_bind '0.0.0.0:8080')" "wildcard bind should map to localhost"
-assert_eq "http://127.0.0.1:9090/healthz" "$(status_probe_url_from_bind '127.0.0.1:9090')" "loopback bind should be preserved"
+assert_eq "http://localhost:9090/healthz" "$(status_probe_url_from_bind '127.0.0.1:9090')" "bind host should not affect probe host"
+assert_eq "http://localhost:7070/healthz" "$(status_probe_url_from_bind '[::1]:7070')" "ipv6 bind should parse port and probe localhost"
 
 echo "PASS: rt-setup helper tests"

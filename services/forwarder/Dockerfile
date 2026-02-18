@@ -35,6 +35,8 @@ COPY crates/ crates/
 COPY services/forwarder/ services/forwarder/
 COPY services/server/ services/server/
 COPY services/receiver/ services/receiver/
+COPY services/streamer/ services/streamer/
+COPY services/emulator/ services/emulator/
 COPY src/ src/
 
 # Build the forwarder binary in release mode.
@@ -51,6 +53,7 @@ FROM debian:bookworm-slim AS runtime
 # HEALTHCHECK directive.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root service user.

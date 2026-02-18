@@ -47,25 +47,15 @@ select_latest_forwarder_asset_from_pages() {
 
 status_probe_url_from_bind() {
   local bind="$1"
-  local host
-  local port
+  local port="8080"
 
-  if [[ "${bind}" =~ ^\[([0-9A-Fa-f:]+)\]:(.+)$ ]]; then
-    host="${BASH_REMATCH[1]}"
-    port="${BASH_REMATCH[2]}"
+  if [[ "${bind}" =~ ^\[[0-9A-Fa-f:]+\]:(.+)$ ]]; then
+    port="${BASH_REMATCH[1]}"
   elif [[ "${bind}" == *:* ]]; then
-    host="${bind%:*}"
     port="${bind##*:}"
-  else
-    host="${bind}"
-    port="8080"
   fi
 
-  if [[ -z "${host}" || "${host}" == "0.0.0.0" || "${host}" == "::" ]]; then
-    host="localhost"
-  fi
-
-  printf 'http://%s:%s/healthz' "${host}" "${port}"
+  printf 'http://localhost:%s/healthz' "${port}"
 }
 
 require_root() {
@@ -344,6 +334,7 @@ verify() {
 
   if [[ ${failed} -ne 0 ]]; then
     echo "Check logs with: journalctl -u rt-forwarder -n 50"
+    return 1
   fi
 }
 
