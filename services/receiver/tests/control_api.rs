@@ -568,3 +568,62 @@ async fn put_subscriptions_emits_status_changed_with_count() {
         "Expected StatusChanged event after put_subscriptions"
     );
 }
+
+#[tokio::test]
+async fn put_subscriptions_concurrent_writes_emit_current_count() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let mut rx = state.ui_tx.subscribe();
+    let app = build_router(Arc::clone(&state));
+
+    // Hold connection_state so both requests can persist before either emits status.
+    let conn_guard = state.connection_state.write().await;
+
+    let first_body = json!({
+        "subscriptions": [
+            {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null}
+        ]
+    });
+    let second_body = json!({
+        "subscriptions": [
+            {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null},
+            {"forwarder_id": "f2", "reader_ip": "10.0.0.2:10000", "local_port_override": null}
+        ]
+    });
+
+    let app_first = app.clone();
+    let first =
+        tokio::spawn(async move { put_json(app_first, "/api/v1/subscriptions", first_body).await });
+    let second =
+        tokio::spawn(async move { put_json(app, "/api/v1/subscriptions", second_body).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let count = {
+                let db = state.db.lock().await;
+                db.load_subscriptions().unwrap().len()
+            };
+            if count == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timed out waiting for persisted subscriptions");
+
+    drop(conn_guard);
+
+    assert_eq!(first.await.unwrap(), StatusCode::NO_CONTENT);
+    assert_eq!(second.await.unwrap(), StatusCode::NO_CONTENT);
+
+    let mut saw_status = false;
+    while let Ok(event) = rx.try_recv() {
+        let json = serde_json::to_value(&event).unwrap();
+        if json["type"] == "status_changed" {
+            saw_status = true;
+            assert_eq!(json["streams_count"], 2);
+        }
+    }
+    assert!(saw_status, "Expected at least one status_changed event");
+}
