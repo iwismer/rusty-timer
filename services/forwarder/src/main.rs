@@ -51,6 +51,12 @@ fn detect_local_ip(target_ip: &str) -> Option<String> {
     Some(local_addr.ip().to_string())
 }
 
+async fn mark_reader_disconnected(status: &StatusServer, reader_ip: &str) {
+    status
+        .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
+        .await;
+}
+
 // ---------------------------------------------------------------------------
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
@@ -97,9 +103,7 @@ async fn run_reader(
                     backoff_secs = backoff_secs,
                     "reader TCP connect failed, retrying"
                 );
-                status
-                    .update_reader_state(&reader_ip, ReaderConnectionState::Disconnected)
-                    .await;
+                mark_reader_disconnected(&status, &reader_ip).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -144,16 +148,12 @@ async fn run_reader(
             match read_result {
                 Err(e) => {
                     warn!(reader_ip = %reader_ip, error = %e, "TCP read error, reconnecting");
-                    status
-                        .update_reader_state(&reader_ip, ReaderConnectionState::Disconnected)
-                        .await;
+                    mark_reader_disconnected(&status, &reader_ip).await;
                     break;
                 }
                 Ok(0) => {
                     warn!(reader_ip = %reader_ip, "TCP connection closed by reader, reconnecting");
-                    status
-                        .update_reader_state(&reader_ip, ReaderConnectionState::Disconnected)
-                        .await;
+                    mark_reader_disconnected(&status, &reader_ip).await;
                     break;
                 }
                 Ok(_) => {}
@@ -186,6 +186,7 @@ async fn run_reader(
                     Ok(v) => v,
                     Err(e) => {
                         error!(reader_ip = %reader_ip, error = %e, "failed to get epoch");
+                        mark_reader_disconnected(&status, &reader_ip).await;
                         break;
                     }
                 };
@@ -193,6 +194,7 @@ async fn run_reader(
                     Ok(s) => s,
                     Err(e) => {
                         error!(reader_ip = %reader_ip, error = %e, "failed to get next_seq");
+                        mark_reader_disconnected(&status, &reader_ip).await;
                         break;
                     }
                 };
@@ -205,6 +207,7 @@ async fn run_reader(
                     &parsed_read_type,
                 ) {
                     error!(reader_ip = %reader_ip, error = %e, "journal insert failed");
+                    mark_reader_disconnected(&status, &reader_ip).await;
                     break;
                 }
                 (epoch, seq)
@@ -695,6 +698,21 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Seed historical totals once at startup to avoid per-request DB counting.
+    for reader_ip in &all_reader_ips {
+        let total = {
+            let j = journal.lock().await;
+            match j.event_count(reader_ip) {
+                Ok(count) => count,
+                Err(e) => {
+                    warn!(reader_ip = %reader_ip, error = %e, "failed to load reader total");
+                    0
+                }
+            }
+        };
+        status_server.set_reader_total(reader_ip, total).await;
+    }
+
     // Set forwarder identity on status page
     status_server.set_forwarder_id(&forwarder_id).await;
 
@@ -782,6 +800,7 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use rt_protocol::{EpochResetCommand, Heartbeat, WsMessage};
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
@@ -1010,5 +1029,51 @@ mod tests {
             Message::Text(text) => serde_json::from_str(&text).expect("parse ws json"),
             other => panic!("expected text ws frame, got {:?}", other),
         }
+    }
+
+    async fn http_get_body(addr: SocketAddr, path: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect failed");
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            path
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write failed");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("read failed");
+        response
+    }
+
+    #[tokio::test]
+    async fn journal_error_marks_reader_disconnected() {
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        status.init_readers(&["10.0.0.42".to_owned()]).await;
+        status
+            .update_reader_state("10.0.0.42", ReaderConnectionState::Connected)
+            .await;
+
+        mark_reader_disconnected(&status, "10.0.0.42").await;
+
+        let body = http_get_body(status.local_addr(), "/").await;
+        assert!(
+            body.contains("disconnected"),
+            "reader should be marked disconnected after journal error"
+        );
     }
 }

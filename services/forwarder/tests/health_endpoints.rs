@@ -11,6 +11,8 @@
 
 use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 // Helper: make an HTTP request (using tokio's TcpStream for simplicity)
@@ -395,5 +397,52 @@ async fn record_read_increments_counter() {
     assert!(
         body.contains(">5<"),
         "status page must show session read count of 5"
+    );
+}
+
+#[tokio::test]
+async fn status_page_does_not_query_journal_for_totals() {
+    use forwarder::status_http::{EpochResetError, JournalAccess};
+    use tokio::sync::Mutex;
+
+    struct CountingJournal {
+        event_count_calls: Arc<AtomicUsize>,
+    }
+
+    impl JournalAccess for CountingJournal {
+        fn reset_epoch(&mut self, _stream_key: &str) -> Result<i64, EpochResetError> {
+            Ok(1)
+        }
+
+        fn event_count(&self, _stream_key: &str) -> Result<i64, String> {
+            self.event_count_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(42)
+        }
+    }
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let journal = Arc::new(Mutex::new(CountingJournal {
+        event_count_calls: calls.clone(),
+    }));
+
+    let server = StatusServer::start_with_journal(cfg, subsystem, journal)
+        .await
+        .expect("start failed");
+    server.init_readers(&["10.0.0.9".to_owned()]).await;
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_get(addr, "/").await;
+    assert_eq!(status, 200);
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "status page must not query journal totals during rendering"
     );
 }

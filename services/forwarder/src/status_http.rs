@@ -54,6 +54,7 @@ pub struct ReaderStatus {
     pub state: ReaderConnectionState,
     pub last_seen: Option<Instant>,
     pub reads_since_restart: u64,
+    pub reads_total: i64,
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -159,7 +160,16 @@ impl StatusServer {
                 state: ReaderConnectionState::Disconnected,
                 last_seen: None,
                 reads_since_restart: 0,
+                reads_total: 0,
             });
+        }
+    }
+
+    /// Seed a reader's total historical count from durable journal state.
+    pub async fn set_reader_total(&self, reader_ip: &str, total: i64) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.reads_total = total;
         }
     }
 
@@ -176,6 +186,7 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.reads_since_restart += 1;
+            r.reads_total += 1;
             r.last_seen = Some(Instant::now());
         }
     }
@@ -391,7 +402,6 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
 
             let mut reader_rows = String::new();
             for (ip, r) in &readers {
-                let total = journal.lock().await.event_count(ip).unwrap_or(0);
                 let (state_text, state_class) = match r.state {
                     ReaderConnectionState::Connected => ("connected", "ok"),
                     ReaderConnectionState::Connecting => ("connecting", "warn"),
@@ -408,7 +418,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                     sc = state_class,
                     st = state_text,
                     session = r.reads_since_restart,
-                    total = total,
+                    total = r.reads_total,
                     ls = last_seen,
                 ));
             }
