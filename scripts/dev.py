@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import hashlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -73,7 +74,7 @@ PANES = [
 def build_emulator_cmd(delay: int, file_path: str | None) -> str:
     cmd = f"cargo run -p emulator -- --port 10001 --delay {delay} --type raw"
     if file_path:
-        cmd += f" --file {file_path}"
+        cmd += f" --file {shlex.quote(file_path)}"
     return cmd
 
 FORWARDER_TOML = f"""\
@@ -137,14 +138,17 @@ def clear() -> None:
         console.print("  [dim]tmux not installed — skipping[/dim]")
 
     # 2. Stop and remove Docker container
-    result = subprocess.run(
-        ["docker", "rm", "-f", PG_CONTAINER],
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        console.print(f"  [green]Removed[/green] Docker container: {PG_CONTAINER}")
+    if shutil.which("docker"):
+        result = subprocess.run(
+            ["docker", "rm", "-f", PG_CONTAINER],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            console.print(f"  [green]Removed[/green] Docker container: {PG_CONTAINER}")
+        else:
+            console.print(f"  [dim]No Docker container found: {PG_CONTAINER}[/dim]")
     else:
-        console.print(f"  [dim]No Docker container found: {PG_CONTAINER}[/dim]")
+        console.print("  [dim]docker not installed — skipping[/dim]")
 
     # 3. Remove tmp directory
     if TMP_DIR.exists():
