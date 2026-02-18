@@ -15,8 +15,10 @@
 //! No authentication in v1. Status page is read-only.
 
 use crate::storage::journal::Journal;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -38,6 +40,22 @@ pub struct StatusConfig {
 // Subsystem readiness
 // ---------------------------------------------------------------------------
 
+/// Connection state of a reader TCP socket.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReaderConnectionState {
+    Connecting,
+    Connected,
+    Disconnected,
+}
+
+/// Per-reader status tracked in memory.
+#[derive(Debug, Clone)]
+pub struct ReaderStatus {
+    pub state: ReaderConnectionState,
+    pub last_seen: Option<Instant>,
+    pub reads_since_restart: u64,
+}
+
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
 ///
 /// Ready = config loaded + journal open + worker tasks started.
@@ -48,6 +66,9 @@ pub struct SubsystemStatus {
     reason: Option<String>,
     /// Uplink state is tracked for the status page but does NOT affect readiness.
     uplink_connected: bool,
+    forwarder_id: String,
+    local_ip: Option<String>,
+    readers: HashMap<String, ReaderStatus>,
 }
 
 impl SubsystemStatus {
@@ -57,6 +78,9 @@ impl SubsystemStatus {
             ready: true,
             reason: None,
             uplink_connected: false,
+            forwarder_id: String::new(),
+            local_ip: None,
+            readers: HashMap::new(),
         }
     }
 
@@ -66,6 +90,9 @@ impl SubsystemStatus {
             ready: false,
             reason: Some(reason),
             uplink_connected: false,
+            forwarder_id: String::new(),
+            local_ip: None,
+            readers: HashMap::new(),
         }
     }
 
