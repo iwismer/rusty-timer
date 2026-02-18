@@ -225,6 +225,7 @@ async fn run_uplink(
     reader_ips: Vec<String>,
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    status: StatusServer,
 ) {
     let server_url = format!(
         "{}{}",
@@ -293,6 +294,7 @@ async fn run_uplink(
                     device_id = %s.device_id(),
                     "uplink connected"
                 );
+                status.set_uplink_connected(true).await;
                 backoff_secs = 1;
                 s
             }
@@ -499,6 +501,7 @@ async fn run_uplink(
         }
 
         // Reconnect with backoff
+        status.set_uplink_connected(false).await;
         let delay = Duration::from_secs(backoff_secs);
         warn!(
             backoff_secs = backoff_secs,
@@ -598,8 +601,6 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-    let _ = status_server; // keep handle alive
-
     // Collect enabled reader endpoints
     let mut all_reader_ips: Vec<String> = Vec::new();
     let mut fanout_addrs: Vec<(String, u16, String, SocketAddr)> = Vec::new(); // (ip, port, read_type, fanout_addr)
@@ -676,10 +677,14 @@ async fn main() {
         let fwd_cfg = cfg.clone();
         let fwd_id = forwarder_id.clone();
         let ips = all_reader_ips.clone();
+        let ss = status_server.clone();
         tokio::spawn(async move {
-            run_uplink(fwd_cfg, fwd_id, ips, j, rx).await;
+            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss).await;
         });
     }
+
+    // All worker tasks started — mark subsystem ready
+    status_server.set_ready().await;
 
     info!(
         readers = all_reader_ips.len(),
@@ -914,12 +919,22 @@ mod tests {
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start test status server");
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-epoch-reconnect-test".to_string(),
             vec![reader_ip],
             journal,
             shutdown_rx,
+            status,
         ));
 
         let (sent_extra_batch_on_first_session, saw_second_session) =

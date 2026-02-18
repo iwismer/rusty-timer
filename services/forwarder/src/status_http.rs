@@ -90,14 +90,28 @@ impl SubsystemStatus {
 // ---------------------------------------------------------------------------
 
 /// Handle to the running status HTTP server.
+#[derive(Clone)]
 pub struct StatusServer {
     local_addr: SocketAddr,
+    subsystem: Arc<Mutex<SubsystemStatus>>,
 }
 
 impl StatusServer {
     /// Return the bound listen address.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Mark all local subsystems as ready.
+    pub async fn set_ready(&self) {
+        let mut ss = self.subsystem.lock().await;
+        ss.ready = true;
+        ss.reason = None;
+    }
+
+    /// Update the uplink connection state (does not affect readiness).
+    pub async fn set_uplink_connected(&self, connected: bool) {
+        self.subsystem.lock().await.set_uplink_connected(connected);
     }
 
     /// Start the status HTTP server without a journal (epoch reset returns 404).
@@ -120,11 +134,15 @@ impl StatusServer {
         let subsystem = Arc::new(Mutex::new(subsystem));
         let version = cfg.forwarder_version.clone();
 
+        let server_subsystem = subsystem.clone();
         tokio::spawn(async move {
-            run_server(listener, subsystem, journal, version).await;
+            run_server(listener, server_subsystem, journal, version).await;
         });
 
-        Ok(StatusServer { local_addr })
+        Ok(StatusServer {
+            local_addr,
+            subsystem,
+        })
     }
 }
 
@@ -255,16 +273,29 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
             };
             let ready_state = if ss.is_ready() { "ready" } else { "not-ready" };
             let html = format!(
-                "<!DOCTYPE html><html><head><title>Forwarder Status</title></head>\
-                 <body>\
+                "<!DOCTYPE html>\
+                 <html><head><title>Forwarder Status</title>\
+                 <style>\
+                 body{{font-family:system-ui,sans-serif;max-width:480px;margin:2rem auto;padding:0 1rem}}\
+                 h1{{margin-bottom:.5rem}}\
+                 .status{{padding:.25rem .5rem;border-radius:4px;display:inline-block}}\
+                 .ok{{background:#d4edda;color:#155724}}\
+                 .err{{background:#f8d7da;color:#721c24}}\
+                 </style>\
+                 </head><body>\
                  <h1>Forwarder Status</h1>\
                  <p>Version: {version}</p>\
-                 <p>Readiness: {ready}</p>\
-                 <p>Uplink: {uplink}</p>\
+                 <p>Readiness: <span class=\"status {ready_class}\">{ready}</span></p>\
+                 <p>Uplink: <span class=\"status {uplink_class}\">{uplink}</span></p>\
+                 <script>\
+                 setTimeout(()=>location.reload(),2000);\
+                 </script>\
                  </body></html>",
                 version = *version,
                 ready = ready_state,
+                ready_class = if ss.is_ready() { "ok" } else { "err" },
                 uplink = uplink_state,
+                uplink_class = if ss.uplink_connected() { "ok" } else { "err" },
             );
             send_response(&mut stream, 200, "text/html; charset=utf-8", &html).await;
         }
