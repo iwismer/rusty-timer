@@ -11,6 +11,7 @@ export interface StreamEntry {
   forwarder_id: string;
   reader_ip: string;
   display_alias: string | null;
+  forwarder_display_name: string | null;
   online: boolean;
   stream_epoch: number;
   created_at: string;
