@@ -1,7 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// These E2E tests require the receiver control API to be running at 127.0.0.1:9090.
-// In CI they are skipped if the API is not reachable.
+// These E2E tests run against mocked control API routes.
 
 type StreamFixture = {
   forwarder_id: string;
@@ -16,7 +15,7 @@ async function mockReceiverApi(
   page: import("@playwright/test").Page,
   streams: StreamFixture[],
 ): Promise<void> {
-  await page.route("http://127.0.0.1:9090/api/v1/events", async (route) => {
+  await page.route("**/api/v1/events", async (route) => {
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
@@ -24,7 +23,7 @@ async function mockReceiverApi(
     });
   });
 
-  await page.route("http://127.0.0.1:9090/api/v1/status", async (route) => {
+  await page.route("**/api/v1/status", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -36,7 +35,7 @@ async function mockReceiverApi(
     });
   });
 
-  await page.route("http://127.0.0.1:9090/api/v1/profile", async (route) => {
+  await page.route("**/api/v1/profile", async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({
         status: 200,
@@ -53,7 +52,7 @@ async function mockReceiverApi(
     await route.fulfill({ status: 204, body: "" });
   });
 
-  await page.route("http://127.0.0.1:9090/api/v1/logs", async (route) => {
+  await page.route("**/api/v1/logs", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -61,7 +60,7 @@ async function mockReceiverApi(
     });
   });
 
-  await page.route("http://127.0.0.1:9090/api/v1/streams", async (route) => {
+  await page.route("**/api/v1/streams", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -76,12 +75,7 @@ async function mockReceiverApi(
 
 test.describe("profile page", () => {
   test.beforeEach(async ({ page }) => {
-    // Skip if API not reachable
-    try {
-      await page.goto("/");
-    } catch {
-      test.skip();
-    }
+    await mockReceiverApi(page, []);
   });
 
   test("renders status section", async ({ page }) => {
@@ -149,10 +143,10 @@ test.describe("profile page", () => {
     const streamsSection = page.locator('[data-testid="streams-section"]');
 
     await expect(
-      streamsSection.locator('button:has-text("Subscribe")'),
+      streamsSection.getByRole("button", { name: /^Subscribe$/ }),
     ).toHaveCount(1);
     await expect(
-      streamsSection.locator('button:has-text("Unsubscribe")'),
+      streamsSection.getByRole("button", { name: /^Unsubscribe$/ }),
     ).toHaveCount(1);
   });
 
@@ -178,15 +172,12 @@ test.describe("profile page", () => {
       },
     ]);
 
-    await page.route(
-      "http://127.0.0.1:9090/api/v1/subscriptions",
-      async (route) => {
-        await new Promise<void>((resolve) => {
-          releasePut = resolve;
-        });
-        await route.fulfill({ status: 204, body: "" });
-      },
-    );
+    await page.route("**/api/v1/subscriptions", async (route) => {
+      await new Promise<void>((resolve) => {
+        releasePut = resolve;
+      });
+      await route.fulfill({ status: 204, body: "" });
+    });
 
     await page.goto("/");
     const first = page.locator('[data-testid="sub-f1/10.0.0.1"]');
@@ -197,5 +188,47 @@ test.describe("profile page", () => {
     await expect(second).toBeDisabled();
 
     releasePut();
+  });
+
+  test("subscribe with port override sends numeric payload", async ({
+    page,
+  }) => {
+    let putPayload: unknown = null;
+
+    await mockReceiverApi(page, [
+      {
+        forwarder_id: "f1",
+        reader_ip: "10.0.0.1",
+        subscribed: false,
+        local_port: null,
+        online: true,
+      },
+    ]);
+
+    await page.route("**/api/v1/subscriptions", async (route) => {
+      if (route.request().method() === "PUT") {
+        putPayload = route.request().postDataJSON();
+        await route.fulfill({ status: 204, body: "" });
+        return;
+      }
+
+      await route.fulfill({ status: 405, body: "" });
+    });
+
+    await page.goto("/");
+    await page.locator('[data-testid="port-f1/10.0.0.1"]').fill("9002");
+    await page.locator('[data-testid="sub-f1/10.0.0.1"]').click();
+
+    await expect
+      .poll(() => putPayload)
+      .toEqual({
+        subscriptions: [
+          {
+            forwarder_id: "f1",
+            reader_ip: "10.0.0.1",
+            local_port_override: 9002,
+          },
+        ],
+      });
   });
 });

@@ -27,6 +27,13 @@ describe("parsePortOverrideInput", () => {
     });
   });
 
+  it("accepts numeric runtime values from number inputs", () => {
+    expect(parsePortOverrideInput(9002)).toEqual({
+      value: 9002,
+      error: null,
+    });
+  });
+
   it("rejects non-integer input", () => {
     expect(parsePortOverrideInput("10.5")).toEqual({
       value: null,

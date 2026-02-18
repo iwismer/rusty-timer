@@ -17,7 +17,7 @@ export interface BuildUpdatedSubscriptionsParams {
     reader_ip: string;
     currentlySubscribed: boolean;
   };
-  rawPortOverride?: string;
+  rawPortOverride?: string | number | null;
 }
 
 export interface BuildUpdatedSubscriptionsResult {
@@ -30,9 +30,9 @@ export interface BuildUpdatedSubscriptionsResult {
 }
 
 export function parsePortOverrideInput(
-  raw: string | undefined,
+  raw: string | number | null | undefined,
 ): ParsedPortOverride {
-  const trimmed = (raw ?? "").trim();
+  const trimmed = String(raw ?? "").trim();
   if (trimmed === "") {
     return { value: null, error: null };
   }

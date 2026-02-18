@@ -23,7 +23,7 @@
   let saving = false;
   let connectBusy = false;
   let sseConnected = false;
-  let portOverrides: Record<string, string> = {};
+  let portOverrides: Record<string, string | number | null> = {};
   let subscriptionsBusy = false;
   let activeSubscriptionKey: string | null = null;
 
