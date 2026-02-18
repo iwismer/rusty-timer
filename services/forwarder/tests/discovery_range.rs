@@ -2,7 +2,7 @@
 ///
 /// Tests single IP parsing, range expansion, error cases for
 /// unsupported syntaxes (CIDR, wildcard), and edge cases.
-use forwarder::discovery::{expand_target, ReaderEndpoint};
+use forwarder::discovery::expand_target;
 
 // ---------------------------------------------------------------------------
 // Single IP

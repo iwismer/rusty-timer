@@ -2,7 +2,6 @@
 ///
 /// Uses MockWsServer from rt-test-utils to simulate a server.
 use forwarder::uplink::{UplinkConfig, UplinkSession};
-use rt_protocol::{AckEntry, ForwarderAck, ForwarderHello, WsMessage};
 use rt_test_utils::MockWsServer;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +23,7 @@ async fn uplink_sends_forwarder_hello_on_connect() {
         batch_max_events: 50,
     };
 
-    let mut session = UplinkSession::connect(cfg).await.expect("connect");
+    let session = UplinkSession::connect(cfg).await.expect("connect");
     let session_id = session.session_id().to_owned();
     assert!(
         !session_id.is_empty(),

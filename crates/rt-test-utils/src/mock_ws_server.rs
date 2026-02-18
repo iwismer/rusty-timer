@@ -56,19 +56,14 @@ impl MockWsServer {
 
     /// Accept loop: accepts TCP connections and spawns a handler per connection.
     async fn accept_loop(listener: TcpListener) {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _peer)) => {
-                    tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(stream).await {
-                            // In tests, connection errors are expected (e.g. client drops).
-                            // Swallow silently.
-                            let _ = e;
-                        }
-                    });
+        while let Ok((stream, _peer)) = listener.accept().await {
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_connection(stream).await {
+                    // In tests, connection errors are expected (e.g. client drops).
+                    // Swallow silently.
+                    let _ = e;
                 }
-                Err(_) => break,
-            }
+            });
         }
     }
 
@@ -136,15 +131,10 @@ impl MockWsServer {
                 }
             } else {
                 // Post-hello message handling
-                match ws_msg {
-                    WsMessage::ForwarderEventBatch(batch) => {
-                        let ack = Self::build_forwarder_ack(&session_id, &batch);
-                        let json = serde_json::to_string(&ack)?;
-                        write.send(Message::Text(json.into())).await?;
-                    }
-                    // Additional message types can be handled here as needed.
-                    // For now, other post-hello messages are silently ignored.
-                    _ => {}
+                if let WsMessage::ForwarderEventBatch(batch) = ws_msg {
+                    let ack = Self::build_forwarder_ack(&session_id, &batch);
+                    let json = serde_json::to_string(&ack)?;
+                    write.send(Message::Text(json.into())).await?;
                 }
             }
         }

@@ -1,4 +1,3 @@
-use forwarder::replay::{ReplayEngine, ReplayResult};
 /// Tests for replay/resume behavior after disconnect/reconnect.
 ///
 /// Validates:
@@ -6,8 +5,8 @@ use forwarder::replay::{ReplayEngine, ReplayResult};
 /// - Replay starts from acked_cursor+1 (not from seq 1)
 /// - Events across epoch boundaries are replayed correctly
 /// - Journal state is updated correctly after ack receipt
+use forwarder::replay::ReplayEngine;
 use forwarder::storage::journal::Journal;
-use rt_test_utils::MockWsServer;
 use tempfile::NamedTempFile;
 
 fn make_journal() -> (Journal, NamedTempFile) {
@@ -100,7 +99,7 @@ fn replay_includes_old_epoch_unacked_events() {
     let result = engine.pending_events(&j, "192.168.2.30").unwrap();
 
     // Should have both epoch 1 and epoch 2 batches
-    assert!(result.len() >= 1, "should have pending events");
+    assert!(!result.is_empty(), "should have pending events");
     let total_events: usize = result.iter().map(|b| b.events.len()).sum();
     assert_eq!(
         total_events, 4,

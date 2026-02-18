@@ -5,7 +5,6 @@
 ///
 /// NOTE: Full migration execution testing requires a PostgreSQL container
 /// (e.g., testcontainers-rs) and is deferred to the integration test phase.
-
 const MIGRATION_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations/0001_init.sql");
 
 fn read_migration() -> String {

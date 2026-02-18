@@ -5,7 +5,7 @@
 //! - `GET /healthz`       — always 200 OK (process is running)
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
-//!                        — bump stream epoch; 200 on success, 404 if unknown
+//!   — bump stream epoch; 200 on success, 404 if unknown
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
@@ -185,18 +185,13 @@ async fn run_server<J: JournalAccess + Send + 'static>(
     version: String,
 ) {
     let version = Arc::new(version);
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let subsystem = subsystem.clone();
-                let journal = journal.clone();
-                let version = version.clone();
-                tokio::spawn(async move {
-                    handle_connection(stream, subsystem, journal, version).await;
-                });
-            }
-            Err(_) => break,
-        }
+    while let Ok((stream, _)) = listener.accept().await {
+        let subsystem = subsystem.clone();
+        let journal = journal.clone();
+        let version = version.clone();
+        tokio::spawn(async move {
+            handle_connection(stream, subsystem, journal, version).await;
+        });
     }
 }
 

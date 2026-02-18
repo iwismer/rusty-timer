@@ -311,7 +311,7 @@ async fn server_restart_http_api_accessible_after_restart() {
     fwd.recv_message().await.unwrap();
 
     // Send one event to ensure the stream is created.
-    let fwd_session2 = {
+    {
         // We already received the heartbeat above — need the session_id.
         // Reconnect to get a clean session for sending.
         let mut fwd2 = MockWsClient::connect_with_token(&fwd_url1, "fwd-srv-token-03")
@@ -327,8 +327,7 @@ async fn server_restart_http_api_accessible_after_restart() {
         // The second connection should fail (first-connection-wins).
         // Just wait briefly.
         tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    drop(fwd_session2);
+    }
     drop(fwd);
 
     // Verify stream exists in DB.
