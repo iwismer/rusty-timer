@@ -111,6 +111,11 @@ pub struct StreamMetricsRow {
     pub dedup_count: i64,
     pub retransmit_count: i64,
     pub lag_ms: Option<u64>,
+    pub epoch_raw_count: i64,
+    pub epoch_dedup_count: i64,
+    pub epoch_retransmit_count: i64,
+    pub epoch_lag_ms: Option<u64>,
+    pub epoch_last_received_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct StreamSnapshotRow {
@@ -128,24 +133,49 @@ pub async fn fetch_stream_metrics(
     stream_id: Uuid,
 ) -> Result<Option<StreamMetricsRow>, sqlx::Error> {
     let row = sqlx::query!(
-        r#"SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at
+        r#"SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at,
+                  epoch_raw_count, epoch_dedup_count, epoch_retransmit_count, epoch_last_received_at
            FROM stream_metrics WHERE stream_id = $1"#,
         stream_id
     )
     .fetch_optional(pool)
     .await?;
 
+    let now = chrono::Utc::now();
     Ok(row.map(|r| {
         let lag_ms = r
             .last_canonical_event_received_at
-            .map(|ts| (chrono::Utc::now() - ts).num_milliseconds().max(0) as u64);
+            .map(|ts| (now - ts).num_milliseconds().max(0) as u64);
+        let epoch_lag_ms = r
+            .epoch_last_received_at
+            .map(|ts| (now - ts).num_milliseconds().max(0) as u64);
         StreamMetricsRow {
             raw_count: r.raw_count,
             dedup_count: r.dedup_count,
             retransmit_count: r.retransmit_count,
             lag_ms,
+            epoch_raw_count: r.epoch_raw_count,
+            epoch_dedup_count: r.epoch_dedup_count,
+            epoch_retransmit_count: r.epoch_retransmit_count,
+            epoch_lag_ms,
+            epoch_last_received_at: r.epoch_last_received_at,
         }
     }))
+}
+
+pub async fn count_unique_chips(
+    pool: &PgPool,
+    stream_id: Uuid,
+    stream_epoch: i64,
+) -> Result<i64, sqlx::Error> {
+    let count = sqlx::query_scalar!(
+        "SELECT COUNT(DISTINCT tag_id) FROM events WHERE stream_id = $1 AND stream_epoch = $2 AND tag_id IS NOT NULL",
+        stream_id,
+        stream_epoch
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(count.unwrap_or(0))
 }
 
 pub async fn fetch_stream_snapshot(

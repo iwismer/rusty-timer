@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at,\n                  epoch_raw_count, epoch_dedup_count, epoch_retransmit_count, epoch_last_received_at\n           FROM stream_metrics WHERE stream_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "raw_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "raw_count"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "dedup_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "dedup_count"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "retransmit_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "retransmit_count"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "last_canonical_event_received_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "last_canonical_event_received_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "epoch_raw_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "epoch_raw_count"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "epoch_dedup_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "epoch_dedup_count"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "epoch_retransmit_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "epoch_retransmit_count"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "epoch_last_received_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "stream_metrics",
+            "name": "epoch_last_received_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "5f8dcf452a81463a370f4cc12005696dea54b80381f0278bf05062bb55d16e2f"
+}
