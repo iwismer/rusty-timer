@@ -22,7 +22,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(pool: PgPool) -> Self {
-        let (dashboard_tx, _) = broadcast::channel(256);
+        let (dashboard_tx, _) = broadcast::channel(4096);
         Self {
             pool,
             active_forwarders: Arc::new(RwLock::new(HashMap::new())),
