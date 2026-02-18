@@ -29,7 +29,7 @@ describe("api client", () => {
     );
     const p = await getProfile();
     expect(mockFetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:9090/api/v1/profile",
+      "/api/v1/profile",
       expect.any(Object),
     );
     expect(p.server_url).toBe("wss://s.com");
@@ -44,7 +44,7 @@ describe("api client", () => {
       log_level: "info",
     });
     expect(mockFetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:9090/api/v1/profile",
+      "/api/v1/profile",
       expect.objectContaining({ method: "PUT" }),
     );
   });
@@ -105,7 +105,7 @@ describe("api client", () => {
       },
     ]);
     expect(mockFetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:9090/api/v1/subscriptions",
+      "/api/v1/subscriptions",
       expect.objectContaining({ method: "PUT" }),
     );
   });

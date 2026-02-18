@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import * as api from "$lib/api";
+  import { initSSE, destroySSE } from "$lib/sse";
   import type {
     Profile,
     StatusResponse,
@@ -20,6 +21,7 @@
   let editLogLevel = "info";
   let saving = false;
   let connectBusy = false;
+  let sseConnected = false;
 
   async function loadAll() {
     try {
@@ -48,7 +50,6 @@
         token: editToken,
         log_level: editLogLevel,
       });
-      await loadAll();
     } catch (e) {
       error = String(e);
     } finally {
@@ -60,7 +61,6 @@
     connectBusy = true;
     try {
       await api.connect();
-      await loadAll();
     } catch (e) {
       error = String(e);
     } finally {
@@ -72,7 +72,6 @@
     connectBusy = true;
     try {
       await api.disconnect();
-      await loadAll();
     } catch (e) {
       error = String(e);
     } finally {
@@ -80,7 +79,33 @@
     }
   }
 
-  onMount(loadAll);
+  onMount(() => {
+    initSSE({
+      onStatusChanged: (s) => {
+        status = s;
+      },
+      onStreamsSnapshot: (s) => {
+        streams = s;
+      },
+      onLogEntry: (entry) => {
+        if (logs) {
+          logs = { entries: [...logs.entries, entry] };
+        } else {
+          logs = { entries: [entry] };
+        }
+      },
+      onResync: () => {
+        loadAll();
+      },
+      onConnectionChange: (connected) => {
+        sseConnected = connected;
+      },
+    });
+  });
+
+  onDestroy(() => {
+    destroySSE();
+  });
 </script>
 
 <main>

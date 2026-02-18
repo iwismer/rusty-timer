@@ -4,8 +4,11 @@ pub mod db;
 pub mod local_proxy;
 pub mod ports;
 pub mod session;
+pub mod sse;
+pub mod ui_events;
 pub use cache::{EventBus, StreamKey};
 pub use db::{Db, DbError, DbResult, Profile, Subscription};
+pub use ui_events::ReceiverUiEvent;
 
 /// Converts `url` into a WebSocket client request with an
 /// `Authorization: Bearer <token>` header.

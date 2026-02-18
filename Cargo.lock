@@ -2015,8 +2015,10 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.8",
  "bytes",
+ "chrono",
  "dirs",
  "futures-util",
+ "http-body-util",
  "reqwest",
  "rt-protocol",
  "rt-test-utils",
@@ -2026,6 +2028,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite 0.26.2",
  "tokio-util",
  "tower 0.5.3",

@@ -10,16 +10,18 @@
 //!   GET  /api/v1/logs           - recent log entries
 //!   POST /api/v1/connect        - initiate WS connection (async, 202)
 //!   POST /api/v1/disconnect     - close WS connection (async, 202)
+//!   GET  /api/v1/events         - SSE stream of receiver UI events
 
 use crate::db::{Db, Subscription};
+use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
 use rt_protocol::StreamInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex, RwLock};
-use tracing::{info, warn};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -40,19 +42,158 @@ pub struct AppState {
     pub log_entries: Arc<RwLock<Vec<String>>>,
     pub shutdown_tx: watch::Sender<bool>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
+    pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
 }
 
 impl AppState {
     pub fn new(db: Db) -> (Arc<Self>, watch::Receiver<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (ui_tx, _) = broadcast::channel(256);
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
             connection_state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
             log_entries: Arc::new(RwLock::new(Vec::new())),
             shutdown_tx,
             upstream_url: Arc::new(RwLock::new(None)),
+            ui_tx,
         });
         (state, shutdown_rx)
+    }
+
+    /// Cap for the in-memory log ring buffer.
+    const MAX_LOG_ENTRIES: usize = 500;
+
+    /// Append a timestamped log entry and broadcast it to SSE clients.
+    pub async fn emit_log(&self, message: String) {
+        let entry = format!(
+            "{} {}",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            message
+        );
+        {
+            let mut entries = self.log_entries.write().await;
+            entries.push(entry.clone());
+            if entries.len() > Self::MAX_LOG_ENTRIES {
+                let excess = entries.len() - Self::MAX_LOG_ENTRIES;
+                entries.drain(..excess);
+            }
+        }
+        let _ = self.ui_tx.send(ReceiverUiEvent::LogEntry { entry });
+    }
+
+    /// Update connection state, broadcast status change, and emit a log entry.
+    pub async fn set_connection_state(&self, new_state: ConnectionState) {
+        *self.connection_state.write().await = new_state.clone();
+        let streams_count = {
+            let db = self.db.lock().await;
+            db.load_subscriptions().map(|s| s.len()).unwrap_or(0)
+        };
+        let _ = self.ui_tx.send(ReceiverUiEvent::StatusChanged {
+            connection_state: new_state.clone(),
+            streams_count,
+        });
+        let label = match &new_state {
+            ConnectionState::Disconnected => "Disconnected",
+            ConnectionState::Connecting => "Connecting",
+            ConnectionState::Connected => "Connected",
+            ConnectionState::Disconnecting => "Disconnecting",
+        };
+        self.emit_log(label.to_owned()).await;
+    }
+
+    /// Build the merged streams response from local subscriptions and upstream server.
+    pub async fn build_streams_response(&self) -> StreamsResponse {
+        let db = self.db.lock().await;
+        let subs = match db.load_subscriptions() {
+            Ok(s) => s,
+            Err(_) => {
+                return StreamsResponse {
+                    streams: vec![],
+                    degraded: true,
+                    upstream_error: Some("failed to load subscriptions".to_owned()),
+                }
+            }
+        };
+        drop(db);
+
+        let sub_map: HashMap<(&str, &str), &Subscription> = subs
+            .iter()
+            .map(|s| ((s.forwarder_id.as_str(), s.reader_ip.as_str()), s))
+            .collect();
+
+        let upstream_url = self.upstream_url.read().await.clone();
+        let conn_state = self.connection_state.read().await.clone();
+
+        let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
+            (None, _) => (None, Some("no profile configured".to_owned())),
+            (_, cs) if *cs != ConnectionState::Connected => {
+                (None, Some(format!("connection state: {cs:?}")))
+            }
+            (Some(url), _) => match fetch_server_streams(url).await {
+                Ok(streams) => (Some(streams), None),
+                Err(e) => {
+                    warn!(error = %e, "failed to fetch server streams");
+                    (None, Some(e))
+                }
+            },
+        };
+
+        let mut streams: Vec<StreamEntry> = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+
+        if let Some(ref server_streams) = server_streams {
+            for si in server_streams {
+                let key = (si.forwarder_id.clone(), si.reader_ip.clone());
+                let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
+                let port = local.and_then(|s| {
+                    s.local_port_override
+                        .or_else(|| crate::ports::default_port(&s.reader_ip))
+                });
+                streams.push(StreamEntry {
+                    forwarder_id: si.forwarder_id.clone(),
+                    reader_ip: si.reader_ip.clone(),
+                    subscribed: local.is_some(),
+                    local_port: port,
+                    online: Some(si.online),
+                    display_alias: si.display_alias.clone(),
+                });
+                seen.insert(key);
+            }
+        }
+
+        for sub in &subs {
+            if seen.contains(&(sub.forwarder_id.clone(), sub.reader_ip.clone())) {
+                continue;
+            }
+            let port = sub
+                .local_port_override
+                .or_else(|| crate::ports::default_port(&sub.reader_ip));
+            streams.push(StreamEntry {
+                forwarder_id: sub.forwarder_id.clone(),
+                reader_ip: sub.reader_ip.clone(),
+                subscribed: true,
+                local_port: port,
+                online: None,
+                display_alias: None,
+            });
+        }
+
+        let degraded = upstream_error.is_some();
+        StreamsResponse {
+            streams,
+            degraded,
+            upstream_error,
+        }
+    }
+
+    /// Build and broadcast a streams snapshot to SSE clients.
+    pub async fn emit_streams_snapshot(&self) {
+        let response = self.build_streams_response().await;
+        let _ = self.ui_tx.send(ReceiverUiEvent::StreamsSnapshot {
+            streams: response.streams,
+            degraded: response.degraded,
+            upstream_error: response.upstream_error,
+        });
     }
 }
 
@@ -86,7 +227,7 @@ pub struct SubscriptionsBody {
     pub subscriptions: Vec<SubscriptionRequest>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct StreamEntry {
     pub forwarder_id: String,
     pub reader_ip: String,
@@ -98,7 +239,7 @@ pub struct StreamEntry {
     pub display_alias: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct StreamsResponse {
     pub streams: Vec<StreamEntry>,
     pub degraded: bool,
@@ -207,87 +348,7 @@ async fn put_profile(
 }
 
 async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // 1. Load local subscriptions from SQLite.
-    let db = state.db.lock().await;
-    let subs = match db.load_subscriptions() {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    drop(db);
-
-    // 2. Build a lookup map of local subscriptions: (forwarder_id, reader_ip) -> &Subscription
-    let sub_map: HashMap<(&str, &str), &Subscription> = subs
-        .iter()
-        .map(|s| ((s.forwarder_id.as_str(), s.reader_ip.as_str()), s))
-        .collect();
-
-    // 3. Attempt to fetch server streams if connected.
-    let upstream_url = state.upstream_url.read().await.clone();
-    let conn_state = state.connection_state.read().await.clone();
-
-    let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
-        (None, _) => (None, Some("no profile configured".to_owned())),
-        (_, cs) if *cs != ConnectionState::Connected => {
-            (None, Some(format!("connection state: {cs:?}")))
-        }
-        (Some(url), _) => match fetch_server_streams(url).await {
-            Ok(streams) => (Some(streams), None),
-            Err(e) => {
-                warn!(error = %e, "failed to fetch server streams");
-                (None, Some(e))
-            }
-        },
-    };
-
-    // 4. Merge: server streams first, then any local-only subscriptions.
-    let mut streams: Vec<StreamEntry> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-
-    if let Some(ref server_streams) = server_streams {
-        for si in server_streams {
-            let key = (si.forwarder_id.clone(), si.reader_ip.clone());
-            let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
-            let port = local.and_then(|s| {
-                s.local_port_override
-                    .or_else(|| crate::ports::default_port(&s.reader_ip))
-            });
-            streams.push(StreamEntry {
-                forwarder_id: si.forwarder_id.clone(),
-                reader_ip: si.reader_ip.clone(),
-                subscribed: local.is_some(),
-                local_port: port,
-                online: Some(si.online),
-                display_alias: si.display_alias.clone(),
-            });
-            seen.insert(key);
-        }
-    }
-
-    // Append local subscriptions not present in the server list.
-    for sub in &subs {
-        if seen.contains(&(sub.forwarder_id.clone(), sub.reader_ip.clone())) {
-            continue;
-        }
-        let port = sub
-            .local_port_override
-            .or_else(|| crate::ports::default_port(&sub.reader_ip));
-        streams.push(StreamEntry {
-            forwarder_id: sub.forwarder_id.clone(),
-            reader_ip: sub.reader_ip.clone(),
-            subscribed: true,
-            local_port: port,
-            online: None,
-            display_alias: None,
-        });
-    }
-
-    let degraded = upstream_error.is_some();
-    Json(StreamsResponse {
-        streams,
-        degraded,
-        upstream_error,
-    })
-    .into_response()
+    Json(state.build_streams_response().await).into_response()
 }
 
 async fn put_subscriptions(
@@ -305,7 +366,11 @@ async fn put_subscriptions(
         .collect();
     let db = state.db.lock().await;
     match db.replace_subscriptions(&subs) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            drop(db);
+            state.emit_streams_snapshot().await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -331,23 +396,23 @@ async fn get_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let current = state.connection_state.read().await.clone();
     if current == ConnectionState::Connected {
-        info!("already connected, no-op");
         return StatusCode::OK.into_response();
     }
-    *state.connection_state.write().await = ConnectionState::Connecting;
-    info!("connect requested (async)");
+    state
+        .set_connection_state(ConnectionState::Connecting)
+        .await;
     StatusCode::ACCEPTED.into_response()
 }
 
 async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let current = state.connection_state.read().await.clone();
     if current == ConnectionState::Disconnected {
-        info!("already disconnected, no-op");
         return StatusCode::OK.into_response();
     }
-    *state.connection_state.write().await = ConnectionState::Disconnecting;
+    state
+        .set_connection_state(ConnectionState::Disconnecting)
+        .await;
     let _ = state.shutdown_tx.send(true);
-    info!("disconnect requested (async)");
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -364,6 +429,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/logs", get(get_logs))
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
+        .route("/api/v1/events", get(crate::sse::receiver_sse))
         .with_state(state)
 }
 
