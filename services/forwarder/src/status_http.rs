@@ -141,6 +141,45 @@ impl StatusServer {
         self.subsystem.lock().await.set_uplink_connected(connected);
     }
 
+    /// Set the forwarder ID (call once at startup).
+    pub async fn set_forwarder_id(&self, id: &str) {
+        self.subsystem.lock().await.forwarder_id = id.to_owned();
+    }
+
+    /// Set the detected local IP (call once at startup).
+    pub async fn set_local_ip(&self, ip: Option<String>) {
+        self.subsystem.lock().await.local_ip = ip;
+    }
+
+    /// Pre-populate all configured reader IPs as Disconnected.
+    pub async fn init_readers(&self, reader_ips: &[String]) {
+        let mut ss = self.subsystem.lock().await;
+        for ip in reader_ips {
+            ss.readers.entry(ip.clone()).or_insert(ReaderStatus {
+                state: ReaderConnectionState::Disconnected,
+                last_seen: None,
+                reads_since_restart: 0,
+            });
+        }
+    }
+
+    /// Update a reader's connection state.
+    pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.state = state;
+        }
+    }
+
+    /// Record a successful chip read for a reader.
+    pub async fn record_read(&self, reader_ip: &str) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.reads_since_restart += 1;
+            r.last_seen = Some(Instant::now());
+        }
+    }
+
     /// Start the status HTTP server without a journal (epoch reset returns 404).
     pub async fn start(
         cfg: StatusConfig,
