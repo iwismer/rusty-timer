@@ -2,35 +2,26 @@
   import { onMount } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
-  import type { StreamEntry, StreamMetrics } from "$lib/api";
+  import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
 
-  let streamId = "";
-  let stream: StreamEntry | null = null;
-  let metrics: StreamMetrics | null = null;
-  let loadingMetrics = true;
-  let error: string | null = null;
   let resetResult: string | null = null;
   let resetBusy = false;
 
-  // Derive stream_id from the URL parameter
   $: streamId = $page.params.streamId;
+  $: stream = $streamsStore.find((s) => s.stream_id === streamId) ?? null;
+  $: metrics = $metricsStore[streamId] ?? null;
 
-  async function loadData(id: string) {
-    loadingMetrics = true;
-    error = null;
-    try {
-      const [streamsResp, metricsResp] = await Promise.all([
-        api.getStreams(),
-        api.getMetrics(id),
-      ]);
-      stream = streamsResp.streams.find((s) => s.stream_id === id) ?? null;
-      metrics = metricsResp;
-    } catch (e) {
-      error = String(e);
-    } finally {
-      loadingMetrics = false;
+  // Fetch metrics on mount if not yet in store (e.g., direct navigation)
+  onMount(async () => {
+    if (streamId && !$metricsStore[streamId]) {
+      try {
+        const m = await api.getMetrics(streamId);
+        setMetrics(streamId, m);
+      } catch {
+        // SSE will populate eventually
+      }
     }
-  }
+  });
 
   async function handleResetEpoch() {
     resetBusy = true;
@@ -38,23 +29,11 @@
     try {
       await api.resetEpoch(streamId);
       resetResult = "Epoch reset command sent successfully.";
-      // Refresh data after reset
-      await loadData(streamId);
     } catch (e) {
       resetResult = `Error: ${String(e)}`;
     } finally {
       resetBusy = false;
     }
-  }
-
-  onMount(() => {
-    if (streamId) {
-      loadData(streamId);
-    }
-  });
-
-  $: if (streamId) {
-    loadData(streamId);
   }
 
   function formatLag(lag: number | null): string {
@@ -75,10 +54,6 @@
       — {streamId}
     {/if}
   </h1>
-
-  {#if error}
-    <p class="error">{error}</p>
-  {/if}
 
   {#if stream}
     <section class="meta-section">
@@ -104,9 +79,9 @@
   <!-- Metrics -->
   <section data-testid="metrics-section">
     <h2>Metrics</h2>
-    {#if loadingMetrics}
+    {#if !metrics}
       <p>Loading metrics…</p>
-    {:else if metrics}
+    {:else}
       <table>
         <tbody>
           <tr>
