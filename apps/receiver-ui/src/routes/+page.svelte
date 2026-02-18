@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import * as api from "$lib/api";
+  import { buildUpdatedSubscriptions } from "$lib/subscriptions";
   import { initSSE, destroySSE } from "$lib/sse";
   import type {
     Profile,
@@ -22,6 +23,55 @@
   let saving = false;
   let connectBusy = false;
   let sseConnected = false;
+  let portOverrides: Record<string, string | number | null> = {};
+  let subscriptionsBusy = false;
+  let activeSubscriptionKey: string | null = null;
+
+  function streamKey(forwarder_id: string, reader_ip: string): string {
+    return `${forwarder_id}/${reader_ip}`;
+  }
+
+  async function toggleSubscription(
+    forwarder_id: string,
+    reader_ip: string,
+    currentlySubscribed: boolean,
+  ) {
+    if (subscriptionsBusy) {
+      return;
+    }
+
+    error = null;
+    const key = streamKey(forwarder_id, reader_ip);
+    subscriptionsBusy = true;
+    activeSubscriptionKey = key;
+    try {
+      const updated = buildUpdatedSubscriptions({
+        allStreams: streams?.streams ?? [],
+        target: {
+          forwarder_id,
+          reader_ip,
+          currentlySubscribed,
+        },
+        rawPortOverride: portOverrides[key],
+      });
+      if (updated.error) {
+        error = updated.error;
+        return;
+      }
+
+      await api.putSubscriptions(updated.subscriptions ?? []);
+      streams = await api.getStreams();
+      if (!currentlySubscribed) {
+        const { [key]: _, ...rest } = portOverrides;
+        portOverrides = rest;
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      subscriptionsBusy = false;
+      activeSubscriptionKey = null;
+    }
+  }
 
   async function loadAll() {
     try {
@@ -192,18 +242,58 @@
     {:else}
       <ul>
         {#each streams?.streams ?? [] as stream}
+          {@const key = streamKey(stream.forwarder_id, stream.reader_ip)}
           <li>
-            {stream.display_alias ??
-              `${stream.forwarder_id} / ${stream.reader_ip}`}
+            <span>
+              {stream.display_alias ??
+                `${stream.forwarder_id} / ${stream.reader_ip}`}
+            </span>
             {#if stream.online !== undefined}
               <span class={stream.online ? "online" : "offline"}
                 >{stream.online ? "(online)" : "(offline)"}</span
               >
             {/if}
             {#if stream.subscribed}
-              → port {stream.local_port ?? "auto"}
+              <span>→ port {stream.local_port ?? "auto"}</span>
+              <button
+                data-testid="unsub-{key}"
+                on:click={() =>
+                  toggleSubscription(
+                    stream.forwarder_id,
+                    stream.reader_ip,
+                    true,
+                  )}
+                disabled={subscriptionsBusy}
+              >
+                {subscriptionsBusy && activeSubscriptionKey === key
+                  ? "..."
+                  : "Unsubscribe"}
+              </button>
             {:else}
-              <em>(not subscribed)</em>
+              <input
+                class="port-input"
+                data-testid="port-{key}"
+                type="number"
+                min="1"
+                max="65535"
+                placeholder="port"
+                bind:value={portOverrides[key]}
+                disabled={subscriptionsBusy}
+              />
+              <button
+                data-testid="sub-{key}"
+                on:click={() =>
+                  toggleSubscription(
+                    stream.forwarder_id,
+                    stream.reader_ip,
+                    false,
+                  )}
+                disabled={subscriptionsBusy}
+              >
+                {subscriptionsBusy && activeSubscriptionKey === key
+                  ? "..."
+                  : "Subscribe"}
+              </button>
             {/if}
           </li>
         {/each}
@@ -285,5 +375,23 @@
     font-size: 0.85em;
     max-height: 300px;
     overflow-y: auto;
+  }
+  section ul:not(.logs) {
+    list-style: none;
+    padding: 0;
+  }
+  section ul:not(.logs) li {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.35em 0;
+    border-bottom: 1px solid #eee;
+  }
+  section ul:not(.logs) li:last-child {
+    border-bottom: none;
+  }
+  .port-input {
+    width: 5em;
+    display: inline-block;
   }
 </style>

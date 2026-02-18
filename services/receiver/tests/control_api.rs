@@ -234,6 +234,42 @@ async fn put_subscriptions_replaces_all() {
 }
 
 #[tokio::test]
+async fn put_subscriptions_rejects_duplicate_entries_and_preserves_existing() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/subscriptions",
+            json!({"subscriptions":[{"forwarder_id":"f1","reader_ip":"10.0.0.1","local_port_override":null}]}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/subscriptions",
+            json!({"subscriptions":[
+                {"forwarder_id":"f2","reader_ip":"10.0.0.2","local_port_override":null},
+                {"forwarder_id":"f2","reader_ip":"10.0.0.2","local_port_override":9950}
+            ]}),
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+
+    let (_, val) = get_json(app, "/api/v1/streams").await;
+    let streams = val["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["forwarder_id"], "f1");
+    assert_eq!(streams[0]["reader_ip"], "10.0.0.1");
+}
+
+#[tokio::test]
 async fn get_streams_connected_merges_server_and_local_streams() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);

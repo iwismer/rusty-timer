@@ -366,6 +366,13 @@ async fn put_subscriptions(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SubscriptionsBody>,
 ) -> impl IntoResponse {
+    let mut seen = std::collections::HashSet::new();
+    for s in &body.subscriptions {
+        if !seen.insert((s.forwarder_id.clone(), s.reader_ip.clone())) {
+            return (StatusCode::BAD_REQUEST, "duplicate subscriptions").into_response();
+        }
+    }
+
     let subs: Vec<Subscription> = body
         .subscriptions
         .into_iter()
@@ -375,7 +382,7 @@ async fn put_subscriptions(
             local_port_override: s.local_port_override,
         })
         .collect();
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
     match db.replace_subscriptions(&subs) {
         Ok(()) => {
             drop(db);

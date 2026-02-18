@@ -8,3 +8,5 @@ Cargo.lock
 *.lock
 target/
 docs/plans/
+test-results/
+apps/receiver-ui/test-results/
