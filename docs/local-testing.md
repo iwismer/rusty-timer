@@ -233,6 +233,12 @@ The control API listens on **127.0.0.1:9090**.
 
 All control API calls go to `http://127.0.0.1:9090`.
 
+> **Note:** When using `uv run scripts/dev.py` (tmux or iTerm2 launch), the
+> receiver profile is configured automatically with the dev token and server URL,
+> and a connect request is sent. You can skip the profile and connect steps
+> below and go straight to subscribing. To re-run the configuration manually:
+> `/tmp/rusty-timer-dev/configure-receiver.sh`
+
 ### Set the server profile (credentials)
 
 ```bash
