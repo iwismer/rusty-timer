@@ -42,7 +42,7 @@ async fn test_first_insert_stores_event_and_acks() {
     client
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-001".to_owned(),
-            reader_ips: vec!["192.168.1.10".to_owned()],
+            reader_ips: vec!["192.168.1.10:10000".to_owned()],
             resume: vec![],
         }))
         .await
@@ -57,7 +57,7 @@ async fn test_first_insert_stores_event_and_acks() {
             batch_id: "b001".to_owned(),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-001".to_owned(),
-                reader_ip: "192.168.1.10".to_owned(),
+                reader_ip: "192.168.1.10:10000".to_owned(),
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -105,7 +105,7 @@ async fn test_identical_retransmit_no_dup() {
     client
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-002".to_owned(),
-            reader_ips: vec!["192.168.1.20".to_owned()],
+            reader_ips: vec!["192.168.1.20:10000".to_owned()],
             resume: vec![],
         }))
         .await
@@ -116,7 +116,7 @@ async fn test_identical_retransmit_no_dup() {
     };
     let event = ReadEvent {
         forwarder_id: "fwd-002".to_owned(),
-        reader_ip: "192.168.1.20".to_owned(),
+        reader_ip: "192.168.1.20:10000".to_owned(),
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -182,7 +182,7 @@ async fn test_mismatched_payload_rejected() {
     client
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-003".to_owned(),
-            reader_ips: vec!["192.168.1.30".to_owned()],
+            reader_ips: vec!["192.168.1.30:10000".to_owned()],
             resume: vec![],
         }))
         .await
@@ -197,7 +197,7 @@ async fn test_mismatched_payload_rejected() {
             batch_id: "b001".to_owned(),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-003".to_owned(),
-                reader_ip: "192.168.1.30".to_owned(),
+                reader_ip: "192.168.1.30:10000".to_owned(),
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -214,7 +214,7 @@ async fn test_mismatched_payload_rejected() {
             batch_id: "b002".to_owned(),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-003".to_owned(),
-                reader_ip: "192.168.1.30".to_owned(),
+                reader_ip: "192.168.1.30:10000".to_owned(),
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -262,7 +262,7 @@ async fn test_first_connection_wins() {
     client1
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-dup".to_owned(),
-            reader_ips: vec!["10.0.0.1".to_owned()],
+            reader_ips: vec!["10.0.0.1:10000".to_owned()],
             resume: vec![],
         }))
         .await
@@ -278,7 +278,7 @@ async fn test_first_connection_wins() {
     client2
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-dup".to_owned(),
-            reader_ips: vec!["10.0.0.1".to_owned()],
+            reader_ips: vec!["10.0.0.1:10000".to_owned()],
             resume: vec![],
         }))
         .await

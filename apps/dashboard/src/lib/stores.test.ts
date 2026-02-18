@@ -14,7 +14,7 @@ import type { StreamEntry, StreamMetrics } from "./api";
 const STREAM_A: StreamEntry = {
   stream_id: "aaa",
   forwarder_id: "fwd-1",
-  reader_ip: "10.0.0.1",
+  reader_ip: "10.0.0.1:10000",
   display_alias: null,
   online: true,
   stream_epoch: 1,
@@ -96,7 +96,7 @@ describe("stores", () => {
         ...STREAM_A,
         stream_id: "bbb",
         forwarder_id: "fwd-2",
-        reader_ip: "10.0.0.2",
+        reader_ip: "10.0.0.2:10000",
       },
     ]);
 
@@ -105,7 +105,7 @@ describe("stores", () => {
         ...STREAM_A,
         stream_id: "bbb",
         forwarder_id: "fwd-2",
-        reader_ip: "10.0.0.2",
+        reader_ip: "10.0.0.2:10000",
       },
     ]);
     expect(get(metricsStore)).toEqual({ aaa: METRICS_A });

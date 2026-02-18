@@ -7,7 +7,7 @@ const MOCK_STREAMS = [
   {
     stream_id: "stream-uuid-1",
     forwarder_id: "fwd-alpha",
-    reader_ip: "192.168.1.100",
+    reader_ip: "192.168.1.100:10000",
     display_alias: "Alpha Reader",
     online: true,
     stream_epoch: 3,
@@ -16,7 +16,7 @@ const MOCK_STREAMS = [
   {
     stream_id: "stream-uuid-2",
     forwarder_id: "fwd-beta",
-    reader_ip: "10.0.0.50",
+    reader_ip: "10.0.0.50:10000",
     display_alias: null,
     online: false,
     stream_epoch: 1,
@@ -65,7 +65,7 @@ test.describe("stream list page", () => {
     await page.goto("/");
     // Second stream has no alias, should show forwarder_id / reader_ip
     await expect(page.getByText(/fwd-beta/)).toBeVisible();
-    await expect(page.getByText(/10\.0\.0\.50/)).toBeVisible();
+    await expect(page.getByText(/10\.0\.0\.50:10000/)).toBeVisible();
   });
 
   test("shows online/offline indicator for each stream", async ({ page }) => {

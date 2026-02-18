@@ -46,7 +46,7 @@ async fn test_export_raw_canonical_events_ordered() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-export".to_owned(),
-        reader_ips: vec!["10.40.0.1".to_owned()],
+        reader_ips: vec!["10.40.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -63,7 +63,7 @@ async fn test_export_raw_canonical_events_ordered() {
             batch_id: format!("b{}", seq),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-export".to_owned(),
-                reader_ip: "10.40.0.1".to_owned(),
+                reader_ip: "10.40.0.1:10000".to_owned(),
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -81,7 +81,7 @@ async fn test_export_raw_canonical_events_ordered() {
         batch_id: "r2".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-export".to_owned(),
-            reader_ip: "10.40.0.1".to_owned(),
+            reader_ip: "10.40.0.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 2,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),

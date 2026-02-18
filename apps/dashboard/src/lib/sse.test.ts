@@ -90,7 +90,7 @@ describe("sse", () => {
     const stream: StreamEntry = {
       stream_id: "s1",
       forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1",
+      reader_ip: "10.0.0.1:10000",
       display_alias: null,
       online: true,
       stream_epoch: 1,
@@ -109,7 +109,7 @@ describe("sse", () => {
     addOrUpdateStream({
       stream_id: "s1",
       forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1",
+      reader_ip: "10.0.0.1:10000",
       display_alias: null,
       online: true,
       stream_epoch: 1,
@@ -184,7 +184,7 @@ describe("sse", () => {
     const streamA: StreamEntry = {
       stream_id: "s1",
       forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1",
+      reader_ip: "10.0.0.1:10000",
       display_alias: null,
       online: false,
       stream_epoch: 1,

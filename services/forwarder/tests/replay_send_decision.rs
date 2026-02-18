@@ -17,7 +17,7 @@ fn replay_epoch_reset_forces_reconnect() {
     let result: Result<SendBatchResult, ()> = Ok(SendBatchResult::EpochReset(EpochResetCommand {
         session_id: "session-1".to_string(),
         forwarder_id: "fwd-1".to_string(),
-        reader_ip: "10.0.0.1".to_string(),
+        reader_ip: "10.0.0.1:10000".to_string(),
         new_stream_epoch: 3,
     }));
 

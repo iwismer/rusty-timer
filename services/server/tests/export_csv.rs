@@ -42,7 +42,7 @@ async fn test_export_csv_header_and_rows() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-csv".to_owned(),
-        reader_ips: vec!["10.50.0.1".to_owned()],
+        reader_ips: vec!["10.50.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -58,7 +58,7 @@ async fn test_export_csv_header_and_rows() {
         batch_id: "b1".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-csv".to_owned(),
-            reader_ip: "10.50.0.1".to_owned(),
+            reader_ip: "10.50.0.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
@@ -76,7 +76,7 @@ async fn test_export_csv_header_and_rows() {
         batch_id: "b2".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-csv".to_owned(),
-            reader_ip: "10.50.0.1".to_owned(),
+            reader_ip: "10.50.0.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 2,
             reader_timestamp: "2026-02-17T10:00:02.000Z".to_owned(),

@@ -81,7 +81,7 @@ async fn uplink_receives_ack_for_event_batch() {
 
     let events = vec![rt_protocol::ReadEvent {
         forwarder_id: "fwd-ack-test".to_owned(),
-        reader_ip: "192.168.2.100".to_owned(),
+        reader_ip: "192.168.2.100:10000".to_owned(),
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
@@ -95,7 +95,7 @@ async fn uplink_receives_ack_for_event_batch() {
         other => panic!("expected Ack, got {:?}", other),
     };
     assert_eq!(ack.entries.len(), 1);
-    assert_eq!(ack.entries[0].reader_ip, "192.168.2.100");
+    assert_eq!(ack.entries[0].reader_ip, "192.168.2.100:10000");
     assert_eq!(ack.entries[0].stream_epoch, 1);
     assert_eq!(ack.entries[0].last_seq, 1);
 }
@@ -120,7 +120,7 @@ async fn uplink_ack_contains_high_water_marks() {
     let events = vec![
         rt_protocol::ReadEvent {
             forwarder_id: "fwd-hwm".to_owned(),
-            reader_ip: "192.168.2.1".to_owned(),
+            reader_ip: "192.168.2.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 3,
             reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
@@ -129,7 +129,7 @@ async fn uplink_ack_contains_high_water_marks() {
         },
         rt_protocol::ReadEvent {
             forwarder_id: "fwd-hwm".to_owned(),
-            reader_ip: "192.168.2.1".to_owned(),
+            reader_ip: "192.168.2.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 7,
             reader_timestamp: "2026-01-01T00:00:01Z".to_owned(),
@@ -138,7 +138,7 @@ async fn uplink_ack_contains_high_water_marks() {
         },
         rt_protocol::ReadEvent {
             forwarder_id: "fwd-hwm".to_owned(),
-            reader_ip: "192.168.2.2".to_owned(),
+            reader_ip: "192.168.2.2:10000".to_owned(),
             stream_epoch: 1,
             seq: 5,
             reader_timestamp: "2026-01-01T00:00:02Z".to_owned(),
@@ -157,14 +157,14 @@ async fn uplink_ack_contains_high_water_marks() {
     let e1 = ack
         .entries
         .iter()
-        .find(|e| e.reader_ip == "192.168.2.1")
+        .find(|e| e.reader_ip == "192.168.2.1:10000")
         .unwrap();
     assert_eq!(e1.last_seq, 7, "high water mark for .2.1 must be 7");
 
     let e2 = ack
         .entries
         .iter()
-        .find(|e| e.reader_ip == "192.168.2.2")
+        .find(|e| e.reader_ip == "192.168.2.2:10000")
         .unwrap();
     assert_eq!(e2.last_seq, 5);
 }
@@ -218,7 +218,7 @@ async fn send_batch_surfaces_epoch_reset_command() {
         let reset = WsMessage::EpochResetCommand(EpochResetCommand {
             session_id: "test-session".to_owned(),
             forwarder_id: fwd_id,
-            reader_ip: "10.0.0.1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
             new_stream_epoch: 42,
         });
         let json = serde_json::to_string(&reset).unwrap();
@@ -239,7 +239,7 @@ async fn send_batch_surfaces_epoch_reset_command() {
 
     let events = vec![rt_protocol::ReadEvent {
         forwarder_id: "fwd-epoch-test".to_owned(),
-        reader_ip: "10.0.0.1".to_owned(),
+        reader_ip: "10.0.0.1:10000".to_owned(),
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
@@ -250,7 +250,7 @@ async fn send_batch_surfaces_epoch_reset_command() {
     let result = session.send_batch(events).await.expect("send_batch");
     match result {
         SendBatchResult::EpochReset(cmd) => {
-            assert_eq!(cmd.reader_ip, "10.0.0.1");
+            assert_eq!(cmd.reader_ip, "10.0.0.1:10000");
             assert_eq!(cmd.new_stream_epoch, 42);
         }
         other => panic!("expected EpochReset, got {:?}", other),

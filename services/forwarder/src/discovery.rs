@@ -25,6 +25,11 @@ impl ReaderEndpoint {
     pub fn default_local_fallback_port(&self) -> u16 {
         10000u16.saturating_add(self.last_octet as u16)
     }
+
+    /// Return the `ip:port` socket address string used as stream identity.
+    pub fn addr(&self) -> String {
+        format!("{}:{}", self.ip, self.port)
+    }
 }
 
 /// Expand a reader target string into one or more `ReaderEndpoint`s.

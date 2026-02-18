@@ -67,7 +67,7 @@ async fn test_list_streams_after_forwarder_connect() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-list".to_owned(),
-        reader_ips: vec!["10.10.0.1".to_owned()],
+        reader_ips: vec!["10.10.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -83,7 +83,7 @@ async fn test_list_streams_after_forwarder_connect() {
     assert_eq!(streams.len(), 1);
     let s = &streams[0];
     assert_eq!(s["forwarder_id"], "fwd-list");
-    assert_eq!(s["reader_ip"], "10.10.0.1");
+    assert_eq!(s["reader_ip"], "10.10.0.1:10000");
     assert!(s["stream_id"].is_string());
     assert!(
         s["online"].as_bool().unwrap_or(false),
@@ -108,7 +108,7 @@ async fn test_patch_stream_rename() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-rename".to_owned(),
-        reader_ips: vec!["10.20.0.1".to_owned()],
+        reader_ips: vec!["10.20.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -181,7 +181,7 @@ async fn test_get_metrics_for_stream() {
         .unwrap();
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-metrics".to_owned(),
-        reader_ips: vec!["10.30.0.1".to_owned()],
+        reader_ips: vec!["10.30.0.1:10000".to_owned()],
         resume: vec![],
     }))
     .await
@@ -198,7 +198,7 @@ async fn test_get_metrics_for_stream() {
             batch_id: format!("b{}", seq),
             events: vec![ReadEvent {
                 forwarder_id: "fwd-metrics".to_owned(),
-                reader_ip: "10.30.0.1".to_owned(),
+                reader_ip: "10.30.0.1:10000".to_owned(),
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
@@ -216,7 +216,7 @@ async fn test_get_metrics_for_stream() {
         batch_id: "r1".to_owned(),
         events: vec![ReadEvent {
             forwarder_id: "fwd-metrics".to_owned(),
-            reader_ip: "10.30.0.1".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),

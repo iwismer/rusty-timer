@@ -26,7 +26,7 @@ describe("server_api client", () => {
         {
           stream_id: "abc-123",
           forwarder_id: "fwd-1",
-          reader_ip: "192.168.1.100",
+          reader_ip: "192.168.1.100:10000",
           display_alias: "Main reader",
           online: true,
           stream_epoch: 1,
@@ -59,7 +59,7 @@ describe("server_api client", () => {
     const updated = {
       stream_id: "abc-123",
       forwarder_id: "fwd-1",
-      reader_ip: "192.168.1.100",
+      reader_ip: "192.168.1.100:10000",
       display_alias: "New Name",
       online: true,
       stream_epoch: 1,

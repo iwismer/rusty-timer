@@ -104,7 +104,7 @@ async fn run_reader(
     status: StatusServer,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
-    let stream_key = reader_ip.clone();
+    let stream_key = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
 
     loop {
@@ -714,7 +714,7 @@ async fn main() {
                 fanout.run().await;
             });
 
-            all_reader_ips.push(ep.ip.clone());
+            all_reader_ips.push(ep.addr());
             fanout_addrs.push((ep.ip, ep.port, reader_cfg.read_type.clone(), fanout_addr));
         }
     }
@@ -746,7 +746,10 @@ async fn main() {
     status_server.set_forwarder_id(&forwarder_id).await;
 
     // Detect local IP from first reader
-    let local_ip = all_reader_ips.first().and_then(|ip| detect_local_ip(ip));
+    let local_ip = all_reader_ips.first().and_then(|addr| {
+        let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(addr);
+        detect_local_ip(ip)
+    });
     if let Some(ref ip) = local_ip {
         info!(local_ip = %ip, "detected local IP");
     }
