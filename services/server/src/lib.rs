@@ -10,6 +10,8 @@ pub mod ws_receiver;
 pub use state::AppState;
 
 use axum::{
+    http::StatusCode,
+    response::{Html, IntoResponse},
     routing::{get, patch, post},
     Router,
 };
@@ -42,7 +44,69 @@ pub fn build_router(state: AppState) -> Router {
             post(http::streams::reset_epoch),
         )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
+        .fallback(fallback_404)
         .with_state(state)
+}
+
+async fn fallback_404() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Html(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>404 – Not Found</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f1117;
+      color: #e1e4e8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .container { text-align: center; }
+    .code {
+      font-size: 8rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .message {
+      margin-top: 0.5rem;
+      font-size: 1.25rem;
+      color: #8b949e;
+    }
+    .home-link {
+      display: inline-block;
+      margin-top: 2rem;
+      padding: 0.6rem 1.5rem;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #c9d1d9;
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .home-link:hover { border-color: #667eea; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="code">404</div>
+    <p class="message">This page doesn't exist.</p>
+    <a class="home-link" href="/">← Back to home</a>
+  </div>
+</body>
+</html>"#,
+        ),
+    )
 }
 
 mod health {
