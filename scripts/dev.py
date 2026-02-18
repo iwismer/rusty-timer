@@ -67,6 +67,10 @@ class EmulatorSpec:
     file: str | None = None
     read_type: str = "raw"
 
+    def __post_init__(self) -> None:
+        if self.read_type not in EMULATOR_VALID_TYPES:
+            raise ValueError(f"Invalid read_type {self.read_type!r}")
+
     def to_cmd(self) -> str:
         cmd = f"cargo run -p emulator -- --port {self.port} --delay {self.delay} --type {self.read_type}"
         if self.file:
@@ -523,10 +527,12 @@ def main() -> None:
 
     emulators: list[EmulatorSpec] = args.emulator or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)]
 
-    # Validate no duplicate ports
+    # Validate no duplicate ports (including fallback ports)
     ports = [e.port for e in emulators]
-    if len(ports) != len(set(ports)):
-        console.print("[red]Error: duplicate emulator ports[/red]")
+    fallbacks = [e.port + 1000 for e in emulators]
+    all_ports = ports + fallbacks
+    if len(all_ports) != len(set(all_ports)):
+        console.print("[red]Error: emulator port/fallback port collision[/red]")
         sys.exit(1)
 
     console.print(Panel.fit(
