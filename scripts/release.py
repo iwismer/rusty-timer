@@ -25,10 +25,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # Server is excluded — it's deployed via Docker, not as a standalone binary.
 VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator")
-PACKAGE_VERSION_RE = re.compile(
-    r'(\[package\][^\[]*?^version\s*=\s*")(\d+\.\d+\.\d+)(")',
-    re.MULTILINE | re.DOTALL,
-)
 VERSION_FORMAT_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
@@ -119,16 +115,50 @@ def compute_new_version(current: str, args: argparse.Namespace) -> str:
 def write_version(service: str, new_version: str) -> None:
     cargo_toml = REPO_ROOT / "services" / service / "Cargo.toml"
     text = cargo_toml.read_text()
-    new_text, count = PACKAGE_VERSION_RE.subn(rf"\g<1>{new_version}\3", text, count=1)
-    if count == 0:
+    try:
+        new_text = update_package_version(text, new_version)
+    except ValueError:
         print(f"Error: failed to update version in {cargo_toml}", file=sys.stderr)
         sys.exit(1)
     cargo_toml.write_text(new_text)
 
 
+def update_package_version(text: str, new_version: str) -> str:
+    lines = text.splitlines(keepends=True)
+    in_package = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "[package]":
+            in_package = True
+            continue
+        if in_package and stripped.startswith("[") and stripped.endswith("]"):
+            break
+        if in_package and stripped.startswith("version"):
+            line_ending = ""
+            if line.endswith("\r\n"):
+                line_ending = "\r\n"
+            elif line.endswith("\n"):
+                line_ending = "\n"
+            prefix = line[: len(line) - len(line.lstrip())]
+            lines[i] = f'{prefix}version = "{new_version}"{line_ending}'
+            return "".join(lines)
+    raise ValueError("No package version found in [package] section")
+
+
 def parse_semver(v: str) -> tuple[int, int, int]:
     parts = v.split(".")
     return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def git_head_sha() -> str:
+    result = run(["git", "rev-parse", "HEAD"])
+    return result.stdout.strip()
+
+
+def rollback_transaction(start_head: str, created_tags: list[str]) -> None:
+    for tag in reversed(created_tags):
+        run(["git", "tag", "-d", tag], check=False)
+    run(["git", "reset", "--hard", start_head], check=False)
 
 
 def main() -> None:
@@ -177,6 +207,8 @@ def main() -> None:
         print("Dry run — no changes made.")
         return
 
+    start_head = git_head_sha()
+
     # --- Confirm ---
     if not args.yes:
         answer = input("Proceed? [y/N] ").strip().lower()
@@ -186,11 +218,11 @@ def main() -> None:
 
     # --- Execute ---
     tags: list[str] = []
-    for service, current, new in plan:
-        print(f"\n--- {service}: {current} -> {new} ---")
-        cargo_path = f"services/{service}/Cargo.toml"
+    try:
+        for service, current, new in plan:
+            print(f"\n--- {service}: {current} -> {new} ---")
+            cargo_path = f"services/{service}/Cargo.toml"
 
-        try:
             # Update Cargo.toml
             write_version(service, new)
             print(f"  Updated {cargo_path}")
@@ -210,19 +242,17 @@ def main() -> None:
             run(["git", "tag", tag])
             print(f"  Tagged: {tag}")
             tags.append(tag)
-        except subprocess.CalledProcessError as e:
-            print(f"  Error: release failed for {service}, rolling back {cargo_path}:", file=sys.stderr)
-            if e.stderr:
-                print(e.stderr, file=sys.stderr)
-            run(["git", "checkout", "--", cargo_path])
-            sys.exit(1)
 
-    # --- Push ---
-    print("\nPushing commits and tags...")
-    run(["git", "push"])
-    for tag in tags:
-        run(["git", "push", "origin", tag])
-    print("Done!")
+        # --- Push ---
+        print("\nPushing commits and tags...")
+        run(["git", "push", "--atomic", "origin", "master", *tags])
+        print("Done!")
+    except subprocess.CalledProcessError as e:
+        print("Error: release failed, rolling back transaction.", file=sys.stderr)
+        if e.stderr:
+            print(e.stderr, file=sys.stderr)
+        rollback_transaction(start_head, tags)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
