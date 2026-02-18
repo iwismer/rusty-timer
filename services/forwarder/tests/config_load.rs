@@ -2,7 +2,7 @@
 ///
 /// Tests config precedence, default values, required field validation,
 /// and token file reading.
-use forwarder::config::{load_config_from_str, ForwarderConfig};
+use forwarder::config::load_config_from_str;
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -427,7 +427,7 @@ target = "127.0.0.1:10001"
         token_file.path().display()
     );
     let mut config_file = tempfile::NamedTempFile::new().unwrap();
-    std::io::Write::write_all(&mut config_file, toml.as_bytes()).unwrap();
+    config_file.write_all(toml.as_bytes()).unwrap();
 
     let cfg = forwarder::config::load_config_from_path(config_file.path())
         .expect("should load from arbitrary path");
