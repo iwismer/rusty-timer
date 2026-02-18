@@ -268,12 +268,22 @@ struct ServerStreamsResponse {
     streams: Vec<StreamInfo>,
 }
 
-/// Derive the HTTP base URL from a WebSocket URL.
+/// Normalize a server URL by prepending `ws://` if no scheme is present.
+pub(crate) fn normalize_server_url(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        trimmed.to_owned()
+    } else {
+        format!("ws://{trimmed}")
+    }
+}
+
+/// Derive the HTTP base URL from the stored server base URL.
 ///
-/// `ws://host:port/ws/v1/receivers`  → `http://host:port`
-/// `wss://host:port/ws/v1/receivers` → `https://host:port`
-pub(crate) fn http_base_url(ws_url: &str) -> Option<String> {
-    let url = reqwest::Url::parse(ws_url).ok()?;
+/// `ws://host:port`  → `http://host:port`
+/// `wss://host:port` → `https://host:port`
+pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
     let scheme = match url.scheme() {
         "ws" => "http",
         "wss" => "https",
@@ -336,11 +346,12 @@ async fn put_profile(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ProfileRequest>,
 ) -> impl IntoResponse {
+    let url = normalize_server_url(&body.server_url);
     let db = state.db.lock().await;
-    match db.save_profile(&body.server_url, &body.token, &body.log_level) {
+    match db.save_profile(&url, &body.token, &body.log_level) {
         Ok(()) => {
             drop(db);
-            *state.upstream_url.write().await = Some(body.server_url);
+            *state.upstream_url.write().await = Some(url);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -440,7 +451,7 @@ mod tests {
     #[test]
     fn http_base_url_ws_with_port() {
         assert_eq!(
-            http_base_url("ws://127.0.0.1:8080/ws/v1/receivers"),
+            http_base_url("ws://127.0.0.1:8080"),
             Some("http://127.0.0.1:8080".to_owned())
         );
     }
@@ -448,7 +459,7 @@ mod tests {
     #[test]
     fn http_base_url_wss_with_port() {
         assert_eq!(
-            http_base_url("wss://server.example.com:8443/ws/v1/receivers"),
+            http_base_url("wss://server.example.com:8443"),
             Some("https://server.example.com:8443".to_owned())
         );
     }
@@ -456,7 +467,7 @@ mod tests {
     #[test]
     fn http_base_url_wss_no_port() {
         assert_eq!(
-            http_base_url("wss://server.example.com/ws/v1/receivers"),
+            http_base_url("wss://server.example.com"),
             Some("https://server.example.com".to_owned())
         );
     }
@@ -469,5 +480,45 @@ mod tests {
     #[test]
     fn http_base_url_invalid_url() {
         assert_eq!(http_base_url("not a url"), None);
+    }
+
+    #[test]
+    fn normalize_prepends_ws_when_no_scheme() {
+        assert_eq!(
+            normalize_server_url("127.0.0.1:8080"),
+            "ws://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_ws_scheme() {
+        assert_eq!(
+            normalize_server_url("ws://127.0.0.1:8080"),
+            "ws://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_wss_scheme() {
+        assert_eq!(
+            normalize_server_url("wss://server.example.com"),
+            "wss://server.example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_trailing_slash() {
+        assert_eq!(
+            normalize_server_url("ws://127.0.0.1:8080/"),
+            "ws://127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn normalize_trims_whitespace() {
+        assert_eq!(
+            normalize_server_url("  127.0.0.1:8080  "),
+            "ws://127.0.0.1:8080"
+        );
     }
 }

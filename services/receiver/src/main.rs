@@ -169,7 +169,12 @@ async fn main() {
                                 state.emit_log("No upstream URL configured".to_owned()).await;
                                 state.set_connection_state(ConnectionState::Disconnected).await;
                             }
-                            Some(url) => {
+                            Some(base_url) => {
+                                // Build the full WS URL from the base URL.
+                                let ws_url = format!(
+                                    "{}/ws/v1/receivers",
+                                    base_url.trim_end_matches('/')
+                                );
                                 // Read the token from the saved profile so we can
                                 // authenticate the WebSocket upgrade request.
                                 let token_opt = {
@@ -184,7 +189,7 @@ async fn main() {
                                   }
                                   Some(token) => {
                                 let ws_request =
-                                    receiver::build_authenticated_request(url.as_str(), &token);
+                                    receiver::build_authenticated_request(ws_url.as_str(), &token);
                                 match ws_request {
                                   Err(e) => {
                                     error!(error = %e, "failed to build WS request");
@@ -192,7 +197,7 @@ async fn main() {
                                     state.set_connection_state(ConnectionState::Disconnected).await;
                                   }
                                   Ok(ws_request) => {
-                                info!(url = %url, "initiating WS session");
+                                info!(url = %ws_url, "initiating WS session");
                                 match connect_async(ws_request).await {
                                     Err(e) => {
                                         error!(error = %e, "WS connect failed");
