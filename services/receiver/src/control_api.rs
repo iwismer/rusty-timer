@@ -86,7 +86,7 @@ pub struct SubscriptionsBody {
     pub subscriptions: Vec<SubscriptionRequest>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct StreamEntry {
     pub forwarder_id: String,
     pub reader_ip: String,
@@ -98,7 +98,7 @@ pub struct StreamEntry {
     pub display_alias: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct StreamsResponse {
     pub streams: Vec<StreamEntry>,
     pub degraded: bool,
