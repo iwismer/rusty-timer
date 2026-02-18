@@ -323,31 +323,26 @@ def wait_for_postgres() -> None:
 
 
 def apply_migrations() -> None:
-    """Apply the server schema migration via psql, recording it in _sqlx_migrations.
+    """Apply all server schema migrations via psql, recording them in _sqlx_migrations.
 
-    sqlx validates on startup that each migration's SHA-384 checksum matches the
-    recorded value. By inserting the tracking row here, the server skips re-applying
-    the migration and avoids the "relation already exists" error.
+    Discovers every *.sql file under services/server/migrations/, applies them in
+    sorted order, and records each in the _sqlx_migrations tracking table so that
+    sqlx's compile-time checks and runtime migration validation both pass.
+
+    sqlx 0.8 uses SHA-384 of the raw migration file bytes as the checksum.
     """
-    console.print("Applying database migrations…")
-    migration_path = REPO_ROOT / "services" / "server" / "migrations" / "0001_init.sql"
-    migration_bytes = migration_path.read_bytes()
+    console.print("[bold]Applying database migrations…[/bold]")
+    migrations_dir = REPO_ROOT / "services" / "server" / "migrations"
+    migration_files = sorted(migrations_dir.glob("*.sql"))
 
-    # Step 1: apply the migration SQL.
-    result = subprocess.run(
-        ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB],
-        input=migration_bytes.decode(),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        console.print(f"[red]Migration failed (psql returned {result.returncode}):[/red]\n{result.stderr}")
-        sys.exit(1)
+    if not migration_files:
+        console.print("  [dim]No migration files found.[/dim]")
+        return
 
-    # Step 2: record the migration in _sqlx_migrations so the server does not re-run it.
-    # sqlx 0.8 uses SHA-384 of the raw migration file bytes as the checksum.
-    checksum_hex = hashlib.sha384(migration_bytes).hexdigest()
-    tracking_sql = (
+    psql_base = ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB]
+
+    # Ensure tracking table exists.
+    tracking_ddl = (
         "CREATE TABLE IF NOT EXISTS _sqlx_migrations ("
         "  version BIGINT PRIMARY KEY,"
         "  description TEXT NOT NULL,"
@@ -356,21 +351,57 @@ def apply_migrations() -> None:
         "  checksum BYTEA NOT NULL,"
         "  execution_time BIGINT NOT NULL"
         ");"
-        f"INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time)"
-        f" VALUES (1, 'init', NOW(), true, decode('{checksum_hex}', 'hex'), 0)"
-        f" ON CONFLICT (version) DO NOTHING;"
     )
-    result = subprocess.run(
-        ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB],
-        input=tracking_sql,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        console.print(f"[red]Migration tracking record failed:[/red]\n{result.stderr}")
-        sys.exit(1)
+    subprocess.run(psql_base, input=tracking_ddl, capture_output=True, text=True, check=True)
 
-    console.print("[green]✓[/green] Migrations applied")
+    # Determine which migrations have already been applied.
+    result = subprocess.run(
+        ["docker", "exec", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB,
+         "-tAc", "SELECT version FROM _sqlx_migrations"],
+        capture_output=True, text=True,
+    )
+    applied: set[int] = set()
+    if result.returncode == 0:
+        applied = {int(v.strip()) for v in result.stdout.strip().splitlines() if v.strip()}
+
+    for mf in migration_files:
+        # Filename format: "0002_epoch_metrics.sql" → version=2, description="epoch_metrics"
+        stem = mf.stem
+        parts = stem.split("_", 1)
+        version = int(parts[0])
+        description = parts[1] if len(parts) > 1 else stem
+
+        if version in applied:
+            console.print(f"  [dim]Already applied:[/dim] {mf.name}")
+            continue
+
+        migration_bytes = mf.read_bytes()
+        checksum_hex = hashlib.sha384(migration_bytes).hexdigest()
+
+        # Apply the migration SQL.
+        result = subprocess.run(
+            psql_base, input=migration_bytes.decode(), capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            console.print(f"[red]Migration {mf.name} failed:[/red]\n{result.stderr}")
+            sys.exit(1)
+
+        # Record in _sqlx_migrations so the server does not re-run it.
+        tracking_sql = (
+            f"INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time)"
+            f" VALUES ({version}, '{description}', NOW(), true, decode('{checksum_hex}', 'hex'), 0)"
+            f" ON CONFLICT (version) DO NOTHING;"
+        )
+        result = subprocess.run(
+            psql_base, input=tracking_sql, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            console.print(f"[red]Migration tracking for {mf.name} failed:[/red]\n{result.stderr}")
+            sys.exit(1)
+
+        console.print(f"  [green]Applied:[/green] {mf.name}")
+
+    console.print("[green]✓[/green] Migrations up to date")
 
 
 def write_config_files(emulators: list[EmulatorSpec]) -> None:
