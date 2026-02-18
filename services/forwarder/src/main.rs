@@ -7,7 +7,7 @@ use forwarder::config::ForwarderConfig;
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
 use forwarder::replay::ReplayEngine;
-use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus};
 use forwarder::storage::journal::Journal;
 use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkSession};
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
@@ -62,6 +62,7 @@ async fn run_reader(
     fanout_addr: SocketAddr,
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    status: StatusServer,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
     let stream_key = reader_ip.clone();
@@ -76,10 +77,17 @@ async fn run_reader(
 
         info!(reader_ip = %reader_ip, target = %target_addr, "connecting to reader");
 
+        status
+            .update_reader_state(&reader_ip, ReaderConnectionState::Connecting)
+            .await;
+
         let stream = match TcpStream::connect(&target_addr).await {
             Ok(s) => {
                 info!(reader_ip = %reader_ip, "reader TCP connected");
                 backoff_secs = 1; // reset backoff on successful connect
+                status
+                    .update_reader_state(&reader_ip, ReaderConnectionState::Connected)
+                    .await;
                 s
             }
             Err(e) => {
@@ -89,6 +97,9 @@ async fn run_reader(
                     backoff_secs = backoff_secs,
                     "reader TCP connect failed, retrying"
                 );
+                status
+                    .update_reader_state(&reader_ip, ReaderConnectionState::Disconnected)
+                    .await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -133,10 +144,16 @@ async fn run_reader(
             match read_result {
                 Err(e) => {
                     warn!(reader_ip = %reader_ip, error = %e, "TCP read error, reconnecting");
+                    status
+                        .update_reader_state(&reader_ip, ReaderConnectionState::Disconnected)
+                        .await;
                     break;
                 }
                 Ok(0) => {
                     warn!(reader_ip = %reader_ip, "TCP connection closed by reader, reconnecting");
+                    status
+                        .update_reader_state(&reader_ip, ReaderConnectionState::Disconnected)
+                        .await;
                     break;
                 }
                 Ok(_) => {}
@@ -206,6 +223,8 @@ async fn run_reader(
                 warn!(reader_ip = %reader_ip, error = %e, "local fanout push failed");
                 // Non-fatal: local fanout failure doesn't break uplink path
             }
+
+            status.record_read(&reader_ip).await;
         }
 
         // Reconnect with backoff
@@ -668,17 +687,31 @@ async fn main() {
         }
     }
 
+    // Initialize reader status tracking
+    status_server.init_readers(&all_reader_ips).await;
+
     if all_reader_ips.is_empty() {
         eprintln!("FATAL: no enabled readers configured");
         std::process::exit(1);
     }
 
+    // Set forwarder identity on status page
+    status_server.set_forwarder_id(&forwarder_id).await;
+
+    // Detect local IP from first reader
+    let local_ip = all_reader_ips.first().and_then(|ip| detect_local_ip(ip));
+    if let Some(ref ip) = local_ip {
+        info!(local_ip = %ip, "detected local IP");
+    }
+    status_server.set_local_ip(local_ip).await;
+
     // Spawn reader tasks
     for (reader_ip, reader_port, read_type, fanout_addr) in fanout_addrs {
         let j = journal.clone();
         let rx = shutdown_rx.clone();
+        let ss = status_server.clone();
         tokio::spawn(async move {
-            run_reader(reader_ip, reader_port, read_type, fanout_addr, j, rx).await;
+            run_reader(reader_ip, reader_port, read_type, fanout_addr, j, rx, ss).await;
         });
     }
 
