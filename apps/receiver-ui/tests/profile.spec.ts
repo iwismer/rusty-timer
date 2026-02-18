@@ -231,4 +231,46 @@ test.describe("profile page", () => {
         ],
       });
   });
+
+  test("clears subscription validation error after successful retry", async ({
+    page,
+  }) => {
+    let putCalls = 0;
+
+    await mockReceiverApi(page, [
+      {
+        forwarder_id: "f1",
+        reader_ip: "10.0.0.1",
+        subscribed: false,
+        local_port: null,
+        online: true,
+      },
+    ]);
+
+    await page.route("**/api/v1/subscriptions", async (route) => {
+      if (route.request().method() === "PUT") {
+        putCalls += 1;
+        await route.fulfill({ status: 204, body: "" });
+        return;
+      }
+
+      await route.fulfill({ status: 405, body: "" });
+    });
+
+    await page.goto("/");
+
+    await page.locator('[data-testid="port-f1/10.0.0.1"]').fill("70000");
+    await page.locator('[data-testid="sub-f1/10.0.0.1"]').click();
+    await expect(
+      page.getByText("Port override must be in range 1-65535."),
+    ).toBeVisible();
+
+    await page.locator('[data-testid="port-f1/10.0.0.1"]').fill("9002");
+    await page.locator('[data-testid="sub-f1/10.0.0.1"]').click();
+
+    await expect.poll(() => putCalls).toBe(1);
+    await expect(
+      page.getByText("Port override must be in range 1-65535."),
+    ).toHaveCount(0);
+  });
 });

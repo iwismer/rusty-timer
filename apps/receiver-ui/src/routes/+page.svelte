@@ -40,6 +40,7 @@
       return;
     }
 
+    error = null;
     const key = streamKey(forwarder_id, reader_ip);
     subscriptionsBusy = true;
     activeSubscriptionKey = key;
