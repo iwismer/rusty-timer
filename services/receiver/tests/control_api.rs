@@ -534,3 +534,37 @@ async fn sse_events_endpoint_returns_status_changed() {
     );
     assert!(collected.contains("\"connecting\""));
 }
+
+#[tokio::test]
+async fn put_subscriptions_emits_status_changed_with_count() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let mut rx = state.ui_tx.subscribe();
+    let app = build_router(Arc::clone(&state));
+
+    let body = json!({
+        "subscriptions": [
+            {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null},
+            {"forwarder_id": "f2", "reader_ip": "10.0.0.2:10000", "local_port_override": null}
+        ]
+    });
+    assert_eq!(
+        put_json(app, "/api/v1/subscriptions", body).await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Expect a StatusChanged event with the updated count
+    let mut found_status = false;
+    while let Ok(event) = rx.try_recv() {
+        let json = serde_json::to_value(&event).unwrap();
+        if json["type"] == "status_changed" {
+            assert_eq!(json["streams_count"], 2);
+            found_status = true;
+            break;
+        }
+    }
+    assert!(
+        found_status,
+        "Expected StatusChanged event after put_subscriptions"
+    );
+}

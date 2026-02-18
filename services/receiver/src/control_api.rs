@@ -386,6 +386,11 @@ async fn put_subscriptions(
     match db.replace_subscriptions(&subs) {
         Ok(()) => {
             drop(db);
+            let conn = state.connection_state.read().await.clone();
+            let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
+                connection_state: conn,
+                streams_count: subs.len(),
+            });
             state.emit_streams_snapshot().await;
             StatusCode::NO_CONTENT.into_response()
         }
