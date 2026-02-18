@@ -1,6 +1,9 @@
 use crate::{
     auth::{extract_bearer, validate_token},
-    repo::events::{set_stream_online, upsert_event, upsert_stream, IngestResult},
+    dashboard_events::DashboardEvent,
+    repo::events::{
+        fetch_stream_metrics, set_stream_online, upsert_event, upsert_stream, IngestResult,
+    },
     state::AppState,
 };
 use axum::{
@@ -155,6 +158,19 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         }
     }
 
+    // Notify dashboard of streams coming online
+    for (reader_ip, &sid) in &stream_map {
+        let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
+            stream_id: sid,
+            forwarder_id: device_id.clone(),
+            reader_ip: reader_ip.clone(),
+            display_alias: None,
+            online: true,
+            stream_epoch: 1,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
     let hb_msg = WsMessage::Heartbeat(Heartbeat {
         session_id: session_id.clone(),
         device_id: device_id.clone(),
@@ -193,6 +209,15 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                             stream_map.insert(reader_ip.clone(), sid);
                                             let _ = set_stream_online(&state.pool, sid, true).await;
                                             state.get_or_create_broadcast(sid).await;
+                                            let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
+                                                stream_id: sid,
+                                                forwarder_id: device_id.clone(),
+                                                reader_ip: reader_ip.clone(),
+                                                display_alias: None,
+                                                online: true,
+                                                stream_epoch: 1,
+                                                created_at: chrono::Utc::now().to_rfc3339(),
+                                            });
                                         }
                                     }
                                 }
@@ -224,6 +249,12 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
 
     for sid in stream_map.values() {
         let _ = set_stream_online(&state.pool, *sid, false).await;
+        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+            stream_id: *sid,
+            online: Some(false),
+            stream_epoch: None,
+            display_alias: None,
+        });
     }
     {
         let mut senders = state.forwarder_command_senders.write().await;
@@ -319,5 +350,24 @@ async fn handle_event_batch(
     if let Ok(json) = serde_json::to_string(&ack) {
         socket.send(Message::Text(json)).await?;
     }
+
+    // Notify dashboard of updated metrics
+    let touched_streams: std::collections::HashSet<Uuid> = batch
+        .events
+        .iter()
+        .filter_map(|e| stream_map.get(&e.reader_ip).copied())
+        .collect();
+    for sid in touched_streams {
+        if let Ok(Some(m)) = fetch_stream_metrics(&state.pool, sid).await {
+            let _ = state.dashboard_tx.send(DashboardEvent::MetricsUpdated {
+                stream_id: sid,
+                raw_count: m.raw_count,
+                dedup_count: m.dedup_count,
+                retransmit_count: m.retransmit_count,
+                lag_ms: m.lag_ms,
+            });
+        }
+    }
+
     Ok(())
 }

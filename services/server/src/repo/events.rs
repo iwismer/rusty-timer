@@ -87,6 +87,38 @@ pub async fn set_stream_online(
     Ok(())
 }
 
+pub struct StreamMetricsRow {
+    pub raw_count: i64,
+    pub dedup_count: i64,
+    pub retransmit_count: i64,
+    pub lag_ms: Option<u64>,
+}
+
+pub async fn fetch_stream_metrics(
+    pool: &PgPool,
+    stream_id: Uuid,
+) -> Result<Option<StreamMetricsRow>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at
+           FROM stream_metrics WHERE stream_id = $1"#,
+        stream_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| {
+        let lag_ms = r
+            .last_canonical_event_received_at
+            .map(|ts| (chrono::Utc::now() - ts).num_milliseconds().max(0) as u64);
+        StreamMetricsRow {
+            raw_count: r.raw_count,
+            dedup_count: r.dedup_count,
+            retransmit_count: r.retransmit_count,
+            lag_ms,
+        }
+    }))
+}
+
 pub async fn fetch_events_after_cursor(
     pool: &PgPool,
     stream_id: Uuid,
