@@ -2,8 +2,8 @@ use crate::{
     auth::{extract_bearer, validate_token},
     dashboard_events::DashboardEvent,
     repo::events::{
-        fetch_stream_metrics, fetch_stream_snapshot, set_stream_online, upsert_event,
-        upsert_stream, IngestResult,
+        count_unique_chips, fetch_stream_metrics, fetch_stream_snapshot, set_stream_online,
+        upsert_event, upsert_stream, IngestResult,
     },
     state::AppState,
 };
@@ -358,12 +358,31 @@ async fn handle_event_batch(
         .collect();
     for sid in touched_streams {
         if let Ok(Some(m)) = fetch_stream_metrics(&state.pool, sid).await {
+            let epoch: i64 =
+                sqlx::query_scalar("SELECT stream_epoch FROM streams WHERE stream_id = $1")
+                    .bind(sid)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(1);
+
+            let unique_chips = count_unique_chips(&state.pool, sid, epoch)
+                .await
+                .unwrap_or(0);
+
             let _ = state.dashboard_tx.send(DashboardEvent::MetricsUpdated {
                 stream_id: sid,
                 raw_count: m.raw_count,
                 dedup_count: m.dedup_count,
                 retransmit_count: m.retransmit_count,
                 lag_ms: m.lag_ms,
+                epoch_raw_count: m.epoch_raw_count,
+                epoch_dedup_count: m.epoch_dedup_count,
+                epoch_retransmit_count: m.epoch_retransmit_count,
+                epoch_lag_ms: m.epoch_lag_ms,
+                epoch_last_received_at: m.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
+                unique_chips,
             });
         }
     }
