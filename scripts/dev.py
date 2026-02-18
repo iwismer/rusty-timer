@@ -14,6 +14,7 @@ One-command local dev environment setup and launch.
 Usage:
     uv run scripts/dev.py
     uv run scripts/dev.py --no-build
+    uv run scripts/dev.py --clear
 """
 
 import hashlib
@@ -99,6 +100,44 @@ console = Console()
 
 def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def clear() -> None:
+    """Remove all dev artifacts: tmux session, Docker container, tmp files."""
+    console.print(Panel.fit(
+        "[bold red]Rusty Timer Dev Cleanup[/bold red]\n"
+        "Removing dev environment artifacts…",
+        border_style="red",
+    ))
+
+    # 1. Kill tmux session
+    result = subprocess.run(
+        ["tmux", "kill-session", "-t", "rusty-dev"],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        console.print("  [green]Killed[/green] tmux session: rusty-dev")
+    else:
+        console.print("  [dim]No tmux session found[/dim]")
+
+    # 2. Stop and remove Docker container
+    result = subprocess.run(
+        ["docker", "rm", "-f", PG_CONTAINER],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        console.print(f"  [green]Removed[/green] Docker container: {PG_CONTAINER}")
+    else:
+        console.print(f"  [dim]No Docker container found: {PG_CONTAINER}[/dim]")
+
+    # 3. Remove tmp directory
+    if TMP_DIR.exists():
+        shutil.rmtree(TMP_DIR)
+        console.print(f"  [green]Removed[/green] {TMP_DIR}")
+    else:
+        console.print(f"  [dim]No tmp directory found: {TMP_DIR}[/dim]")
+
+    console.print("\n[bold green]Cleanup complete.[/bold green]")
 
 
 def check_prereqs() -> None:
@@ -365,6 +404,9 @@ def detect_and_launch() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    if "--clear" in sys.argv:
+        clear()
+        return
     skip_build = "--no-build" in sys.argv
     console.print(Panel.fit(
         "[bold cyan]Rusty Timer Dev Launcher[/bold cyan]\n"
