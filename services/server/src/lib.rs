@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod dashboard_events;
 pub mod db;
 pub mod http;
 pub mod repo;
