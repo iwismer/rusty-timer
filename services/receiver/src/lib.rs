@@ -17,17 +17,21 @@ pub use db::{Db, DbError, DbResult, Profile, Subscription};
 pub fn build_authenticated_request(
     url: &str,
     token: &str,
-) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, tokio_tungstenite::tungstenite::Error>
-{
+) -> Result<
+    tokio_tungstenite::tungstenite::http::Request<()>,
+    Box<tokio_tungstenite::tungstenite::Error>,
+> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::header;
-    url.into_client_request().and_then(|mut r| {
-        let hv = header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| {
-            tokio_tungstenite::tungstenite::Error::Http(
-                tokio_tungstenite::tungstenite::http::Response::new(Some(e.to_string().into())),
-            )
-        })?;
-        r.headers_mut().insert(header::AUTHORIZATION, hv);
-        Ok(r)
-    })
+    url.into_client_request()
+        .and_then(|mut r| {
+            let hv = header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| {
+                tokio_tungstenite::tungstenite::Error::Http(
+                    tokio_tungstenite::tungstenite::http::Response::new(Some(e.to_string().into())),
+                )
+            })?;
+            r.headers_mut().insert(header::AUTHORIZATION, hv);
+            Ok(r)
+        })
+        .map_err(Box::new)
 }

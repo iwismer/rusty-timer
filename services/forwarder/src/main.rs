@@ -93,11 +93,7 @@ async fn run_reader(
         // Initialize stream state in journal on first connect
         {
             let mut j = journal.lock().await;
-            // Current Unix timestamp seconds as initial epoch
-            let epoch = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let epoch = 1_i64;
             if let Err(e) = j.ensure_stream_state(&stream_key, epoch) {
                 warn!(reader_ip = %reader_ip, error = %e, "ensure_stream_state failed");
             }
