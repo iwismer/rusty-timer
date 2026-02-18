@@ -104,13 +104,18 @@
     metricsRetryTimers = {};
   });
 
-  // Aggregate stats per forwarder group
-  function groupStats(streams: typeof $streamsStore) {
+  // Aggregate stats per forwarder group.
+  // metricsMap is passed explicitly so Svelte tracks it as a reactive dependency
+  // in the {@const} call site — without it, the group header stats won't live-update.
+  function groupStats(
+    streams: typeof $streamsStore,
+    metricsMap: Record<string, import("$lib/api").StreamMetrics>,
+  ) {
     let totalRaw = 0;
     let totalChips = 0;
     let onlineCount = 0;
     for (const s of streams) {
-      const m = $metricsStore[s.stream_id];
+      const m = metricsMap[s.stream_id];
       if (m) {
         totalRaw += m.epoch_raw_count;
         totalChips += m.unique_chips;
@@ -138,7 +143,7 @@
   <h1 data-testid="streams-heading">Dashboard – Streams</h1>
 
   {#each groupedStreams as group (group.forwarderId)}
-    {@const stats = groupStats(group.streams)}
+    {@const stats = groupStats(group.streams, $metricsStore)}
     <section class="forwarder-group">
       <div class="forwarder-header">
         <h2>{group.displayName}</h2>
