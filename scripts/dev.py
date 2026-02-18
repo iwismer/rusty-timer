@@ -30,9 +30,11 @@ from rich.panel import Panel
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 TMP_DIR = Path("/tmp/rusty-timer-dev")
+DEV_DIR = TMP_DIR
 FORWARDER_TOML_PATH = TMP_DIR / "forwarder.toml"
 FORWARDER_TOKEN_PATH = TMP_DIR / "forwarder-token.txt"
 RECEIVER_TOKEN_PATH = TMP_DIR / "receiver-token.txt"
+FORWARDER_JOURNAL_PATH = DEV_DIR / "forwarder.sqlite3"
 
 FORWARDER_TOKEN_TEXT = "rusty-dev-forwarder"
 RECEIVER_TOKEN_TEXT = "rusty-dev-receiver"
@@ -45,25 +47,28 @@ PG_PORT = 5432
 
 PANES = [
     ("Postgres",  f"docker logs -f {PG_CONTAINER}"),
-    ("Server",    "DATABASE_URL=postgres://rt:secret@localhost:5432/rusty_timer "
-                  "BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server"),
+    (
+        "Server",
+        f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
+        f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server",
+    ),
     ("Emulator",  "cargo run -p emulator -- --port 10001 --delay 2000 --type raw"),
     ("Forwarder", "cargo run -p forwarder -- --config /tmp/rusty-timer-dev/forwarder.toml"),
     ("Receiver",  "cargo run -p receiver"),
     ("Dashboard", "cd apps/dashboard && npm run dev"),
 ]
 
-FORWARDER_TOML = """\
+FORWARDER_TOML = f"""\
 schema_version = 1
 
 [server]
 base_url = "ws://127.0.0.1:8080"
 
 [auth]
-token_file = "/tmp/rusty-timer-dev/forwarder-token.txt"
+token_file = "{FORWARDER_TOKEN_PATH}"
 
 [journal]
-sqlite_path = "/tmp/rusty-timer-dev/forwarder.sqlite3"
+sqlite_path = "{FORWARDER_JOURNAL_PATH}"
 prune_watermark_pct = 80
 
 [status_http]
@@ -132,7 +137,6 @@ def start_postgres() -> None:
             "postgres:16",
         ],
         check=True,
-        capture_output=True,
     )
 
 
@@ -174,6 +178,8 @@ def seed_tokens() -> None:
         (RECEIVER_TOKEN_TEXT, "receiver"),
     ]:
         hex_hash = sha256_hex(token_text)
+        # hex_hash is [0-9a-f] only (SHA-256 output); device_type is a hardcoded string literal.
+        # Neither comes from external input, so f-string interpolation is safe here.
         sql = (
             f"INSERT INTO device_tokens (token_hash, device_type, device_id) "
             f"VALUES (decode('{hex_hash}', 'hex'), '{device_type}', 'dev') "
@@ -242,7 +248,7 @@ def launch_tmux() -> None:
     for i, (title, cmd) in enumerate(PANES):
         pane = f"{session}:0.{i}"
         subprocess.run(["tmux", "select-pane", "-t", pane, "-T", title], check=True)
-        full_cmd = f"cd {REPO_ROOT} && {cmd}"
+        full_cmd = f'cd "{REPO_ROOT}" && {cmd}'
         subprocess.run(["tmux", "send-keys", "-t", pane, full_cmd, "Enter"], check=True)
     subprocess.run(["tmux", "attach-session", "-t", session])
 
@@ -275,7 +281,7 @@ async def _iterm2_async() -> None:
         sessions = [s0, s1, s2, s4, s3, s5]  # row-major: top-L, top-R, mid-L, mid-R, bot-L, bot-R
         for session, (title, cmd) in zip(sessions, PANES):
             await session.async_set_name(title)
-            await session.async_send_text(f"cd {REPO_ROOT} && {cmd}\n")
+            await session.async_send_text(f'cd "{REPO_ROOT}" && {cmd}\n')
 
 
 # ---------------------------------------------------------------------------
