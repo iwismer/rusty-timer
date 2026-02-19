@@ -787,6 +787,15 @@ async fn main() {
     // All worker tasks started — mark subsystem ready
     status_server.set_ready().await;
 
+    if std::env::var_os("RT_UPDATER_STAGE_DIR").is_none() {
+        let default_stage_dir = "/var/lib/rusty-timer";
+        std::env::set_var("RT_UPDATER_STAGE_DIR", default_stage_dir);
+        info!(
+            stage_dir = default_stage_dir,
+            "configured updater stage directory"
+        );
+    }
+
     // Spawn background update check
     {
         let ss = status_server.clone();

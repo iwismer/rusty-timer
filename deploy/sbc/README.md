@@ -138,6 +138,10 @@ To update to a newer version, choose one of:
   sudo systemctl restart rt-forwarder
   ```
 
+When the forwarder self-updater stages an artifact at
+`/var/lib/rusty-timer/.forwarder-staged`, `systemd` applies it automatically on
+the next restart via `/usr/local/lib/rt-forwarder-apply-staged.sh`.
+
 ## Configuration Reference
 
 See [`docs/runbooks/forwarder-operations.md`](../../docs/runbooks/forwarder-operations.md)

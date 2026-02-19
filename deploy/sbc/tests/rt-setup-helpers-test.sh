@@ -29,6 +29,15 @@ assert_nonempty() {
   fi
 }
 
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "${haystack}" != *"${needle}"* ]]; then
+    fail "${msg} (missing='${needle}')"
+  fi
+}
+
 # --- release selection across pages ---
 page1='[{"tag_name":"server-v1.0.0","published_at":"2026-02-01T00:00:00Z","draft":false,"prerelease":false,"assets":[]}]'
 page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
@@ -53,5 +62,18 @@ assert_eq "" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.
 assert_eq "skip_verify" "$(install_verify_policy yes n)" "active service + no restart should skip verify"
 assert_eq "run_verify" "$(install_verify_policy yes y)" "active service + yes restart should run verify"
 assert_eq "run_verify" "$(install_verify_policy no '')" "inactive service should run verify"
+
+# --- service unit and staged-update helper rendering ---
+unit="$(render_forwarder_systemd_unit)"
+assert_contains "${unit}" "User=rt-forwarder" "unit should keep service user"
+assert_contains "${unit}" "PermissionsStartOnly=true" "unit should allow root pre-start hook"
+assert_contains "${unit}" "ExecStartPre=/usr/local/lib/rt-forwarder-apply-staged.sh" "unit should include staged update hook"
+assert_contains "${unit}" "ExecStart=/usr/local/bin/rt-forwarder" "unit should run forwarder binary"
+
+apply_script="$(render_apply_staged_script)"
+assert_contains "${apply_script}" "STAGED_PATH=\"/var/lib/rusty-timer/.forwarder-staged\"" "apply helper should use staged path"
+assert_contains "${apply_script}" "TARGET_PATH=\"/usr/local/bin/rt-forwarder\"" "apply helper should use forwarder install path"
+assert_contains "${apply_script}" "mv \"\${tmp_target}\" \"\${TARGET_PATH}\"" "apply helper should atomically promote binary"
+assert_contains "${apply_script}" "rm -f \"\${STAGED_PATH}\"" "apply helper should clean staged file"
 
 echo "PASS: rt-setup helper tests"

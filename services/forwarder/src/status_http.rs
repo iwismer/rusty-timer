@@ -1551,3 +1551,64 @@ function showRestartBanner() {{
         reader_rows = reader_rows,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn update_apply_sets_failed_status_when_staged_file_missing() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .set_update_status(UpdateStatus::Downloaded {
+                version: "1.2.3".to_owned(),
+            })
+            .await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        server
+            .set_staged_update_path(temp.path().join("missing-forwarder-staged"))
+            .await;
+
+        let addr = server.local_addr();
+        let base = format!("http://{}", addr);
+        let client = reqwest::Client::new();
+
+        let apply_resp = client
+            .post(format!("{}/update/apply", base))
+            .send()
+            .await
+            .expect("POST /update/apply");
+        assert_eq!(apply_resp.status(), 200);
+
+        let mut saw_failed = false;
+        let mut last_body = String::new();
+        for _ in 0..20 {
+            let resp = client
+                .get(format!("{}/update/status", base))
+                .send()
+                .await
+                .expect("GET /update/status");
+            last_body = resp.text().await.expect("response body");
+            if last_body.contains(r#""status":"failed""#) {
+                saw_failed = true;
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            saw_failed,
+            "status never became failed, last response: {last_body}"
+        );
+    }
+}

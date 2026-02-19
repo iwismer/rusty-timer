@@ -128,6 +128,17 @@ fn parse_version_from_tag(tag: &str, service_name: &str) -> Option<Version> {
     Version::parse(version_str).ok()
 }
 
+fn stage_root_dir(exe_dir: &Path) -> PathBuf {
+    stage_root_dir_from(std::env::var_os("RT_UPDATER_STAGE_DIR"), exe_dir)
+}
+
+fn stage_root_dir_from(env_value: Option<std::ffi::OsString>, exe_dir: &Path) -> PathBuf {
+    match env_value {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => exe_dir.to_path_buf(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Blocking implementations (run inside spawn_blocking)
 // ---------------------------------------------------------------------------
@@ -201,13 +212,14 @@ fn download_blocking(
         .asset_for(target, None)
         .ok_or_else(|| format!("no asset found for target {target} in release {tag}"))?;
 
-    // Download the archive into a temp dir on the **same filesystem** as the
-    // running binary so that renames are atomic.
+    // Download and stage on the same filesystem as the final staged path.
     let current_exe = std::env::current_exe()?;
     let exe_dir = current_exe
         .parent()
         .ok_or("cannot determine executable directory")?;
-    let tmp_dir = tempfile::tempdir_in(exe_dir)?;
+    let stage_root = stage_root_dir(exe_dir);
+    std::fs::create_dir_all(&stage_root)?;
+    let tmp_dir = tempfile::tempdir_in(&stage_root)?;
     let tmp_archive = tmp_dir.path().join(&asset.name);
 
     {
@@ -229,8 +241,8 @@ fn download_blocking(
     // Find the extracted binary — it should be the service name (or the only file).
     let staged_bin = find_extracted_binary(&extract_dir, service_name)?;
 
-    // Stage to the exe dir as `.{service_name}-staged`.
-    let staged_path = exe_dir.join(format!(".{service_name}-staged"));
+    // Stage as `.{service_name}-staged` under the configured stage root.
+    let staged_path = stage_root.join(format!(".{service_name}-staged"));
     std::fs::copy(&staged_bin, &staged_path)?;
 
     // Make executable on Unix.
@@ -328,6 +340,8 @@ fn find_extracted_binary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::path::Path;
 
     #[test]
     fn parse_version_from_tag_strips_prefix() {
@@ -381,5 +395,21 @@ mod tests {
     fn new_checker_rejects_invalid_version() {
         let checker = UpdateChecker::new("owner", "repo", "forwarder", "not.a.version");
         assert!(checker.is_err());
+    }
+
+    #[test]
+    fn staging_dir_prefers_explicit_env() {
+        let stage_dir = stage_root_dir_from(
+            Some(OsString::from("/var/lib/rusty-timer")),
+            Path::new("/usr/local/bin"),
+        );
+        assert_eq!(stage_dir, PathBuf::from("/var/lib/rusty-timer"));
+    }
+
+    #[test]
+    fn staging_dir_falls_back_to_exe_dir_when_unset() {
+        let exe_dir = Path::new("/usr/local/bin");
+        let stage_dir = stage_root_dir_from(None, exe_dir);
+        assert_eq!(stage_dir, exe_dir);
     }
 }
