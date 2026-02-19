@@ -572,6 +572,18 @@ fn config_not_available() -> Response {
     text_response(StatusCode::NOT_FOUND, "Config editing not available")
 }
 
+async fn restart_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    match &state.restart_signal {
+        Some(signal) => {
+            signal.notify_one();
+            json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
+        }
+        None => config_not_available(),
+    }
+}
+
 fn get_config_state<J: JournalAccess + Send + 'static>(
     state: &AppState<J>,
 ) -> Option<Arc<ConfigState>> {
@@ -614,6 +626,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/config/readers",
             post(post_config_readers_handler::<J>),
         )
+        .route("/api/v1/restart", post(restart_handler::<J>))
         .fallback(not_found_handler)
         .with_state(state)
 }
