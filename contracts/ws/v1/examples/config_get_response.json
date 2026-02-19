@@ -1,0 +1,12 @@
+{
+  "kind": "config_get_response",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "config": {
+    "schema_version": 1,
+    "display_name": "Start Line",
+    "server": { "base_url": "http://server.example.com" },
+    "auth": { "token_file": "/etc/rusty-timer/token" },
+    "readers": [{ "target": "192.168.0.50:10000", "enabled": true }]
+  },
+  "restart_needed": false
+}

@@ -219,6 +219,41 @@ pub struct EpochResetCommand {
 }
 
 // ---------------------------------------------------------------------------
+// Config messages (server <-> forwarder)
+// ---------------------------------------------------------------------------
+
+/// Server-to-forwarder: request the current config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigGetRequest {
+    pub request_id: String,
+}
+
+/// Forwarder-to-server: current config response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigGetResponse {
+    pub request_id: String,
+    pub config: serde_json::Value,
+    pub restart_needed: bool,
+}
+
+/// Server-to-forwarder: update a config section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSetRequest {
+    pub request_id: String,
+    pub section: String,
+    pub payload: serde_json::Value,
+}
+
+/// Forwarder-to-server: config update result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub restart_needed: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
@@ -243,6 +278,10 @@ pub enum WsMessage {
     Heartbeat(Heartbeat),
     Error(ErrorMessage),
     EpochResetCommand(EpochResetCommand),
+    ConfigGetRequest(ConfigGetRequest),
+    ConfigGetResponse(ConfigGetResponse),
+    ConfigSetRequest(ConfigSetRequest),
+    ConfigSetResponse(ConfigSetResponse),
 }
 
 // ---------------------------------------------------------------------------
