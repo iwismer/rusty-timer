@@ -15,12 +15,18 @@
 //! No authentication in v1. Status page is read-only.
 
 use crate::storage::journal::Journal;
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -153,6 +159,24 @@ impl ConfigState {
     }
 }
 
+struct AppState<J: JournalAccess + Send + 'static> {
+    subsystem: Arc<Mutex<SubsystemStatus>>,
+    journal: Arc<Mutex<J>>,
+    version: Arc<String>,
+    config_state: Option<Arc<ConfigState>>,
+}
+
+impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
+    fn clone(&self) -> Self {
+        Self {
+            subsystem: self.subsystem.clone(),
+            journal: self.journal.clone(),
+            version: self.version.clone(),
+            config_state: self.config_state.clone(),
+        }
+    }
+}
+
 impl StatusServer {
     /// Return the bound listen address.
     pub fn local_addr(&self) -> SocketAddr {
@@ -248,11 +272,18 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let subsystem = Arc::new(Mutex::new(subsystem));
-        let version = cfg.forwarder_version.clone();
+        let state = AppState {
+            subsystem: subsystem.clone(),
+            journal,
+            version: Arc::new(cfg.forwarder_version),
+            config_state: None,
+        };
 
-        let server_subsystem = subsystem.clone();
+        let app = build_router(state);
         tokio::spawn(async move {
-            run_server(listener, server_subsystem, journal, version, None).await;
+            if let Err(err) = axum::serve(listener, app).await {
+                eprintln!("status HTTP server error: {}", err);
+            }
         });
 
         Ok(StatusServer {
@@ -272,19 +303,18 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let subsystem = Arc::new(Mutex::new(subsystem));
-        let version = cfg.forwarder_version.clone();
-        let config_state = Arc::new(config_state);
+        let state = AppState {
+            subsystem: subsystem.clone(),
+            journal,
+            version: Arc::new(cfg.forwarder_version),
+            config_state: Some(Arc::new(config_state)),
+        };
 
-        let server_subsystem = subsystem.clone();
+        let app = build_router(state);
         tokio::spawn(async move {
-            run_server(
-                listener,
-                server_subsystem,
-                journal,
-                version,
-                Some(config_state),
-            )
-            .await;
+            if let Err(err) = axum::serve(listener, app).await {
+                eprintln!("status HTTP server error: {}", err);
+            }
         });
 
         Ok(StatusServer {
@@ -379,47 +409,6 @@ fn format_last_seen(instant: Option<Instant>) -> String {
     }
 }
 
-fn from_hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Extract the body from a raw HTTP request string.
-///
-/// Looks for the `\r\n\r\n` separator between headers and body.
-/// Returns `None` if the separator is not found.
-fn extract_request_body(request: &str) -> Option<&str> {
-    request.find("\r\n\r\n").map(|i| &request[i + 4..])
-}
-
-fn percent_decode_path_segment(input: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' => {
-                if i + 2 >= bytes.len() {
-                    return None;
-                }
-                let hi = from_hex_digit(bytes[i + 1])?;
-                let lo = from_hex_digit(bytes[i + 2])?;
-                out.push((hi << 4) | lo);
-                i += 3;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
 /// Read the TOML config file, apply a mutation, and write it back.
 ///
 /// Returns Ok(()) on success or Err((status_code, json_error_body)) on failure.
@@ -471,830 +460,618 @@ async fn update_config_file(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Server accept loop
-// ---------------------------------------------------------------------------
+fn text_response(status: StatusCode, body: impl Into<String>) -> Response {
+    (status, [(header::CONTENT_TYPE, "text/plain")], body.into()).into_response()
+}
 
-async fn run_server<J: JournalAccess + Send + 'static>(
-    listener: TcpListener,
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    journal: Arc<Mutex<J>>,
-    version: String,
-    config_state: Option<Arc<ConfigState>>,
-) {
-    let version = Arc::new(version);
-    while let Ok((stream, _)) = listener.accept().await {
-        let subsystem = subsystem.clone();
-        let journal = journal.clone();
-        let version = version.clone();
-        let config_state = config_state.clone();
-        tokio::spawn(async move {
-            handle_connection(stream, subsystem, journal, version, config_state).await;
-        });
+fn json_response(status: StatusCode, body: String) -> Response {
+    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, String> {
+    serde_json::from_slice::<T>(body).map_err(|e| format!("Invalid JSON: {}", e))
+}
+
+fn config_not_available() -> Response {
+    text_response(StatusCode::NOT_FOUND, "Config editing not available")
+}
+
+fn get_config_state<J: JournalAccess + Send + 'static>(
+    state: &AppState<J>,
+) -> Option<Arc<ConfigState>> {
+    state.config_state.clone()
+}
+
+fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz_handler))
+        .route("/readyz", get(readyz_handler::<J>))
+        .route("/", get(status_page_handler::<J>))
+        .route(
+            "/api/v1/streams/:reader_ip/reset-epoch",
+            post(reset_epoch_handler::<J>),
+        )
+        .route("/config", get(config_page_handler::<J>))
+        .route("/api/v1/config", get(config_json_handler::<J>))
+        .route(
+            "/api/v1/config/general",
+            post(post_config_general_handler::<J>),
+        )
+        .route(
+            "/api/v1/config/server",
+            post(post_config_server_handler::<J>),
+        )
+        .route("/api/v1/config/auth", post(post_config_auth_handler::<J>))
+        .route(
+            "/api/v1/config/journal",
+            post(post_config_journal_handler::<J>),
+        )
+        .route(
+            "/api/v1/config/uplink",
+            post(post_config_uplink_handler::<J>),
+        )
+        .route(
+            "/api/v1/config/status_http",
+            post(post_config_status_http_handler::<J>),
+        )
+        .route(
+            "/api/v1/config/readers",
+            post(post_config_readers_handler::<J>),
+        )
+        .fallback(not_found_handler)
+        .with_state(state)
+}
+
+async fn healthz_handler() -> &'static str {
+    "ok"
+}
+
+async fn readyz_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let ss = state.subsystem.lock().await;
+    if ss.is_ready() {
+        text_response(StatusCode::OK, "ready")
+    } else {
+        let reason = ss.reason.clone().unwrap_or_else(|| "not ready".to_owned());
+        text_response(StatusCode::SERVICE_UNAVAILABLE, reason)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Request handler
-// ---------------------------------------------------------------------------
+async fn status_page_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Html<String> {
+    let (ready, uplink_connected, forwarder_id, local_ip, readers, restart_needed) = {
+        let ss = state.subsystem.lock().await;
+        let mut readers: Vec<_> = ss
+            .readers
+            .iter()
+            .map(|(ip, r)| (ip.clone(), r.clone()))
+            .collect();
+        readers.sort_by(|a, b| a.0.cmp(&b.0));
+        (
+            ss.is_ready(),
+            ss.uplink_connected(),
+            ss.forwarder_id.clone(),
+            ss.local_ip.clone(),
+            readers,
+            ss.restart_needed(),
+        )
+    };
 
-async fn handle_connection<J: JournalAccess + Send + 'static>(
-    mut stream: TcpStream,
-    subsystem: Arc<Mutex<SubsystemStatus>>,
-    journal: Arc<Mutex<J>>,
-    version: Arc<String>,
-    config_state: Option<Arc<ConfigState>>,
-) {
-    // Read the request into a 64 KiB buffer, looping until we see the header/body separator
-    let mut buf = vec![0u8; 65536];
-    let mut total = 0usize;
-    loop {
-        let n = match stream.read(&mut buf[total..]).await {
-            Ok(n) if n > 0 => n,
-            _ => {
-                if total == 0 {
-                    return;
-                }
-                break;
+    let ready_state = if ready { "ready" } else { "not-ready" };
+    let ready_class = if ready { "ok" } else { "err" };
+    let uplink_state = if uplink_connected {
+        "connected"
+    } else {
+        "disconnected"
+    };
+    let uplink_class = if uplink_connected { "ok" } else { "err" };
+    let local_ip_display = local_ip.as_deref().unwrap_or("unknown");
+
+    let mut reader_rows = String::new();
+    for (ip, r) in &readers {
+        let (state_text, state_class) = match r.state {
+            ReaderConnectionState::Connected => ("connected", "ok"),
+            ReaderConnectionState::Connecting => ("connecting", "warn"),
+            ReaderConnectionState::Disconnected => ("disconnected", "err"),
+        };
+        let last_seen = format_last_seen(r.last_seen);
+        reader_rows.push_str(&format!(
+            "<tr><td>{ip}</td>\
+             <td><span class=\"status {sc}\">{st}</span></td>\
+             <td>{session}</td>\
+             <td>{total}</td>\
+             <td>{ls}</td></tr>",
+            ip = ip,
+            sc = state_class,
+            st = state_text,
+            session = r.reads_since_restart,
+            total = r.reads_total,
+            ls = last_seen,
+        ));
+    }
+
+    let restart_banner = if restart_needed {
+        "<div style=\"background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem\">Configuration changed. Restart the forwarder to apply changes.</div>"
+    } else {
+        ""
+    };
+
+    let html = format!(
+        "<!DOCTYPE html>\
+         <html><head><title>Forwarder Status</title>\
+         <style>\
+         body{{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem}}\
+         h1{{margin-bottom:.5rem}}\
+         h2{{margin-top:1.5rem;margin-bottom:.5rem}}\
+         .status{{padding:.25rem .5rem;border-radius:4px;display:inline-block}}\
+         .ok{{background:#d4edda;color:#155724}}\
+         .warn{{background:#fff3cd;color:#856404}}\
+         .err{{background:#f8d7da;color:#721c24}}\
+         table{{border-collapse:collapse;width:100%}}\
+         th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd}}\
+         th{{font-weight:600}}\
+         </style>\
+         </head><body>\
+         {restart_banner}\
+         <h1>Forwarder Status</h1>\
+         <p><a href=\"/config\">Configure</a></p>\
+         <p>Version: {version}</p>\
+         <p>Forwarder ID: <code>{fwd_id}</code></p>\
+         <p>Local IP: {local_ip}</p>\
+         <p>Readiness: <span class=\"status {rc}\">{rs}</span></p>\
+         <p>Uplink: <span class=\"status {uc}\">{us}</span></p>\
+         <h2>Readers</h2>\
+         <table>\
+         <tr><th>Reader IP</th><th>Status</th><th>Reads (session)</th><th>Reads (total)</th><th>Last seen</th></tr>\
+         {reader_rows}\
+         </table>\
+         <script>\
+         setTimeout(()=>location.reload(),2000);\
+         </script>\
+         </body></html>",
+        restart_banner = restart_banner,
+        version = *state.version,
+        fwd_id = forwarder_id,
+        local_ip = local_ip_display,
+        rs = ready_state,
+        rc = ready_class,
+        us = uplink_state,
+        uc = uplink_class,
+        reader_rows = reader_rows,
+    );
+
+    Html(html)
+}
+
+async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(reader_ip): Path<String>,
+) -> Response {
+    // Keep prior behavior for malformed percent-encoding style stream keys.
+    if reader_ip.contains('%') {
+        return text_response(
+            StatusCode::BAD_REQUEST,
+            "invalid percent-encoding in stream key",
+        );
+    }
+
+    let result = state.journal.lock().await.reset_epoch(&reader_ip);
+    match result {
+        Ok(new_epoch) => {
+            let body = format!("{{\"new_epoch\":{}}}", new_epoch);
+            json_response(StatusCode::OK, body)
+        }
+        Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
+        Err(EpochResetError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn config_page_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+
+    let _lock = cs.write_lock.lock().await;
+    let raw = match std::fs::read_to_string(&cs.path) {
+        Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
+            Ok(raw) => raw,
+            Err(e) => {
+                let body = format!("Error parsing config: {}", e);
+                return text_response(StatusCode::INTERNAL_SERVER_ERROR, body);
+            }
+        },
+        Err(e) => {
+            let body = format!("Error reading config: {}", e);
+            return text_response(StatusCode::INTERNAL_SERVER_ERROR, body);
+        }
+    };
+
+    let restart_needed = state.subsystem.lock().await.restart_needed();
+    let html = render_config_page(&raw, restart_needed);
+    Html(html).into_response()
+}
+
+async fn config_json_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+
+    let _lock = cs.write_lock.lock().await;
+    match std::fs::read_to_string(&cs.path) {
+        Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
+            Ok(raw) => match serde_json::to_string(&raw) {
+                Ok(json) => json_response(StatusCode::OK, json),
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)})
+                        .to_string(),
+                ),
+            },
+            Err(e) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                    .to_string(),
+            ),
+        },
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                .to_string(),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GeneralUpdate {
+    display_name: Option<String>,
+}
+
+async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let update: GeneralUpdate = match parse_json_body(&body) {
+        Ok(u) => u,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    let _lock = cs.write_lock.lock().await;
+    match update_config_file(&cs, &state.subsystem, |raw| {
+        raw.display_name = update.display_name;
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ServerUpdate {
+    base_url: Option<String>,
+    forwarders_ws_path: Option<String>,
+}
+
+async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let update: ServerUpdate = match parse_json_body(&body) {
+        Ok(u) => u,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    if update.base_url.is_none() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            "{\"ok\":false,\"error\":\"base_url is required\"}".to_owned(),
+        );
+    }
+
+    let _lock = cs.write_lock.lock().await;
+    match update_config_file(&cs, &state.subsystem, |raw| {
+        raw.server = Some(crate::config::RawServerConfig {
+            base_url: update.base_url,
+            forwarders_ws_path: update.forwarders_ws_path,
+        });
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AuthUpdate {
+    token_file: Option<String>,
+}
+
+async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let update: AuthUpdate = match parse_json_body(&body) {
+        Ok(u) => u,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    if update.token_file.is_none() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            "{\"ok\":false,\"error\":\"token_file is required\"}".to_owned(),
+        );
+    }
+
+    let _lock = cs.write_lock.lock().await;
+    match update_config_file(&cs, &state.subsystem, |raw| {
+        raw.auth = Some(crate::config::RawAuthConfig {
+            token_file: update.token_file,
+        });
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct JournalUpdate {
+    sqlite_path: Option<String>,
+    prune_watermark_pct: Option<u8>,
+}
+
+async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let update: JournalUpdate = match parse_json_body(&body) {
+        Ok(u) => u,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    let _lock = cs.write_lock.lock().await;
+    match update_config_file(&cs, &state.subsystem, |raw| {
+        raw.journal = Some(crate::config::RawJournalConfig {
+            sqlite_path: update.sqlite_path,
+            prune_watermark_pct: update.prune_watermark_pct,
+        });
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UplinkUpdate {
+    batch_mode: Option<String>,
+    batch_flush_ms: Option<u64>,
+    batch_max_events: Option<u32>,
+}
+
+async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let update: UplinkUpdate = match parse_json_body(&body) {
+        Ok(u) => u,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    let _lock = cs.write_lock.lock().await;
+    match update_config_file(&cs, &state.subsystem, |raw| {
+        raw.uplink = Some(crate::config::RawUplinkConfig {
+            batch_mode: update.batch_mode,
+            batch_flush_ms: update.batch_flush_ms,
+            batch_max_events: update.batch_max_events,
+        });
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct StatusHttpUpdate {
+    bind: Option<String>,
+}
+
+async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let update: StatusHttpUpdate = match parse_json_body(&body) {
+        Ok(u) => u,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    let _lock = cs.write_lock.lock().await;
+    match update_config_file(&cs, &state.subsystem, |raw| {
+        raw.status_http = Some(crate::config::RawStatusHttpConfig { bind: update.bind });
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ReaderEntry {
+    target: Option<String>,
+    read_type: Option<String>,
+    enabled: Option<bool>,
+    local_fallback_port: Option<u16>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReadersUpdate {
+    readers: Vec<ReaderEntry>,
+}
+
+async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let update: ReadersUpdate = match parse_json_body(&body) {
+        Ok(u) => u,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    if update.readers.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            "{\"ok\":false,\"error\":\"at least one reader is required\"}".to_owned(),
+        );
+    }
+
+    // Validate all targets before writing.
+    for (i, r) in update.readers.iter().enumerate() {
+        let target = match &r.target {
+            Some(t) => t,
+            None => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({"ok": false, "error": format!("readers[{}].target is required", i)}).to_string(),
+                );
             }
         };
-        total += n;
-        // Stop once we've seen the header/body separator or buffer is full
-        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") || total >= buf.len() {
-            break;
-        }
-    }
-
-    let request = match std::str::from_utf8(&buf[..total]) {
-        Ok(s) => s,
-        Err(_) => {
-            send_response(&mut stream, 400, "text/plain", "Bad Request").await;
-            return;
-        }
-    };
-
-    // Parse the request line: METHOD PATH HTTP/1.1
-    let first_line = match request.lines().next() {
-        Some(l) => l,
-        None => {
-            send_response(&mut stream, 400, "text/plain", "Bad Request").await;
-            return;
-        }
-    };
-
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("/");
-
-    match (method, path) {
-        ("GET", "/healthz") => {
-            send_response(&mut stream, 200, "text/plain", "ok").await;
-        }
-        ("GET", "/readyz") => {
-            let ss = subsystem.lock().await;
-            if ss.is_ready() {
-                send_response(&mut stream, 200, "text/plain", "ready").await;
-            } else {
-                let reason = ss.reason.clone().unwrap_or_else(|| "not ready".to_owned());
-                send_response(&mut stream, 503, "text/plain", &reason).await;
-            }
-        }
-        ("GET", "/") => {
-            let (ready, uplink_connected, forwarder_id, local_ip, readers, restart_needed) = {
-                let ss = subsystem.lock().await;
-                let mut readers: Vec<_> = ss
-                    .readers
-                    .iter()
-                    .map(|(ip, r)| (ip.clone(), r.clone()))
-                    .collect();
-                readers.sort_by(|a, b| a.0.cmp(&b.0));
-                (
-                    ss.is_ready(),
-                    ss.uplink_connected(),
-                    ss.forwarder_id.clone(),
-                    ss.local_ip.clone(),
-                    readers,
-                    ss.restart_needed(),
-                )
-            };
-
-            let ready_state = if ready { "ready" } else { "not-ready" };
-            let ready_class = if ready { "ok" } else { "err" };
-            let uplink_state = if uplink_connected {
-                "connected"
-            } else {
-                "disconnected"
-            };
-            let uplink_class = if uplink_connected { "ok" } else { "err" };
-            let local_ip_display = local_ip.as_deref().unwrap_or("unknown");
-
-            let mut reader_rows = String::new();
-            for (ip, r) in &readers {
-                let (state_text, state_class) = match r.state {
-                    ReaderConnectionState::Connected => ("connected", "ok"),
-                    ReaderConnectionState::Connecting => ("connecting", "warn"),
-                    ReaderConnectionState::Disconnected => ("disconnected", "err"),
-                };
-                let last_seen = format_last_seen(r.last_seen);
-                reader_rows.push_str(&format!(
-                    "<tr><td>{ip}</td>\
-                     <td><span class=\"status {sc}\">{st}</span></td>\
-                     <td>{session}</td>\
-                     <td>{total}</td>\
-                     <td>{ls}</td></tr>",
-                    ip = ip,
-                    sc = state_class,
-                    st = state_text,
-                    session = r.reads_since_restart,
-                    total = r.reads_total,
-                    ls = last_seen,
-                ));
-            }
-
-            let restart_banner = if restart_needed {
-                "<div style=\"background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem\">Configuration changed. Restart the forwarder to apply changes.</div>"
-            } else {
-                ""
-            };
-
-            let html = format!(
-                "<!DOCTYPE html>\
-                 <html><head><title>Forwarder Status</title>\
-                 <style>\
-                 body{{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem}}\
-                 h1{{margin-bottom:.5rem}}\
-                 h2{{margin-top:1.5rem;margin-bottom:.5rem}}\
-                 .status{{padding:.25rem .5rem;border-radius:4px;display:inline-block}}\
-                 .ok{{background:#d4edda;color:#155724}}\
-                 .warn{{background:#fff3cd;color:#856404}}\
-                 .err{{background:#f8d7da;color:#721c24}}\
-                 table{{border-collapse:collapse;width:100%}}\
-                 th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd}}\
-                 th{{font-weight:600}}\
-                 </style>\
-                 </head><body>\
-                 {restart_banner}\
-                 <h1>Forwarder Status</h1>\
-                 <p><a href=\"/config\">Configure</a></p>\
-                 <p>Version: {version}</p>\
-                 <p>Forwarder ID: <code>{fwd_id}</code></p>\
-                 <p>Local IP: {local_ip}</p>\
-                 <p>Readiness: <span class=\"status {rc}\">{rs}</span></p>\
-                 <p>Uplink: <span class=\"status {uc}\">{us}</span></p>\
-                 <h2>Readers</h2>\
-                 <table>\
-                 <tr><th>Reader IP</th><th>Status</th><th>Reads (session)</th><th>Reads (total)</th><th>Last seen</th></tr>\
-                 {reader_rows}\
-                 </table>\
-                 <script>\
-                 setTimeout(()=>location.reload(),2000);\
-                 </script>\
-                 </body></html>",
-                restart_banner = restart_banner,
-                version = *version,
-                fwd_id = forwarder_id,
-                local_ip = local_ip_display,
-                rs = ready_state,
-                rc = ready_class,
-                us = uplink_state,
-                uc = uplink_class,
-                reader_rows = reader_rows,
+        if let Err(e) = crate::discovery::expand_target(target) {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": format!("readers[{}].target invalid: {}", i, e)}).to_string(),
             );
-            send_response(&mut stream, 200, "text/html; charset=utf-8", &html).await;
-        }
-        ("POST", path)
-            if path.starts_with("/api/v1/streams/") && path.ends_with("/reset-epoch") =>
-        {
-            // Extract reader_ip from: /api/v1/streams/{reader_ip}/reset-epoch
-            let inner = &path["/api/v1/streams/".len()..path.len() - "/reset-epoch".len()];
-            let reader_ip = match percent_decode_path_segment(inner) {
-                Some(v) => v,
-                None => {
-                    send_response(
-                        &mut stream,
-                        400,
-                        "text/plain",
-                        "invalid percent-encoding in stream key",
-                    )
-                    .await;
-                    return;
-                }
-            };
-
-            let result = journal.lock().await.reset_epoch(&reader_ip);
-            match result {
-                Ok(new_epoch) => {
-                    let body = format!("{{\"new_epoch\":{}}}", new_epoch);
-                    send_response(&mut stream, 200, "application/json", &body).await;
-                }
-                Err(EpochResetError::NotFound) => {
-                    send_response(&mut stream, 404, "text/plain", "stream not found").await;
-                }
-                Err(EpochResetError::Storage(e)) => {
-                    send_response(&mut stream, 500, "text/plain", &e).await;
-                }
-            }
-        }
-        ("POST", "/api/v1/config/general") => match &config_state {
-            Some(cs) => {
-                let body_str = match extract_request_body(request) {
-                    Some(b) => b,
-                    None => {
-                        send_response(
-                            &mut stream,
-                            400,
-                            "application/json",
-                            "{\"ok\":false,\"error\":\"missing request body\"}",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                #[derive(serde::Deserialize)]
-                struct GeneralUpdate {
-                    display_name: Option<String>,
-                }
-
-                let update: GeneralUpdate = match serde_json::from_str(body_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                };
-
-                let _lock = cs.write_lock.lock().await;
-                match update_config_file(cs, &subsystem, |raw| {
-                    raw.display_name = update.display_name;
-                    Ok(())
-                })
-                .await
-                {
-                    Ok(()) => {
-                        send_response(
-                            &mut stream,
-                            200,
-                            "application/json",
-                            &serde_json::json!({"ok": true}).to_string(),
-                        )
-                        .await;
-                    }
-                    Err((status_code, body)) => {
-                        send_response(&mut stream, status_code, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("POST", "/api/v1/config/server") => match &config_state {
-            Some(cs) => {
-                let body_str = match extract_request_body(request) {
-                    Some(b) => b,
-                    None => {
-                        send_response(
-                            &mut stream,
-                            400,
-                            "application/json",
-                            "{\"ok\":false,\"error\":\"missing request body\"}",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                #[derive(serde::Deserialize)]
-                struct ServerUpdate {
-                    base_url: Option<String>,
-                    forwarders_ws_path: Option<String>,
-                }
-
-                let update: ServerUpdate = match serde_json::from_str(body_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                };
-
-                if update.base_url.is_none() {
-                    send_response(
-                        &mut stream,
-                        400,
-                        "application/json",
-                        "{\"ok\":false,\"error\":\"base_url is required\"}",
-                    )
-                    .await;
-                    return;
-                }
-
-                let _lock = cs.write_lock.lock().await;
-                match update_config_file(cs, &subsystem, |raw| {
-                    raw.server = Some(crate::config::RawServerConfig {
-                        base_url: update.base_url,
-                        forwarders_ws_path: update.forwarders_ws_path,
-                    });
-                    Ok(())
-                })
-                .await
-                {
-                    Ok(()) => {
-                        send_response(
-                            &mut stream,
-                            200,
-                            "application/json",
-                            &serde_json::json!({"ok": true}).to_string(),
-                        )
-                        .await;
-                    }
-                    Err((status_code, body)) => {
-                        send_response(&mut stream, status_code, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("POST", "/api/v1/config/auth") => match &config_state {
-            Some(cs) => {
-                let body_str = match extract_request_body(request) {
-                    Some(b) => b,
-                    None => {
-                        send_response(
-                            &mut stream,
-                            400,
-                            "application/json",
-                            "{\"ok\":false,\"error\":\"missing request body\"}",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                #[derive(serde::Deserialize)]
-                struct AuthUpdate {
-                    token_file: Option<String>,
-                }
-
-                let update: AuthUpdate = match serde_json::from_str(body_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                };
-
-                if update.token_file.is_none() {
-                    send_response(
-                        &mut stream,
-                        400,
-                        "application/json",
-                        "{\"ok\":false,\"error\":\"token_file is required\"}",
-                    )
-                    .await;
-                    return;
-                }
-
-                let _lock = cs.write_lock.lock().await;
-                match update_config_file(cs, &subsystem, |raw| {
-                    raw.auth = Some(crate::config::RawAuthConfig {
-                        token_file: update.token_file,
-                    });
-                    Ok(())
-                })
-                .await
-                {
-                    Ok(()) => {
-                        send_response(
-                            &mut stream,
-                            200,
-                            "application/json",
-                            &serde_json::json!({"ok": true}).to_string(),
-                        )
-                        .await;
-                    }
-                    Err((status_code, body)) => {
-                        send_response(&mut stream, status_code, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("POST", "/api/v1/config/journal") => match &config_state {
-            Some(cs) => {
-                let body_str = match extract_request_body(request) {
-                    Some(b) => b,
-                    None => {
-                        send_response(
-                            &mut stream,
-                            400,
-                            "application/json",
-                            "{\"ok\":false,\"error\":\"missing request body\"}",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                #[derive(serde::Deserialize)]
-                struct JournalUpdate {
-                    sqlite_path: Option<String>,
-                    prune_watermark_pct: Option<u8>,
-                }
-
-                let update: JournalUpdate = match serde_json::from_str(body_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                };
-
-                let _lock = cs.write_lock.lock().await;
-                match update_config_file(cs, &subsystem, |raw| {
-                    raw.journal = Some(crate::config::RawJournalConfig {
-                        sqlite_path: update.sqlite_path,
-                        prune_watermark_pct: update.prune_watermark_pct,
-                    });
-                    Ok(())
-                })
-                .await
-                {
-                    Ok(()) => {
-                        send_response(
-                            &mut stream,
-                            200,
-                            "application/json",
-                            &serde_json::json!({"ok": true}).to_string(),
-                        )
-                        .await;
-                    }
-                    Err((status_code, body)) => {
-                        send_response(&mut stream, status_code, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("POST", "/api/v1/config/uplink") => match &config_state {
-            Some(cs) => {
-                let body_str = match extract_request_body(request) {
-                    Some(b) => b,
-                    None => {
-                        send_response(
-                            &mut stream,
-                            400,
-                            "application/json",
-                            "{\"ok\":false,\"error\":\"missing request body\"}",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                #[derive(serde::Deserialize)]
-                struct UplinkUpdate {
-                    batch_mode: Option<String>,
-                    batch_flush_ms: Option<u64>,
-                    batch_max_events: Option<u32>,
-                }
-
-                let update: UplinkUpdate = match serde_json::from_str(body_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                };
-
-                let _lock = cs.write_lock.lock().await;
-                match update_config_file(cs, &subsystem, |raw| {
-                    raw.uplink = Some(crate::config::RawUplinkConfig {
-                        batch_mode: update.batch_mode,
-                        batch_flush_ms: update.batch_flush_ms,
-                        batch_max_events: update.batch_max_events,
-                    });
-                    Ok(())
-                })
-                .await
-                {
-                    Ok(()) => {
-                        send_response(
-                            &mut stream,
-                            200,
-                            "application/json",
-                            &serde_json::json!({"ok": true}).to_string(),
-                        )
-                        .await;
-                    }
-                    Err((status_code, body)) => {
-                        send_response(&mut stream, status_code, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("POST", "/api/v1/config/status_http") => match &config_state {
-            Some(cs) => {
-                let body_str = match extract_request_body(request) {
-                    Some(b) => b,
-                    None => {
-                        send_response(
-                            &mut stream,
-                            400,
-                            "application/json",
-                            "{\"ok\":false,\"error\":\"missing request body\"}",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                #[derive(serde::Deserialize)]
-                struct StatusHttpUpdate {
-                    bind: Option<String>,
-                }
-
-                let update: StatusHttpUpdate = match serde_json::from_str(body_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                };
-
-                let _lock = cs.write_lock.lock().await;
-                match update_config_file(cs, &subsystem, |raw| {
-                    raw.status_http =
-                        Some(crate::config::RawStatusHttpConfig { bind: update.bind });
-                    Ok(())
-                })
-                .await
-                {
-                    Ok(()) => {
-                        send_response(
-                            &mut stream,
-                            200,
-                            "application/json",
-                            &serde_json::json!({"ok": true}).to_string(),
-                        )
-                        .await;
-                    }
-                    Err((status_code, body)) => {
-                        send_response(&mut stream, status_code, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("POST", "/api/v1/config/readers") => match &config_state {
-            Some(cs) => {
-                let body_str = match extract_request_body(request) {
-                    Some(b) => b,
-                    None => {
-                        send_response(
-                            &mut stream,
-                            400,
-                            "application/json",
-                            "{\"ok\":false,\"error\":\"missing request body\"}",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-
-                #[derive(serde::Deserialize)]
-                struct ReaderEntry {
-                    target: Option<String>,
-                    read_type: Option<String>,
-                    enabled: Option<bool>,
-                    local_fallback_port: Option<u16>,
-                }
-
-                #[derive(serde::Deserialize)]
-                struct ReadersUpdate {
-                    readers: Vec<ReaderEntry>,
-                }
-
-                let update: ReadersUpdate = match serde_json::from_str(body_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                };
-
-                if update.readers.is_empty() {
-                    send_response(
-                        &mut stream,
-                        400,
-                        "application/json",
-                        "{\"ok\":false,\"error\":\"at least one reader is required\"}",
-                    )
-                    .await;
-                    return;
-                }
-
-                // Validate all targets before writing
-                for (i, r) in update.readers.iter().enumerate() {
-                    let target = match &r.target {
-                        Some(t) => t,
-                        None => {
-                            let body = serde_json::json!({"ok": false, "error": format!("readers[{}].target is required", i)}).to_string();
-                            send_response(&mut stream, 400, "application/json", &body).await;
-                            return;
-                        }
-                    };
-                    if let Err(e) = crate::discovery::expand_target(target) {
-                        let body = serde_json::json!({"ok": false, "error": format!("readers[{}].target invalid: {}", i, e)}).to_string();
-                        send_response(&mut stream, 400, "application/json", &body).await;
-                        return;
-                    }
-                }
-
-                let raw_readers: Vec<crate::config::RawReaderConfig> = update
-                    .readers
-                    .into_iter()
-                    .map(|r| crate::config::RawReaderConfig {
-                        target: r.target,
-                        read_type: r.read_type,
-                        enabled: r.enabled,
-                        local_fallback_port: r.local_fallback_port,
-                    })
-                    .collect();
-
-                let _lock = cs.write_lock.lock().await;
-                match update_config_file(cs, &subsystem, |raw| {
-                    raw.readers = Some(raw_readers);
-                    Ok(())
-                })
-                .await
-                {
-                    Ok(()) => {
-                        send_response(
-                            &mut stream,
-                            200,
-                            "application/json",
-                            &serde_json::json!({"ok": true}).to_string(),
-                        )
-                        .await;
-                    }
-                    Err((status_code, body)) => {
-                        send_response(&mut stream, status_code, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("GET", "/config") => match &config_state {
-            Some(cs) => {
-                let _lock = cs.write_lock.lock().await;
-                let raw = match std::fs::read_to_string(&cs.path) {
-                    Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
-                        Ok(raw) => raw,
-                        Err(e) => {
-                            let body = format!("Error parsing config: {}", e);
-                            send_response(&mut stream, 500, "text/plain", &body).await;
-                            return;
-                        }
-                    },
-                    Err(e) => {
-                        let body = format!("Error reading config: {}", e);
-                        send_response(&mut stream, 500, "text/plain", &body).await;
-                        return;
-                    }
-                };
-
-                let restart_needed = subsystem.lock().await.restart_needed();
-                let html = render_config_page(&raw, restart_needed);
-                send_response(&mut stream, 200, "text/html; charset=utf-8", &html).await;
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("GET", "/api/v1/config") => match &config_state {
-            Some(cs) => {
-                let _lock = cs.write_lock.lock().await;
-                match std::fs::read_to_string(&cs.path) {
-                    Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
-                        Ok(raw) => match serde_json::to_string(&raw) {
-                            Ok(json) => {
-                                send_response(&mut stream, 200, "application/json", &json).await;
-                            }
-                            Err(e) => {
-                                let body = serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)}).to_string();
-                                send_response(&mut stream, 500, "application/json", &body).await;
-                            }
-                        },
-                        Err(e) => {
-                            let body = serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)}).to_string();
-                            send_response(&mut stream, 500, "application/json", &body).await;
-                        }
-                    },
-                    Err(e) => {
-                        let body = serde_json::json!({"ok": false, "error": format!("File read error: {}", e)}).to_string();
-                        send_response(&mut stream, 500, "application/json", &body).await;
-                    }
-                }
-            }
-            None => {
-                send_response(
-                    &mut stream,
-                    404,
-                    "text/plain",
-                    "Config editing not available",
-                )
-                .await;
-            }
-        },
-        ("POST", "/api/v1/restart") => {
-            send_response(
-                &mut stream,
-                200,
-                "application/json",
-                &serde_json::json!({"ok": true}).to_string(),
-            )
-            .await;
-            // Give the response a moment to flush, then exit.
-            // The service manager (systemd, etc.) is expected to restart the process.
-            tokio::spawn(async {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                std::process::exit(0);
-            });
-        }
-        _ => {
-            send_response(&mut stream, 404, "text/plain", "Not Found").await;
         }
     }
+
+    let raw_readers: Vec<crate::config::RawReaderConfig> = update
+        .readers
+        .into_iter()
+        .map(|r| crate::config::RawReaderConfig {
+            target: r.target,
+            read_type: r.read_type,
+            enabled: r.enabled,
+            local_fallback_port: r.local_fallback_port,
+        })
+        .collect();
+
+    let _lock = cs.write_lock.lock().await;
+    match update_config_file(&cs, &state.subsystem, |raw| {
+        raw.readers = Some(raw_readers);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn not_found_handler() -> Response {
+    text_response(StatusCode::NOT_FOUND, "Not Found")
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,10 +1113,10 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
     let status_http = raw.status_http.as_ref();
     let bind = html_escape(status_http.and_then(|s| s.bind.as_deref()).unwrap_or(""));
 
-    // Build reader rows
+    // Build reader rows.
     let mut reader_rows = String::new();
     if let Some(readers) = &raw.readers {
-        for (i, r) in readers.iter().enumerate() {
+        for r in readers {
             let target = html_escape(r.target.as_deref().unwrap_or(""));
             let read_type = r.read_type.as_deref().unwrap_or("raw");
             let enabled = r.enabled.unwrap_or(true);
@@ -1356,20 +1133,19 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
                  <td><select name=\"read_type\"><option value=\"raw\"{raw_sel}>raw</option><option value=\"fsls\"{fsls_sel}>fsls</option></select></td>\
                  <td><input type=\"checkbox\" name=\"enabled\" {checked}></td>\
                  <td><input type=\"number\" name=\"local_fallback_port\" value=\"{fallback_port}\" min=\"1\" max=\"65535\"></td>\
-                 <td><button type=\"button\" onclick=\"removeReader({i})\">Remove</button></td>\
+                 <td><button type=\"button\" onclick=\"removeReader(this)\">Remove</button></td>\
                  </tr>",
                 target = target,
                 raw_sel = if read_type == "raw" { " selected" } else { "" },
                 fsls_sel = if read_type == "fsls" { " selected" } else { "" },
                 checked = checked,
                 fallback_port = fallback_port,
-                i = i,
             ));
         }
     }
 
     let restart_banner = if restart_needed {
-        "<div class=\"banner warn\">Configuration changed. Restart the forwarder to apply changes. <button onclick=\"restartForwarder()\">Restart Now</button></div>"
+        "<div class=\"banner warn\">Configuration changed. Restart the forwarder to apply changes.</div>"
     } else {
         ""
     };
@@ -1554,7 +1330,6 @@ function saveReaders() {{
 
 function addReader() {{
   var table = document.getElementById('readers-table');
-  var idx = document.querySelectorAll('.reader-row').length;
   var row = document.createElement('tr');
   row.className = 'reader-row';
   row.innerHTML = '<td><input type="text" name="target" required></td>' +
@@ -1566,33 +1341,16 @@ function addReader() {{
 }}
 
 function removeReader(el) {{
-  if (typeof el === 'number') {{
-    var rows = document.querySelectorAll('.reader-row');
-    if (rows[el]) rows[el].remove();
-  }} else {{
-    el.closest('tr').remove();
-  }}
+  el.closest('tr').remove();
 }}
 
 function showRestartBanner() {{
   if (!document.querySelector('.banner')) {{
     var banner = document.createElement('div');
     banner.className = 'banner warn';
-    banner.innerHTML = 'Configuration changed. Restart the forwarder to apply changes. <button onclick="restartForwarder()">Restart Now</button>';
+    banner.textContent = 'Configuration changed. Restart the forwarder to apply changes.';
     document.querySelector('h1').after(banner);
   }}
-}}
-
-function restartForwarder() {{
-  if (!confirm('Restart the forwarder now? It will be briefly unavailable.')) return;
-  fetch('/api/v1/restart', {{method: 'POST'}}).then(function() {{
-    document.body.innerHTML = '<h1>Restarting\u2026</h1><p>The forwarder is restarting. This page will reload automatically.</p>';
-    setTimeout(function check() {{
-      fetch('/').then(function() {{ location.href = '/config'; }}).catch(function() {{ setTimeout(check, 1000); }});
-    }}, 2000);
-  }}).catch(function(e) {{
-    alert('Restart failed: ' + e);
-  }});
 }}
 </script>
 </body></html>"#,
@@ -1609,61 +1367,4 @@ function restartForwarder() {{
         bind = bind,
         reader_rows = reader_rows,
     )
-}
-
-// ---------------------------------------------------------------------------
-// HTTP response helper
-// ---------------------------------------------------------------------------
-
-async fn send_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) {
-    let status_text = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "Unknown",
-    };
-
-    let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\n\
-         Content-Type: {content_type}\r\n\
-         Content-Length: {len}\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {body}",
-        status = status,
-        status_text = status_text,
-        content_type = content_type,
-        len = body.len(),
-        body = body,
-    );
-
-    let _ = stream.write_all(response.as_bytes()).await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_body_from_http_request() {
-        let request = "POST /api/v1/config/general HTTP/1.1\r\nHost: localhost\r\nContent-Length: 27\r\n\r\n{\"display_name\":\"Start Line\"}";
-        let body = extract_request_body(request);
-        assert_eq!(body, Some("{\"display_name\":\"Start Line\"}"));
-    }
-
-    #[test]
-    fn extract_body_returns_empty_for_no_body() {
-        let request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
-        let body = extract_request_body(request);
-        assert_eq!(body, Some(""));
-    }
-
-    #[test]
-    fn extract_body_returns_none_for_malformed_request() {
-        let request = "GET / HTTP/1.1";
-        let body = extract_request_body(request);
-        assert_eq!(body, None);
-    }
 }
