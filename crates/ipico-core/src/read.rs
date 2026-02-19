@@ -91,6 +91,18 @@ impl fmt::Display for ReadType {
     }
 }
 
+impl ReadType {
+    /// Return the canonical lowercase protocol string for this read type.
+    ///
+    /// Inverse of `TryFrom<&str>`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReadType::RAW => "raw",
+            ReadType::FSLS => "fsls",
+        }
+    }
+}
+
 impl TryFrom<&str> for ReadType {
     type Error = &'static str;
 
@@ -327,5 +339,23 @@ mod tests {
         let result = ChipRead::try_from("   ");
         assert!(result.is_err());
         assert_eq!(result.err().unwrap(), "Empty chip read");
+    }
+
+    #[test]
+    fn read_type_as_str() {
+        assert_eq!(ReadType::RAW.as_str(), "raw");
+        assert_eq!(ReadType::FSLS.as_str(), "fsls");
+    }
+
+    #[test]
+    fn read_type_round_trips_through_as_str() {
+        assert_eq!(
+            ReadType::try_from(ReadType::RAW.as_str()).unwrap(),
+            ReadType::RAW
+        );
+        assert_eq!(
+            ReadType::try_from(ReadType::FSLS.as_str()).unwrap(),
+            ReadType::FSLS
+        );
     }
 }
