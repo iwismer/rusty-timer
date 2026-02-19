@@ -121,6 +121,8 @@ export async function resetEpoch(streamId: string): Promise<void> {
 // ----- Forwarder config types -----
 
 export interface ForwarderConfigResponse {
+  ok: boolean;
+  error: string | null;
   config: Record<string, unknown>;
   restart_needed: boolean;
 }

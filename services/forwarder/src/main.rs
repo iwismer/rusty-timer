@@ -296,15 +296,29 @@ async fn handle_config_message(
                     Ok((config, restart_needed)) => {
                         WsMessage::ConfigGetResponse(rt_protocol::ConfigGetResponse {
                             request_id: req.request_id,
+                            ok: true,
+                            error: None,
                             config,
                             restart_needed,
                         })
                     }
-                    Err(_) => WsMessage::ConfigGetResponse(rt_protocol::ConfigGetResponse {
-                        request_id: req.request_id,
-                        config: serde_json::Value::Null,
-                        restart_needed: false,
-                    }),
+                    Err((_code, err_json)) => {
+                        let err_msg = serde_json::from_str::<serde_json::Value>(&err_json)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("error")
+                                    .and_then(|e| e.as_str())
+                                    .map(|s| s.to_owned())
+                            })
+                            .unwrap_or(err_json);
+                        WsMessage::ConfigGetResponse(rt_protocol::ConfigGetResponse {
+                            request_id: req.request_id,
+                            ok: false,
+                            error: Some(err_msg),
+                            config: serde_json::Value::Null,
+                            restart_needed: false,
+                        })
+                    }
                 };
             session.send_message(&response).await
         }

@@ -7,21 +7,26 @@ use uuid::Uuid;
 
 use crate::dashboard_events::DashboardEvent;
 
+pub enum ForwarderProxyReply<T> {
+    Response(T),
+    Timeout,
+}
+
 pub enum ForwarderCommand {
     EpochReset(EpochResetCommand),
     ConfigGet {
         request_id: String,
-        reply: oneshot::Sender<ConfigGetResponse>,
+        reply: oneshot::Sender<ForwarderProxyReply<ConfigGetResponse>>,
     },
     ConfigSet {
         request_id: String,
         section: String,
         payload: serde_json::Value,
-        reply: oneshot::Sender<ConfigSetResponse>,
+        reply: oneshot::Sender<ForwarderProxyReply<ConfigSetResponse>>,
     },
     Restart {
         request_id: String,
-        reply: oneshot::Sender<RestartResponse>,
+        reply: oneshot::Sender<ForwarderProxyReply<RestartResponse>>,
     },
 }
 

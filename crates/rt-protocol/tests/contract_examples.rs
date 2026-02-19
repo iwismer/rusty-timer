@@ -200,7 +200,23 @@ fn config_get_response_round_trip() {
     match msg {
         WsMessage::ConfigGetResponse(inner) => {
             assert!(!inner.request_id.is_empty());
+            assert!(inner.ok);
+            assert!(inner.error.is_none());
             assert!(!inner.config.is_null());
+        }
+        other => panic!("Expected ConfigGetResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_get_response_error_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_get_response_error.json");
+    match msg {
+        WsMessage::ConfigGetResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(!inner.ok);
+            assert!(inner.error.is_some());
+            assert!(inner.config.is_null());
         }
         other => panic!("Expected ConfigGetResponse, got {:?}", other),
     }

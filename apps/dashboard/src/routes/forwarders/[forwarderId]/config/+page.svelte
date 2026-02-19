@@ -55,6 +55,9 @@
     loadError = null;
     try {
       const resp = await api.getForwarderConfig(forwarderId);
+      if (!resp.ok) {
+        throw new Error(resp.error ?? "Forwarder failed to return config");
+      }
       config = resp.config;
       restartNeeded = resp.restart_needed;
       populateFields(resp.config);

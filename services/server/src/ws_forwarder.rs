@@ -6,7 +6,7 @@ use crate::{
         fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
         upsert_stream, IngestResult,
     },
-    state::{AppState, ForwarderCommand},
+    state::{AppState, ForwarderCommand, ForwarderProxyReply},
 };
 use axum::{
     extract::{
@@ -25,6 +25,13 @@ use uuid::Uuid;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
 const FORWARDER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn is_path_safe_forwarder_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+}
 
 pub async fn ws_forwarder_handler(
     ws: WebSocketUpgrade,
@@ -103,6 +110,16 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         return;
     }
     let device_id = claims.device_id.clone();
+    if !is_path_safe_forwarder_id(&device_id) {
+        send_ws_error(
+            &mut socket,
+            error_codes::INVALID_TOKEN,
+            "forwarder id from token is not path-safe",
+            false,
+        )
+        .await;
+        return;
+    }
     if !state.register_forwarder(&device_id).await {
         send_ws_error(
             &mut socket,
@@ -248,21 +265,21 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         String,
         (
             Instant,
-            tokio::sync::oneshot::Sender<rt_protocol::ConfigGetResponse>,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::ConfigGetResponse>>,
         ),
     > = HashMap::new();
     let mut pending_config_sets: HashMap<
         String,
         (
             Instant,
-            tokio::sync::oneshot::Sender<rt_protocol::ConfigSetResponse>,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::ConfigSetResponse>>,
         ),
     > = HashMap::new();
     let mut pending_restarts: HashMap<
         String,
         (
             Instant,
-            tokio::sync::oneshot::Sender<rt_protocol::RestartResponse>,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::RestartResponse>>,
         ),
     > = HashMap::new();
 
@@ -361,17 +378,17 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::ConfigGetResponse(resp)) => {
                                 if let Some((_, reply)) = pending_config_gets.remove(&resp.request_id) {
-                                    let _ = reply.send(resp);
+                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
                                 }
                             }
                             Ok(WsMessage::ConfigSetResponse(resp)) => {
                                 if let Some((_, reply)) = pending_config_sets.remove(&resp.request_id) {
-                                    let _ = reply.send(resp);
+                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
                                 }
                             }
                             Ok(WsMessage::RestartResponse(resp)) => {
                                 if let Some((_, reply)) = pending_restarts.remove(&resp.request_id) {
-                                    let _ = reply.send(resp);
+                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
                                 }
                             }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
@@ -459,11 +476,32 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
 }
 
 fn expire_pending_requests<T>(
-    pending: &mut HashMap<String, (Instant, tokio::sync::oneshot::Sender<T>)>,
+    pending: &mut HashMap<
+        String,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<T>>,
+        ),
+    >,
     timeout: Duration,
 ) {
     let now = Instant::now();
-    pending.retain(|_, (started_at, _)| now.duration_since(*started_at) <= timeout);
+    let expired: Vec<String> = pending
+        .iter()
+        .filter_map(|(request_id, (started_at, _))| {
+            if now.duration_since(*started_at) > timeout {
+                Some(request_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for request_id in expired {
+        if let Some((_, reply)) = pending.remove(&request_id) {
+            let _ = reply.send(ForwarderProxyReply::Timeout);
+        }
+    }
 }
 
 async fn handle_event_batch(

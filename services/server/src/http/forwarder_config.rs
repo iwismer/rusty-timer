@@ -1,4 +1,4 @@
-use crate::state::{AppState, ForwarderCommand};
+use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -52,11 +52,38 @@ pub async fn get_forwarder_config(
     }
 
     match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, reply_rx).await {
-        Ok(Ok(resp)) => Json(serde_json::json!({
-            "config": resp.config,
-            "restart_needed": resp.restart_needed,
-        }))
-        .into_response(),
+        Ok(Ok(ForwarderProxyReply::Response(resp))) => {
+            if resp.ok {
+                Json(serde_json::json!({
+                    "ok": true,
+                    "error": serde_json::Value::Null,
+                    "config": resp.config,
+                    "restart_needed": resp.restart_needed,
+                }))
+                .into_response()
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(HttpErrorEnvelope {
+                        code: "FORWARDER_CONFIG_ERROR".to_owned(),
+                        message: resp
+                            .error
+                            .unwrap_or_else(|| "forwarder failed to read config".to_owned()),
+                        details: None,
+                    }),
+                )
+                    .into_response()
+            }
+        }
+        Ok(Ok(ForwarderProxyReply::Timeout)) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(HttpErrorEnvelope {
+                code: "TIMEOUT".to_owned(),
+                message: "forwarder did not respond within timeout".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response(),
         Ok(Err(_)) => (
             StatusCode::BAD_GATEWAY,
             Json(HttpErrorEnvelope {
@@ -122,7 +149,7 @@ pub async fn set_forwarder_config(
     }
 
     match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, reply_rx).await {
-        Ok(Ok(resp)) => {
+        Ok(Ok(ForwarderProxyReply::Response(resp))) => {
             let status = if resp.ok {
                 StatusCode::OK
             } else {
@@ -138,6 +165,15 @@ pub async fn set_forwarder_config(
             )
                 .into_response()
         }
+        Ok(Ok(ForwarderProxyReply::Timeout)) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(HttpErrorEnvelope {
+                code: "TIMEOUT".to_owned(),
+                message: "forwarder did not respond within timeout".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response(),
         Ok(Err(_)) => (
             StatusCode::BAD_GATEWAY,
             Json(HttpErrorEnvelope {
@@ -200,7 +236,7 @@ pub async fn restart_forwarder(
     }
 
     match tokio::time::timeout(RESTART_REQUEST_TIMEOUT, reply_rx).await {
-        Ok(Ok(resp)) => {
+        Ok(Ok(ForwarderProxyReply::Response(resp))) => {
             let status = if resp.ok {
                 StatusCode::OK
             } else {
@@ -215,6 +251,15 @@ pub async fn restart_forwarder(
             )
                 .into_response()
         }
+        Ok(Ok(ForwarderProxyReply::Timeout)) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(HttpErrorEnvelope {
+                code: "TIMEOUT".to_owned(),
+                message: "forwarder did not respond within timeout".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response(),
         Ok(Err(_)) => (
             StatusCode::BAD_GATEWAY,
             Json(HttpErrorEnvelope {

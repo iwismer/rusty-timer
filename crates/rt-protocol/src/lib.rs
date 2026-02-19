@@ -232,6 +232,8 @@ pub struct ConfigGetRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigGetResponse {
     pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
     pub config: serde_json::Value,
     pub restart_needed: bool,
 }

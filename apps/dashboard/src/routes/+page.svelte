@@ -151,6 +151,7 @@
           {stats.totalRaw} reads · {stats.totalChips} chips · {stats.onlineCount}/{stats.totalStreams}
           online
         </span>
+        <!-- server enforces path-safe forwarder IDs -->
         <a href="/forwarders/{group.forwarderId}/config" class="configure-link"
           >Configure</a
         >
