@@ -156,3 +156,13 @@ export async function setForwarderConfig(
     },
   );
 }
+
+/** POST /api/v1/forwarders/{forwarderId}/restart */
+export async function restartForwarder(
+  forwarderId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return apiFetch<{ ok: boolean; error?: string }>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/restart`,
+    { method: "POST" },
+  );
+}

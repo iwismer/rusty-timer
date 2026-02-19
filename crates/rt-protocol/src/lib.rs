@@ -253,6 +253,20 @@ pub struct ConfigSetResponse {
     pub restart_needed: bool,
 }
 
+/// Server-to-forwarder: request a graceful restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartRequest {
+    pub request_id: String,
+}
+
+/// Forwarder-to-server: restart acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartResponse {
+    pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
@@ -282,6 +296,8 @@ pub enum WsMessage {
     ConfigGetResponse(ConfigGetResponse),
     ConfigSetRequest(ConfigSetRequest),
     ConfigSetResponse(ConfigSetResponse),
+    RestartRequest(RestartRequest),
+    RestartResponse(RestartResponse),
 }
 
 // ---------------------------------------------------------------------------

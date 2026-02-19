@@ -52,6 +52,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/forwarders/:forwarder_id/config/:section",
             post(http::forwarder_config::set_forwarder_config),
         )
+        .route(
+            "/api/v1/forwarders/:forwarder_id/restart",
+            post(http::forwarder_config::restart_forwarder),
+        )
         .fallback(fallback_404)
         .with_state(state)
 }

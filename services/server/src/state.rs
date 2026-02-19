@@ -1,4 +1,4 @@
-use rt_protocol::{ConfigGetResponse, ConfigSetResponse, EpochResetCommand};
+use rt_protocol::{ConfigGetResponse, ConfigSetResponse, EpochResetCommand, RestartResponse};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +18,10 @@ pub enum ForwarderCommand {
         section: String,
         payload: serde_json::Value,
         reply: oneshot::Sender<ConfigSetResponse>,
+    },
+    Restart {
+        request_id: String,
+        reply: oneshot::Sender<RestartResponse>,
     },
 }
 

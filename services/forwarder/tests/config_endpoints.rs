@@ -161,10 +161,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -210,10 +215,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -283,10 +293,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -351,7 +366,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -411,10 +426,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -470,7 +490,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -528,7 +548,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -576,7 +596,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -619,7 +639,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -663,7 +683,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -721,7 +741,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -764,7 +784,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -808,7 +828,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -872,7 +892,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -931,7 +951,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -990,7 +1010,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1059,7 +1079,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1109,7 +1129,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1177,7 +1197,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1220,7 +1240,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1267,7 +1287,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1317,7 +1337,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal.clone(),
     )
     .await
@@ -1393,7 +1413,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await

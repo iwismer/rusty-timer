@@ -251,6 +251,10 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         String,
         tokio::sync::oneshot::Sender<rt_protocol::ConfigSetResponse>,
     > = HashMap::new();
+    let mut pending_restarts: HashMap<
+        String,
+        tokio::sync::oneshot::Sender<rt_protocol::RestartResponse>,
+    > = HashMap::new();
 
     loop {
         tokio::select! {
@@ -351,6 +355,11 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     let _ = reply.send(resp);
                                 }
                             }
+                            Ok(WsMessage::RestartResponse(resp)) => {
+                                if let Some(reply) = pending_restarts.remove(&resp.request_id) {
+                                    let _ = reply.send(resp);
+                                }
+                            }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
                             Err(e) => { send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await; break; }
                         }
@@ -408,6 +417,22 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             }
                         }
                         pending_config_sets.insert(request_id, reply);
+                    }
+                    ForwarderCommand::Restart { request_id, reply } => {
+                        let msg = WsMessage::RestartRequest(rt_protocol::RestartRequest {
+                            request_id: request_id.clone(),
+                        });
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() {
+                                let _ = reply.send(rt_protocol::RestartResponse {
+                                    request_id,
+                                    ok: false,
+                                    error: Some("send failed".to_owned()),
+                                });
+                                break;
+                            }
+                        }
+                        pending_restarts.insert(request_id, reply);
                     }
                 }
             }

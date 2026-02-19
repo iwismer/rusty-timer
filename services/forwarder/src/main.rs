@@ -347,9 +347,36 @@ async fn handle_config_message(
 }
 
 // ---------------------------------------------------------------------------
+// Restart message handler (used by uplink loop)
+// ---------------------------------------------------------------------------
+
+async fn handle_restart_message(
+    session: &mut UplinkSession,
+    req: rt_protocol::RestartRequest,
+    restart_signal: &Arc<Notify>,
+) -> Result<(), UplinkError> {
+    let (ok, error) = if cfg!(unix) {
+        restart_signal.notify_one();
+        (true, None)
+    } else {
+        (
+            false,
+            Some("restart not supported on non-unix platforms".to_owned()),
+        )
+    };
+    let response = WsMessage::RestartResponse(rt_protocol::RestartResponse {
+        request_id: req.request_id,
+        ok,
+        error,
+    });
+    session.send_message(&response).await
+}
+
+// ---------------------------------------------------------------------------
 // Uplink task: WebSocket connect → replay → send batches → receive acks
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_uplink(
     cfg: ForwarderConfig,
     forwarder_id: String,
@@ -359,6 +386,7 @@ async fn run_uplink(
     status: StatusServer,
     config_state: Arc<ConfigState>,
     subsystem: Arc<Mutex<SubsystemStatus>>,
+    restart_signal: Arc<Notify>,
 ) {
     let server_url = format!(
         "{}{}",
@@ -547,6 +575,14 @@ async fn run_uplink(
                         break;
                     }
                 }
+                Ok(SendBatchResult::Restart(req)) => {
+                    if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await
+                    {
+                        warn!(error = %e, "restart handler failed during replay");
+                        reconnect_after_replay = true;
+                        break;
+                    }
+                }
                 Err(e) => {
                     warn!(error = %e, "send_batch (replay) failed, reconnecting");
                 }
@@ -583,6 +619,13 @@ async fn run_uplink(
                         Ok(msg @ WsMessage::ConfigGetRequest(_)) | Ok(msg @ WsMessage::ConfigSetRequest(_)) => {
                             if let Err(e) = handle_config_message(&mut session, msg, &config_state, &subsystem).await {
                                 warn!(error = %e, "config handler failed during idle");
+                                break 'uplink;
+                            }
+                            continue 'uplink;
+                        }
+                        Ok(WsMessage::RestartRequest(req)) => {
+                            if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await {
+                                warn!(error = %e, "restart handler failed during idle");
                                 break 'uplink;
                             }
                             continue 'uplink;
@@ -691,6 +734,13 @@ async fn run_uplink(
                         handle_config_message(&mut session, msg, &config_state, &subsystem).await
                     {
                         warn!(error = %e, "config set handler failed");
+                        break 'uplink;
+                    }
+                }
+                Ok(SendBatchResult::Restart(req)) => {
+                    if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await
+                    {
+                        warn!(error = %e, "restart handler failed");
                         break 'uplink;
                     }
                 }
@@ -922,8 +972,9 @@ async fn main() {
         let ss = status_server.clone();
         let cs = config_state.clone();
         let sub = status_server.subsystem_arc();
+        let rs = restart_signal.clone();
         tokio::spawn(async move {
-            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss, cs, sub).await;
+            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss, cs, sub, rs).await;
         });
     }
 
@@ -1285,6 +1336,7 @@ mod tests {
             .expect("write test config");
         let config_state = Arc::new(ConfigState::new(config_path));
         let subsystem_arc = status.subsystem_arc();
+        let restart_signal = Arc::new(Notify::new());
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-epoch-reconnect-test".to_string(),
@@ -1294,6 +1346,7 @@ mod tests {
             status,
             config_state,
             subsystem_arc,
+            restart_signal,
         ));
 
         let (sent_extra_batch_on_first_session, saw_second_session) =
@@ -1720,6 +1773,7 @@ token_file = "/tmp/test-token"
         .expect("start test status server");
         let config_state = Arc::new(ConfigState::new(config_path));
         let subsystem_arc = status.subsystem_arc();
+        let restart_signal = Arc::new(Notify::new());
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-config-test".to_string(),
@@ -1729,6 +1783,7 @@ token_file = "/tmp/test-token"
             status,
             config_state,
             subsystem_arc,
+            restart_signal,
         ));
 
         // 7. Wait for results

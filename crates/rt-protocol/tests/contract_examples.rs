@@ -230,6 +230,29 @@ fn config_set_response_round_trip() {
     }
 }
 
+#[test]
+fn restart_request_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/restart_request.json");
+    match msg {
+        WsMessage::RestartRequest(inner) => {
+            assert!(!inner.request_id.is_empty());
+        }
+        other => panic!("Expected RestartRequest, got {:?}", other),
+    }
+}
+
+#[test]
+fn restart_response_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/restart_response.json");
+    match msg {
+        WsMessage::RestartResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(inner.ok);
+        }
+        other => panic!("Expected RestartResponse, got {:?}", other),
+    }
+}
+
 /// Verify that all frozen error codes are valid deserialization targets.
 #[test]
 fn error_codes_all_deserialize() {

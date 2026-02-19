@@ -11,6 +11,8 @@
   let loadError: string | null = null;
   let sectionMessages: Record<string, { ok: boolean; text: string }> = {};
   let savingSection: Record<string, boolean> = {};
+  let restarting = false;
+  let restartMessage: { ok: boolean; text: string } | null = null;
 
   // Derive online status from streams store
   $: isOnline = $streamsStore.some(
@@ -196,6 +198,27 @@
   function removeReader(index: number) {
     readers = readers.filter((_, i) => i !== index);
   }
+
+  async function doRestart() {
+    restarting = true;
+    restartMessage = null;
+    try {
+      const result = await api.restartForwarder(forwarderId);
+      if (result.ok) {
+        restartMessage = { ok: true, text: "Restart initiated." };
+        restartNeeded = false;
+      } else {
+        restartMessage = {
+          ok: false,
+          text: result.error ?? "Unknown error",
+        };
+      }
+    } catch (e) {
+      restartMessage = { ok: false, text: String(e) };
+    } finally {
+      restarting = false;
+    }
+  }
 </script>
 
 <main>
@@ -213,7 +236,15 @@
   {#if restartNeeded}
     <div class="restart-banner">
       Restart needed — some changes require a forwarder restart to take effect.
+      <button class="restart-btn" on:click={doRestart} disabled={restarting}>
+        {restarting ? "Restarting..." : "Restart Now"}
+      </button>
     </div>
+  {/if}
+  {#if restartMessage}
+    <p class:success={restartMessage.ok} class:error={!restartMessage.ok}>
+      {restartMessage.text}
+    </p>
   {/if}
 
   {#if loading}
@@ -452,6 +483,27 @@
     padding: 0.75rem 1rem;
     margin-bottom: 1rem;
     font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .restart-btn {
+    margin-left: auto;
+    background: #856404;
+    color: white;
+    border: none;
+    border-radius: 3px;
+    padding: 0.35rem 0.85rem;
+    cursor: pointer;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .restart-btn:hover {
+    background: #6d5003;
+  }
+  .restart-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .config-card {
     border: 1px solid #ccc;

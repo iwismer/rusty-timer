@@ -61,6 +61,8 @@ pub enum SendBatchResult {
     ConfigGet(rt_protocol::ConfigGetRequest),
     /// Server requested a config section update.
     ConfigSet(rt_protocol::ConfigSetRequest),
+    /// Server requested a graceful restart.
+    Restart(rt_protocol::RestartRequest),
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +240,9 @@ impl UplinkSession {
                 }
                 WsMessage::ConfigSetRequest(req) => {
                     return Ok(SendBatchResult::ConfigSet(req));
+                }
+                WsMessage::RestartRequest(req) => {
+                    return Ok(SendBatchResult::Restart(req));
                 }
                 WsMessage::Error(e) => {
                     return Err(UplinkError::Protocol(format!(
