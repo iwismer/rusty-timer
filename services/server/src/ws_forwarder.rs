@@ -6,7 +6,7 @@ use crate::{
         fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
         upsert_stream, IngestResult,
     },
-    state::AppState,
+    state::{AppState, ForwarderCommand, ForwarderProxyReply},
 };
 use axum::{
     extract::{
@@ -16,14 +16,22 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use rt_protocol::{error_codes, AckEntry, EpochResetCommand, ForwarderAck, Heartbeat, WsMessage};
+use rt_protocol::{error_codes, AckEntry, ForwarderAck, Heartbeat, WsMessage};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
+const FORWARDER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn is_path_safe_forwarder_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+}
 
 pub async fn ws_forwarder_handler(
     ws: WebSocketUpgrade,
@@ -102,6 +110,16 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         return;
     }
     let device_id = claims.device_id.clone();
+    if !is_path_safe_forwarder_id(&device_id) {
+        send_ws_error(
+            &mut socket,
+            error_codes::INVALID_TOKEN,
+            "forwarder id from token is not path-safe",
+            false,
+        )
+        .await;
+        return;
+    }
     if !state.register_forwarder(&device_id).await {
         send_ws_error(
             &mut socket,
@@ -234,7 +252,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         }
     }
 
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<EpochResetCommand>(8);
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<ForwarderCommand>(8);
     {
         let mut senders = state.forwarder_command_senders.write().await;
         senders.insert(device_id.clone(), cmd_tx);
@@ -243,7 +261,33 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat_interval.tick().await;
 
+    let mut pending_config_gets: HashMap<
+        String,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::ConfigGetResponse>>,
+        ),
+    > = HashMap::new();
+    let mut pending_config_sets: HashMap<
+        String,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::ConfigSetResponse>>,
+        ),
+    > = HashMap::new();
+    let mut pending_restarts: HashMap<
+        String,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::RestartResponse>>,
+        ),
+    > = HashMap::new();
+
     loop {
+        expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
+        expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
+        expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
+
         tokio::select! {
             msg = tokio::time::timeout(SESSION_TIMEOUT, socket.recv()) => {
                 match msg {
@@ -332,6 +376,21 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
+                            Ok(WsMessage::ConfigGetResponse(resp)) => {
+                                if let Some((_, reply)) = pending_config_gets.remove(&resp.request_id) {
+                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
+                                }
+                            }
+                            Ok(WsMessage::ConfigSetResponse(resp)) => {
+                                if let Some((_, reply)) = pending_config_sets.remove(&resp.request_id) {
+                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
+                                }
+                            }
+                            Ok(WsMessage::RestartResponse(resp)) => {
+                                if let Some((_, reply)) = pending_restarts.remove(&resp.request_id) {
+                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
+                                }
+                            }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
                             Err(e) => { send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await; break; }
                         }
@@ -344,12 +403,56 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 }
             }
             _ = heartbeat_interval.tick() => {
+                expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
+                expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
+                expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
                 let hb = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
                 if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
             }
             Some(cmd) = cmd_rx.recv() => {
-                let msg = WsMessage::EpochResetCommand(cmd);
-                if let Ok(json) = serde_json::to_string(&msg) { if socket.send(Message::Text(json)).await.is_err() { break; } }
+                match cmd {
+                    ForwarderCommand::EpochReset(epoch_cmd) => {
+                        let msg = WsMessage::EpochResetCommand(epoch_cmd);
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() { break; }
+                        }
+                    }
+                    ForwarderCommand::ConfigGet { request_id, reply } => {
+                        let msg = WsMessage::ConfigGetRequest(rt_protocol::ConfigGetRequest {
+                            request_id: request_id.clone(),
+                        });
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                        pending_config_gets.insert(request_id, (Instant::now(), reply));
+                    }
+                    ForwarderCommand::ConfigSet { request_id, section, payload, reply } => {
+                        let msg = WsMessage::ConfigSetRequest(rt_protocol::ConfigSetRequest {
+                            request_id: request_id.clone(),
+                            section,
+                            payload,
+                        });
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                        pending_config_sets.insert(request_id, (Instant::now(), reply));
+                    }
+                    ForwarderCommand::Restart { request_id, reply } => {
+                        let msg = WsMessage::RestartRequest(rt_protocol::RestartRequest {
+                            request_id: request_id.clone(),
+                        });
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                        pending_restarts.insert(request_id, (Instant::now(), reply));
+                    }
+                }
             }
         }
     }
@@ -370,6 +473,35 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
     state.unregister_forwarder(&device_id).await;
     info!(device_id = %device_id, "forwarder session ended");
+}
+
+fn expire_pending_requests<T>(
+    pending: &mut HashMap<
+        String,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<T>>,
+        ),
+    >,
+    timeout: Duration,
+) {
+    let now = Instant::now();
+    let expired: Vec<String> = pending
+        .iter()
+        .filter_map(|(request_id, (started_at, _))| {
+            if now.duration_since(*started_at) > timeout {
+                Some(request_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for request_id in expired {
+        if let Some((_, reply)) = pending.remove(&request_id) {
+            let _ = reply.send(ForwarderProxyReply::Timeout);
+        }
+    }
 }
 
 async fn handle_event_batch(

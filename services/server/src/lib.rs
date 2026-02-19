@@ -44,6 +44,18 @@ pub fn build_router(state: AppState) -> Router {
             post(http::streams::reset_epoch),
         )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
+        .route(
+            "/api/v1/forwarders/:forwarder_id/config",
+            get(http::forwarder_config::get_forwarder_config),
+        )
+        .route(
+            "/api/v1/forwarders/:forwarder_id/config/:section",
+            post(http::forwarder_config::set_forwarder_config),
+        )
+        .route(
+            "/api/v1/forwarders/:forwarder_id/restart",
+            post(http::forwarder_config::restart_forwarder),
+        )
         .fallback(fallback_404)
         .with_state(state)
 }

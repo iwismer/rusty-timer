@@ -117,3 +117,54 @@ export async function resetEpoch(streamId: string): Promise<void> {
     method: "POST",
   });
 }
+
+// ----- Forwarder config types -----
+
+export interface ForwarderConfigResponse {
+  ok: boolean;
+  error: string | null;
+  config: Record<string, unknown>;
+  restart_needed: boolean;
+}
+
+export interface ConfigSetResult {
+  ok: boolean;
+  error: string | null;
+  restart_needed: boolean;
+}
+
+// ----- Forwarder config API -----
+
+/** GET /api/v1/forwarders/{forwarderId}/config */
+export async function getForwarderConfig(
+  forwarderId: string,
+): Promise<ForwarderConfigResponse> {
+  return apiFetch<ForwarderConfigResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/config`,
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/config/{section} */
+export async function setForwarderConfig(
+  forwarderId: string,
+  section: string,
+  payload: Record<string, unknown>,
+): Promise<ConfigSetResult> {
+  return apiFetch<ConfigSetResult>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/config/${encodeURIComponent(section)}`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/restart */
+export async function restartForwarder(
+  forwarderId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return apiFetch<{ ok: boolean; error?: string }>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/restart`,
+    { method: "POST" },
+  );
+}

@@ -183,6 +183,106 @@ fn epoch_reset_command_round_trip() {
     }
 }
 
+#[test]
+fn config_get_request_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_get_request.json");
+    match msg {
+        WsMessage::ConfigGetRequest(inner) => {
+            assert!(!inner.request_id.is_empty());
+        }
+        other => panic!("Expected ConfigGetRequest, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_get_response_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_get_response.json");
+    match msg {
+        WsMessage::ConfigGetResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(inner.ok);
+            assert!(inner.error.is_none());
+            assert!(!inner.config.is_null());
+        }
+        other => panic!("Expected ConfigGetResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_get_response_error_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_get_response_error.json");
+    match msg {
+        WsMessage::ConfigGetResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(!inner.ok);
+            assert!(inner.error.is_some());
+            assert!(inner.config.is_null());
+        }
+        other => panic!("Expected ConfigGetResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_set_request_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_set_request.json");
+    match msg {
+        WsMessage::ConfigSetRequest(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(!inner.section.is_empty());
+        }
+        other => panic!("Expected ConfigSetRequest, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_set_response_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_set_response.json");
+    match msg {
+        WsMessage::ConfigSetResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(inner.ok);
+            assert!(inner.status_code.is_none());
+        }
+        other => panic!("Expected ConfigSetResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_set_response_internal_error_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_set_response_error_internal.json");
+    match msg {
+        WsMessage::ConfigSetResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(!inner.ok);
+            assert_eq!(inner.status_code, Some(500));
+        }
+        other => panic!("Expected ConfigSetResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn restart_request_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/restart_request.json");
+    match msg {
+        WsMessage::RestartRequest(inner) => {
+            assert!(!inner.request_id.is_empty());
+        }
+        other => panic!("Expected RestartRequest, got {:?}", other),
+    }
+}
+
+#[test]
+fn restart_response_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/restart_response.json");
+    match msg {
+        WsMessage::RestartResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(inner.ok);
+        }
+        other => panic!("Expected RestartResponse, got {:?}", other),
+    }
+}
+
 /// Verify that all frozen error codes are valid deserialization targets.
 #[test]
 fn error_codes_all_deserialize() {

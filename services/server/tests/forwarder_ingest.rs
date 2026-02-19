@@ -336,3 +336,43 @@ async fn test_invalid_token_rejected() {
         Ok(other) => panic!("expected INVALID_TOKEN error, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn test_path_unsafe_forwarder_id_rejected() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state))
+            .await
+            .unwrap();
+    });
+
+    insert_token(&pool, "fwd/bad", "forwarder", b"test-token-path-unsafe").await;
+    let url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut client = MockWsClient::connect_with_token(&url, "test-token-path-unsafe")
+        .await
+        .unwrap();
+    client
+        .send_message(&WsMessage::ForwarderHello(ForwarderHello {
+            forwarder_id: "fwd/bad".to_owned(),
+            reader_ips: vec![],
+            resume: vec![],
+            display_name: None,
+        }))
+        .await
+        .unwrap();
+
+    match client.recv_message().await {
+        Ok(WsMessage::Error(e)) => {
+            assert_eq!(e.code, rt_protocol::error_codes::INVALID_TOKEN);
+        }
+        Err(_) => {}
+        Ok(other) => panic!("expected INVALID_TOKEN error, got {:?}", other),
+    }
+}

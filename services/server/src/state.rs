@@ -1,15 +1,39 @@
+use rt_protocol::{ConfigGetResponse, ConfigSetResponse, EpochResetCommand, RestartResponse};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, oneshot, RwLock};
 use uuid::Uuid;
 
 use crate::dashboard_events::DashboardEvent;
 
+pub enum ForwarderProxyReply<T> {
+    Response(T),
+    Timeout,
+}
+
+pub enum ForwarderCommand {
+    EpochReset(EpochResetCommand),
+    ConfigGet {
+        request_id: String,
+        reply: oneshot::Sender<ForwarderProxyReply<ConfigGetResponse>>,
+    },
+    ConfigSet {
+        request_id: String,
+        section: String,
+        payload: serde_json::Value,
+        reply: oneshot::Sender<ForwarderProxyReply<ConfigSetResponse>>,
+    },
+    Restart {
+        request_id: String,
+        reply: oneshot::Sender<ForwarderProxyReply<RestartResponse>>,
+    },
+}
+
 pub type StreamBroadcast = broadcast::Sender<rt_protocol::ReadEvent>;
 pub type BroadcastRegistry = Arc<RwLock<HashMap<Uuid, StreamBroadcast>>>;
 pub type ForwarderCommandSenders =
-    Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<rt_protocol::EpochResetCommand>>>>;
+    Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<ForwarderCommand>>>>;
 
 #[derive(Clone)]
 pub struct AppState {

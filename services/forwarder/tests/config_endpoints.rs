@@ -161,10 +161,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -210,10 +215,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -283,10 +293,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -351,7 +366,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -411,10 +426,15 @@ target = "192.168.1.100:10000"
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-    let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
-            .await
-            .expect("start failed");
+    let server = StatusServer::start_with_config(
+        cfg,
+        subsystem,
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -436,6 +456,64 @@ target = "192.168.1.100:10000"
         "TOML file must contain updated display_name, got: {}",
         toml_str
     );
+}
+
+#[tokio::test]
+async fn post_config_optional_sections_reject_non_object_payloads() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let endpoints = [
+        "/api/v1/config/general",
+        "/api/v1/config/journal",
+        "/api/v1/config/uplink",
+        "/api/v1/config/status_http",
+    ];
+    for endpoint in endpoints {
+        let (status, response) = http_post(addr, endpoint, r#""oops""#).await;
+        assert_eq!(status, 400, "{} must reject scalar payloads", endpoint);
+        let body = response_body(&response);
+        assert!(
+            body.contains("payload must be a JSON object"),
+            "{} must report object payload requirement, body: {}",
+            endpoint,
+            body
+        );
+    }
 }
 
 #[tokio::test]
@@ -470,7 +548,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -528,7 +606,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -576,7 +654,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -619,7 +697,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -663,7 +741,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -721,7 +799,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -764,7 +842,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -808,7 +886,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -837,6 +915,108 @@ target = "192.168.1.100:10000"
         toml_str.contains("80"),
         "journal prune_watermark_pct must be updated, got: {}",
         toml_str
+    );
+}
+
+#[tokio::test]
+async fn post_config_journal_rejects_out_of_range_prune_watermark() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/config/journal",
+        r#"{"prune_watermark_pct":1000}"#,
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "out-of-range prune_watermark_pct must return 400"
+    );
+}
+
+#[tokio::test]
+async fn post_config_journal_rejects_non_numeric_prune_watermark() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/config/journal",
+        r#"{"prune_watermark_pct":"80"}"#,
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "non-numeric prune_watermark_pct must return 400"
     );
 }
 
@@ -872,7 +1052,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -897,6 +1077,54 @@ target = "192.168.1.100:10000"
         "batch_flush_ms must be updated, got: {}",
         toml_str
     );
+}
+
+#[tokio::test]
+async fn post_config_uplink_rejects_out_of_range_batch_max_events() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/config/uplink",
+        r#"{"batch_max_events":5000000000}"#,
+    )
+    .await;
+    assert_eq!(status, 400, "out-of-range batch_max_events must return 400");
 }
 
 #[tokio::test]
@@ -931,7 +1159,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -990,7 +1218,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1059,7 +1287,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1075,6 +1303,57 @@ target = "192.168.1.100:10000"
     )
     .await;
     assert_eq!(status, 400, "invalid target must return 400");
+}
+
+#[tokio::test]
+async fn post_config_readers_rejects_out_of_range_local_fallback_port() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/config/readers",
+        r#"{"readers":[{"target":"192.168.1.200:10000","local_fallback_port":70000}]}"#,
+    )
+    .await;
+    assert_eq!(
+        status, 400,
+        "out-of-range local_fallback_port must return 400"
+    );
 }
 
 #[tokio::test]
@@ -1109,7 +1388,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1177,7 +1456,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1220,7 +1499,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1267,7 +1546,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await
@@ -1317,7 +1596,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal.clone(),
     )
     .await
@@ -1393,7 +1672,7 @@ target = "192.168.1.100:10000"
         cfg,
         SubsystemStatus::ready(),
         journal,
-        config_state,
+        std::sync::Arc::new(config_state),
         restart_signal,
     )
     .await

@@ -219,6 +219,59 @@ pub struct EpochResetCommand {
 }
 
 // ---------------------------------------------------------------------------
+// Config messages (server <-> forwarder)
+// ---------------------------------------------------------------------------
+
+/// Server-to-forwarder: request the current config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigGetRequest {
+    pub request_id: String,
+}
+
+/// Forwarder-to-server: current config response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigGetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub config: serde_json::Value,
+    pub restart_needed: bool,
+}
+
+/// Server-to-forwarder: update a config section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSetRequest {
+    pub request_id: String,
+    pub section: String,
+    pub payload: serde_json::Value,
+}
+
+/// Forwarder-to-server: config update result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub restart_needed: bool,
+    /// Optional status hint from forwarder local handler (e.g. 400 vs 500).
+    pub status_code: Option<u16>,
+}
+
+/// Server-to-forwarder: request a graceful restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartRequest {
+    pub request_id: String,
+}
+
+/// Forwarder-to-server: restart acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartResponse {
+    pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
@@ -243,6 +296,12 @@ pub enum WsMessage {
     Heartbeat(Heartbeat),
     Error(ErrorMessage),
     EpochResetCommand(EpochResetCommand),
+    ConfigGetRequest(ConfigGetRequest),
+    ConfigGetResponse(ConfigGetResponse),
+    ConfigSetRequest(ConfigSetRequest),
+    ConfigSetResponse(ConfigSetResponse),
+    RestartRequest(RestartRequest),
+    RestartResponse(RestartResponse),
 }
 
 // ---------------------------------------------------------------------------
