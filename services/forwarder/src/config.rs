@@ -114,7 +114,6 @@ pub struct RawUplinkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawReaderConfig {
     pub target: Option<String>,
-    pub read_type: Option<String>,
     pub enabled: Option<bool>,
     pub local_fallback_port: Option<u16>,
 }
