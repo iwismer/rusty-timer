@@ -3,14 +3,18 @@
 #
 # cloud-init user-data template for Raspberry Pi running rt-forwarder.
 #
-# BEFORE FLASHING: Edit the two lines marked CHANGEME below.
+# BEFORE FLASHING: Edit the lines marked CHANGEME below, and edit
+# network-config for the static IP address.
 #
 # How to use:
 #   1. Flash Raspberry Pi OS (64-bit, Lite) with Raspberry Pi Imager
 #   2. Edit this file (hostname + SSH key)
-#   3. Copy this file to the SD card boot partition as "user-data"
-#   4. Boot the Pi — cloud-init runs on first boot
-#   5. SSH in and run rt-setup.sh to install the forwarder
+#   3. Edit network-config (static IP, gateway, DNS)
+#   4. Copy both files to the SD card boot partition:
+#        - this file as "user-data"
+#        - network-config as "network-config"
+#   5. Boot the Pi — cloud-init runs on first boot
+#   6. SSH in and run rt-setup.sh to install the forwarder
 #
 # See deploy/sbc/README.md for full instructions.
 
