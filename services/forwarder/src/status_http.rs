@@ -1132,6 +1132,39 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await;
             }
         },
+        ("GET", "/config") => match &config_state {
+            Some(cs) => {
+                let _lock = cs.write_lock.lock().await;
+                let raw = match std::fs::read_to_string(&cs.path) {
+                    Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
+                        Ok(raw) => raw,
+                        Err(e) => {
+                            let body = format!("Error parsing config: {}", e);
+                            send_response(&mut stream, 500, "text/plain", &body).await;
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        let body = format!("Error reading config: {}", e);
+                        send_response(&mut stream, 500, "text/plain", &body).await;
+                        return;
+                    }
+                };
+
+                let restart_needed = subsystem.lock().await.restart_needed();
+                let html = render_config_page(&raw, restart_needed);
+                send_response(&mut stream, 200, "text/html; charset=utf-8", &html).await;
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
         ("GET", "/api/v1/config") => match &config_state {
             Some(cs) => {
                 let _lock = cs.write_lock.lock().await;
@@ -1175,6 +1208,305 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
             send_response(&mut stream, 404, "text/plain", "Not Found").await;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Config page renderer
+// ---------------------------------------------------------------------------
+
+fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> String {
+    let display_name = raw.display_name.as_deref().unwrap_or("");
+
+    let server = raw.server.as_ref();
+    let base_url = server.and_then(|s| s.base_url.as_deref()).unwrap_or("");
+    let ws_path = server
+        .and_then(|s| s.forwarders_ws_path.as_deref())
+        .unwrap_or("");
+
+    let auth = raw.auth.as_ref();
+    let token_file = auth.and_then(|a| a.token_file.as_deref()).unwrap_or("");
+
+    let journal = raw.journal.as_ref();
+    let sqlite_path = journal.and_then(|j| j.sqlite_path.as_deref()).unwrap_or("");
+    let prune_pct = journal
+        .and_then(|j| j.prune_watermark_pct)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+
+    let uplink = raw.uplink.as_ref();
+    let batch_mode = uplink.and_then(|u| u.batch_mode.as_deref()).unwrap_or("");
+    let batch_flush_ms = uplink
+        .and_then(|u| u.batch_flush_ms)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let batch_max_events = uplink
+        .and_then(|u| u.batch_max_events)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+
+    let status_http = raw.status_http.as_ref();
+    let bind = status_http.and_then(|s| s.bind.as_deref()).unwrap_or("");
+
+    // Build reader rows
+    let mut reader_rows = String::new();
+    if let Some(readers) = &raw.readers {
+        for (i, r) in readers.iter().enumerate() {
+            let target = r.target.as_deref().unwrap_or("");
+            let read_type = r.read_type.as_deref().unwrap_or("raw");
+            let enabled = r.enabled.unwrap_or(true);
+            let checked = if enabled { "checked" } else { "" };
+            let fallback_port = r
+                .local_fallback_port
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+
+            reader_rows.push_str(&format!(
+                "<tr class=\"reader-row\">\
+                 <td><input type=\"text\" name=\"target\" value=\"{target}\" required></td>\
+                 <td><select name=\"read_type\"><option value=\"raw\"{raw_sel}>raw</option><option value=\"fsls\"{fsls_sel}>fsls</option></select></td>\
+                 <td><input type=\"checkbox\" name=\"enabled\" {checked}></td>\
+                 <td><input type=\"number\" name=\"local_fallback_port\" value=\"{fallback_port}\" min=\"1\" max=\"65535\"></td>\
+                 <td><button type=\"button\" onclick=\"removeReader({i})\">Remove</button></td>\
+                 </tr>",
+                target = target,
+                raw_sel = if read_type == "raw" { " selected" } else { "" },
+                fsls_sel = if read_type == "fsls" { " selected" } else { "" },
+                checked = checked,
+                fallback_port = fallback_port,
+                i = i,
+            ));
+        }
+    }
+
+    let restart_banner = if restart_needed {
+        "<div class=\"banner warn\">Configuration changed. Restart the forwarder to apply changes.</div>"
+    } else {
+        ""
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html><head><title>Forwarder Configuration</title>
+<style>
+body{{font-family:system-ui,sans-serif;max-width:700px;margin:2rem auto;padding:0 1rem}}
+h1{{margin-bottom:.5rem}}
+h2{{margin-top:1.5rem;margin-bottom:.5rem;font-size:1.1rem}}
+.card{{border:1px solid #ddd;border-radius:6px;padding:1rem;margin-bottom:1rem}}
+label{{display:block;margin:.5rem 0 .2rem;font-weight:500}}
+input[type="text"],input[type="number"],select{{width:100%;padding:.4rem;box-sizing:border-box;border:1px solid #ccc;border-radius:3px}}
+button{{padding:.4rem .8rem;border:1px solid #ccc;border-radius:3px;cursor:pointer;background:#f8f8f8}}
+button:hover{{background:#e8e8e8}}
+button.save{{background:#d4edda;border-color:#155724;color:#155724}}
+button.save:hover{{background:#c3e6cb}}
+table{{border-collapse:collapse;width:100%}}
+th,td{{text-align:left;padding:.3rem .4rem;border-bottom:1px solid #ddd}}
+th{{font-weight:600;font-size:.9rem}}
+.msg{{padding:.5rem;border-radius:4px;margin-top:.5rem;display:none}}
+.msg.ok{{background:#d4edda;color:#155724;display:block}}
+.msg.err{{background:#f8d7da;color:#721c24;display:block}}
+.banner{{padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem}}
+.banner.warn{{background:#fff3cd;color:#856404;border:1px solid #ffc107}}
+a{{color:#0366d6;text-decoration:none}}
+a:hover{{text-decoration:underline}}
+</style>
+</head><body>
+<h1>Forwarder Configuration</h1>
+<p><a href="/">← Back to Status</a></p>
+{restart_banner}
+
+<div class="card">
+<h2>General</h2>
+<form id="form-general" onsubmit="return saveSection('/api/v1/config/general','form-general')">
+<label>Display Name</label>
+<input type="text" name="display_name" value="{display_name}">
+<br><button type="submit" class="save">Save General</button>
+<div id="msg-general" class="msg"></div>
+</form>
+</div>
+
+<div class="card">
+<h2>Server</h2>
+<form id="form-server" onsubmit="return saveSection('/api/v1/config/server','form-server')">
+<label>Base URL *</label>
+<input type="text" name="base_url" value="{base_url}" required>
+<label>Forwarders WS Path</label>
+<input type="text" name="forwarders_ws_path" value="{ws_path}">
+<br><button type="submit" class="save">Save Server</button>
+<div id="msg-server" class="msg"></div>
+</form>
+</div>
+
+<div class="card">
+<h2>Auth</h2>
+<form id="form-auth" onsubmit="return saveSection('/api/v1/config/auth','form-auth')">
+<label>Token File Path *</label>
+<input type="text" name="token_file" value="{token_file}" required>
+<br><button type="submit" class="save">Save Auth</button>
+<div id="msg-auth" class="msg"></div>
+</form>
+</div>
+
+<div class="card">
+<h2>Journal</h2>
+<form id="form-journal" onsubmit="return saveSection('/api/v1/config/journal','form-journal')">
+<label>SQLite Path</label>
+<input type="text" name="sqlite_path" value="{sqlite_path}">
+<label>Prune Watermark %</label>
+<input type="number" name="prune_watermark_pct" value="{prune_pct}" min="0" max="100">
+<br><button type="submit" class="save">Save Journal</button>
+<div id="msg-journal" class="msg"></div>
+</form>
+</div>
+
+<div class="card">
+<h2>Uplink</h2>
+<form id="form-uplink" onsubmit="return saveSection('/api/v1/config/uplink','form-uplink')">
+<label>Batch Mode</label>
+<input type="text" name="batch_mode" value="{batch_mode}">
+<label>Batch Flush (ms)</label>
+<input type="number" name="batch_flush_ms" value="{batch_flush_ms}" min="1">
+<label>Batch Max Events</label>
+<input type="number" name="batch_max_events" value="{batch_max_events}" min="1">
+<br><button type="submit" class="save">Save Uplink</button>
+<div id="msg-uplink" class="msg"></div>
+</form>
+</div>
+
+<div class="card">
+<h2>Status HTTP</h2>
+<form id="form-status_http" onsubmit="return saveSection('/api/v1/config/status_http','form-status_http')">
+<label>Bind Address</label>
+<input type="text" name="bind" value="{bind}">
+<br><button type="submit" class="save">Save Status HTTP</button>
+<div id="msg-status_http" class="msg"></div>
+</form>
+</div>
+
+<div class="card">
+<h2>Readers</h2>
+<table id="readers-table">
+<tr><th>Target *</th><th>Read Type</th><th>Enabled</th><th>Fallback Port</th><th></th></tr>
+{reader_rows}
+</table>
+<button type="button" onclick="addReader()">+ Add Reader</button>
+<button type="button" class="save" onclick="saveReaders()">Save Readers</button>
+<div id="msg-readers" class="msg"></div>
+</div>
+
+<script>
+function saveSection(endpoint, formId) {{
+  var form = document.getElementById(formId);
+  var data = {{}};
+  var inputs = form.querySelectorAll('input,select');
+  for (var i = 0; i < inputs.length; i++) {{
+    var inp = inputs[i];
+    if (!inp.name) continue;
+    if (inp.type === 'number') {{
+      data[inp.name] = inp.value ? Number(inp.value) : null;
+    }} else if (inp.type === 'checkbox') {{
+      data[inp.name] = inp.checked;
+    }} else {{
+      data[inp.name] = inp.value || null;
+    }}
+  }}
+  fetch(endpoint, {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(data)
+  }}).then(function(r) {{ return r.json(); }}).then(function(j) {{
+    var msgId = 'msg-' + formId.replace('form-','');
+    var msg = document.getElementById(msgId);
+    if (j.ok) {{
+      msg.className = 'msg ok';
+      msg.textContent = 'Saved. Restart to apply.';
+      showRestartBanner();
+    }} else {{
+      msg.className = 'msg err';
+      msg.textContent = j.error || 'Unknown error';
+    }}
+  }}).catch(function(e) {{
+    alert('Request failed: ' + e);
+  }});
+  return false;
+}}
+
+function saveReaders() {{
+  var rows = document.querySelectorAll('.reader-row');
+  var readers = [];
+  for (var i = 0; i < rows.length; i++) {{
+    var row = rows[i];
+    var entry = {{}};
+    entry.target = row.querySelector('[name=target]').value || null;
+    entry.read_type = row.querySelector('[name=read_type]').value || null;
+    entry.enabled = row.querySelector('[name=enabled]').checked;
+    var port = row.querySelector('[name=local_fallback_port]').value;
+    entry.local_fallback_port = port ? Number(port) : null;
+    readers.push(entry);
+  }}
+  fetch('/api/v1/config/readers', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{readers: readers}})
+  }}).then(function(r) {{ return r.json(); }}).then(function(j) {{
+    var msg = document.getElementById('msg-readers');
+    if (j.ok) {{
+      msg.className = 'msg ok';
+      msg.textContent = 'Saved. Restart to apply.';
+      showRestartBanner();
+    }} else {{
+      msg.className = 'msg err';
+      msg.textContent = j.error || 'Unknown error';
+    }}
+  }}).catch(function(e) {{
+    alert('Request failed: ' + e);
+  }});
+}}
+
+function addReader() {{
+  var table = document.getElementById('readers-table');
+  var idx = document.querySelectorAll('.reader-row').length;
+  var row = document.createElement('tr');
+  row.className = 'reader-row';
+  row.innerHTML = '<td><input type="text" name="target" required></td>' +
+    '<td><select name="read_type"><option value="raw" selected>raw</option><option value="fsls">fsls</option></select></td>' +
+    '<td><input type="checkbox" name="enabled" checked></td>' +
+    '<td><input type="number" name="local_fallback_port" min="1" max="65535"></td>' +
+    '<td><button type="button" onclick="removeReader(this)">Remove</button></td>';
+  table.appendChild(row);
+}}
+
+function removeReader(el) {{
+  if (typeof el === 'number') {{
+    var rows = document.querySelectorAll('.reader-row');
+    if (rows[el]) rows[el].remove();
+  }} else {{
+    el.closest('tr').remove();
+  }}
+}}
+
+function showRestartBanner() {{
+  if (!document.querySelector('.banner')) {{
+    var banner = document.createElement('div');
+    banner.className = 'banner warn';
+    banner.textContent = 'Configuration changed. Restart the forwarder to apply changes.';
+    document.querySelector('h1').after(banner);
+  }}
+}}
+</script>
+</body></html>"#,
+        restart_banner = restart_banner,
+        display_name = display_name,
+        base_url = base_url,
+        ws_path = ws_path,
+        token_file = token_file,
+        sqlite_path = sqlite_path,
+        prune_pct = prune_pct,
+        batch_mode = batch_mode,
+        batch_flush_ms = batch_flush_ms,
+        batch_max_events = batch_max_events,
+        bind = bind,
+        reader_rows = reader_rows,
+    )
 }
 
 // ---------------------------------------------------------------------------
