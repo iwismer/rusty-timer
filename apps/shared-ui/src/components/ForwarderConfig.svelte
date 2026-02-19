@@ -252,8 +252,8 @@
       <Card title="General">
         <label class="block text-sm font-medium text-text-secondary mb-1">
           Display Name
+          <input type="text" bind:value={generalDisplayName} class="mt-1 {inputClass}" />
         </label>
-        <input type="text" bind:value={generalDisplayName} class={inputClass} />
         <button
           class={saveBtnClass}
           on:click={saveGeneral}
@@ -275,27 +275,14 @@
       <!-- Server -->
       <Card title="Server">
         <div class="space-y-3">
-          <div>
-            <label class="block text-sm font-medium text-text-secondary mb-1">
-              Base URL *
-            </label>
-            <input
-              type="text"
-              bind:value={serverBaseUrl}
-              required
-              class={inputClass}
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-text-secondary mb-1">
-              Forwarders WS Path
-            </label>
-            <input
-              type="text"
-              bind:value={serverForwardersWsPath}
-              class={inputClass}
-            />
-          </div>
+          <label class="block text-sm font-medium text-text-secondary">
+            Base URL *
+            <input type="text" bind:value={serverBaseUrl} required class="mt-1 {inputClass}" />
+          </label>
+          <label class="block text-sm font-medium text-text-secondary">
+            Forwarders WS Path
+            <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
+          </label>
         </div>
         <button
           class={saveBtnClass}
@@ -319,13 +306,8 @@
       <Card title="Auth">
         <label class="block text-sm font-medium text-text-secondary mb-1">
           Token File Path *
+          <input type="text" bind:value={authTokenFile} required class="mt-1 {inputClass}" />
         </label>
-        <input
-          type="text"
-          bind:value={authTokenFile}
-          required
-          class={inputClass}
-        />
         <button
           class={saveBtnClass}
           on:click={saveAuth}
@@ -347,28 +329,14 @@
       <!-- Journal -->
       <Card title="Journal">
         <div class="space-y-3">
-          <div>
-            <label class="block text-sm font-medium text-text-secondary mb-1">
-              SQLite Path
-            </label>
-            <input
-              type="text"
-              bind:value={journalSqlitePath}
-              class={inputClass}
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-text-secondary mb-1">
-              Prune Watermark %
-            </label>
-            <input
-              type="number"
-              bind:value={journalPruneWatermarkPct}
-              min="0"
-              max="100"
-              class={inputClass}
-            />
-          </div>
+          <label class="block text-sm font-medium text-text-secondary">
+            SQLite Path
+            <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
+          </label>
+          <label class="block text-sm font-medium text-text-secondary">
+            Prune Watermark %
+            <input type="number" bind:value={journalPruneWatermarkPct} min="0" max="100" class="mt-1 {inputClass}" />
+          </label>
         </div>
         <button
           class={saveBtnClass}
@@ -391,38 +359,18 @@
       <!-- Uplink -->
       <Card title="Uplink">
         <div class="space-y-3">
-          <div>
-            <label class="block text-sm font-medium text-text-secondary mb-1">
-              Batch Mode
-            </label>
-            <input
-              type="text"
-              bind:value={uplinkBatchMode}
-              class={inputClass}
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-text-secondary mb-1">
-              Batch Flush (ms)
-            </label>
-            <input
-              type="number"
-              bind:value={uplinkBatchFlushMs}
-              min="0"
-              class={inputClass}
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-text-secondary mb-1">
-              Batch Max Events
-            </label>
-            <input
-              type="number"
-              bind:value={uplinkBatchMaxEvents}
-              min="0"
-              class={inputClass}
-            />
-          </div>
+          <label class="block text-sm font-medium text-text-secondary">
+            Batch Mode
+            <input type="text" bind:value={uplinkBatchMode} class="mt-1 {inputClass}" />
+          </label>
+          <label class="block text-sm font-medium text-text-secondary">
+            Batch Flush (ms)
+            <input type="number" bind:value={uplinkBatchFlushMs} min="0" class="mt-1 {inputClass}" />
+          </label>
+          <label class="block text-sm font-medium text-text-secondary">
+            Batch Max Events
+            <input type="number" bind:value={uplinkBatchMaxEvents} min="0" class="mt-1 {inputClass}" />
+          </label>
         </div>
         <button
           class={saveBtnClass}
@@ -446,8 +394,8 @@
       <Card title="Status HTTP">
         <label class="block text-sm font-medium text-text-secondary mb-1">
           Bind Address
+          <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
         </label>
-        <input type="text" bind:value={statusHttpBind} class={inputClass} />
         <button
           class={saveBtnClass}
           on:click={saveStatusHttp}
@@ -487,6 +435,7 @@
                       bind:value={reader.target}
                       required
                       placeholder="192.168.0.50:10000"
+                      aria-label="Reader {i + 1} target"
                       class={inputClass}
                     />
                   </td>
@@ -494,6 +443,7 @@
                     <input
                       type="checkbox"
                       bind:checked={reader.enabled}
+                      aria-label="Reader {i + 1} enabled"
                       class="accent-accent"
                     />
                   </td>
@@ -503,6 +453,7 @@
                       bind:value={reader.local_fallback_port}
                       min="1"
                       max="65535"
+                      aria-label="Reader {i + 1} fallback port"
                       class={inputClass}
                     />
                   </td>
