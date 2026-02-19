@@ -189,13 +189,17 @@ def build_forwarder_toml(emulators: list[EmulatorSpec]) -> str:
 
 
 def build_panes(emulators: list[EmulatorSpec]) -> list[tuple[str, str]]:
-    dashboard_dir = shlex.quote(str(REPO_ROOT / "apps" / "dashboard" / "build"))
+    dashboard_build_dir = REPO_ROOT / "apps" / "dashboard" / "build"
+    dashboard_env = ""
+    if dashboard_build_dir.is_dir():
+        dashboard_env = f"DASHBOARD_DIR={shlex.quote(str(dashboard_build_dir))} "
+
     panes_before_emulator = [
         ("Postgres", f"docker logs -f {PG_CONTAINER}"),
         (
             "Server",
             f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
-            f"DASHBOARD_DIR={dashboard_dir} "
+            f"{dashboard_env}"
             "BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug ./target/debug/server",
         ),
     ]

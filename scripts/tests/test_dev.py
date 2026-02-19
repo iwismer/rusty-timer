@@ -360,12 +360,22 @@ class BuildPanesTests(unittest.TestCase):
     def test_server_pane_uses_current_repo_root_with_shell_safe_dashboard_dir(self) -> None:
         with tempfile.TemporaryDirectory(prefix="repo with spaces ") as tmp:
             repo_root = Path(tmp)
+            (repo_root / "apps" / "dashboard" / "build").mkdir(parents=True)
             with patch.object(dev, "REPO_ROOT", repo_root):
                 panes = dev.build_panes([dev.EmulatorSpec(port=10001)])
 
         server_cmd = next(cmd for title, cmd in panes if title == "Server")
         expected_dashboard_dir = shlex.quote(str(repo_root / "apps" / "dashboard" / "build"))
         self.assertIn(f"DASHBOARD_DIR={expected_dashboard_dir}", server_cmd)
+
+    def test_server_pane_omits_dashboard_dir_when_static_build_missing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="repo without dashboard build ") as tmp:
+            repo_root = Path(tmp)
+            with patch.object(dev, "REPO_ROOT", repo_root):
+                panes = dev.build_panes([dev.EmulatorSpec(port=10001)])
+
+        server_cmd = next(cmd for title, cmd in panes if title == "Server")
+        self.assertNotIn("DASHBOARD_DIR=", server_cmd)
 
 
 class StartReceiverAutoConfigTests(unittest.TestCase):

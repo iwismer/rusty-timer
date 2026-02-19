@@ -74,7 +74,11 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
 }
 
 fn is_reserved_backend_path(path: &str) -> bool {
-    path == "/api" || path.starts_with("/api/") || path == "/ws" || path.starts_with("/ws/")
+    let first_segment = path.trim_start_matches('/').split('/').next().unwrap_or("");
+    matches!(
+        first_segment,
+        "api" | "ws" | "healthz" | "readyz" | "metrics"
+    )
 }
 
 async fn dashboard_fallback(

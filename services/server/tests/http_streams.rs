@@ -560,6 +560,45 @@ async fn test_dashboard_fallback_unknown_ws_path_stays_not_found() {
 }
 
 #[tokio::test]
+async fn test_dashboard_fallback_healthz_subpath_stays_not_found() {
+    let dashboard_dir = write_dashboard_fixture();
+    let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
+
+    let resp = reqwest::get(format!("http://{}/healthz/extra", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+    std::fs::remove_dir_all(dashboard_dir).ok();
+}
+
+#[tokio::test]
+async fn test_dashboard_fallback_readyz_subpath_stays_not_found() {
+    let dashboard_dir = write_dashboard_fixture();
+    let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
+
+    let resp = reqwest::get(format!("http://{}/readyz/extra", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+    std::fs::remove_dir_all(dashboard_dir).ok();
+}
+
+#[tokio::test]
+async fn test_dashboard_fallback_metrics_subpath_stays_not_found() {
+    let dashboard_dir = write_dashboard_fixture();
+    let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
+
+    let resp = reqwest::get(format!("http://{}/metrics/extra", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+    std::fs::remove_dir_all(dashboard_dir).ok();
+}
+
+#[tokio::test]
 async fn test_dashboard_fallback_route_like_path_serves_index_html() {
     let dashboard_dir = write_dashboard_fixture();
     let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
