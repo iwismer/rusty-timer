@@ -30,7 +30,7 @@ async fn test_first_insert_stores_event_and_acks() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -94,7 +94,7 @@ async fn test_identical_retransmit_no_dup() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -172,7 +172,7 @@ async fn test_mismatched_payload_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -253,7 +253,7 @@ async fn test_first_connection_wins() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -311,7 +311,7 @@ async fn test_invalid_token_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -348,7 +348,7 @@ async fn test_path_unsafe_forwarder_id_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });

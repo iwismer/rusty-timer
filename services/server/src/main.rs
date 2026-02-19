@@ -13,6 +13,7 @@ async fn main() {
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
+    let dashboard_dir = env::var("DASHBOARD_DIR").ok().map(std::path::PathBuf::from);
 
     info!("connecting to database...");
     let pool = db::create_pool(&database_url).await;
@@ -27,7 +28,7 @@ async fn main() {
         .expect("failed to reset stream online status");
 
     let state = AppState::new(pool);
-    let router = server::build_router(state);
+    let router = server::build_router(state, dashboard_dir);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .expect("failed to bind");

@@ -9,15 +9,18 @@ pub mod ws_receiver;
 
 pub use state::AppState;
 
+use std::path::PathBuf;
+
 use axum::{
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::{get, patch, post},
     Router,
 };
+use tower_http::services::{ServeDir, ServeFile};
 
-pub fn build_router(state: AppState) -> Router {
-    Router::new()
+pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
+    let router = Router::new()
         .route("/ws/v1/forwarders", get(ws_forwarder::ws_forwarder_handler))
         .route("/ws/v1/receivers", get(ws_receiver::ws_receiver_handler))
         .route("/healthz", get(health::healthz))
@@ -55,9 +58,17 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/forwarders/:forwarder_id/restart",
             post(http::forwarder_config::restart_forwarder),
-        )
-        .fallback(fallback_404)
-        .with_state(state)
+        );
+
+    let router = match dashboard_dir {
+        Some(dir) => {
+            let index = dir.join("index.html");
+            router.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
+        }
+        None => router.fallback(fallback_404),
+    };
+
+    router.with_state(state)
 }
 
 async fn fallback_404() -> impl IntoResponse {

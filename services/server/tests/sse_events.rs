@@ -73,7 +73,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -270,7 +270,7 @@ async fn test_sse_emits_stream_updated_on_forwarder_display_name_change() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -382,7 +382,7 @@ async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -493,7 +493,7 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_display_name
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -618,7 +618,7 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_initial_hell
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });

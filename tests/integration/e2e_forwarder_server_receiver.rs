@@ -44,7 +44,7 @@ async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, r
 /// Returns the local address the server is bound to.
 async fn start_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
     let state = server::AppState::new(pool);
-    let router = server::build_router(state);
+    let router = server::build_router(state, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("failed to bind server");

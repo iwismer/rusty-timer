@@ -30,7 +30,7 @@ async fn test_receiver_connect_and_heartbeat() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -67,7 +67,7 @@ async fn test_receiver_invalid_token_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -103,7 +103,7 @@ async fn test_receiver_receives_realtime_events() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -200,7 +200,7 @@ async fn test_receiver_ack_updates_cursor() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
