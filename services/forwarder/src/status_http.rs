@@ -6,13 +6,17 @@
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
+//! - `GET /config`        — config editing page (when enabled)
+//! - `GET /api/v1/config` — current config as JSON
+//! - `POST /api/v1/config/{section}` — update a config section
+//! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
 //! Uplink connectivity does NOT affect readiness.
 //!
 //! # Security
-//! No authentication in v1. Status page is read-only.
+//! No authentication in v1.
 
 use crate::storage::journal::Journal;
 use axum::body::Bytes;
