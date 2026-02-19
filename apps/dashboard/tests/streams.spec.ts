@@ -108,6 +108,12 @@ test.describe("stream list page", () => {
     expect(firstHref).toContain("stream-uuid-1");
   });
 
+  test("configure link targets forwarder config page", async ({ page }) => {
+    await page.goto("/");
+    const link = page.getByRole("link", { name: "Configure" }).first();
+    await expect(link).toHaveAttribute("href", "/forwarders/fwd-alpha/config");
+  });
+
   test("stream list shows epoch for each stream", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByText(/epoch/i).first()).toBeVisible();

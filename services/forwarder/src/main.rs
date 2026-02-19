@@ -1463,7 +1463,7 @@ mod tests {
         )
         .await
         .expect("start status server");
-        status.init_readers(&[stream_key.clone()]).await;
+        status.init_readers(std::slice::from_ref(&stream_key)).await;
 
         let temp_dir = tempdir().expect("create tempdir");
         let db_path = temp_dir.path().join("forwarder.sqlite3");
@@ -1526,7 +1526,7 @@ mod tests {
         )
         .await
         .expect("start status server");
-        status.init_readers(&[stream_key.clone()]).await;
+        status.init_readers(std::slice::from_ref(&stream_key)).await;
 
         let temp_dir = tempdir().expect("create tempdir");
         let db_path = temp_dir.path().join("forwarder.sqlite3");
@@ -1825,5 +1825,226 @@ token_file = "/tmp/test-token"
             .expect("uplink task shutdown timeout")
             .expect("uplink task join");
         server_task.await.expect("server task join");
+    }
+
+    #[tokio::test]
+    async fn run_uplink_does_not_resend_batch_after_config_get_then_ack() {
+        let reader_ip = "10.0.0.9:10000".to_string();
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let config_path = temp_dir.path().join("forwarder.toml");
+
+        std::fs::write(
+            &config_path,
+            r#"
+schema_version = 1
+display_name = "Ack Test"
+
+[server]
+base_url = "http://localhost:9999"
+
+[auth]
+token_file = "/tmp/test-token"
+"#,
+        )
+        .expect("write test config");
+
+        let mut journal = Journal::open(&db_path).expect("open journal");
+        journal
+            .ensure_stream_state(&reader_ip, 1)
+            .expect("ensure stream state");
+        let journal = Arc::new(Mutex::new(journal));
+        let journal_for_inject = journal.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (result_tx, result_rx) = oneshot::channel::<bool>();
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
+        let reader_ip_for_server = reader_ip.clone();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let ws = accept_async(stream).await.expect("ws accept");
+            let (mut write, mut read) = ws.split();
+
+            let hello = read.next().await.expect("hello").expect("hello frame");
+            let hello = parse_ws_text_message(hello);
+            let forwarder_id = match hello {
+                WsMessage::ForwarderHello(h) => h.forwarder_id,
+                other => panic!("expected ForwarderHello, got {:?}", other),
+            };
+
+            let hb = WsMessage::Heartbeat(Heartbeat {
+                session_id: "ack-test-session".to_string(),
+                device_id: forwarder_id.clone(),
+            });
+            write
+                .send(Message::Text(serde_json::to_string(&hb).unwrap().into()))
+                .await
+                .expect("send heartbeat");
+            let _ = ready_tx.send(());
+
+            let first_batch = timeout(std::time::Duration::from_secs(3), read.next())
+                .await
+                .expect("first batch timeout")
+                .expect("first batch")
+                .expect("first batch frame");
+            let first_batch = parse_ws_text_message(first_batch);
+            match first_batch {
+                WsMessage::ForwarderEventBatch(batch) => {
+                    assert_eq!(batch.events.len(), 1);
+                    assert_eq!(batch.events[0].reader_ip, reader_ip_for_server);
+                    assert_eq!(batch.events[0].seq, 1);
+                }
+                other => panic!("expected ForwarderEventBatch, got {:?}", other),
+            }
+
+            let get_req = WsMessage::ConfigGetRequest(rt_protocol::ConfigGetRequest {
+                request_id: "cfg-ack-interleave".to_string(),
+            });
+            write
+                .send(Message::Text(
+                    serde_json::to_string(&get_req).unwrap().into(),
+                ))
+                .await
+                .expect("send config get request");
+
+            let get_resp = read
+                .next()
+                .await
+                .expect("config get response")
+                .expect("config get response frame");
+            let get_resp = parse_ws_text_message(get_resp);
+            match get_resp {
+                WsMessage::ConfigGetResponse(resp) => {
+                    assert_eq!(resp.request_id, "cfg-ack-interleave");
+                }
+                other => panic!("expected ConfigGetResponse, got {:?}", other),
+            }
+
+            let ack = WsMessage::ForwarderAck(rt_protocol::ForwarderAck {
+                session_id: "ack-test-session".to_string(),
+                entries: vec![rt_protocol::AckEntry {
+                    forwarder_id: forwarder_id.clone(),
+                    reader_ip: reader_ip_for_server.clone(),
+                    stream_epoch: 1,
+                    last_seq: 1,
+                }],
+            });
+            write
+                .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
+                .await
+                .expect("send ack");
+
+            let mut resent = false;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+            loop {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                match timeout(remaining, read.next()).await {
+                    Ok(Some(Ok(msg))) => {
+                        let parsed = parse_ws_text_message(msg);
+                        if let WsMessage::ForwarderEventBatch(_) = parsed {
+                            resent = true;
+                            break;
+                        }
+                    }
+                    Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
+                }
+            }
+
+            let _ = result_tx.send(resent);
+        });
+
+        let cfg = ForwarderConfig {
+            schema_version: 1,
+            token: "test-token".to_string(),
+            display_name: Some("Ack Test".to_string()),
+            server: forwarder::config::ServerConfig {
+                base_url: format!("http://{}", addr),
+                forwarders_ws_path: "/ws/v1/forwarders".to_string(),
+            },
+            journal: forwarder::config::JournalConfig {
+                sqlite_path: db_path.display().to_string(),
+                prune_watermark_pct: 80,
+            },
+            status_http: forwarder::config::StatusHttpConfig {
+                bind: "127.0.0.1:0".to_string(),
+            },
+            uplink: forwarder::config::UplinkConfig {
+                batch_mode: "immediate".to_string(),
+                batch_flush_ms: 50,
+                batch_max_events: 50,
+            },
+            readers: vec![forwarder::config::ReaderConfig {
+                target: reader_ip.clone(),
+                enabled: true,
+                local_fallback_port: None,
+            }],
+        };
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start test status server");
+
+        let config_state = Arc::new(ConfigState::new(config_path));
+        let subsystem_arc = status.subsystem_arc();
+        let restart_signal = Arc::new(Notify::new());
+
+        let uplink_task = tokio::spawn(run_uplink(
+            cfg,
+            "fwd-ack-interleave".to_string(),
+            vec![reader_ip.clone()],
+            journal,
+            shutdown_rx,
+            status,
+            config_state,
+            subsystem_arc,
+            restart_signal,
+        ));
+
+        timeout(std::time::Duration::from_secs(2), ready_rx)
+            .await
+            .expect("handshake ready timeout")
+            .expect("handshake ready");
+        {
+            let mut j = journal_for_inject.lock().await;
+            j.insert_event(
+                &reader_ip,
+                1,
+                1,
+                Some("2026-01-01T00:00:00Z"),
+                "aa400000000123450a2a01123018455927a7",
+                "RAW",
+            )
+            .expect("insert pending event");
+        }
+
+        let resent = timeout(std::time::Duration::from_secs(3), result_rx)
+            .await
+            .expect("result timeout")
+            .expect("result value");
+
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(2), uplink_task)
+            .await
+            .expect("uplink shutdown timeout")
+            .expect("uplink join");
+        server_task.await.expect("server task join");
+
+        assert!(
+            !resent,
+            "forwarder should not resend batch after config-get interleaving once ack is sent"
+        );
     }
 }

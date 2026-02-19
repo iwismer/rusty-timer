@@ -510,6 +510,8 @@ async fn update_config_file(
     subsystem: &Arc<Mutex<SubsystemStatus>>,
     mutate: impl FnOnce(&mut crate::config::RawConfig) -> Result<(), String>,
 ) -> Result<(), (u16, String)> {
+    let _lock = config_state.write_lock.lock().await;
+
     let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
         (
             500u16,
@@ -568,10 +570,7 @@ pub async fn apply_section_update(
 ) -> Result<(), (u16, String)> {
     match section {
         "general" => {
-            let display_name = payload
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
+            let display_name = optional_string_field(payload, "display_name")?;
             update_config_file(config_state, subsystem, |raw| {
                 raw.display_name = display_name;
                 Ok(())
@@ -579,25 +578,11 @@ pub async fn apply_section_update(
             .await
         }
         "server" => {
-            let base_url_opt = payload
-                .get("base_url")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
-            let base_url = require_non_empty_trimmed("base_url", base_url_opt).map_err(|e| {
-                (
-                    400u16,
-                    serde_json::json!({"ok": false, "error": e}).to_string(),
-                )
-            })?;
-            validate_base_url(&base_url).map_err(|e| {
-                (
-                    400u16,
-                    serde_json::json!({"ok": false, "error": e}).to_string(),
-                )
-            })?;
-            let forwarders_ws_path = payload
-                .get("forwarders_ws_path")
-                .and_then(|v| v.as_str())
+            let base_url_opt = optional_string_field(payload, "base_url")?;
+            let base_url =
+                require_non_empty_trimmed("base_url", base_url_opt).map_err(bad_request_error)?;
+            validate_base_url(&base_url).map_err(bad_request_error)?;
+            let forwarders_ws_path = optional_string_field(payload, "forwarders_ws_path")?
                 .and_then(|s| {
                     let trimmed = s.trim();
                     if trimmed.is_empty() {
@@ -616,23 +601,10 @@ pub async fn apply_section_update(
             .await
         }
         "auth" => {
-            let token_file_opt = payload
-                .get("token_file")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
-            let token_file =
-                require_non_empty_trimmed("token_file", token_file_opt).map_err(|e| {
-                    (
-                        400u16,
-                        serde_json::json!({"ok": false, "error": e}).to_string(),
-                    )
-                })?;
-            validate_token_file(&token_file).map_err(|e| {
-                (
-                    400u16,
-                    serde_json::json!({"ok": false, "error": e}).to_string(),
-                )
-            })?;
+            let token_file_opt = optional_string_field(payload, "token_file")?;
+            let token_file = require_non_empty_trimmed("token_file", token_file_opt)
+                .map_err(bad_request_error)?;
+            validate_token_file(&token_file).map_err(bad_request_error)?;
             update_config_file(config_state, subsystem, |raw| {
                 raw.auth = Some(crate::config::RawAuthConfig {
                     token_file: Some(token_file),
@@ -642,14 +614,8 @@ pub async fn apply_section_update(
             .await
         }
         "journal" => {
-            let sqlite_path = payload
-                .get("sqlite_path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
-            let prune_watermark_pct = payload
-                .get("prune_watermark_pct")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u8);
+            let sqlite_path = optional_string_field(payload, "sqlite_path")?;
+            let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
             update_config_file(config_state, subsystem, |raw| {
                 raw.journal = Some(crate::config::RawJournalConfig {
                     sqlite_path,
@@ -660,15 +626,9 @@ pub async fn apply_section_update(
             .await
         }
         "uplink" => {
-            let batch_mode = payload
-                .get("batch_mode")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
-            let batch_flush_ms = payload.get("batch_flush_ms").and_then(|v| v.as_u64());
-            let batch_max_events = payload
-                .get("batch_max_events")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
+            let batch_mode = optional_string_field(payload, "batch_mode")?;
+            let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
+            let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
             update_config_file(config_state, subsystem, |raw| {
                 raw.uplink = Some(crate::config::RawUplinkConfig {
                     batch_mode,
@@ -680,10 +640,7 @@ pub async fn apply_section_update(
             .await
         }
         "status_http" => {
-            let bind = payload
-                .get("bind")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
+            let bind = optional_string_field(payload, "bind")?;
             update_config_file(config_state, subsystem, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
                 Ok(())
@@ -715,10 +672,7 @@ pub async fn apply_section_update(
 
             let mut raw_readers = Vec::with_capacity(readers_arr.len());
             for (i, entry) in readers_arr.iter().enumerate() {
-                let target = entry
-                    .get("target")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned());
+                let target = optional_string_field(entry, "target")?;
 
                 let target_str = match &target {
                     Some(t) => t,
@@ -737,11 +691,8 @@ pub async fn apply_section_update(
                     ));
                 }
 
-                let enabled = entry.get("enabled").and_then(|v| v.as_bool());
-                let local_fallback_port = entry
-                    .get("local_fallback_port")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u16);
+                let enabled = optional_bool_field(entry, "enabled")?;
+                let local_fallback_port = optional_u16_field(entry, "local_fallback_port")?;
 
                 raw_readers.push(crate::config::RawReaderConfig {
                     target,
@@ -811,6 +762,92 @@ fn json_response(status: StatusCode, body: String) -> Response {
 
 fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, String> {
     serde_json::from_slice::<T>(body).map_err(|e| format!("Invalid JSON: {}", e))
+}
+
+fn bad_request_error(message: impl Into<String>) -> (u16, String) {
+    (
+        400u16,
+        serde_json::json!({"ok": false, "error": message.into()}).to_string(),
+    )
+}
+
+fn optional_string_field(
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<Option<String>, (u16, String)> {
+    match payload.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(bad_request_error(format!(
+            "{} must be a string or null",
+            field
+        ))),
+    }
+}
+
+fn optional_bool_field(
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<Option<bool>, (u16, String)> {
+    match payload.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(bad_request_error(format!(
+            "{} must be a boolean or null",
+            field
+        ))),
+    }
+}
+
+fn optional_u64_field(
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<Option<u64>, (u16, String)> {
+    match payload.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value.as_u64().ok_or_else(|| {
+                bad_request_error(format!("{} must be a non-negative integer or null", field))
+            })?;
+            Ok(Some(raw))
+        }
+    }
+}
+
+fn optional_u32_field(
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<Option<u32>, (u16, String)> {
+    let raw = optional_u64_field(payload, field)?;
+    raw.map(|value| {
+        u32::try_from(value)
+            .map_err(|_| bad_request_error(format!("{} must be <= {}", field, u32::MAX)))
+    })
+    .transpose()
+}
+
+fn optional_u16_field(
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<Option<u16>, (u16, String)> {
+    let raw = optional_u64_field(payload, field)?;
+    raw.map(|value| {
+        u16::try_from(value)
+            .map_err(|_| bad_request_error(format!("{} must be <= {}", field, u16::MAX)))
+    })
+    .transpose()
+}
+
+fn optional_u8_field(
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<Option<u8>, (u16, String)> {
+    let raw = optional_u64_field(payload, field)?;
+    raw.map(|value| {
+        u8::try_from(value)
+            .map_err(|_| bad_request_error(format!("{} must be <= {}", field, u8::MAX)))
+    })
+    .transpose()
 }
 
 fn require_non_empty_trimmed(field: &str, value: Option<String>) -> Result<String, String> {
@@ -1195,7 +1232,6 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let _lock = cs.write_lock.lock().await;
     match apply_section_update("general", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
@@ -1223,7 +1259,6 @@ async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let _lock = cs.write_lock.lock().await;
     match apply_section_update("server", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
@@ -1251,7 +1286,6 @@ async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let _lock = cs.write_lock.lock().await;
     match apply_section_update("auth", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
@@ -1279,7 +1313,6 @@ async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let _lock = cs.write_lock.lock().await;
     match apply_section_update("journal", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
@@ -1307,7 +1340,6 @@ async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let _lock = cs.write_lock.lock().await;
     match apply_section_update("uplink", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
@@ -1335,7 +1367,6 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let _lock = cs.write_lock.lock().await;
     match apply_section_update("status_http", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
@@ -1363,7 +1394,6 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let _lock = cs.write_lock.lock().await;
     match apply_section_update("readers", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(

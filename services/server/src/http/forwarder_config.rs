@@ -58,10 +58,10 @@ pub async fn get_forwarder_config(
         }))
         .into_response(),
         Ok(Err(_)) => (
-            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::BAD_GATEWAY,
             Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond".to_owned(),
+                code: "FORWARDER_DISCONNECTED".to_owned(),
+                message: "forwarder disconnected before replying".to_owned(),
                 details: None,
             }),
         )
@@ -139,10 +139,10 @@ pub async fn set_forwarder_config(
                 .into_response()
         }
         Ok(Err(_)) => (
-            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::BAD_GATEWAY,
             Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond".to_owned(),
+                code: "FORWARDER_DISCONNECTED".to_owned(),
+                message: "forwarder disconnected before replying".to_owned(),
                 details: None,
             }),
         )
@@ -216,10 +216,10 @@ pub async fn restart_forwarder(
                 .into_response()
         }
         Ok(Err(_)) => (
-            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::BAD_GATEWAY,
             Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond".to_owned(),
+                code: "FORWARDER_DISCONNECTED".to_owned(),
+                message: "forwarder disconnected before replying".to_owned(),
                 details: None,
             }),
         )

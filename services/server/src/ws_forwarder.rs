@@ -18,12 +18,13 @@ use axum::{
 };
 use rt_protocol::{error_codes, AckEntry, ForwarderAck, Heartbeat, WsMessage};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
+const FORWARDER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn ws_forwarder_handler(
     ws: WebSocketUpgrade,
@@ -245,18 +246,31 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
 
     let mut pending_config_gets: HashMap<
         String,
-        tokio::sync::oneshot::Sender<rt_protocol::ConfigGetResponse>,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<rt_protocol::ConfigGetResponse>,
+        ),
     > = HashMap::new();
     let mut pending_config_sets: HashMap<
         String,
-        tokio::sync::oneshot::Sender<rt_protocol::ConfigSetResponse>,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<rt_protocol::ConfigSetResponse>,
+        ),
     > = HashMap::new();
     let mut pending_restarts: HashMap<
         String,
-        tokio::sync::oneshot::Sender<rt_protocol::RestartResponse>,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<rt_protocol::RestartResponse>,
+        ),
     > = HashMap::new();
 
     loop {
+        expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
+        expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
+        expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
+
         tokio::select! {
             msg = tokio::time::timeout(SESSION_TIMEOUT, socket.recv()) => {
                 match msg {
@@ -346,17 +360,17 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::ConfigGetResponse(resp)) => {
-                                if let Some(reply) = pending_config_gets.remove(&resp.request_id) {
+                                if let Some((_, reply)) = pending_config_gets.remove(&resp.request_id) {
                                     let _ = reply.send(resp);
                                 }
                             }
                             Ok(WsMessage::ConfigSetResponse(resp)) => {
-                                if let Some(reply) = pending_config_sets.remove(&resp.request_id) {
+                                if let Some((_, reply)) = pending_config_sets.remove(&resp.request_id) {
                                     let _ = reply.send(resp);
                                 }
                             }
                             Ok(WsMessage::RestartResponse(resp)) => {
-                                if let Some(reply) = pending_restarts.remove(&resp.request_id) {
+                                if let Some((_, reply)) = pending_restarts.remove(&resp.request_id) {
                                     let _ = reply.send(resp);
                                 }
                             }
@@ -372,6 +386,9 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 }
             }
             _ = heartbeat_interval.tick() => {
+                expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
+                expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
+                expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
                 let hb = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
                 if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
             }
@@ -389,15 +406,10 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         });
                         if let Ok(json) = serde_json::to_string(&msg) {
                             if socket.send(Message::Text(json)).await.is_err() {
-                                let _ = reply.send(rt_protocol::ConfigGetResponse {
-                                    request_id,
-                                    config: serde_json::Value::Null,
-                                    restart_needed: false,
-                                });
                                 break;
                             }
                         }
-                        pending_config_gets.insert(request_id, reply);
+                        pending_config_gets.insert(request_id, (Instant::now(), reply));
                     }
                     ForwarderCommand::ConfigSet { request_id, section, payload, reply } => {
                         let msg = WsMessage::ConfigSetRequest(rt_protocol::ConfigSetRequest {
@@ -407,16 +419,10 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         });
                         if let Ok(json) = serde_json::to_string(&msg) {
                             if socket.send(Message::Text(json)).await.is_err() {
-                                let _ = reply.send(rt_protocol::ConfigSetResponse {
-                                    request_id,
-                                    ok: false,
-                                    error: Some("send failed".to_owned()),
-                                    restart_needed: false,
-                                });
                                 break;
                             }
                         }
-                        pending_config_sets.insert(request_id, reply);
+                        pending_config_sets.insert(request_id, (Instant::now(), reply));
                     }
                     ForwarderCommand::Restart { request_id, reply } => {
                         let msg = WsMessage::RestartRequest(rt_protocol::RestartRequest {
@@ -424,15 +430,10 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         });
                         if let Ok(json) = serde_json::to_string(&msg) {
                             if socket.send(Message::Text(json)).await.is_err() {
-                                let _ = reply.send(rt_protocol::RestartResponse {
-                                    request_id,
-                                    ok: false,
-                                    error: Some("send failed".to_owned()),
-                                });
                                 break;
                             }
                         }
-                        pending_restarts.insert(request_id, reply);
+                        pending_restarts.insert(request_id, (Instant::now(), reply));
                     }
                 }
             }
@@ -455,6 +456,14 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
     state.unregister_forwarder(&device_id).await;
     info!(device_id = %device_id, "forwarder session ended");
+}
+
+fn expire_pending_requests<T>(
+    pending: &mut HashMap<String, (Instant, tokio::sync::oneshot::Sender<T>)>,
+    timeout: Duration,
+) {
+    let now = Instant::now();
+    pending.retain(|_, (started_at, _)| now.duration_since(*started_at) <= timeout);
 }
 
 async fn handle_event_batch(
