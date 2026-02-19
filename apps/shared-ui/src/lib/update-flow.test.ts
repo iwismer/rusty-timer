@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { waitForApplyResult } from "./update-flow";
-import type { UpdateStatusResponse } from "./api";
+import type { UpdateStatusResponse } from "./update-flow";
 
 const noSleep = async () => {};
 

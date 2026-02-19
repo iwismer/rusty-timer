@@ -3,7 +3,7 @@
   import * as api from "$lib/api";
   import { buildUpdatedSubscriptions } from "$lib/subscriptions";
   import { initSSE, destroySSE } from "$lib/sse";
-  import { waitForApplyResult } from "$lib/update-flow";
+  import { waitForApplyResult } from "@rusty-timer/shared-ui/lib/update-flow";
   import type {
     Profile,
     StatusResponse,
