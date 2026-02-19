@@ -57,6 +57,10 @@ pub enum SendBatchResult {
     /// Server requested an epoch bump — caller should update the journal and
     /// reconnect with a fresh `ForwarderHello`.
     EpochReset(EpochResetCommand),
+    /// Server requested the current config.
+    ConfigGet(rt_protocol::ConfigGetRequest),
+    /// Server requested a config section update.
+    ConfigSet(rt_protocol::ConfigSetRequest),
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +233,12 @@ impl UplinkSession {
                     );
                     return Ok(SendBatchResult::EpochReset(cmd));
                 }
+                WsMessage::ConfigGetRequest(req) => {
+                    return Ok(SendBatchResult::ConfigGet(req));
+                }
+                WsMessage::ConfigSetRequest(req) => {
+                    return Ok(SendBatchResult::ConfigSet(req));
+                }
                 WsMessage::Error(e) => {
                     return Err(UplinkError::Protocol(format!(
                         "server error while waiting for ack: {} - {}",
@@ -241,6 +251,16 @@ impl UplinkSession {
                 }
             }
         }
+    }
+
+    /// Send an arbitrary WsMessage (used for config responses).
+    pub async fn send_message(&mut self, msg: &WsMessage) -> Result<(), UplinkError> {
+        self.send_ws_message(msg).await
+    }
+
+    /// Receive the next WsMessage from the server.
+    pub async fn recv_message(&mut self) -> Result<WsMessage, UplinkError> {
+        self.recv_ws_message().await
     }
 
     // -----------------------------------------------------------------------

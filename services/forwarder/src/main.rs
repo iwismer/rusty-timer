@@ -11,10 +11,10 @@ use forwarder::status_http::{
     ConfigState, ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus,
 };
 use forwarder::storage::journal::Journal;
-use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkSession};
+use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkError, UplinkSession};
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
 use ipico_core::read::ChipRead;
-use rt_protocol::{ReadEvent, ResumeCursor};
+use rt_protocol::{ReadEvent, ResumeCursor, WsMessage};
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
 use std::net::SocketAddr;
@@ -280,6 +280,73 @@ async fn run_reader(
 }
 
 // ---------------------------------------------------------------------------
+// Config message handler (used by uplink loop)
+// ---------------------------------------------------------------------------
+
+async fn handle_config_message(
+    session: &mut UplinkSession,
+    msg: WsMessage,
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+) -> Result<(), UplinkError> {
+    match msg {
+        WsMessage::ConfigGetRequest(req) => {
+            let response =
+                match forwarder::status_http::read_config_json(config_state, subsystem).await {
+                    Ok((config, restart_needed)) => {
+                        WsMessage::ConfigGetResponse(rt_protocol::ConfigGetResponse {
+                            request_id: req.request_id,
+                            config,
+                            restart_needed,
+                        })
+                    }
+                    Err(_) => WsMessage::ConfigGetResponse(rt_protocol::ConfigGetResponse {
+                        request_id: req.request_id,
+                        config: serde_json::Value::Null,
+                        restart_needed: false,
+                    }),
+                };
+            session.send_message(&response).await
+        }
+        WsMessage::ConfigSetRequest(req) => {
+            let (ok, error, restart_needed) = match forwarder::status_http::apply_section_update(
+                &req.section,
+                &req.payload,
+                config_state,
+                subsystem,
+            )
+            .await
+            {
+                Ok(()) => (true, None, subsystem.lock().await.restart_needed()),
+                Err((_code, err_json)) => {
+                    let err_msg = serde_json::from_str::<serde_json::Value>(&err_json)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("error")
+                                .and_then(|e| e.as_str())
+                                .map(|s| s.to_owned())
+                        })
+                        .unwrap_or(err_json);
+                    (
+                        false,
+                        Some(err_msg),
+                        subsystem.lock().await.restart_needed(),
+                    )
+                }
+            };
+            let response = WsMessage::ConfigSetResponse(rt_protocol::ConfigSetResponse {
+                request_id: req.request_id,
+                ok,
+                error,
+                restart_needed,
+            });
+            session.send_message(&response).await
+        }
+        _ => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Uplink task: WebSocket connect → replay → send batches → receive acks
 // ---------------------------------------------------------------------------
 
@@ -290,6 +357,8 @@ async fn run_uplink(
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
     status: StatusServer,
+    config_state: Arc<ConfigState>,
+    subsystem: Arc<Mutex<SubsystemStatus>>,
 ) {
     let server_url = format!(
         "{}{}",
@@ -458,6 +527,26 @@ async fn run_uplink(
                     }
                     break;
                 }
+                Ok(SendBatchResult::ConfigGet(req)) => {
+                    let msg = WsMessage::ConfigGetRequest(req);
+                    if let Err(e) =
+                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                    {
+                        warn!(error = %e, "config get handler failed during replay");
+                        reconnect_after_replay = true;
+                        break;
+                    }
+                }
+                Ok(SendBatchResult::ConfigSet(req)) => {
+                    let msg = WsMessage::ConfigSetRequest(req);
+                    if let Err(e) =
+                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                    {
+                        warn!(error = %e, "config set handler failed during replay");
+                        reconnect_after_replay = true;
+                        break;
+                    }
+                }
                 Err(e) => {
                     warn!(error = %e, "send_batch (replay) failed, reconnecting");
                 }
@@ -481,12 +570,41 @@ async fn run_uplink(
                 return;
             }
 
-            // Wait for flush interval or shutdown
+            // Wait for flush interval, shutdown, or incoming config messages
             tokio::select! {
                 _ = sleep(flush_interval) => {}
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         return;
+                    }
+                }
+                result = session.recv_message() => {
+                    match result {
+                        Ok(msg @ WsMessage::ConfigGetRequest(_)) | Ok(msg @ WsMessage::ConfigSetRequest(_)) => {
+                            if let Err(e) = handle_config_message(&mut session, msg, &config_state, &subsystem).await {
+                                warn!(error = %e, "config handler failed during idle");
+                                break 'uplink;
+                            }
+                            continue 'uplink;
+                        }
+                        Ok(WsMessage::Heartbeat(_)) => { continue 'uplink; }
+                        Ok(WsMessage::EpochResetCommand(cmd)) => {
+                            info!(reader_ip = %cmd.reader_ip, new_epoch = cmd.new_stream_epoch, "epoch reset during idle");
+                            let mut j = journal.lock().await;
+                            if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                                warn!(error = %e, "failed to bump epoch");
+                            }
+                            break 'uplink;
+                        }
+                        Ok(WsMessage::Error(e)) => {
+                            warn!(code = %e.code, msg = %e.message, "server error during idle");
+                            break 'uplink;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "ws receive failed during idle");
+                            break 'uplink;
+                        }
+                        _ => { continue 'uplink; }
                     }
                 }
             }
@@ -557,6 +675,24 @@ async fn run_uplink(
                         warn!(error = %e, "failed to bump epoch in journal");
                     }
                     break 'uplink;
+                }
+                Ok(SendBatchResult::ConfigGet(req)) => {
+                    let msg = WsMessage::ConfigGetRequest(req);
+                    if let Err(e) =
+                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                    {
+                        warn!(error = %e, "config get handler failed");
+                        break 'uplink;
+                    }
+                }
+                Ok(SendBatchResult::ConfigSet(req)) => {
+                    let msg = WsMessage::ConfigSetRequest(req);
+                    if let Err(e) =
+                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                    {
+                        warn!(error = %e, "config set handler failed");
+                        break 'uplink;
+                    }
                 }
                 Err(e) => {
                     warn!(error = %e, "send_batch failed, reconnecting uplink");
@@ -655,13 +791,13 @@ async fn main() {
         forwarder_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let subsystem = SubsystemStatus::not_ready("starting".to_owned());
-    let config_state = ConfigState::new(config_path.clone());
+    let config_state = Arc::new(ConfigState::new(config_path.clone()));
     let restart_signal = Arc::new(Notify::new());
     let status_server = match StatusServer::start_with_config(
         status_cfg,
         subsystem,
         journal.clone(),
-        config_state,
+        config_state.clone(),
         restart_signal.clone(),
     )
     .await
@@ -784,8 +920,10 @@ async fn main() {
         let fwd_id = forwarder_id.clone();
         let ips = all_reader_ips.clone();
         let ss = status_server.clone();
+        let cs = config_state.clone();
+        let sub = status_server.subsystem_arc();
         tokio::spawn(async move {
-            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss).await;
+            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss, cs, sub).await;
         });
     }
 
@@ -1142,6 +1280,11 @@ mod tests {
         )
         .await
         .expect("start test status server");
+        let config_path = temp_dir.path().join("forwarder.toml");
+        std::fs::write(&config_path, "schema_version = 1\ntoken = \"test-token\"\n")
+            .expect("write test config");
+        let config_state = Arc::new(ConfigState::new(config_path));
+        let subsystem_arc = status.subsystem_arc();
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-epoch-reconnect-test".to_string(),
@@ -1149,6 +1292,8 @@ mod tests {
             journal,
             shutdown_rx,
             status,
+            config_state,
+            subsystem_arc,
         ));
 
         let (sent_extra_batch_on_first_session, saw_second_session) =

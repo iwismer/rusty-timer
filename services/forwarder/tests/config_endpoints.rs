@@ -162,7 +162,7 @@ target = "192.168.1.100:10000"
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
     let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
             .await
             .expect("start failed");
     let addr = server.local_addr();
@@ -211,7 +211,7 @@ target = "192.168.1.100:10000"
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
     let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
             .await
             .expect("start failed");
     let addr = server.local_addr();
@@ -284,7 +284,7 @@ target = "192.168.1.100:10000"
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
     let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
             .await
             .expect("start failed");
     let addr = server.local_addr();
@@ -412,7 +412,7 @@ target = "192.168.1.100:10000"
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
     let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
     let server =
-        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+        StatusServer::start_with_config(cfg, subsystem, journal, std::sync::Arc::new(config_state), restart_signal)
             .await
             .expect("start failed");
     let addr = server.local_addr();

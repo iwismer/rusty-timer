@@ -200,6 +200,11 @@ impl StatusServer {
         self.local_addr
     }
 
+    /// Return a clone of the internal subsystem status Arc.
+    pub fn subsystem_arc(&self) -> Arc<Mutex<SubsystemStatus>> {
+        self.subsystem.clone()
+    }
+
     /// Mark all local subsystems as ready.
     pub async fn set_ready(&self) {
         let mut ss = self.subsystem.lock().await;
@@ -325,7 +330,7 @@ impl StatusServer {
         cfg: StatusConfig,
         subsystem: SubsystemStatus,
         journal: Arc<Mutex<J>>,
-        config_state: ConfigState,
+        config_state: Arc<ConfigState>,
         restart_signal: Arc<Notify>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(&cfg.bind).await?;
@@ -336,7 +341,7 @@ impl StatusServer {
             subsystem: subsystem.clone(),
             journal,
             version: Arc::new(cfg.forwarder_version),
-            config_state: Some(Arc::new(config_state)),
+            config_state: Some(config_state),
             restart_signal: Some(restart_signal),
         };
 
