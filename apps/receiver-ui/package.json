@@ -15,6 +15,7 @@
     "lint": "prettier --check ."
   },
   "devDependencies": {
+    "@rusty-timer/shared-ui": "*",
     "@playwright/test": "^1.40.0",
     "@sveltejs/adapter-static": "^3.0.0",
     "@sveltejs/kit": "^2.0.0",

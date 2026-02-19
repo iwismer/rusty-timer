@@ -1,0 +1,22 @@
+{
+  "name": "@rusty-timer/shared-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "svelte": "./src/lib/index.ts",
+  "exports": {
+    ".": "./src/lib/index.ts",
+    "./lib/*": "./src/lib/*",
+    "./components/*": "./src/components/*",
+    "./styles/*": "./src/styles/*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "svelte": "^4.2.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}
