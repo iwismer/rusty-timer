@@ -162,7 +162,7 @@ pub struct StatusServer {
 /// Holds the config file path and a write lock for read-modify-write operations.
 pub struct ConfigState {
     pub path: std::path::PathBuf,
-    write_lock: Mutex<()>,
+    pub(crate) write_lock: Mutex<()>,
 }
 
 impl ConfigState {
@@ -548,6 +548,254 @@ async fn update_config_file(
     Ok(())
 }
 
+/// Apply a config section update by name.
+///
+/// Dispatches to the right mutation logic based on `section`, validates the
+/// payload, and calls `update_config_file` to persist the change.
+///
+/// Recognised sections: `"general"`, `"server"`, `"auth"`, `"journal"`,
+/// `"uplink"`, `"status_http"`, `"readers"`.
+pub async fn apply_section_update(
+    section: &str,
+    payload: &serde_json::Value,
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+) -> Result<(), (u16, String)> {
+    match section {
+        "general" => {
+            let display_name = payload
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+            update_config_file(config_state, subsystem, |raw| {
+                raw.display_name = display_name;
+                Ok(())
+            })
+            .await
+        }
+        "server" => {
+            let base_url_opt = payload
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+            let base_url = require_non_empty_trimmed("base_url", base_url_opt).map_err(|e| {
+                (
+                    400u16,
+                    serde_json::json!({"ok": false, "error": e}).to_string(),
+                )
+            })?;
+            validate_base_url(&base_url).map_err(|e| {
+                (
+                    400u16,
+                    serde_json::json!({"ok": false, "error": e}).to_string(),
+                )
+            })?;
+            let forwarders_ws_path = payload
+                .get("forwarders_ws_path")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_owned())
+                    }
+                });
+            update_config_file(config_state, subsystem, |raw| {
+                raw.server = Some(crate::config::RawServerConfig {
+                    base_url: Some(base_url),
+                    forwarders_ws_path,
+                });
+                Ok(())
+            })
+            .await
+        }
+        "auth" => {
+            let token_file_opt = payload
+                .get("token_file")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+            let token_file =
+                require_non_empty_trimmed("token_file", token_file_opt).map_err(|e| {
+                    (
+                        400u16,
+                        serde_json::json!({"ok": false, "error": e}).to_string(),
+                    )
+                })?;
+            validate_token_file(&token_file).map_err(|e| {
+                (
+                    400u16,
+                    serde_json::json!({"ok": false, "error": e}).to_string(),
+                )
+            })?;
+            update_config_file(config_state, subsystem, |raw| {
+                raw.auth = Some(crate::config::RawAuthConfig {
+                    token_file: Some(token_file),
+                });
+                Ok(())
+            })
+            .await
+        }
+        "journal" => {
+            let sqlite_path = payload
+                .get("sqlite_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+            let prune_watermark_pct = payload
+                .get("prune_watermark_pct")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u8);
+            update_config_file(config_state, subsystem, |raw| {
+                raw.journal = Some(crate::config::RawJournalConfig {
+                    sqlite_path,
+                    prune_watermark_pct,
+                });
+                Ok(())
+            })
+            .await
+        }
+        "uplink" => {
+            let batch_mode = payload
+                .get("batch_mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+            let batch_flush_ms = payload.get("batch_flush_ms").and_then(|v| v.as_u64());
+            let batch_max_events = payload
+                .get("batch_max_events")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            update_config_file(config_state, subsystem, |raw| {
+                raw.uplink = Some(crate::config::RawUplinkConfig {
+                    batch_mode,
+                    batch_flush_ms,
+                    batch_max_events,
+                });
+                Ok(())
+            })
+            .await
+        }
+        "status_http" => {
+            let bind = payload
+                .get("bind")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+            update_config_file(config_state, subsystem, |raw| {
+                raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
+                Ok(())
+            })
+            .await
+        }
+        "readers" => {
+            let readers_val = payload.get("readers").ok_or_else(|| {
+                (
+                    400u16,
+                    serde_json::json!({"ok": false, "error": "readers field is required"})
+                        .to_string(),
+                )
+            })?;
+            let readers_arr = readers_val.as_array().ok_or_else(|| {
+                (
+                    400u16,
+                    serde_json::json!({"ok": false, "error": "readers must be an array"})
+                        .to_string(),
+                )
+            })?;
+
+            if readers_arr.is_empty() {
+                return Err((
+                    400u16,
+                    "{\"ok\":false,\"error\":\"at least one reader is required\"}".to_owned(),
+                ));
+            }
+
+            let mut raw_readers = Vec::with_capacity(readers_arr.len());
+            for (i, entry) in readers_arr.iter().enumerate() {
+                let target = entry
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+
+                let target_str = match &target {
+                    Some(t) => t,
+                    None => {
+                        return Err((
+                            400u16,
+                            serde_json::json!({"ok": false, "error": format!("readers[{}].target is required", i)}).to_string(),
+                        ));
+                    }
+                };
+
+                if let Err(e) = crate::discovery::expand_target(target_str) {
+                    return Err((
+                        400u16,
+                        serde_json::json!({"ok": false, "error": format!("readers[{}].target invalid: {}", i, e)}).to_string(),
+                    ));
+                }
+
+                let enabled = entry.get("enabled").and_then(|v| v.as_bool());
+                let local_fallback_port = entry
+                    .get("local_fallback_port")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u16);
+
+                raw_readers.push(crate::config::RawReaderConfig {
+                    target,
+                    enabled,
+                    local_fallback_port,
+                });
+            }
+
+            update_config_file(config_state, subsystem, |raw| {
+                raw.readers = Some(raw_readers);
+                Ok(())
+            })
+            .await
+        }
+        _ => Err((
+            400u16,
+            serde_json::json!({"ok": false, "error": format!("unknown section: {}", section)})
+                .to_string(),
+        )),
+    }
+}
+
+/// Read the config TOML file as JSON.
+///
+/// Returns `(config_json, restart_needed)` on success.
+pub async fn read_config_json(
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+) -> Result<(serde_json::Value, bool), (u16, String)> {
+    let _lock = config_state.write_lock.lock().await;
+
+    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                .to_string(),
+        )
+    })?;
+
+    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                .to_string(),
+        )
+    })?;
+
+    let json = serde_json::to_value(&raw).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)})
+                .to_string(),
+        )
+    })?;
+
+    let restart_needed = subsystem.lock().await.restart_needed();
+    Ok((json, restart_needed))
+}
+
 fn text_response(status: StatusCode, body: impl Into<String>) -> Response {
     (status, [(header::CONTENT_TYPE, "text/plain")], body.into()).into_response()
 }
@@ -909,34 +1157,19 @@ async fn config_json_handler<J: JournalAccess + Send + 'static>(
         None => return config_not_available(),
     };
 
-    let _lock = cs.write_lock.lock().await;
-    match std::fs::read_to_string(&cs.path) {
-        Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
-            Ok(raw) => match serde_json::to_string(&raw) {
-                Ok(json) => json_response(StatusCode::OK, json),
-                Err(e) => json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)})
-                        .to_string(),
-                ),
-            },
-            Err(e) => json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
-                    .to_string(),
-            ),
-        },
-        Err(e) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                .to_string(),
+    match read_config_json(&cs, &state.subsystem).await {
+        Ok((json_value, _restart_needed)) => {
+            let json_str = serde_json::to_string(&json_value).unwrap_or_else(|e| {
+                serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)})
+                    .to_string()
+            });
+            json_response(StatusCode::OK, json_str)
+        }
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
         ),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct GeneralUpdate {
-    display_name: Option<String>,
 }
 
 async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
@@ -947,8 +1180,8 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    let update: GeneralUpdate = match parse_json_body(&body) {
-        Ok(u) => u,
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
         Err(err) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -958,24 +1191,13 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
     };
 
     let _lock = cs.write_lock.lock().await;
-    match update_config_file(&cs, &state.subsystem, |raw| {
-        raw.display_name = update.display_name;
-        Ok(())
-    })
-    .await
-    {
+    match apply_section_update("general", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct ServerUpdate {
-    base_url: Option<String>,
-    forwarders_ws_path: Option<String>,
 }
 
 async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
@@ -986,8 +1208,8 @@ async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    let update: ServerUpdate = match parse_json_body(&body) {
-        Ok(u) => u,
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
         Err(err) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -995,52 +1217,15 @@ async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
             )
         }
     };
-
-    let base_url = match require_non_empty_trimmed("base_url", update.base_url) {
-        Ok(base_url) => base_url,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-    if let Err(err) = validate_base_url(&base_url) {
-        return json_response(
-            StatusCode::BAD_REQUEST,
-            serde_json::json!({"ok": false, "error": err}).to_string(),
-        );
-    }
-    let forwarders_ws_path = update.forwarders_ws_path.and_then(|path| {
-        let trimmed = path.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_owned())
-        }
-    });
 
     let _lock = cs.write_lock.lock().await;
-    match update_config_file(&cs, &state.subsystem, |raw| {
-        raw.server = Some(crate::config::RawServerConfig {
-            base_url: Some(base_url),
-            forwarders_ws_path,
-        });
-        Ok(())
-    })
-    .await
-    {
+    match apply_section_update("server", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct AuthUpdate {
-    token_file: Option<String>,
 }
 
 async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
@@ -1051,8 +1236,8 @@ async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    let update: AuthUpdate = match parse_json_body(&body) {
-        Ok(u) => u,
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
         Err(err) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -1060,44 +1245,15 @@ async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
             )
         }
     };
-
-    let token_file = match require_non_empty_trimmed("token_file", update.token_file) {
-        Ok(token_file) => token_file,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-    if let Err(err) = validate_token_file(&token_file) {
-        return json_response(
-            StatusCode::BAD_REQUEST,
-            serde_json::json!({"ok": false, "error": err}).to_string(),
-        );
-    }
 
     let _lock = cs.write_lock.lock().await;
-    match update_config_file(&cs, &state.subsystem, |raw| {
-        raw.auth = Some(crate::config::RawAuthConfig {
-            token_file: Some(token_file),
-        });
-        Ok(())
-    })
-    .await
-    {
+    match apply_section_update("auth", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct JournalUpdate {
-    sqlite_path: Option<String>,
-    prune_watermark_pct: Option<u8>,
 }
 
 async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
@@ -1108,8 +1264,8 @@ async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    let update: JournalUpdate = match parse_json_body(&body) {
-        Ok(u) => u,
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
         Err(err) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -1119,28 +1275,13 @@ async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
     };
 
     let _lock = cs.write_lock.lock().await;
-    match update_config_file(&cs, &state.subsystem, |raw| {
-        raw.journal = Some(crate::config::RawJournalConfig {
-            sqlite_path: update.sqlite_path,
-            prune_watermark_pct: update.prune_watermark_pct,
-        });
-        Ok(())
-    })
-    .await
-    {
+    match apply_section_update("journal", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct UplinkUpdate {
-    batch_mode: Option<String>,
-    batch_flush_ms: Option<u64>,
-    batch_max_events: Option<u32>,
 }
 
 async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
@@ -1151,8 +1292,8 @@ async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    let update: UplinkUpdate = match parse_json_body(&body) {
-        Ok(u) => u,
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
         Err(err) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -1162,27 +1303,13 @@ async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
     };
 
     let _lock = cs.write_lock.lock().await;
-    match update_config_file(&cs, &state.subsystem, |raw| {
-        raw.uplink = Some(crate::config::RawUplinkConfig {
-            batch_mode: update.batch_mode,
-            batch_flush_ms: update.batch_flush_ms,
-            batch_max_events: update.batch_max_events,
-        });
-        Ok(())
-    })
-    .await
-    {
+    match apply_section_update("uplink", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct StatusHttpUpdate {
-    bind: Option<String>,
 }
 
 async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
@@ -1193,8 +1320,8 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    let update: StatusHttpUpdate = match parse_json_body(&body) {
-        Ok(u) => u,
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
         Err(err) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -1204,30 +1331,13 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
     };
 
     let _lock = cs.write_lock.lock().await;
-    match update_config_file(&cs, &state.subsystem, |raw| {
-        raw.status_http = Some(crate::config::RawStatusHttpConfig { bind: update.bind });
-        Ok(())
-    })
-    .await
-    {
+    match apply_section_update("status_http", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct ReaderEntry {
-    target: Option<String>,
-    enabled: Option<bool>,
-    local_fallback_port: Option<u16>,
-}
-
-#[derive(serde::Deserialize)]
-struct ReadersUpdate {
-    readers: Vec<ReaderEntry>,
 }
 
 async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
@@ -1238,8 +1348,8 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    let update: ReadersUpdate = match parse_json_body(&body) {
-        Ok(u) => u,
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
         Err(err) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
@@ -1248,49 +1358,8 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    if update.readers.is_empty() {
-        return json_response(
-            StatusCode::BAD_REQUEST,
-            "{\"ok\":false,\"error\":\"at least one reader is required\"}".to_owned(),
-        );
-    }
-
-    // Validate all targets before writing.
-    for (i, r) in update.readers.iter().enumerate() {
-        let target = match &r.target {
-            Some(t) => t,
-            None => {
-                return json_response(
-                    StatusCode::BAD_REQUEST,
-                    serde_json::json!({"ok": false, "error": format!("readers[{}].target is required", i)}).to_string(),
-                );
-            }
-        };
-        if let Err(e) = crate::discovery::expand_target(target) {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": format!("readers[{}].target invalid: {}", i, e)}).to_string(),
-            );
-        }
-    }
-
-    let raw_readers: Vec<crate::config::RawReaderConfig> = update
-        .readers
-        .into_iter()
-        .map(|r| crate::config::RawReaderConfig {
-            target: r.target,
-            enabled: r.enabled,
-            local_fallback_port: r.local_fallback_port,
-        })
-        .collect();
-
     let _lock = cs.write_lock.lock().await;
-    match update_config_file(&cs, &state.subsystem, |raw| {
-        raw.readers = Some(raw_readers);
-        Ok(())
-    })
-    .await
-    {
+    match apply_section_update("readers", &payload, &cs, &state.subsystem).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
