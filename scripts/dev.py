@@ -160,6 +160,7 @@ PANES_BEFORE_EMULATOR = [
     (
         "Server",
         f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
+        f"DASHBOARD_DIR=apps/dashboard/build "
         f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server",
     ),
 ]
@@ -167,7 +168,6 @@ PANES_BEFORE_EMULATOR = [
 PANES_AFTER_EMULATOR = [
     ("Forwarder", f"cargo run -p forwarder --features embed-ui -- --config {FORWARDER_TOML_PATH}"),
     ("Receiver",     "cargo run -p receiver --features embed-ui"),
-    ("Dashboard",    "cd apps/dashboard && npm run dev"),
 ]
 
 FORWARDER_TOML_HEADER = f"""\
@@ -530,6 +530,19 @@ def npm_install() -> None:
     console.print("  [green]npm install complete.[/green]")
 
 
+def build_dashboard(skip_build: bool = False) -> None:
+    if skip_build:
+        console.print("[dim]Skipping dashboard build (--no-build)[/dim]")
+        return
+    console.print("[bold]Building dashboard…[/bold]")
+    subprocess.run(
+        ["npm", "run", "build", "--workspace=apps/dashboard"],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    console.print("  [green]Dashboard build complete.[/green]")
+
+
 def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None) -> None:
     check_prereqs()
     start_postgres()
@@ -538,6 +551,7 @@ def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None)
     write_config_files(emulators or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)])
     seed_tokens()
     npm_install()
+    build_dashboard(skip_build=skip_build)
     build_rust(skip_build=skip_build)
 
 
