@@ -1,0 +1,47 @@
+name: Receiver UI CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "apps/receiver-ui/**"
+      - ".github/workflows/receiver-ui.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "apps/receiver-ui/**"
+      - ".github/workflows/receiver-ui.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  receiver-ui:
+    name: Receiver UI Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/receiver-ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/receiver-ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prettier check
+        run: npm run lint
+
+      - name: Svelte type check
+        run: npm run check
+
+      - name: Vitest
+        run: npm test

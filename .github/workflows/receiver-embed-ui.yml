@@ -1,0 +1,46 @@
+name: Receiver Embed UI CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "apps/receiver-ui/**"
+      - "services/receiver/**"
+      - ".github/workflows/receiver-embed-ui.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "apps/receiver-ui/**"
+      - "services/receiver/**"
+      - ".github/workflows/receiver-embed-ui.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  receiver-embed-ui:
+    name: Receiver embed-ui build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/receiver-ui/package-lock.json
+
+      - name: Build and test receiver with embedded UI
+        run: cargo test -p receiver --features embed-ui --test ui_embed_fallback
