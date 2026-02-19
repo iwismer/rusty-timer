@@ -203,3 +203,352 @@ target = "192.168.1.100:10000"
         "restart_needed must be true after config change"
     );
 }
+
+#[tokio::test]
+async fn post_config_server_updates_base_url() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://old.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_path = config_file.path().to_path_buf();
+    let config_state = ConfigState::new(config_path.clone());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/server",
+        r#"{"base_url":"https://new.example.com","forwarders_ws_path":"/ws/v2/forwarders"}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body = response_body(&response);
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+
+    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_str.contains("new.example.com"),
+        "server base_url must be updated, got: {}",
+        toml_str
+    );
+}
+
+#[tokio::test]
+async fn post_config_server_requires_base_url() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://old.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/config/server",
+        r#"{"forwarders_ws_path":"/ws/v2"}"#,
+    )
+    .await;
+    assert_eq!(status, 400, "missing base_url must return 400");
+}
+
+#[tokio::test]
+async fn post_config_auth_updates_token_file() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/old-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_path = config_file.path().to_path_buf();
+    let config_state = ConfigState::new(config_path.clone());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/auth",
+        r#"{"token_file":"/tmp/new-token"}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body = response_body(&response);
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+
+    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_str.contains("new-token"),
+        "auth token_file must be updated, got: {}",
+        toml_str
+    );
+}
+
+#[tokio::test]
+async fn post_config_auth_requires_token_file() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(addr, "/api/v1/config/auth", r#"{}"#).await;
+    assert_eq!(status, 400, "missing token_file must return 400");
+}
+
+#[tokio::test]
+async fn post_config_journal_updates_sqlite_path() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_path = config_file.path().to_path_buf();
+    let config_state = ConfigState::new(config_path.clone());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/journal",
+        r#"{"sqlite_path":"/data/journal.db","prune_watermark_pct":80}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body = response_body(&response);
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+
+    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_str.contains("journal.db"),
+        "journal sqlite_path must be updated, got: {}",
+        toml_str
+    );
+    assert!(
+        toml_str.contains("80"),
+        "journal prune_watermark_pct must be updated, got: {}",
+        toml_str
+    );
+}
+
+#[tokio::test]
+async fn post_config_uplink_updates_batch_settings() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_path = config_file.path().to_path_buf();
+    let config_state = ConfigState::new(config_path.clone());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/uplink",
+        r#"{"batch_flush_ms":200,"batch_max_events":100}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body = response_body(&response);
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+
+    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_str.contains("200"),
+        "batch_flush_ms must be updated, got: {}",
+        toml_str
+    );
+}
+
+#[tokio::test]
+async fn post_config_status_http_updates_bind() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_path = config_file.path().to_path_buf();
+    let config_state = ConfigState::new(config_path.clone());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/status_http",
+        r#"{"bind":"0.0.0.0:9090"}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body = response_body(&response);
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+
+    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_str.contains("0.0.0.0:9090"),
+        "status_http bind must be updated, got: {}",
+        toml_str
+    );
+}

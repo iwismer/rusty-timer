@@ -710,6 +710,320 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await;
             }
         },
+        ("POST", "/api/v1/config/server") => match &config_state {
+            Some(cs) => {
+                let body_str = match extract_request_body(request) {
+                    Some(b) => b,
+                    None => {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            "{\"ok\":false,\"error\":\"missing request body\"}",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                #[derive(serde::Deserialize)]
+                struct ServerUpdate {
+                    base_url: Option<String>,
+                    forwarders_ws_path: Option<String>,
+                }
+
+                let update: ServerUpdate = match serde_json::from_str(body_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                };
+
+                if update.base_url.is_none() {
+                    send_response(
+                        &mut stream,
+                        400,
+                        "application/json",
+                        "{\"ok\":false,\"error\":\"base_url is required\"}",
+                    )
+                    .await;
+                    return;
+                }
+
+                let _lock = cs.write_lock.lock().await;
+                match update_config_file(cs, &subsystem, |raw| {
+                    raw.server = Some(crate::config::RawServerConfig {
+                        base_url: update.base_url,
+                        forwarders_ws_path: update.forwarders_ws_path,
+                    });
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                    }
+                    Err((status_code, body)) => {
+                        send_response(&mut stream, status_code, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
+        ("POST", "/api/v1/config/auth") => match &config_state {
+            Some(cs) => {
+                let body_str = match extract_request_body(request) {
+                    Some(b) => b,
+                    None => {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            "{\"ok\":false,\"error\":\"missing request body\"}",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                #[derive(serde::Deserialize)]
+                struct AuthUpdate {
+                    token_file: Option<String>,
+                }
+
+                let update: AuthUpdate = match serde_json::from_str(body_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                };
+
+                if update.token_file.is_none() {
+                    send_response(
+                        &mut stream,
+                        400,
+                        "application/json",
+                        "{\"ok\":false,\"error\":\"token_file is required\"}",
+                    )
+                    .await;
+                    return;
+                }
+
+                let _lock = cs.write_lock.lock().await;
+                match update_config_file(cs, &subsystem, |raw| {
+                    raw.auth = Some(crate::config::RawAuthConfig {
+                        token_file: update.token_file,
+                    });
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                    }
+                    Err((status_code, body)) => {
+                        send_response(&mut stream, status_code, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
+        ("POST", "/api/v1/config/journal") => match &config_state {
+            Some(cs) => {
+                let body_str = match extract_request_body(request) {
+                    Some(b) => b,
+                    None => {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            "{\"ok\":false,\"error\":\"missing request body\"}",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                #[derive(serde::Deserialize)]
+                struct JournalUpdate {
+                    sqlite_path: Option<String>,
+                    prune_watermark_pct: Option<u8>,
+                }
+
+                let update: JournalUpdate = match serde_json::from_str(body_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                };
+
+                let _lock = cs.write_lock.lock().await;
+                match update_config_file(cs, &subsystem, |raw| {
+                    raw.journal = Some(crate::config::RawJournalConfig {
+                        sqlite_path: update.sqlite_path,
+                        prune_watermark_pct: update.prune_watermark_pct,
+                    });
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                    }
+                    Err((status_code, body)) => {
+                        send_response(&mut stream, status_code, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
+        ("POST", "/api/v1/config/uplink") => match &config_state {
+            Some(cs) => {
+                let body_str = match extract_request_body(request) {
+                    Some(b) => b,
+                    None => {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            "{\"ok\":false,\"error\":\"missing request body\"}",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                #[derive(serde::Deserialize)]
+                struct UplinkUpdate {
+                    batch_mode: Option<String>,
+                    batch_flush_ms: Option<u64>,
+                    batch_max_events: Option<u32>,
+                }
+
+                let update: UplinkUpdate = match serde_json::from_str(body_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                };
+
+                let _lock = cs.write_lock.lock().await;
+                match update_config_file(cs, &subsystem, |raw| {
+                    raw.uplink = Some(crate::config::RawUplinkConfig {
+                        batch_mode: update.batch_mode,
+                        batch_flush_ms: update.batch_flush_ms,
+                        batch_max_events: update.batch_max_events,
+                    });
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                    }
+                    Err((status_code, body)) => {
+                        send_response(&mut stream, status_code, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
+        ("POST", "/api/v1/config/status_http") => match &config_state {
+            Some(cs) => {
+                let body_str = match extract_request_body(request) {
+                    Some(b) => b,
+                    None => {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            "{\"ok\":false,\"error\":\"missing request body\"}",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                #[derive(serde::Deserialize)]
+                struct StatusHttpUpdate {
+                    bind: Option<String>,
+                }
+
+                let update: StatusHttpUpdate = match serde_json::from_str(body_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                };
+
+                let _lock = cs.write_lock.lock().await;
+                match update_config_file(cs, &subsystem, |raw| {
+                    raw.status_http =
+                        Some(crate::config::RawStatusHttpConfig { bind: update.bind });
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                    }
+                    Err((status_code, body)) => {
+                        send_response(&mut stream, status_code, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
         ("GET", "/api/v1/config") => match &config_state {
             Some(cs) => {
                 let _lock = cs.write_lock.lock().await;
