@@ -233,7 +233,7 @@ true optionality is intended so the caller handles the `None` case.
 
 **Severity:** Important — race condition between reactive block and `onMount`
 **Source:** Review D
-**File:** `apps/dashboard/src/routes/streams/[streamId]/+page.svelte`
+**File:** `apps/server-ui/src/routes/streams/[streamId]/+page.svelte`
 
 Both `onMount(() => loadData(streamId))` and `$: if (streamId) { loadData(streamId); }` are
 present. On first render both fire, causing two parallel in-flight requests. If the user
@@ -388,7 +388,7 @@ processing requests meant for a different test.
 
 ### M-1: `ApiError` Interface Exported but Never Used
 
-**File:** `apps/dashboard/src/lib/api.ts:32`
+**File:** `apps/server-ui/src/lib/api.ts:32`
 The `ApiError` interface is exported but errors are always coerced to strings. Either use
 it for structured error handling or remove it to reduce dead exports.
 
@@ -428,7 +428,7 @@ of providing the exact SQL. Add a ready-to-run `INSERT INTO device_tokens` templ
 
 ### M-6: Dashboard API Fetch Has No Request Timeout
 
-**Files:** `apps/dashboard/src/lib/api.ts`, `apps/receiver-ui/src/lib/api.ts`
+**Files:** `apps/server-ui/src/lib/api.ts`, `apps/receiver-ui/src/lib/api.ts`
 A hung server causes the UI to freeze indefinitely. Wrap `fetch` calls with an
 `AbortController` and a 30-second timeout.
 
@@ -489,9 +489,9 @@ ignores it. Fix the implementation (see C-1 above) so the runbook is accurate.
 | Rust unit + lib tests | `cargo test --lib --workspace` | Nothing |
 | Rust all tests (excl. integration) | `cargo test --lib --workspace --bins` | Nothing |
 | Integration tests | `cargo test --test <name> -- --test-threads=4` | Docker daemon |
-| Dashboard unit tests | `cd apps/dashboard && npm test` | Node |
+| Dashboard unit tests | `cd apps/server-ui && npm test` | Node |
 | Receiver-UI unit tests | `cd apps/receiver-ui && npm test` | Node |
-| Dashboard E2E | `cd apps/dashboard && npm run build && npm run test:e2e` | Node + Playwright browsers |
+| Dashboard E2E | `cd apps/server-ui && npm run build && npm run test:e2e` | Node + Playwright browsers |
 
 All Rust unit and JavaScript unit tests can be run by an agent with no external
 dependencies. Integration tests require Docker. Dashboard E2E requires Playwright browser

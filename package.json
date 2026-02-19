@@ -1,4 +1,5 @@
 {
+  "name": "rusty-timer",
   "engines": {
     "node": ">=20",
     "npm": ">=10"
@@ -6,7 +7,7 @@
   "private": true,
   "workspaces": [
     "apps/shared-ui",
-    "apps/dashboard",
+    "apps/server-ui",
     "apps/forwarder-ui",
     "apps/receiver-ui"
   ]

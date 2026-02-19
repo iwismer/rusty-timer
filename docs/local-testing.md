@@ -190,7 +190,7 @@ the forwarder retry on reconnect).
 The dashboard is a SvelteKit static app that talks to the server's HTTP API.
 
 ```bash
-cd apps/dashboard
+cd apps/server-ui
 npm install
 npm run dev
 ```
@@ -393,14 +393,14 @@ cargo test --workspace -- --test-threads=4
 ### Dashboard unit tests
 
 ```bash
-cd apps/dashboard
+cd apps/server-ui
 npm test
 ```
 
 ### Dashboard end-to-end tests (Playwright)
 
 ```bash
-cd apps/dashboard
+cd apps/server-ui
 npx playwright install --with-deps
 npm run test:e2e
 ```

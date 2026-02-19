@@ -27,7 +27,7 @@ FROM node:20-bookworm-slim AS dashboard-builder
 WORKDIR /dashboard
 
 # Copy the dashboard application source.
-COPY apps/dashboard/ ./
+COPY apps/server-ui/ ./
 
 # Install dependencies and build static output.
 RUN npm ci && npm run build

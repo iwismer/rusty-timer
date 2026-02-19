@@ -1,7 +1,7 @@
 # Rusty Timer
 
 [![Rust CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
-[![Dashboard CI](https://github.com/iwismer/rusty-timer/actions/workflows/dashboard.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/dashboard.yml)
+[![Server UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/server-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/server-ui.yml)
 
 Timing utilities for the IPICO chip timing system, extended with a full remote forwarding suite for distributing race reads across a network.
 
@@ -22,7 +22,7 @@ IPICO Reader ──TCP──► Streamer ──fanout──► Local Clients
 | forwarder    | services/forwarder/   | Reads from IPICO hardware, journals to SQLite, forwards over WebSocket |
 | server       | services/server/      | Axum/Postgres: ingest, dedup, fanout, dashboard API              |
 | receiver     | services/receiver/    | Subscribes to server, proxies streams to local TCP ports         |
-| dashboard    | apps/dashboard/       | SvelteKit static web dashboard (served by server)                |
+| server-ui    | apps/server-ui/       | SvelteKit static web dashboard (served by server)                |
 | receiver-ui  | apps/receiver-ui/     | Tauri v2 + SvelteKit desktop app for the receiver                |
 | emulator-v2  | crates/emulator-v2/   | Deterministic multi-reader playback for integration testing      |
 
@@ -117,7 +117,7 @@ cargo test --workspace --lib
 cargo test --workspace -- --test-threads=4
 
 # Dashboard unit tests
-cd apps/dashboard && npm test
+cd apps/server-ui && npm test
 
 # Packaging validation
 bash scripts/validate-packaging.sh
@@ -133,7 +133,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets
 
 # Format JS/TS
-cd apps/dashboard && npm run format
+cd apps/server-ui && npm run format
 cd apps/receiver-ui && npm run format
 ```
 
