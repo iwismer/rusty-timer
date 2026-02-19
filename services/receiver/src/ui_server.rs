@@ -22,7 +22,7 @@ pub async fn serve_ui(method: Method, uri: Uri) -> Response {
     let raw_path = uri.path();
 
     // Preserve API semantics for unknown API endpoints.
-    if raw_path.starts_with("/api/") {
+    if raw_path == "/api" || raw_path.starts_with("/api/") {
         return StatusCode::NOT_FOUND.into_response();
     }
 

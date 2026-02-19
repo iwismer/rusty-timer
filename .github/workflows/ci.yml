@@ -109,8 +109,8 @@ jobs:
           cache: npm
           cache-dependency-path: apps/receiver-ui/package-lock.json
 
-      - name: Build receiver with embedded UI
-        run: cargo build -p receiver --features embed-ui
+      - name: Build and test receiver with embedded UI
+        run: cargo test -p receiver --features embed-ui --test ui_embed_fallback
 
   receiver-ui:
     name: Receiver UI Checks
