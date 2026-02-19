@@ -380,6 +380,14 @@ fn from_hex_digit(b: u8) -> Option<u8> {
     }
 }
 
+/// Extract the body from a raw HTTP request string.
+///
+/// Looks for the `\r\n\r\n` separator between headers and body.
+/// Returns `None` if the separator is not found.
+fn extract_request_body(request: &str) -> Option<&str> {
+    request.find("\r\n\r\n").map(|i| &request[i + 4..])
+}
+
 fn percent_decode_path_segment(input: &str) -> Option<String> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -640,4 +648,30 @@ async fn send_response(stream: &mut TcpStream, status: u16, content_type: &str, 
     );
 
     let _ = stream.write_all(response.as_bytes()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_body_from_http_request() {
+        let request = "POST /api/v1/config/general HTTP/1.1\r\nHost: localhost\r\nContent-Length: 27\r\n\r\n{\"display_name\":\"Start Line\"}";
+        let body = extract_request_body(request);
+        assert_eq!(body, Some("{\"display_name\":\"Start Line\"}"));
+    }
+
+    #[test]
+    fn extract_body_returns_empty_for_no_body() {
+        let request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let body = extract_request_body(request);
+        assert_eq!(body, Some(""));
+    }
+
+    #[test]
+    fn extract_body_returns_none_for_malformed_request() {
+        let request = "GET / HTTP/1.1";
+        let body = extract_request_body(request);
+        assert_eq!(body, None);
+    }
 }
