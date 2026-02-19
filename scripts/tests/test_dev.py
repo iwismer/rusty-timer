@@ -1,7 +1,9 @@
 import argparse
+import tempfile
 import sys
 import unittest
 import urllib.error
+from pathlib import Path
 from unittest.mock import patch
 
 import scripts.dev as dev
@@ -294,6 +296,33 @@ class SetupOrderingTests(unittest.TestCase):
 
         self.assertEqual(call_order[0], "npm_install")
         self.assertEqual(call_order[1], "build_rust(False)")
+
+
+class NpmInstallTests(unittest.TestCase):
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.subprocess.run")
+    def test_npm_install_runs_once_in_workspace_root_when_missing(
+        self, run_mock, _print_mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            with patch.object(dev, "REPO_ROOT", repo_root):
+                dev.npm_install()
+
+        run_mock.assert_called_once_with(["npm", "install"], check=True, cwd=repo_root)
+
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.subprocess.run")
+    def test_npm_install_skips_when_workspace_node_modules_exists(
+        self, run_mock, _print_mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "node_modules").mkdir()
+            with patch.object(dev, "REPO_ROOT", repo_root):
+                dev.npm_install()
+
+        run_mock.assert_not_called()
 
 
 class StartReceiverAutoConfigTests(unittest.TestCase):

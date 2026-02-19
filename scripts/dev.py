@@ -521,14 +521,13 @@ def build_rust(skip_build: bool) -> None:
 
 
 def npm_install() -> None:
-    for app_name in ("dashboard", "forwarder-ui", "receiver-ui"):
-        app_dir = REPO_ROOT / "apps" / app_name
-        if (app_dir / "node_modules").exists():
-            console.print(f"[dim]node_modules present in apps/{app_name} — skipping npm install.[/dim]")
-        else:
-            console.print(f"[bold]Running npm install in apps/{app_name}…[/bold]")
-            subprocess.run(["npm", "install"], check=True, cwd=app_dir)
-            console.print("  [green]npm install complete.[/green]")
+    if (REPO_ROOT / "node_modules").exists():
+        console.print("[dim]node_modules present in workspace root — skipping npm install.[/dim]")
+        return
+
+    console.print("[bold]Running npm install in workspace root…[/bold]")
+    subprocess.run(["npm", "install"], check=True, cwd=REPO_ROOT)
+    console.print("  [green]npm install complete.[/green]")
 
 
 def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None) -> None:

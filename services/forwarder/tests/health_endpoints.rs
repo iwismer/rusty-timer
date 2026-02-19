@@ -376,6 +376,42 @@ async fn unknown_api_path_returns_404() {
 }
 
 #[tokio::test]
+async fn unknown_update_path_returns_404() {
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start(cfg, subsystem)
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_get(addr, "/update/no/such/path").await;
+    assert_eq!(status, 404, "unknown update path must return 404");
+}
+
+#[tokio::test]
+async fn bare_update_path_returns_404() {
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start(cfg, subsystem)
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_get(addr, "/update").await;
+    assert_eq!(status, 404, "bare update path must return 404");
+}
+
+#[tokio::test]
 async fn status_json_shows_forwarder_id() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
