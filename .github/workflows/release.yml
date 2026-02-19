@@ -143,9 +143,31 @@ jobs:
         shell: bash
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.zip"
-          7z a "$ARCHIVE" ./target/release/${{ env.SERVICE }}.exe
+          pushd target/release
+          7z a "../../$ARCHIVE" "${{ env.SERVICE }}.exe"
+          popd
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Verify archive layout (Windows)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+
+          archive = os.environ["ARCHIVE"]
+          expected = f"{os.environ['SERVICE']}.exe"
+
+          with zipfile.ZipFile(archive) as zf:
+              names = zf.namelist()
+
+          if names != [expected]:
+              raise SystemExit(
+                  f"unexpected zip layout: {names}; expected only {expected}"
+              )
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

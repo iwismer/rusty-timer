@@ -3,6 +3,7 @@
   import * as api from "$lib/api";
   import { buildUpdatedSubscriptions } from "$lib/subscriptions";
   import { initSSE, destroySSE } from "$lib/sse";
+  import { waitForApplyResult } from "$lib/update-flow";
   import type {
     Profile,
     StatusResponse,
@@ -92,6 +93,8 @@
       const updateStatus = await api.getUpdateStatus().catch(() => null);
       if (updateStatus?.status === "downloaded" && updateStatus.version) {
         updateVersion = updateStatus.version;
+      } else if (updateStatus?.status === "up_to_date") {
+        updateVersion = null;
       }
     } catch (e) {
       error = String(e);
@@ -137,9 +140,17 @@
 
   async function handleApplyUpdate() {
     updateBusy = true;
+    error = null;
     try {
       await api.applyUpdate();
-      updateVersion = null;
+      const result = await waitForApplyResult(() => api.getUpdateStatus());
+      if (result.outcome === "applied") {
+        updateVersion = null;
+      } else if (result.outcome === "failed") {
+        error = `Update failed: ${result.error}`;
+      } else {
+        error = "Update apply still in progress. Check status again shortly.";
+      }
     } catch (e) {
       error = String(e);
     } finally {
