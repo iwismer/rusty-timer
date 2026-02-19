@@ -42,8 +42,16 @@ values, and installs the systemd service.
      cat ~/.ssh/id_rsa.pub
      ```
 
-3. Copy the edited file to the SD card's **boot** partition. Name the file
-   `user-data` (no file extension).
+3. Open `deploy/sbc/network-config` and edit the static IP settings:
+
+   - **`addresses`** -- the static IP for this Pi (default: `192.168.1.50/24`).
+   - **`routes` → `via`** -- the default gateway (default: `192.168.1.1`).
+   - **`nameservers`** -- DNS servers (default: `8.8.8.8`, `8.8.4.4`).
+
+4. Copy both files to the SD card's **boot** partition:
+
+   - `user-data.yaml` → `user-data` (no extension)
+   - `network-config` → `network-config` (no extension)
 
 > **Tip:** Some versions of Raspberry Pi Imager can apply cloud-init settings
 > directly in the UI -- check under the advanced/customization options.
@@ -52,23 +60,22 @@ values, and installs the systemd service.
 
 1. Insert the SD card into the Pi and power it on.
 2. Wait approximately **2 minutes** for the first boot and cloud-init to finish.
-3. Connect via SSH:
+3. Connect via SSH using the static IP you configured in `network-config`:
+
+   ```bash
+   ssh pi@<static-ip-from-network-config>
+   ```
+
+   For example, if you kept the default address:
+
+   ```bash
+   ssh pi@192.168.1.50
+   ```
+
+   You can also try mDNS if your network supports it:
 
    ```bash
    ssh pi@<hostname>.local
-   ```
-
-   For example, if you set the hostname to `rt-fwd-01`:
-
-   ```bash
-   ssh pi@rt-fwd-01.local
-   ```
-
-4. If `.local` does not resolve, find the Pi's IP address from your router's
-   admin page and connect with:
-
-   ```bash
-   ssh pi@<ip-address>
    ```
 
 ## Step 4 -- Run the Setup Script
@@ -161,3 +168,4 @@ for full configuration options and operational procedures.
 | Forwarder won't start | Bad config or unreachable readers | Check logs: `journalctl -u rt-forwarder -n 50` |
 | "permission denied" errors | Script not running as root | Run with `sudo bash rt-setup.sh` |
 | Forwarder starts but no events reach server | Wrong server URL or auth token | Verify `server.base_url` in `/etc/rusty-timer/forwarder.toml` and check the token in `/etc/rusty-timer/forwarder.token`. |
+| Can't reach Pi after setting static IP | Wrong subnet or IP conflict | Verify the IP/subnet in `network-config` matches your network. Check for IP conflicts. Connect a monitor to see boot logs. |
