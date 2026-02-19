@@ -1,0 +1,39 @@
+name: Shared UI CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "apps/shared-ui/**"
+      - ".github/workflows/shared-ui.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "apps/shared-ui/**"
+      - ".github/workflows/shared-ui.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Shared UI Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Vitest
+        run: npm test
+        working-directory: apps/shared-ui
