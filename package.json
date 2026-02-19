@@ -10,5 +10,11 @@
     "apps/server-ui",
     "apps/forwarder-ui",
     "apps/receiver-ui"
-  ]
+  ],
+  "devDependencies": {
+    "@fontsource-variable/ibm-plex-sans": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@tailwindcss/vite": "^4.2.0",
+    "tailwindcss": "^4.2.0"
+  }
 }

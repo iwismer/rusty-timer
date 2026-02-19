@@ -1,5 +1,5 @@
 <script>
-  import "@rusty-timer/shared-ui/styles/global.css";
+  import "@rusty-timer/shared-ui/styles/tokens.css";
 </script>
 
 <nav>
