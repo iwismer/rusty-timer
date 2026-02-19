@@ -130,13 +130,21 @@ To update to a newer version, choose one of:
   sudo bash rt-setup.sh
   ```
 
-- **Manual update.** Download the new `forwarder-*-linux-arm64.tar.gz` from
+- **Manual update.** Download the new `forwarder-*-aarch64-unknown-linux-gnu.tar.gz` from
   [GitHub Releases](https://github.com/iwismer/rusty-timer/releases), extract
   it, copy the binary to `/usr/local/bin/rt-forwarder`, and restart the service:
 
   ```bash
   sudo systemctl restart rt-forwarder
   ```
+
+When the forwarder self-updater stages an artifact at
+`/var/lib/rusty-timer/.forwarder-staged`, `systemd` applies it automatically on
+the next restart via `/usr/local/lib/rt-forwarder-apply-staged.sh`.
+
+On SBC installs, `POST /update/apply` is configured to restart the forwarder
+process (instead of in-process binary replacement). The root-owned
+`ExecStartPre` hook then atomically promotes the staged binary before startup.
 
 ## Configuration Reference
 

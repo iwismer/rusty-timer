@@ -90,6 +90,72 @@ async fn main() {
         let _ = api_state.shutdown_tx.send(true);
     });
 
+    // Spawn background update check
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let checker = match rt_updater::UpdateChecker::new(
+                "iwismer",
+                "rusty-timer",
+                "receiver",
+                env!("CARGO_PKG_VERSION"),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "failed to create update checker");
+                    return;
+                }
+            };
+
+            match checker.check().await {
+                Ok(rt_updater::UpdateStatus::Available { ref version }) => {
+                    info!(
+                        current = env!("CARGO_PKG_VERSION"),
+                        available = %version,
+                        "update available"
+                    );
+                    *state.update_status.write().await = rt_updater::UpdateStatus::Available {
+                        version: version.clone(),
+                    };
+
+                    match checker.download(version).await {
+                        Ok(path) => {
+                            info!(version = %version, "update downloaded and staged");
+                            *state.update_status.write().await =
+                                rt_updater::UpdateStatus::Downloaded {
+                                    version: version.clone(),
+                                };
+                            *state.staged_update_path.write().await = Some(path);
+
+                            let _ = state
+                                .ui_tx
+                                .send(receiver::ReceiverUiEvent::UpdateAvailable {
+                                    version: version.clone(),
+                                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
+                                });
+                            state.emit_log(format!("Update v{version} available")).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "update download failed");
+                            *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            };
+                        }
+                    }
+                }
+                Ok(_) => {
+                    info!("receiver is up to date");
+                }
+                Err(e) => {
+                    warn!(error = %e, "update check failed");
+                    *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
+                        error: e.to_string(),
+                    };
+                }
+            }
+        });
+    }
+
     // -------------------------------------------------------------------------
     // Event loop: watch connection_state + reconcile subscriptions
     // -------------------------------------------------------------------------

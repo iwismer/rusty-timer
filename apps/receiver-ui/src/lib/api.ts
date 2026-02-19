@@ -105,3 +105,18 @@ export async function disconnect(): Promise<void> {
   if (resp.status !== 200 && resp.status !== 202)
     throw new Error(`disconnect -> ${resp.status}`);
 }
+
+export interface UpdateStatusResponse {
+  status: "up_to_date" | "available" | "downloaded" | "failed";
+  version?: string;
+  error?: string;
+}
+
+export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
+  return apiFetch<UpdateStatusResponse>("/api/v1/update/status");
+}
+
+export async function applyUpdate(): Promise<void> {
+  const resp = await fetch(`${BASE}/api/v1/update/apply`, { method: "POST" });
+  if (resp.status !== 200) throw new Error(`apply update -> ${resp.status}`);
+}

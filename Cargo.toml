@@ -6,6 +6,7 @@ members = [
     "crates/rt-protocol",
     "crates/rt-test-utils",
     "crates/timer-core",
+    "crates/rt-updater",
     "services/forwarder",
     "services/server",
     "services/receiver",

@@ -29,9 +29,18 @@ assert_nonempty() {
   fi
 }
 
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "${haystack}" != *"${needle}"* ]]; then
+    fail "${msg} (missing='${needle}')"
+  fi
+}
+
 # --- release selection across pages ---
 page1='[{"tag_name":"server-v1.0.0","published_at":"2026-02-01T00:00:00Z","draft":false,"prerelease":false,"assets":[]}]'
-page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-linux-arm64.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
+page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
 
 url="$(select_latest_forwarder_asset_from_pages "${page1}" "${page2}")"
 assert_nonempty "${url}" "release URL should be found across multiple pages"
@@ -45,13 +54,27 @@ assert_eq "http://192.168.1.50:8080/healthz" "$(status_probe_url_from_bind '192.
 assert_eq "http://[::1]:7070/healthz" "$(status_probe_url_from_bind '[::1]:7070')" "explicit ipv6 bind should preserve probe host"
 
 # --- checksum extraction helper ---
-checksums=$'aaaaaaaa  forwarder-v1.2.3-linux-arm64.tar.gz\nbbbbbbbb  forwarder-v1.2.3-linux-x86_64.tar.gz\n'
-assert_eq "aaaaaaaa" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-linux-arm64.tar.gz")" "should pick checksum for requested asset"
+checksums=$'aaaaaaaa  forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz\nbbbbbbbb  forwarder-v1.2.3-linux-x86_64.tar.gz\n'
+assert_eq "aaaaaaaa" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz")" "should pick checksum for requested asset"
 assert_eq "" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-linux-armv7.tar.gz")" "should return empty when asset missing"
 
 # --- verify policy helper ---
 assert_eq "skip_verify" "$(install_verify_policy yes n)" "active service + no restart should skip verify"
 assert_eq "run_verify" "$(install_verify_policy yes y)" "active service + yes restart should run verify"
 assert_eq "run_verify" "$(install_verify_policy no '')" "inactive service should run verify"
+
+# --- service unit and staged-update helper rendering ---
+unit="$(render_forwarder_systemd_unit)"
+assert_contains "${unit}" "User=rt-forwarder" "unit should keep service user"
+assert_contains "${unit}" "PermissionsStartOnly=true" "unit should allow root pre-start hook"
+assert_contains "${unit}" "ExecStartPre=/usr/local/lib/rt-forwarder-apply-staged.sh" "unit should include staged update hook"
+assert_contains "${unit}" "Environment=RT_FORWARDER_UPDATE_APPLY_VIA_RESTART=1" "unit should enable restart-based update apply mode"
+assert_contains "${unit}" "ExecStart=/usr/local/bin/rt-forwarder" "unit should run forwarder binary"
+
+apply_script="$(render_apply_staged_script)"
+assert_contains "${apply_script}" "STAGED_PATH=\"/var/lib/rusty-timer/.forwarder-staged\"" "apply helper should use staged path"
+assert_contains "${apply_script}" "TARGET_PATH=\"/usr/local/bin/rt-forwarder\"" "apply helper should use forwarder install path"
+assert_contains "${apply_script}" "mv \"\${tmp_target}\" \"\${TARGET_PATH}\"" "apply helper should atomically promote binary"
+assert_contains "${apply_script}" "rm -f \"\${STAGED_PATH}\"" "apply helper should clean staged file"
 
 echo "PASS: rt-setup helper tests"

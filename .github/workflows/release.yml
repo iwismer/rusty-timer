@@ -69,10 +69,10 @@ jobs:
           SERVICE="${{ steps.parse.outputs.service }}"
           case "$SERVICE" in
             forwarder|emulator)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm"},{"os":"windows","arch":"x86_64","runner":"windows-latest"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
               ;;
             receiver|streamer)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest"},{"os":"windows","arch":"x86_64","runner":"windows-latest"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
               ;;
             *)
               echo "::error::Unknown service: $SERVICE"
@@ -133,7 +133,7 @@ jobs:
       - name: Package (Linux)
         if: matrix.os == 'linux'
         run: |
-          ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-linux-${{ matrix.arch }}.tar.gz"
+          ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
           tar -czf "$ARCHIVE" -C target/release ${{ env.SERVICE }}
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
@@ -142,10 +142,32 @@ jobs:
         if: matrix.os == 'windows'
         shell: bash
         run: |
-          ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-windows-${{ matrix.arch }}.zip"
-          7z a "$ARCHIVE" ./target/release/${{ env.SERVICE }}.exe
+          ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.zip"
+          pushd target/release
+          7z a "../../$ARCHIVE" "${{ env.SERVICE }}.exe"
+          popd
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Verify archive layout (Windows)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+
+          archive = os.environ["ARCHIVE"]
+          expected = f"{os.environ['SERVICE']}.exe"
+
+          with zipfile.ZipFile(archive) as zf:
+              names = zf.namelist()
+
+          if names != [expected]:
+              raise SystemExit(
+                  f"unexpected zip layout: {names}; expected only {expected}"
+              )
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
