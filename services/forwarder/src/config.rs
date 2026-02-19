@@ -12,7 +12,7 @@
 //! # Token file format
 //! Raw token string on a single line; trimmed on read.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -71,53 +71,53 @@ pub struct ReaderConfig {
 // Raw TOML deserialization types (with Option for optional fields)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct RawConfig {
-    schema_version: Option<u32>,
-    display_name: Option<String>,
-    server: Option<RawServerConfig>,
-    auth: Option<RawAuthConfig>,
-    journal: Option<RawJournalConfig>,
-    status_http: Option<RawStatusHttpConfig>,
-    uplink: Option<RawUplinkConfig>,
-    readers: Option<Vec<RawReaderConfig>>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawConfig {
+    pub schema_version: Option<u32>,
+    pub display_name: Option<String>,
+    pub server: Option<RawServerConfig>,
+    pub auth: Option<RawAuthConfig>,
+    pub journal: Option<RawJournalConfig>,
+    pub status_http: Option<RawStatusHttpConfig>,
+    pub uplink: Option<RawUplinkConfig>,
+    pub readers: Option<Vec<RawReaderConfig>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawServerConfig {
-    base_url: Option<String>,
-    forwarders_ws_path: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawServerConfig {
+    pub base_url: Option<String>,
+    pub forwarders_ws_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawAuthConfig {
-    token_file: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawAuthConfig {
+    pub token_file: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawJournalConfig {
-    sqlite_path: Option<String>,
-    prune_watermark_pct: Option<u8>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawJournalConfig {
+    pub sqlite_path: Option<String>,
+    pub prune_watermark_pct: Option<u8>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawStatusHttpConfig {
-    bind: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawStatusHttpConfig {
+    pub bind: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawUplinkConfig {
-    batch_mode: Option<String>,
-    batch_flush_ms: Option<u64>,
-    batch_max_events: Option<u32>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawUplinkConfig {
+    pub batch_mode: Option<String>,
+    pub batch_flush_ms: Option<u64>,
+    pub batch_max_events: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawReaderConfig {
-    target: Option<String>,
-    read_type: Option<String>,
-    enabled: Option<bool>,
-    local_fallback_port: Option<u16>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawReaderConfig {
+    pub target: Option<String>,
+    pub read_type: Option<String>,
+    pub enabled: Option<bool>,
+    pub local_fallback_port: Option<u16>,
 }
 
 // ---------------------------------------------------------------------------
