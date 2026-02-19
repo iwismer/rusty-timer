@@ -530,7 +530,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
             }
         }
         ("GET", "/") => {
-            let (ready, uplink_connected, forwarder_id, local_ip, readers) = {
+            let (ready, uplink_connected, forwarder_id, local_ip, readers, restart_needed) = {
                 let ss = subsystem.lock().await;
                 let mut readers: Vec<_> = ss
                     .readers
@@ -544,6 +544,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                     ss.forwarder_id.clone(),
                     ss.local_ip.clone(),
                     readers,
+                    ss.restart_needed(),
                 )
             };
 
@@ -580,6 +581,12 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 ));
             }
 
+            let restart_banner = if restart_needed {
+                "<div style=\"background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem\">Configuration changed. Restart the forwarder to apply changes.</div>"
+            } else {
+                ""
+            };
+
             let html = format!(
                 "<!DOCTYPE html>\
                  <html><head><title>Forwarder Status</title>\
@@ -596,7 +603,9 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                  th{{font-weight:600}}\
                  </style>\
                  </head><body>\
+                 {restart_banner}\
                  <h1>Forwarder Status</h1>\
+                 <p><a href=\"/config\">Configure</a></p>\
                  <p>Version: {version}</p>\
                  <p>Forwarder ID: <code>{fwd_id}</code></p>\
                  <p>Local IP: {local_ip}</p>\
@@ -611,6 +620,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                  setTimeout(()=>location.reload(),2000);\
                  </script>\
                  </body></html>",
+                restart_banner = restart_banner,
                 version = *version,
                 fwd_id = forwarder_id,
                 local_ip = local_ip_display,
