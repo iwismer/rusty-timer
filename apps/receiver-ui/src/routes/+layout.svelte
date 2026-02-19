@@ -11,6 +11,6 @@
 
 <slot />
 
-<footer class="border-t border-border py-3 px-6 text-center">
+<footer class="border-t border-border py-3 px-8 text-center">
   <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Receiver</p>
 </footer>

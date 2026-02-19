@@ -215,7 +215,7 @@
     "px-3 py-1.5 text-sm font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
 </script>
 
-<main class="max-w-[900px] mx-auto px-6 py-6">
+<main class="max-w-[900px] mx-auto px-8 py-6">
   {#if updateVersion}
     <div class="mb-4">
       <UpdateBanner
