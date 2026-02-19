@@ -1276,6 +1276,21 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await;
             }
         },
+        ("POST", "/api/v1/restart") => {
+            send_response(
+                &mut stream,
+                200,
+                "application/json",
+                &serde_json::json!({"ok": true}).to_string(),
+            )
+            .await;
+            // Give the response a moment to flush, then exit.
+            // The service manager (systemd, etc.) is expected to restart the process.
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                std::process::exit(0);
+            });
+        }
         _ => {
             send_response(&mut stream, 404, "text/plain", "Not Found").await;
         }
@@ -1354,7 +1369,7 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
     }
 
     let restart_banner = if restart_needed {
-        "<div class=\"banner warn\">Configuration changed. Restart the forwarder to apply changes.</div>"
+        "<div class=\"banner warn\">Configuration changed. Restart the forwarder to apply changes. <button onclick=\"restartForwarder()\">Restart Now</button></div>"
     } else {
         ""
     };
@@ -1563,9 +1578,21 @@ function showRestartBanner() {{
   if (!document.querySelector('.banner')) {{
     var banner = document.createElement('div');
     banner.className = 'banner warn';
-    banner.textContent = 'Configuration changed. Restart the forwarder to apply changes.';
+    banner.innerHTML = 'Configuration changed. Restart the forwarder to apply changes. <button onclick="restartForwarder()">Restart Now</button>';
     document.querySelector('h1').after(banner);
   }}
+}}
+
+function restartForwarder() {{
+  if (!confirm('Restart the forwarder now? It will be briefly unavailable.')) return;
+  fetch('/api/v1/restart', {{method: 'POST'}}).then(function() {{
+    document.body.innerHTML = '<h1>Restarting\u2026</h1><p>The forwarder is restarting. This page will reload automatically.</p>';
+    setTimeout(function check() {{
+      fetch('/').then(function() {{ location.href = '/config'; }}).catch(function() {{ setTimeout(check, 1000); }});
+    }}, 2000);
+  }}).catch(function(e) {{
+    alert('Restart failed: ' + e);
+  }});
 }}
 </script>
 </body></html>"#,
