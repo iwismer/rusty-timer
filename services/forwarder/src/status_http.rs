@@ -702,7 +702,7 @@ async fn status_page_handler<J: JournalAccess + Send + 'static>(
     }
 
     let restart_banner = if restart_needed {
-        "<div style=\"background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem\">Configuration changed. Restart the forwarder to apply changes.</div>"
+        r#"<div style="background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div><script>function doRestart(btn){btn.disabled=true;btn.textContent='Restarting\u2026';fetch('/api/v1/restart',{method:'POST'}).catch(function(){});}</script>"#
     } else {
         ""
     };
@@ -1280,7 +1280,7 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
     }
 
     let restart_banner = if restart_needed {
-        "<div class=\"banner warn\">Configuration changed. Restart the forwarder to apply changes.</div>"
+        r#"<div class="banner warn">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div>"#
     } else {
         ""
     };
@@ -1483,9 +1483,15 @@ function showRestartBanner() {{
   if (!document.querySelector('.banner')) {{
     var banner = document.createElement('div');
     banner.className = 'banner warn';
-    banner.textContent = 'Configuration changed. Restart the forwarder to apply changes.';
+    banner.innerHTML = 'Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button>';
     document.querySelector('h1').after(banner);
   }}
+}}
+
+function doRestart(btn) {{
+  btn.disabled = true;
+  btn.textContent = 'Restarting\u2026';
+  fetch('/api/v1/restart', {{method: 'POST'}}).catch(function(){{}});
 }}
 </script>
 </body></html>"#,
