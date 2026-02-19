@@ -13,6 +13,7 @@
   let sseConnected = false;
 
   async function loadAll() {
+    error = null;
     try {
       status = await api.getStatus();
       const updateStatus = await api.getUpdateStatus().catch(() => null);

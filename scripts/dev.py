@@ -538,8 +538,8 @@ def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None)
     apply_migrations()
     write_config_files(emulators or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)])
     seed_tokens()
-    build_rust(skip_build=skip_build)
     npm_install()
+    build_rust(skip_build=skip_build)
 
 
 # ---------------------------------------------------------------------------

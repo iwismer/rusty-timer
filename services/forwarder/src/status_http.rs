@@ -218,6 +218,13 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         ss.ready = true;
         ss.reason = None;
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+                ready: ss.is_ready(),
+                uplink_connected: ss.uplink_connected(),
+                restart_needed: ss.restart_needed(),
+            });
     }
 
     /// Mark that a restart is needed to apply saved config changes.
@@ -1538,6 +1545,33 @@ mod tests {
         assert_eq!(body["restart_needed"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn set_ready_broadcasts_status_changed() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::not_ready("starting".to_owned()),
+        )
+        .await
+        .expect("start status server");
+
+        let mut rx = server.ui_tx.subscribe();
+        server.set_ready().await;
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::StatusChanged { ready, .. } => {
+                assert!(ready);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]
