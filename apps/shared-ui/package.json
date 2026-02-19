@@ -6,7 +6,7 @@
   "svelte": "./src/lib/index.ts",
   "exports": {
     ".": "./src/lib/index.ts",
-    "./lib/*": "./src/lib/*",
+    "./lib/*": "./src/lib/*.ts",
     "./components/*": "./src/components/*",
     "./styles/*": "./src/styles/*"
   },
