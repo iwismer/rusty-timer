@@ -1,19 +1,18 @@
 //! Local status HTTP server for Task 8.
 //!
 //! Provides:
-//! - `GET /`              — read-only HTML status page
 //! - `GET /healthz`       — always 200 OK (process is running)
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
 //! - `GET /api/v1/status`  — current forwarder state as JSON
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
-//! - `GET /config`        — config editing page (when enabled)
 //! - `GET /api/v1/config` — current config as JSON
 //! - `POST /api/v1/config/{section}` — update a config section
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
 //!   501 on non-Unix platforms
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
+//! - All other routes fall back to the embedded SvelteKit UI
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
@@ -26,7 +25,7 @@ use crate::storage::journal::Journal;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use rt_updater::UpdateStatus;
@@ -473,30 +472,6 @@ impl JournalAccess for NoJournal {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
-}
-
-fn format_last_seen(instant: Option<Instant>) -> String {
-    match instant {
-        None => "never".to_owned(),
-        Some(t) => {
-            let elapsed = t.elapsed().as_secs();
-            if elapsed < 60 {
-                format!("{}s ago", elapsed)
-            } else if elapsed < 3600 {
-                format!("{}m ago", elapsed / 60)
-            } else {
-                format!("{}h ago", elapsed / 3600)
-            }
-        }
-    }
-}
 
 fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     let original_permissions = std::fs::metadata(path).map(|m| m.permissions()).ok();
@@ -1077,14 +1052,12 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/readyz", get(readyz_handler::<J>))
-        .route("/", get(status_page_handler::<J>))
         .route(
             "/api/v1/streams/{reader_ip}/reset-epoch",
             post(reset_epoch_handler::<J>),
         )
         .route("/update/status", get(update_status_handler::<J>))
         .route("/update/apply", post(update_apply_handler::<J>))
-        .route("/config", get(config_page_handler::<J>))
         .route("/api/v1/config", get(config_json_handler::<J>))
         .route(
             "/api/v1/config/general",
@@ -1114,7 +1087,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route("/api/v1/restart", post(restart_handler::<J>))
         .route("/api/v1/status", get(status_json_handler::<J>))
         .route("/api/v1/events", get(events_handler::<J>))
-        .fallback(not_found_handler)
+        .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
 
@@ -1132,113 +1105,6 @@ async fn readyz_handler<J: JournalAccess + Send + 'static>(
         let reason = ss.reason.clone().unwrap_or_else(|| "not ready".to_owned());
         text_response(StatusCode::SERVICE_UNAVAILABLE, reason)
     }
-}
-
-async fn status_page_handler<J: JournalAccess + Send + 'static>(
-    State(state): State<AppState<J>>,
-) -> Html<String> {
-    let (ready, uplink_connected, forwarder_id, local_ip, readers, restart_needed) = {
-        let ss = state.subsystem.lock().await;
-        let mut readers: Vec<_> = ss
-            .readers
-            .iter()
-            .map(|(ip, r)| (ip.clone(), r.clone()))
-            .collect();
-        readers.sort_by(|a, b| a.0.cmp(&b.0));
-        (
-            ss.is_ready(),
-            ss.uplink_connected(),
-            ss.forwarder_id.clone(),
-            ss.local_ip.clone(),
-            readers,
-            ss.restart_needed(),
-        )
-    };
-
-    let ready_state = if ready { "ready" } else { "not-ready" };
-    let ready_class = if ready { "ok" } else { "err" };
-    let uplink_state = if uplink_connected {
-        "connected"
-    } else {
-        "disconnected"
-    };
-    let uplink_class = if uplink_connected { "ok" } else { "err" };
-    let local_ip_display = local_ip.as_deref().unwrap_or("unknown");
-
-    let mut reader_rows = String::new();
-    for (ip, r) in &readers {
-        let (state_text, state_class) = match r.state {
-            ReaderConnectionState::Connected => ("connected", "ok"),
-            ReaderConnectionState::Connecting => ("connecting", "warn"),
-            ReaderConnectionState::Disconnected => ("disconnected", "err"),
-        };
-        let last_seen = format_last_seen(r.last_seen);
-        reader_rows.push_str(&format!(
-            "<tr><td>{ip}</td>\
-             <td><span class=\"status {sc}\">{st}</span></td>\
-             <td>{session}</td>\
-             <td>{total}</td>\
-             <td>{ls}</td></tr>",
-            ip = ip,
-            sc = state_class,
-            st = state_text,
-            session = r.reads_since_restart,
-            total = r.reads_total,
-            ls = last_seen,
-        ));
-    }
-
-    let restart_banner = if restart_needed {
-        r#"<div style="background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div><script>function doRestart(btn){btn.disabled=true;btn.textContent='Restarting\u2026';fetch('/api/v1/restart',{method:'POST'}).catch(function(){});}</script>"#
-    } else {
-        ""
-    };
-
-    let html = format!(
-        "<!DOCTYPE html>\
-         <html><head><title>Forwarder Status</title>\
-         <style>\
-         body{{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem}}\
-         h1{{margin-bottom:.5rem}}\
-         h2{{margin-top:1.5rem;margin-bottom:.5rem}}\
-         .status{{padding:.25rem .5rem;border-radius:4px;display:inline-block}}\
-         .ok{{background:#d4edda;color:#155724}}\
-         .warn{{background:#fff3cd;color:#856404}}\
-         .err{{background:#f8d7da;color:#721c24}}\
-         table{{border-collapse:collapse;width:100%}}\
-         th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd}}\
-         th{{font-weight:600}}\
-         </style>\
-         </head><body>\
-         {restart_banner}\
-         <h1>Forwarder Status</h1>\
-         <p><a href=\"/config\">Configure</a></p>\
-         <p>Version: {version}</p>\
-         <p>Forwarder ID: <code>{fwd_id}</code></p>\
-         <p>Local IP: {local_ip}</p>\
-         <p>Readiness: <span class=\"status {rc}\">{rs}</span></p>\
-         <p>Uplink: <span class=\"status {uc}\">{us}</span></p>\
-         <h2>Readers</h2>\
-         <table>\
-         <tr><th>Reader IP</th><th>Status</th><th>Reads (session)</th><th>Reads (total)</th><th>Last seen</th></tr>\
-         {reader_rows}\
-         </table>\
-         <script>\
-         setTimeout(()=>location.reload(),2000);\
-         </script>\
-         </body></html>",
-        restart_banner = restart_banner,
-        version = *state.version,
-        fwd_id = forwarder_id,
-        local_ip = local_ip_display,
-        rs = ready_state,
-        rc = ready_class,
-        us = uplink_state,
-        uc = uplink_class,
-        reader_rows = reader_rows,
-    );
-
-    Html(html)
 }
 
 async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
@@ -1321,34 +1187,6 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
             )
         }
     }
-}
-
-async fn config_page_handler<J: JournalAccess + Send + 'static>(
-    State(state): State<AppState<J>>,
-) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-
-    let _lock = cs.write_lock.lock().await;
-    let raw = match std::fs::read_to_string(&cs.path) {
-        Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
-            Ok(raw) => raw,
-            Err(e) => {
-                let body = format!("Error parsing config: {}", e);
-                return text_response(StatusCode::INTERNAL_SERVER_ERROR, body);
-            }
-        },
-        Err(e) => {
-            let body = format!("Error reading config: {}", e);
-            return text_response(StatusCode::INTERNAL_SERVER_ERROR, body);
-        }
-    };
-
-    let restart_needed = state.subsystem.lock().await.restart_needed();
-    let html = render_config_page(&raw, restart_needed);
-    Html(html).into_response()
 }
 
 async fn config_json_handler<J: JournalAccess + Send + 'static>(
@@ -1561,305 +1399,6 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
             body,
         ),
     }
-}
-
-async fn not_found_handler() -> Response {
-    text_response(StatusCode::NOT_FOUND, "Not Found")
-}
-
-// ---------------------------------------------------------------------------
-// Config page renderer
-// ---------------------------------------------------------------------------
-
-fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> String {
-    let display_name = html_escape(raw.display_name.as_deref().unwrap_or(""));
-
-    let server = raw.server.as_ref();
-    let base_url = html_escape(server.and_then(|s| s.base_url.as_deref()).unwrap_or(""));
-    let ws_path = html_escape(
-        server
-            .and_then(|s| s.forwarders_ws_path.as_deref())
-            .unwrap_or(""),
-    );
-
-    let auth = raw.auth.as_ref();
-    let token_file = html_escape(auth.and_then(|a| a.token_file.as_deref()).unwrap_or(""));
-
-    let journal = raw.journal.as_ref();
-    let sqlite_path = html_escape(journal.and_then(|j| j.sqlite_path.as_deref()).unwrap_or(""));
-    let prune_pct = journal
-        .and_then(|j| j.prune_watermark_pct)
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-
-    let uplink = raw.uplink.as_ref();
-    let batch_mode = html_escape(uplink.and_then(|u| u.batch_mode.as_deref()).unwrap_or(""));
-    let batch_flush_ms = uplink
-        .and_then(|u| u.batch_flush_ms)
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let batch_max_events = uplink
-        .and_then(|u| u.batch_max_events)
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-
-    let status_http = raw.status_http.as_ref();
-    let bind = html_escape(status_http.and_then(|s| s.bind.as_deref()).unwrap_or(""));
-
-    // Build reader rows.
-    let mut reader_rows = String::new();
-    if let Some(readers) = &raw.readers {
-        for r in readers {
-            let target = html_escape(r.target.as_deref().unwrap_or(""));
-            let enabled = r.enabled.unwrap_or(true);
-            let checked = if enabled { "checked" } else { "" };
-            let fallback_port = html_escape(
-                &r.local_fallback_port
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-            );
-
-            reader_rows.push_str(&format!(
-                "<tr class=\"reader-row\">\
-                 <td><input type=\"text\" name=\"target\" value=\"{target}\" required></td>\
-                 <td><input type=\"checkbox\" name=\"enabled\" {checked}></td>\
-                 <td><input type=\"number\" name=\"local_fallback_port\" value=\"{fallback_port}\" min=\"1\" max=\"65535\"></td>\
-                 <td><button type=\"button\" onclick=\"removeReader(this)\">Remove</button></td>\
-                 </tr>",
-                target = target,
-                checked = checked,
-                fallback_port = fallback_port,
-            ));
-        }
-    }
-
-    let restart_banner = if restart_needed {
-        r#"<div class="banner warn">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div>"#
-    } else {
-        ""
-    };
-
-    format!(
-        r#"<!DOCTYPE html>
-<html><head><title>Forwarder Configuration</title>
-<style>
-body{{font-family:system-ui,sans-serif;max-width:700px;margin:2rem auto;padding:0 1rem}}
-h1{{margin-bottom:.5rem}}
-h2{{margin-top:1.5rem;margin-bottom:.5rem;font-size:1.1rem}}
-.card{{border:1px solid #ddd;border-radius:6px;padding:1rem;margin-bottom:1rem}}
-label{{display:block;margin:.5rem 0 .2rem;font-weight:500}}
-input[type="text"],input[type="number"],select{{width:100%;padding:.4rem;box-sizing:border-box;border:1px solid #ccc;border-radius:3px}}
-button{{padding:.4rem .8rem;border:1px solid #ccc;border-radius:3px;cursor:pointer;background:#f8f8f8}}
-button:hover{{background:#e8e8e8}}
-button.save{{background:#d4edda;border-color:#155724;color:#155724}}
-button.save:hover{{background:#c3e6cb}}
-table{{border-collapse:collapse;width:100%}}
-th,td{{text-align:left;padding:.3rem .4rem;border-bottom:1px solid #ddd}}
-th{{font-weight:600;font-size:.9rem}}
-.msg{{padding:.5rem;border-radius:4px;margin-top:.5rem;display:none}}
-.msg.ok{{background:#d4edda;color:#155724;display:block}}
-.msg.err{{background:#f8d7da;color:#721c24;display:block}}
-.banner{{padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem}}
-.banner.warn{{background:#fff3cd;color:#856404;border:1px solid #ffc107}}
-a{{color:#0366d6;text-decoration:none}}
-a:hover{{text-decoration:underline}}
-</style>
-</head><body>
-<h1>Forwarder Configuration</h1>
-<p><a href="/">← Back to Status</a></p>
-{restart_banner}
-
-<div class="card">
-<h2>General</h2>
-<form id="form-general" onsubmit="return saveSection('/api/v1/config/general','form-general')">
-<label>Display Name</label>
-<input type="text" name="display_name" value="{display_name}">
-<br><button type="submit" class="save">Save General</button>
-<div id="msg-general" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Server</h2>
-<form id="form-server" onsubmit="return saveSection('/api/v1/config/server','form-server')">
-<label>Base URL *</label>
-<input type="text" name="base_url" value="{base_url}" required>
-<label>Forwarders WS Path</label>
-<input type="text" name="forwarders_ws_path" value="{ws_path}">
-<br><button type="submit" class="save">Save Server</button>
-<div id="msg-server" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Auth</h2>
-<form id="form-auth" onsubmit="return saveSection('/api/v1/config/auth','form-auth')">
-<label>Token File Path *</label>
-<input type="text" name="token_file" value="{token_file}" required>
-<br><button type="submit" class="save">Save Auth</button>
-<div id="msg-auth" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Journal</h2>
-<form id="form-journal" onsubmit="return saveSection('/api/v1/config/journal','form-journal')">
-<label>SQLite Path</label>
-<input type="text" name="sqlite_path" value="{sqlite_path}">
-<label>Prune Watermark %</label>
-<input type="number" name="prune_watermark_pct" value="{prune_pct}" min="0" max="100">
-<br><button type="submit" class="save">Save Journal</button>
-<div id="msg-journal" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Uplink</h2>
-<form id="form-uplink" onsubmit="return saveSection('/api/v1/config/uplink','form-uplink')">
-<label>Batch Mode</label>
-<input type="text" name="batch_mode" value="{batch_mode}">
-<label>Batch Flush (ms)</label>
-<input type="number" name="batch_flush_ms" value="{batch_flush_ms}" min="1">
-<label>Batch Max Events</label>
-<input type="number" name="batch_max_events" value="{batch_max_events}" min="1">
-<br><button type="submit" class="save">Save Uplink</button>
-<div id="msg-uplink" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Status HTTP</h2>
-<form id="form-status_http" onsubmit="return saveSection('/api/v1/config/status_http','form-status_http')">
-<label>Bind Address</label>
-<input type="text" name="bind" value="{bind}">
-<br><button type="submit" class="save">Save Status HTTP</button>
-<div id="msg-status_http" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Readers</h2>
-<table id="readers-table">
-<tr><th>Target *</th><th>Enabled</th><th>Fallback Port</th><th></th></tr>
-{reader_rows}
-</table>
-<button type="button" onclick="addReader()">+ Add Reader</button>
-<button type="button" class="save" onclick="saveReaders()">Save Readers</button>
-<div id="msg-readers" class="msg"></div>
-</div>
-
-<script>
-function saveSection(endpoint, formId) {{
-  var form = document.getElementById(formId);
-  var data = {{}};
-  var inputs = form.querySelectorAll('input,select');
-  for (var i = 0; i < inputs.length; i++) {{
-    var inp = inputs[i];
-    if (!inp.name) continue;
-    if (inp.type === 'number') {{
-      data[inp.name] = inp.value ? Number(inp.value) : null;
-    }} else if (inp.type === 'checkbox') {{
-      data[inp.name] = inp.checked;
-    }} else {{
-      data[inp.name] = inp.value || null;
-    }}
-  }}
-  fetch(endpoint, {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify(data)
-  }}).then(function(r) {{ return r.json(); }}).then(function(j) {{
-    var msgId = 'msg-' + formId.replace('form-','');
-    var msg = document.getElementById(msgId);
-    if (j.ok) {{
-      msg.className = 'msg ok';
-      msg.textContent = 'Saved. Restart to apply.';
-      showRestartBanner();
-    }} else {{
-      msg.className = 'msg err';
-      msg.textContent = j.error || 'Unknown error';
-    }}
-  }}).catch(function(e) {{
-    alert('Request failed: ' + e);
-  }});
-  return false;
-}}
-
-function saveReaders() {{
-  var rows = document.querySelectorAll('.reader-row');
-  var readers = [];
-  for (var i = 0; i < rows.length; i++) {{
-    var row = rows[i];
-    var entry = {{}};
-    entry.target = row.querySelector('[name=target]').value || null;
-    entry.enabled = row.querySelector('[name=enabled]').checked;
-    var port = row.querySelector('[name=local_fallback_port]').value;
-    entry.local_fallback_port = port ? Number(port) : null;
-    readers.push(entry);
-  }}
-  fetch('/api/v1/config/readers', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{readers: readers}})
-  }}).then(function(r) {{ return r.json(); }}).then(function(j) {{
-    var msg = document.getElementById('msg-readers');
-    if (j.ok) {{
-      msg.className = 'msg ok';
-      msg.textContent = 'Saved. Restart to apply.';
-      showRestartBanner();
-    }} else {{
-      msg.className = 'msg err';
-      msg.textContent = j.error || 'Unknown error';
-    }}
-  }}).catch(function(e) {{
-    alert('Request failed: ' + e);
-  }});
-}}
-
-function addReader() {{
-  var table = document.getElementById('readers-table');
-  var row = document.createElement('tr');
-  row.className = 'reader-row';
-  row.innerHTML = '<td><input type="text" name="target" required></td>' +
-    '<td><input type="checkbox" name="enabled" checked></td>' +
-    '<td><input type="number" name="local_fallback_port" min="1" max="65535"></td>' +
-    '<td><button type="button" onclick="removeReader(this)">Remove</button></td>';
-  table.appendChild(row);
-}}
-
-function removeReader(el) {{
-  el.closest('tr').remove();
-}}
-
-function showRestartBanner() {{
-  if (!document.querySelector('.banner')) {{
-    var banner = document.createElement('div');
-    banner.className = 'banner warn';
-    banner.innerHTML = 'Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button>';
-    document.querySelector('h1').after(banner);
-  }}
-}}
-
-function doRestart(btn) {{
-  btn.disabled = true;
-  btn.textContent = 'Restarting\u2026';
-  fetch('/api/v1/restart', {{method: 'POST'}}).catch(function(){{}});
-}}
-</script>
-</body></html>"#,
-        restart_banner = restart_banner,
-        display_name = display_name,
-        base_url = base_url,
-        ws_path = ws_path,
-        token_file = token_file,
-        sqlite_path = sqlite_path,
-        prune_pct = prune_pct,
-        batch_mode = batch_mode,
-        batch_flush_ms = batch_flush_ms,
-        batch_max_events = batch_max_events,
-        bind = bind,
-        reader_rows = reader_rows,
-    )
 }
 
 fn apply_via_restart_enabled() -> bool {

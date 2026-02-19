@@ -1456,9 +1456,9 @@ mod tests {
 
         mark_reader_disconnected(&status, "10.0.0.42").await;
 
-        let body = http_get_body(status.local_addr(), "/").await;
+        let body = http_get_body(status.local_addr(), "/api/v1/status").await;
         assert!(
-            body.contains("disconnected"),
+            body.contains("\"state\":\"disconnected\""),
             "reader should be marked disconnected after journal error"
         );
     }
@@ -1501,13 +1501,13 @@ mod tests {
             .expect("reader connect timeout")
             .expect("accept reader connection");
 
-        let expected_row =
-            format!("<tr><td>{stream_key}</td><td><span class=\"status ok\">connected</span></td>");
+        let expected_json = format!("\"ip\":\"{stream_key}\"");
+        let expected_state = "\"state\":\"connected\"";
         let mut body = String::new();
         let mut found = false;
         for _ in 0..50 {
-            body = http_get_body(status.local_addr(), "/").await;
-            if body.contains(&expected_row) {
+            body = http_get_body(status.local_addr(), "/api/v1/status").await;
+            if body.contains(&expected_json) && body.contains(expected_state) {
                 found = true;
                 break;
             }
