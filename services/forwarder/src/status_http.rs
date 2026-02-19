@@ -412,6 +412,48 @@ fn percent_decode_path_segment(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Read the TOML config file, apply a mutation, and write it back.
+///
+/// Returns Ok(()) on success or Err((status_code, json_error_body)) on failure.
+async fn update_config_file(
+    config_state: &ConfigState,
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    mutate: impl FnOnce(&mut crate::config::RawConfig) -> Result<(), String>,
+) -> Result<(), (u16, String)> {
+    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
+        (
+            500u16,
+            format!("{{\"ok\":false,\"error\":\"File read error: {}\"}}", e),
+        )
+    })?;
+
+    let mut raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
+        (
+            500u16,
+            format!("{{\"ok\":false,\"error\":\"TOML parse error: {}\"}}", e),
+        )
+    })?;
+
+    mutate(&mut raw).map_err(|e| (400u16, format!("{{\"ok\":false,\"error\":\"{}\"}}", e)))?;
+
+    let new_toml = toml::to_string_pretty(&raw).map_err(|e| {
+        (
+            500u16,
+            format!("{{\"ok\":false,\"error\":\"TOML serialize error: {}\"}}", e),
+        )
+    })?;
+
+    std::fs::write(&config_state.path, new_toml).map_err(|e| {
+        (
+            500u16,
+            format!("{{\"ok\":false,\"error\":\"File write error: {}\"}}", e),
+        )
+    })?;
+
+    subsystem.lock().await.set_restart_needed();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Server accept loop
 // ---------------------------------------------------------------------------
@@ -613,6 +655,61 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 }
             }
         }
+        ("POST", "/api/v1/config/general") => match &config_state {
+            Some(cs) => {
+                let body_str = match extract_request_body(request) {
+                    Some(b) => b,
+                    None => {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            "{\"ok\":false,\"error\":\"missing request body\"}",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                #[derive(serde::Deserialize)]
+                struct GeneralUpdate {
+                    display_name: Option<String>,
+                }
+
+                let update: GeneralUpdate = match serde_json::from_str(body_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                };
+
+                let _lock = cs.write_lock.lock().await;
+                match update_config_file(cs, &subsystem, |raw| {
+                    raw.display_name = update.display_name;
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                    }
+                    Err((status_code, body)) => {
+                        send_response(&mut stream, status_code, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
         ("GET", "/api/v1/config") => match &config_state {
             Some(cs) => {
                 let _lock = cs.write_lock.lock().await;
