@@ -4,32 +4,26 @@
 </script>
 
 <section data-testid="logs-section">
-  <h2>Logs</h2>
+  <div
+    class="flex items-center justify-between px-4 py-2 border-b border-border"
+  >
+    <h2 class="text-sm font-semibold text-text-primary m-0">Logs</h2>
+    <span class="text-xs text-text-muted">{entries.length} entries</span>
+  </div>
   {#if entries.length === 0}
-    <p>No log entries.</p>
+    <p class="px-4 py-6 text-sm text-text-muted text-center m-0">
+      No log entries.
+    </p>
   {:else}
-    <ul class="logs" style="max-height: {maxHeight}">
+    <ul
+      class="font-mono text-xs overflow-y-auto list-none p-0 m-0"
+      style="max-height: {maxHeight}"
+    >
       {#each entries as entry}
-        <li>{entry}</li>
+        <li class="px-4 py-1 border-b border-border text-text-secondary">
+          {entry}
+        </li>
       {/each}
     </ul>
   {/if}
 </section>
-
-<style>
-  .logs {
-    font-family: monospace;
-    font-size: 0.85em;
-    overflow-y: auto;
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  .logs li {
-    padding: 0.15rem 0;
-    border-bottom: 1px solid #f0f0f0;
-  }
-  h2 {
-    margin-top: 0;
-  }
-</style>
