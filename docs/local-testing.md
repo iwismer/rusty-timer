@@ -11,7 +11,7 @@ single development machine and exercising the end-to-end flow manually.
 |------|-----------------|-------|
 | Rust | 1.89.0 | Managed by `rust-toolchain.toml`; `rustup` picks it up automatically |
 | Docker | any recent | Used to run Postgres |
-| Node.js | 20 or later | Required for the dashboard only |
+| Node.js + npm | 20.x + 10.x | Required for frontend apps; use `nvm use` from repo root |
 | jq | optional | Used by the pre-commit hook for JSON formatting checks |
 
 All Rust binaries are built from the workspace root

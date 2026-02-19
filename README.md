@@ -31,7 +31,11 @@ IPICO Reader ──TCP──► Streamer ──fanout──► Local Clients
 **Prerequisites:**
 - Rust 1.89.0 (see `rust-toolchain.toml`)
 - Docker (for server/integration tests)
-- Node.js 20+
+- Node.js 20.x and npm 10.x
+
+JavaScript toolchain pinning:
+- `package.json` pins the expected Node/npm via `engines` and `packageManager`
+- `.nvmrc` is set to `20` for `nvm use`
 
 See [docs/local-testing.md](docs/local-testing.md) for local development setup and [docs/docker-deployment.md](docs/docker-deployment.md) for production deployment.
 
