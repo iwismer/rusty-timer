@@ -99,7 +99,6 @@ fn append_read_to_journal(
 async fn run_reader(
     reader_ip: String,
     reader_port: u16,
-    read_type_str: String,
     fanout_addr: SocketAddr,
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -205,7 +204,7 @@ async fn run_reader(
             match ChipRead::try_from(raw_line.as_str()) {
                 Ok(chip) => {
                     reader_timestamp = Some(chip.timestamp.to_string());
-                    parsed_read_type = read_type_str.clone();
+                    parsed_read_type = chip.read_type.as_str().to_owned();
                 }
                 Err(_) => {
                     // Line is not a valid IPICO read — log and skip
@@ -672,7 +671,7 @@ async fn main() {
         };
     // Collect enabled reader endpoints
     let mut all_reader_ips: Vec<String> = Vec::new();
-    let mut fanout_addrs: Vec<(String, u16, String, SocketAddr)> = Vec::new(); // (ip, port, read_type, fanout_addr)
+    let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)
 
     for reader_cfg in &cfg.readers {
         if !reader_cfg.enabled {
@@ -721,7 +720,7 @@ async fn main() {
             });
 
             all_reader_ips.push(ep.addr());
-            fanout_addrs.push((ep.ip, ep.port, reader_cfg.read_type.clone(), fanout_addr));
+            fanout_addrs.push((ep.ip, ep.port, fanout_addr));
         }
     }
 
@@ -762,12 +761,12 @@ async fn main() {
     status_server.set_local_ip(local_ip).await;
 
     // Spawn reader tasks
-    for (reader_ip, reader_port, read_type, fanout_addr) in fanout_addrs {
+    for (reader_ip, reader_port, fanout_addr) in fanout_addrs {
         let j = journal.clone();
         let rx = shutdown_rx.clone();
         let ss = status_server.clone();
         tokio::spawn(async move {
-            run_reader(reader_ip, reader_port, read_type, fanout_addr, j, rx, ss).await;
+            run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss).await;
         });
     }
 
@@ -1015,7 +1014,6 @@ mod tests {
             },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
-                read_type: "raw".to_string(),
                 enabled: true,
                 local_fallback_port: None,
             }],
@@ -1164,7 +1162,6 @@ mod tests {
         let reader_task = tokio::spawn(run_reader(
             "127.0.0.1".to_owned(),
             reader_port,
-            "raw".to_owned(),
             "127.0.0.1:9".parse().expect("parse fanout addr"),
             journal,
             shutdown_rx,
@@ -1199,5 +1196,83 @@ mod tests {
             found,
             "expected connected status row for stream key {stream_key}, body was: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_reader_journals_detected_read_types() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let reader_port = listener.local_addr().expect("listener local_addr").port();
+        let stream_key = format!("127.0.0.1:{reader_port}");
+
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+        status.init_readers(&[stream_key.clone()]).await;
+
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let reader_task = tokio::spawn(run_reader(
+            "127.0.0.1".to_owned(),
+            reader_port,
+            "127.0.0.1:9".parse().expect("parse fanout addr"),
+            journal.clone(),
+            shutdown_rx,
+            status,
+        ));
+
+        let (mut reader_stream, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
+            .await
+            .expect("reader connect timeout")
+            .expect("accept reader connection");
+
+        reader_stream
+            .write_all(b"aa400000000123450a2a01123018455927a7\n")
+            .await
+            .expect("write raw read");
+        reader_stream
+            .write_all(b"aa400000000123450a2a01123018455927a7FS\n")
+            .await
+            .expect("write fsls read");
+        drop(reader_stream);
+
+        let mut events = Vec::new();
+        for _ in 0..50 {
+            {
+                let j = journal.lock().await;
+                events = j
+                    .unacked_events(&stream_key, 1, 0)
+                    .expect("read journal events");
+            }
+            if events.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(1), reader_task)
+            .await
+            .expect("reader shutdown timeout")
+            .expect("reader task join");
+
+        assert_eq!(
+            events.len(),
+            2,
+            "expected 2 events in journal, got {}",
+            events.len()
+        );
+        assert_eq!(events[0].read_type, "raw");
+        assert_eq!(events[1].read_type, "fsls");
     }
 }

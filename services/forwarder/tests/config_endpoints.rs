@@ -942,6 +942,10 @@ target = "192.168.1.100:10000"
         !toml_str.contains("192.168.1.100"),
         "old reader must be removed from TOML"
     );
+    assert!(
+        !toml_str.contains("read_type"),
+        "read_type must not be persisted in TOML"
+    );
 }
 
 #[tokio::test]
@@ -1039,6 +1043,14 @@ target = "192.168.1.100:10000"
     assert!(
         response.contains("/api/v1/config/general"),
         "must have form action for general section"
+    );
+    assert!(
+        !response.contains("Read Type"),
+        "config page must not render read type column"
+    );
+    assert!(
+        !response.contains("name=\"read_type\""),
+        "config page must not render read_type inputs"
     );
 }
 

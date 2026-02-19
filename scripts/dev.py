@@ -91,7 +91,6 @@ class EmulatorSpec:
         return (
             f"[[readers]]\n"
             f'target              = "127.0.0.1:{self.port}"\n'
-            f'read_type           = "{self.read_type}"\n'
             f"enabled             = true\n"
             f"local_fallback_port = {self.port + FALLBACK_OFFSET}\n"
         )

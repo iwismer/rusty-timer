@@ -1107,7 +1107,6 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
 #[derive(serde::Deserialize)]
 struct ReaderEntry {
     target: Option<String>,
-    read_type: Option<String>,
     enabled: Option<bool>,
     local_fallback_port: Option<u16>,
 }
@@ -1166,7 +1165,6 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         .into_iter()
         .map(|r| crate::config::RawReaderConfig {
             target: r.target,
-            read_type: r.read_type,
             enabled: r.enabled,
             local_fallback_port: r.local_fallback_port,
         })
@@ -1235,7 +1233,6 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
     if let Some(readers) = &raw.readers {
         for r in readers {
             let target = html_escape(r.target.as_deref().unwrap_or(""));
-            let read_type = r.read_type.as_deref().unwrap_or("raw");
             let enabled = r.enabled.unwrap_or(true);
             let checked = if enabled { "checked" } else { "" };
             let fallback_port = html_escape(
@@ -1247,14 +1244,11 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
             reader_rows.push_str(&format!(
                 "<tr class=\"reader-row\">\
                  <td><input type=\"text\" name=\"target\" value=\"{target}\" required></td>\
-                 <td><select name=\"read_type\"><option value=\"raw\"{raw_sel}>raw</option><option value=\"fsls\"{fsls_sel}>fsls</option></select></td>\
                  <td><input type=\"checkbox\" name=\"enabled\" {checked}></td>\
                  <td><input type=\"number\" name=\"local_fallback_port\" value=\"{fallback_port}\" min=\"1\" max=\"65535\"></td>\
                  <td><button type=\"button\" onclick=\"removeReader(this)\">Remove</button></td>\
                  </tr>",
                 target = target,
-                raw_sel = if read_type == "raw" { " selected" } else { "" },
-                fsls_sel = if read_type == "fsls" { " selected" } else { "" },
                 checked = checked,
                 fallback_port = fallback_port,
             ));
@@ -1368,7 +1362,7 @@ a:hover{{text-decoration:underline}}
 <div class="card">
 <h2>Readers</h2>
 <table id="readers-table">
-<tr><th>Target *</th><th>Read Type</th><th>Enabled</th><th>Fallback Port</th><th></th></tr>
+<tr><th>Target *</th><th>Enabled</th><th>Fallback Port</th><th></th></tr>
 {reader_rows}
 </table>
 <button type="button" onclick="addReader()">+ Add Reader</button>
@@ -1420,7 +1414,6 @@ function saveReaders() {{
     var row = rows[i];
     var entry = {{}};
     entry.target = row.querySelector('[name=target]').value || null;
-    entry.read_type = row.querySelector('[name=read_type]').value || null;
     entry.enabled = row.querySelector('[name=enabled]').checked;
     var port = row.querySelector('[name=local_fallback_port]').value;
     entry.local_fallback_port = port ? Number(port) : null;
@@ -1450,7 +1443,6 @@ function addReader() {{
   var row = document.createElement('tr');
   row.className = 'reader-row';
   row.innerHTML = '<td><input type="text" name="target" required></td>' +
-    '<td><select name="read_type"><option value="raw" selected>raw</option><option value="fsls">fsls</option></select></td>' +
     '<td><input type="checkbox" name="enabled" checked></td>' +
     '<td><input type="number" name="local_fallback_port" min="1" max="65535"></td>' +
     '<td><button type="button" onclick="removeReader(this)">Remove</button></td>';
