@@ -10,6 +10,8 @@
 //! - `GET /api/v1/config` — current config as JSON
 //! - `POST /api/v1/config/{section}` — update a config section
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled
+//! - `GET /update/status`    — current rt-updater status as JSON
+//! - `POST /update/apply`    — apply a staged update
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
@@ -25,6 +27,7 @@ use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use rt_updater::UpdateStatus;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -81,6 +84,8 @@ pub struct SubsystemStatus {
     forwarder_id: String,
     local_ip: Option<String>,
     readers: HashMap<String, ReaderStatus>,
+    update_status: UpdateStatus,
+    staged_update_path: Option<std::path::PathBuf>,
     /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
     restart_needed: bool,
 }
@@ -95,6 +100,8 @@ impl SubsystemStatus {
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
+            update_status: UpdateStatus::UpToDate,
+            staged_update_path: None,
             restart_needed: false,
         }
     }
@@ -108,6 +115,8 @@ impl SubsystemStatus {
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
+            update_status: UpdateStatus::UpToDate,
+            staged_update_path: None,
             restart_needed: false,
         }
     }
@@ -220,6 +229,16 @@ impl StatusServer {
     /// Set the detected local IP (call once at startup).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.subsystem.lock().await.local_ip = ip;
+    }
+
+    /// Update the current rt-updater status (shown on `/update/status`).
+    pub async fn set_update_status(&self, status: UpdateStatus) {
+        self.subsystem.lock().await.update_status = status;
+    }
+
+    /// Record the filesystem path of a downloaded update artifact ready to apply.
+    pub async fn set_staged_update_path(&self, path: std::path::PathBuf) {
+        self.subsystem.lock().await.staged_update_path = Some(path);
     }
 
     /// Pre-populate all configured reader IPs as Disconnected.
@@ -603,6 +622,8 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/streams/:reader_ip/reset-epoch",
             post(reset_epoch_handler::<J>),
         )
+        .route("/update/status", get(update_status_handler::<J>))
+        .route("/update/apply", post(update_apply_handler::<J>))
         .route("/config", get(config_page_handler::<J>))
         .route("/api/v1/config", get(config_json_handler::<J>))
         .route(
@@ -778,6 +799,65 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
         }
         Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
         Err(EpochResetError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn update_status_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let update_status = {
+        let ss = state.subsystem.lock().await;
+        ss.update_status.clone()
+    };
+    let body = serde_json::to_string(&update_status)
+        .unwrap_or_else(|_| r#"{"status":"failed","error":"serialization error"}"#.to_owned());
+    json_response(StatusCode::OK, body)
+}
+
+async fn update_apply_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let ss = state.subsystem.lock().await;
+    match &ss.staged_update_path {
+        Some(path) => {
+            let path = path.clone();
+            drop(ss);
+            if apply_via_restart_enabled() {
+                schedule_process_restart();
+                json_response(StatusCode::OK, r#"{"status":"restarting"}"#.to_owned())
+            } else {
+                let sub = state.subsystem.clone();
+                tokio::spawn(async move {
+                    match tokio::task::spawn_blocking(move || {
+                        rt_updater::UpdateChecker::apply_and_exit(&path)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::error!(error = %e, "update apply failed");
+                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            };
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "update apply task failed");
+                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            };
+                        }
+                    }
+                });
+                json_response(StatusCode::OK, r#"{"status":"applying"}"#.to_owned())
+            }
+        }
+        None => {
+            drop(ss);
+            json_response(
+                StatusCode::NOT_FOUND,
+                r#"{"error":"no update staged"}"#.to_owned(),
+            )
+        }
     }
 }
 
@@ -1129,7 +1209,6 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
 #[derive(serde::Deserialize)]
 struct ReaderEntry {
     target: Option<String>,
-    read_type: Option<String>,
     enabled: Option<bool>,
     local_fallback_port: Option<u16>,
 }
@@ -1188,7 +1267,6 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         .into_iter()
         .map(|r| crate::config::RawReaderConfig {
             target: r.target,
-            read_type: r.read_type,
             enabled: r.enabled,
             local_fallback_port: r.local_fallback_port,
         })
@@ -1257,7 +1335,6 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
     if let Some(readers) = &raw.readers {
         for r in readers {
             let target = html_escape(r.target.as_deref().unwrap_or(""));
-            let read_type = r.read_type.as_deref().unwrap_or("raw");
             let enabled = r.enabled.unwrap_or(true);
             let checked = if enabled { "checked" } else { "" };
             let fallback_port = html_escape(
@@ -1269,14 +1346,11 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
             reader_rows.push_str(&format!(
                 "<tr class=\"reader-row\">\
                  <td><input type=\"text\" name=\"target\" value=\"{target}\" required></td>\
-                 <td><select name=\"read_type\"><option value=\"raw\"{raw_sel}>raw</option><option value=\"fsls\"{fsls_sel}>fsls</option></select></td>\
                  <td><input type=\"checkbox\" name=\"enabled\" {checked}></td>\
                  <td><input type=\"number\" name=\"local_fallback_port\" value=\"{fallback_port}\" min=\"1\" max=\"65535\"></td>\
                  <td><button type=\"button\" onclick=\"removeReader(this)\">Remove</button></td>\
                  </tr>",
                 target = target,
-                raw_sel = if read_type == "raw" { " selected" } else { "" },
-                fsls_sel = if read_type == "fsls" { " selected" } else { "" },
                 checked = checked,
                 fallback_port = fallback_port,
             ));
@@ -1390,7 +1464,7 @@ a:hover{{text-decoration:underline}}
 <div class="card">
 <h2>Readers</h2>
 <table id="readers-table">
-<tr><th>Target *</th><th>Read Type</th><th>Enabled</th><th>Fallback Port</th><th></th></tr>
+<tr><th>Target *</th><th>Enabled</th><th>Fallback Port</th><th></th></tr>
 {reader_rows}
 </table>
 <button type="button" onclick="addReader()">+ Add Reader</button>
@@ -1442,7 +1516,6 @@ function saveReaders() {{
     var row = rows[i];
     var entry = {{}};
     entry.target = row.querySelector('[name=target]').value || null;
-    entry.read_type = row.querySelector('[name=read_type]').value || null;
     entry.enabled = row.querySelector('[name=enabled]').checked;
     var port = row.querySelector('[name=local_fallback_port]').value;
     entry.local_fallback_port = port ? Number(port) : null;
@@ -1472,7 +1545,6 @@ function addReader() {{
   var row = document.createElement('tr');
   row.className = 'reader-row';
   row.innerHTML = '<td><input type="text" name="target" required></td>' +
-    '<td><select name="read_type"><option value="raw" selected>raw</option><option value="fsls">fsls</option></select></td>' +
     '<td><input type="checkbox" name="enabled" checked></td>' +
     '<td><input type="number" name="local_fallback_port" min="1" max="65535"></td>' +
     '<td><button type="button" onclick="removeReader(this)">Remove</button></td>';
@@ -1512,4 +1584,98 @@ function doRestart(btn) {{
         bind = bind,
         reader_rows = reader_rows,
     )
+}
+
+fn apply_via_restart_enabled() -> bool {
+    apply_via_restart_from_env(std::env::var("RT_FORWARDER_UPDATE_APPLY_VIA_RESTART").ok())
+}
+
+fn apply_via_restart_from_env(value: Option<String>) -> bool {
+    value.is_some_and(|raw| {
+        let normalized = raw.trim().to_ascii_lowercase();
+        matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+    })
+}
+
+#[cfg(not(test))]
+fn schedule_process_restart() {
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::process::exit(1);
+    });
+}
+
+#[cfg(test)]
+fn schedule_process_restart() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn update_apply_sets_failed_status_when_staged_file_missing() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .set_update_status(UpdateStatus::Downloaded {
+                version: "1.2.3".to_owned(),
+            })
+            .await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        server
+            .set_staged_update_path(temp.path().join("missing-forwarder-staged"))
+            .await;
+
+        let addr = server.local_addr();
+        let base = format!("http://{}", addr);
+        let client = reqwest::Client::new();
+
+        let apply_resp = client
+            .post(format!("{}/update/apply", base))
+            .send()
+            .await
+            .expect("POST /update/apply");
+        assert_eq!(apply_resp.status(), 200);
+
+        let mut saw_failed = false;
+        let mut last_body = String::new();
+        for _ in 0..20 {
+            let resp = client
+                .get(format!("{}/update/status", base))
+                .send()
+                .await
+                .expect("GET /update/status");
+            last_body = resp.text().await.expect("response body");
+            if last_body.contains(r#""status":"failed""#) {
+                saw_failed = true;
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            saw_failed,
+            "status never became failed, last response: {last_body}"
+        );
+    }
+
+    #[test]
+    fn apply_via_restart_env_parsing() {
+        assert!(apply_via_restart_from_env(Some("1".to_owned())));
+        assert!(apply_via_restart_from_env(Some("true".to_owned())));
+        assert!(apply_via_restart_from_env(Some("YES".to_owned())));
+        assert!(apply_via_restart_from_env(Some(" on ".to_owned())));
+        assert!(!apply_via_restart_from_env(None));
+        assert!(!apply_via_restart_from_env(Some("0".to_owned())));
+        assert!(!apply_via_restart_from_env(Some("false".to_owned())));
+    }
 }

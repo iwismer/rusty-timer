@@ -15,11 +15,15 @@ set -euo pipefail
 # ── Variables ────────────────────────────────────────────────────────
 GITHUB_REPO="iwismer/rusty-timer"
 INSTALL_DIR="/usr/local/bin"
+HELPER_DIR="/usr/local/lib"
 CONFIG_DIR="/etc/rusty-timer"
 DATA_DIR="/var/lib/rusty-timer"
 SERVICE_USER="rt-forwarder"
 STATUS_BIND="0.0.0.0:8080"
 VERIFY_POLICY="run_verify"
+FORWARDER_BIN_PATH="${INSTALL_DIR}/rt-forwarder"
+STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
+APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -40,7 +44,7 @@ select_latest_forwarder_asset_from_pages() {
     | reverse
     | .[]
     | .assets[]?
-    | select((.name // "") | test("forwarder-.*-linux-arm64\\.tar\\.gz$"))
+    | select((.name // "") | test("forwarder-.*-aarch64-unknown-linux-gnu\\.tar\\.gz$"))
     | .browser_download_url
     | select(type == "string" and length > 0)
   ' | head -n 1
@@ -88,6 +92,62 @@ checksum_for_asset_from_sha256sums() {
       }
     }
   '
+}
+
+render_apply_staged_script() {
+  cat <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+STAGED_PATH="${STAGED_FORWARDER_PATH}"
+TARGET_PATH="${FORWARDER_BIN_PATH}"
+
+if [[ ! -f "\${STAGED_PATH}" ]]; then
+  exit 0
+fi
+
+tmp_target="\${TARGET_PATH}.tmp.\$\$"
+install -m 0755 "\${STAGED_PATH}" "\${tmp_target}"
+mv "\${tmp_target}" "\${TARGET_PATH}"
+rm -f "\${STAGED_PATH}"
+EOF
+}
+
+render_forwarder_systemd_unit() {
+  cat <<EOF
+[Unit]
+Description=Remote Timing Forwarder (rt-forwarder)
+Documentation=https://github.com/iwismer/rusty-timer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+PermissionsStartOnly=true
+ExecStartPre=${APPLY_STAGED_HELPER}
+User=rt-forwarder
+Group=rt-forwarder
+ExecStart=/usr/local/bin/rt-forwarder
+WorkingDirectory=/var/lib/rusty-timer
+Environment=RUST_LOG=info
+Environment=RT_FORWARDER_UPDATE_APPLY_VIA_RESTART=1
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rt-forwarder
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/rusty-timer
+ReadOnlyPaths=/etc/rusty-timer
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 install_verify_policy() {
@@ -328,38 +388,13 @@ install_service() {
   echo ""
   echo "── Install service ──"
 
+  install -d -m 0755 "${HELPER_DIR}"
+  render_apply_staged_script > "${APPLY_STAGED_HELPER}"
+  chmod 0755 "${APPLY_STAGED_HELPER}"
+  chown root:root "${APPLY_STAGED_HELPER}"
+
   # Write systemd unit file
-  cat > /etc/systemd/system/rt-forwarder.service <<'EOF'
-[Unit]
-Description=Remote Timing Forwarder (rt-forwarder)
-Documentation=https://github.com/iwismer/rusty-timer
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=rt-forwarder
-Group=rt-forwarder
-ExecStart=/usr/local/bin/rt-forwarder
-WorkingDirectory=/var/lib/rusty-timer
-Environment=RUST_LOG=info
-Restart=on-failure
-RestartSec=5s
-StartLimitInterval=60s
-StartLimitBurst=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=rt-forwarder
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/lib/rusty-timer
-ReadOnlyPaths=/etc/rusty-timer
-TimeoutStopSec=30s
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  render_forwarder_systemd_unit > /etc/systemd/system/rt-forwarder.service
 
   systemctl daemon-reload
   systemctl enable rt-forwarder

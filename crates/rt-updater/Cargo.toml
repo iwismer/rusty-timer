@@ -1,0 +1,28 @@
+[package]
+name = "rt-updater"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+self_update = { version = "0.42", default-features = false, features = [
+    "archive-tar",
+    "archive-zip",
+    "compression-flate2",
+    "compression-zip-deflate",
+    "rustls",
+] }
+self-replace = "1.5"
+semver = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

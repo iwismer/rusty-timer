@@ -61,7 +61,6 @@ pub struct UplinkConfig {
 #[derive(Debug, Clone)]
 pub struct ReaderConfig {
     pub target: String,
-    pub read_type: String,
     pub enabled: bool,
     /// Explicit override; None means use default (10000 + last_octet).
     pub local_fallback_port: Option<u16>,
@@ -115,7 +114,6 @@ pub struct RawUplinkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawReaderConfig {
     pub target: Option<String>,
-    pub read_type: Option<String>,
     pub enabled: Option<bool>,
     pub local_fallback_port: Option<u16>,
 }
@@ -232,7 +230,6 @@ pub fn load_config_from_str(
             .ok_or_else(|| ConfigError::MissingField(format!("readers[{}].target", i)))?;
         readers.push(ReaderConfig {
             target,
-            read_type: r.read_type.unwrap_or_else(|| "raw".to_owned()),
             enabled: r.enabled.unwrap_or(true),
             local_fallback_port: r.local_fallback_port,
         });

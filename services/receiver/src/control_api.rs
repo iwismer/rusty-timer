@@ -17,8 +17,10 @@ use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
 use rt_protocol::StreamInfo;
+use rt_updater::UpdateStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::warn;
@@ -43,6 +45,8 @@ pub struct AppState {
     pub shutdown_tx: watch::Sender<bool>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
+    pub update_status: Arc<RwLock<UpdateStatus>>,
+    pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl AppState {
@@ -56,6 +60,8 @@ impl AppState {
             shutdown_tx,
             upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
+            update_status: Arc::new(RwLock::new(UpdateStatus::UpToDate)),
+            staged_update_path: Arc::new(RwLock::new(None)),
         });
         (state, shutdown_rx)
     }
@@ -442,6 +448,55 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
     StatusCode::ACCEPTED.into_response()
 }
 
+async fn get_update_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = state.update_status.read().await.clone();
+    Json(status).into_response()
+}
+
+async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let path = state.staged_update_path.read().await.clone();
+    match path {
+        Some(path) => {
+            let state_clone = Arc::clone(&state);
+            // Send response before exiting
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                match tokio::task::spawn_blocking(move || {
+                    rt_updater::UpdateChecker::apply_and_exit(&path)
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "update apply failed");
+                        *state_clone.update_status.write().await =
+                            rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            };
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "update apply task failed");
+                        *state_clone.update_status.write().await =
+                            rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            };
+                    }
+                }
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "applying"})),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no update staged"})),
+        )
+            .into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -456,6 +511,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
         .route("/api/v1/events", get(crate::sse::receiver_sse))
+        .route("/api/v1/update/status", get(get_update_status))
+        .route("/api/v1/update/apply", post(post_update_apply))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
@@ -463,6 +520,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
 
     #[test]
     fn http_base_url_ws_with_port() {
@@ -536,5 +597,152 @@ mod tests {
             normalize_server_url("  127.0.0.1:8080  "),
             "ws://127.0.0.1:8080"
         );
+    }
+
+    #[tokio::test]
+    async fn post_update_apply_sets_failed_status_when_staged_file_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        *state.update_status.write().await = UpdateStatus::Downloaded {
+            version: "1.2.3".to_owned(),
+        };
+        *state.staged_update_path.write().await = Some(temp.path().join("missing-staged-receiver"));
+
+        let app = build_router(Arc::clone(&state));
+
+        let apply_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/update/apply")
+                    .body(Body::empty())
+                    .expect("build apply request"),
+            )
+            .await
+            .expect("apply request");
+        assert_eq!(apply_resp.status(), StatusCode::OK);
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        let status_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/update/status")
+                    .body(Body::empty())
+                    .expect("build status request"),
+            )
+            .await
+            .expect("status request");
+
+        let bytes = status_resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes.to_bytes()).expect("status json");
+        assert_eq!(json["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn get_update_status_serializes_variants() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        let app = build_router(Arc::clone(&state));
+
+        let up_to_date_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/update/status")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("up_to_date response");
+        let up_to_date_body = up_to_date_resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect up_to_date body");
+        let up_to_date_json: serde_json::Value =
+            serde_json::from_slice(&up_to_date_body.to_bytes()).expect("up_to_date json");
+        assert_eq!(up_to_date_json["status"], "up_to_date");
+
+        *state.update_status.write().await = UpdateStatus::Downloaded {
+            version: "1.2.3".to_owned(),
+        };
+        let downloaded_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/update/status")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("downloaded response");
+        let downloaded_body = downloaded_resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect downloaded body");
+        let downloaded_json: serde_json::Value =
+            serde_json::from_slice(&downloaded_body.to_bytes()).expect("downloaded json");
+        assert_eq!(downloaded_json["status"], "downloaded");
+        assert_eq!(downloaded_json["version"], "1.2.3");
+
+        *state.update_status.write().await = UpdateStatus::Failed {
+            error: "boom".to_owned(),
+        };
+        let failed_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/update/status")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("failed response");
+        let failed_body = failed_resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect failed body");
+        let failed_json: serde_json::Value =
+            serde_json::from_slice(&failed_body.to_bytes()).expect("failed json");
+        assert_eq!(failed_json["status"], "failed");
+        assert_eq!(failed_json["error"], "boom");
+    }
+
+    #[tokio::test]
+    async fn post_update_apply_returns_not_found_when_unstaged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/update/apply")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = response.into_body().collect().await.expect("collect body");
+        let json: serde_json::Value = serde_json::from_slice(&body.to_bytes()).expect("json body");
+        assert_eq!(json["error"], "no update staged");
     }
 }
