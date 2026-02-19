@@ -7,7 +7,9 @@ use forwarder::config::ForwarderConfig;
 use forwarder::discovery::expand_target;
 use forwarder::local_fanout::FanoutServer;
 use forwarder::replay::ReplayEngine;
-use forwarder::status_http::{ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus};
+use forwarder::status_http::{
+    ConfigState, ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus,
+};
 use forwarder::storage::journal::Journal;
 use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkSession};
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
@@ -654,8 +656,11 @@ async fn main() {
         forwarder_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let subsystem = SubsystemStatus::not_ready("starting".to_owned());
+    let config_state = ConfigState::new(config_path.clone());
     let status_server =
-        match StatusServer::start_with_journal(status_cfg, subsystem, journal.clone()).await {
+        match StatusServer::start_with_config(status_cfg, subsystem, journal.clone(), config_state)
+            .await
+        {
             Ok(s) => {
                 info!(addr = %s.local_addr(), "status HTTP server started");
                 s
