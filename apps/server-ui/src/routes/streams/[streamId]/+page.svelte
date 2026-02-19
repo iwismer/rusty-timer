@@ -4,6 +4,7 @@
   import * as api from "$lib/api";
   import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
+  import { StatusBadge, Card } from "@rusty-timer/shared-ui";
 
   let resetResult: string | null = null;
   let resetBusy = false;
@@ -99,267 +100,220 @@
   });
 </script>
 
-<main>
-  <a data-testid="back-link" href="/">← Back to stream list</a>
+<main class="max-w-[1100px] mx-auto px-6 py-6">
+  <div class="mb-4">
+    <a
+      data-testid="back-link"
+      href="/"
+      class="text-xs text-accent no-underline hover:underline"
+    >
+      &larr; Back to stream list
+    </a>
+  </div>
 
-  <h1 data-testid="stream-detail-heading">
-    Stream Detail
+  <div class="flex items-center gap-3 mb-6">
+    <h1
+      data-testid="stream-detail-heading"
+      class="text-xl font-bold text-text-primary m-0"
+    >
+      {#if stream}
+        {stream.display_alias ?? `${stream.forwarder_id} / ${stream.reader_ip}`}
+      {:else}
+        {streamId}
+      {/if}
+    </h1>
     {#if stream}
-      — {stream.display_alias ?? `${stream.forwarder_id} / ${stream.reader_ip}`}
-    {:else}
-      — {streamId}
+      <StatusBadge
+        label={stream.online ? "online" : "offline"}
+        state={stream.online ? "ok" : "err"}
+      />
     {/if}
-  </h1>
+  </div>
 
   {#if stream}
-    <section class="meta-section">
-      <p><strong>Stream ID:</strong> {stream.stream_id}</p>
-      <p><strong>Forwarder:</strong> {stream.forwarder_id}</p>
-      <p><strong>Reader IP:</strong> {stream.reader_ip}</p>
-      <p>
-        <strong>Status:</strong>
-        {#if stream.online}
-          <span class="badge online">online</span>
-        {:else}
-          <span class="badge offline">offline</span>
+    <div class="grid grid-cols-2 gap-4 mb-6">
+      <Card title="Info">
+        <dl
+          class="grid gap-y-2 gap-x-4 text-sm m-0"
+          style="grid-template-columns: auto 1fr;"
+        >
+          <dt class="text-text-muted">Stream ID</dt>
+          <dd class="font-mono text-text-primary m-0">{stream.stream_id}</dd>
+          <dt class="text-text-muted">Forwarder</dt>
+          <dd class="text-text-primary m-0">{stream.forwarder_id}</dd>
+          <dt class="text-text-muted">Reader IP</dt>
+          <dd class="font-mono text-text-primary m-0">{stream.reader_ip}</dd>
+          <dt class="text-text-muted">Epoch</dt>
+          <dd class="font-mono text-text-primary m-0">
+            {stream.stream_epoch}
+          </dd>
+          <dt class="text-text-muted">Created</dt>
+          <dd class="text-text-primary m-0">
+            {new Date(stream.created_at).toLocaleString()}
+          </dd>
+        </dl>
+      </Card>
+
+      <Card title="Metrics">
+        <div data-testid="metrics-section">
+          {#if !metrics}
+            <p class="text-sm text-text-muted italic m-0">Loading metrics…</p>
+          {:else}
+            <dl
+              class="grid gap-y-2 gap-x-4 text-sm m-0"
+              style="grid-template-columns: auto 1fr;"
+            >
+              <dt class="text-text-muted">Raw count</dt>
+              <dd
+                data-testid="metric-raw-count"
+                class="font-mono text-text-primary text-right m-0"
+              >
+                {metrics.raw_count.toLocaleString()}
+              </dd>
+              <dt class="text-text-muted">Dedup count</dt>
+              <dd
+                data-testid="metric-dedup-count"
+                class="font-mono text-text-primary text-right m-0"
+              >
+                {metrics.dedup_count.toLocaleString()}
+              </dd>
+              <dt class="text-text-muted">Retransmit</dt>
+              <dd
+                data-testid="metric-retransmit-count"
+                class="font-mono text-text-primary text-right m-0"
+              >
+                {metrics.retransmit_count.toLocaleString()}
+              </dd>
+              <dt class="text-text-muted">Lag</dt>
+              <dd
+                data-testid="metric-lag"
+                class="font-mono text-text-primary text-right m-0"
+              >
+                {formatLag(metrics.lag)}
+              </dd>
+              <dt class="text-text-muted">Backlog</dt>
+              <dd
+                data-testid="metric-backlog"
+                class="font-mono text-text-primary text-right m-0"
+              >
+                {metrics.backlog}
+              </dd>
+            </dl>
+
+            <div class="mt-3 pt-3 border-t border-border">
+              <p class="text-xs font-medium text-text-muted mb-2 m-0">
+                Current Epoch
+              </p>
+              <dl
+                class="grid gap-y-2 gap-x-4 text-sm m-0"
+                style="grid-template-columns: auto 1fr;"
+              >
+                <dt class="text-text-muted">Raw (epoch)</dt>
+                <dd
+                  data-testid="metric-epoch-raw-count"
+                  class="font-mono text-text-primary text-right m-0"
+                >
+                  {metrics.epoch_raw_count.toLocaleString()}
+                </dd>
+                <dt class="text-text-muted">Dedup (epoch)</dt>
+                <dd
+                  data-testid="metric-epoch-dedup-count"
+                  class="font-mono text-text-primary text-right m-0"
+                >
+                  {metrics.epoch_dedup_count.toLocaleString()}
+                </dd>
+                <dt class="text-text-muted">Retransmit (epoch)</dt>
+                <dd
+                  data-testid="metric-epoch-retransmit-count"
+                  class="font-mono text-text-primary text-right m-0"
+                >
+                  {metrics.epoch_retransmit_count.toLocaleString()}
+                </dd>
+                <dt class="text-text-muted">Unique chips</dt>
+                <dd
+                  data-testid="metric-unique-chips"
+                  class="font-mono text-text-primary text-right m-0"
+                >
+                  {metrics.unique_chips.toLocaleString()}
+                </dd>
+                <dt class="text-text-muted">Last read</dt>
+                <dd
+                  data-testid="metric-last-read"
+                  class="text-text-primary text-right m-0"
+                >
+                  {metrics.epoch_last_received_at
+                    ? new Date(metrics.epoch_last_received_at).toLocaleString()
+                    : "N/A (no events in epoch)"}
+                </dd>
+                <dt class="text-text-muted">Time since last read</dt>
+                <dd
+                  data-testid="metric-time-since-last-read"
+                  class="text-text-primary text-right m-0"
+                >
+                  {timeSinceLastRead}
+                </dd>
+              </dl>
+            </div>
+          {/if}
+        </div>
+      </Card>
+    </div>
+
+    <div class="grid grid-cols-2 gap-4 mb-6">
+      <Card title="Export">
+        <div data-testid="export-section">
+          <p class="text-xs text-text-secondary mb-3 m-0">
+            All canonical (deduplicated) events, ordered by epoch and sequence.
+          </p>
+          <div class="flex flex-col gap-2">
+            <a
+              data-testid="export-raw-link"
+              href={api.exportRawUrl(streamId)}
+              download
+              class="text-sm text-accent no-underline hover:underline"
+            >
+              Download export.txt
+            </a>
+            <a
+              data-testid="export-csv-link"
+              href={api.exportCsvUrl(streamId)}
+              download
+              class="text-sm text-accent no-underline hover:underline"
+            >
+              Download export.csv
+            </a>
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Actions">
+        <button
+          data-testid="reset-epoch-btn"
+          on:click={handleResetEpoch}
+          disabled={resetBusy}
+          class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {resetBusy ? "Sending…" : "Reset Epoch"}
+        </button>
+        <p class="text-xs text-text-muted mt-2 m-0">
+          Sends an epoch-reset command to the connected forwarder. Only works
+          while the forwarder is connected; returns 409 otherwise.
+        </p>
+        {#if resetResult}
+          <p
+            data-testid="reset-epoch-result"
+            class="text-sm mt-2 m-0 {resetResult.startsWith('Error')
+              ? 'text-status-err'
+              : 'text-status-ok'}"
+          >
+            {resetResult}
+          </p>
         {/if}
-      </p>
-      <p><strong>Epoch:</strong> {stream.stream_epoch}</p>
-      <p>
-        <strong>Created:</strong>
-        {new Date(stream.created_at).toLocaleString()}
-      </p>
-    </section>
+      </Card>
+    </div>
+  {:else}
+    <p class="text-sm text-text-muted">
+      Stream not found. It may appear once the forwarder connects.
+    </p>
   {/if}
-
-  <!-- Metrics -->
-  <section data-testid="metrics-section">
-    <h2>Metrics</h2>
-    {#if !metrics}
-      <p>Loading metrics…</p>
-    {:else}
-      <table>
-        <tbody>
-          <tr>
-            <td>Raw count</td>
-            <td data-testid="metric-raw-count">{metrics.raw_count}</td>
-          </tr>
-          <tr>
-            <td>Dedup count</td>
-            <td data-testid="metric-dedup-count">{metrics.dedup_count}</td>
-          </tr>
-          <tr>
-            <td>Retransmit count</td>
-            <td data-testid="metric-retransmit-count"
-              >{metrics.retransmit_count}</td
-            >
-          </tr>
-          <tr>
-            <td>Lag</td>
-            <td data-testid="metric-lag">{formatLag(metrics.lag)}</td>
-          </tr>
-          <tr>
-            <td>Backlog</td>
-            <td data-testid="metric-backlog">{metrics.backlog}</td>
-          </tr>
-          <tr>
-            <td
-              colspan="2"
-              style="border-bottom: 2px solid #ccc; padding-top: 0.75rem;"
-            >
-              <strong>Current Epoch</strong>
-            </td>
-          </tr>
-          <tr>
-            <td>Raw count (epoch)</td>
-            <td data-testid="metric-epoch-raw-count"
-              >{metrics.epoch_raw_count}</td
-            >
-          </tr>
-          <tr>
-            <td>Dedup count (epoch)</td>
-            <td data-testid="metric-epoch-dedup-count"
-              >{metrics.epoch_dedup_count}</td
-            >
-          </tr>
-          <tr>
-            <td>Retransmit count (epoch)</td>
-            <td data-testid="metric-epoch-retransmit-count"
-              >{metrics.epoch_retransmit_count}</td
-            >
-          </tr>
-          <tr>
-            <td>Unique chips</td>
-            <td data-testid="metric-unique-chips">{metrics.unique_chips}</td>
-          </tr>
-          <tr>
-            <td>Last read</td>
-            <td data-testid="metric-last-read">
-              {metrics.epoch_last_received_at
-                ? new Date(metrics.epoch_last_received_at).toLocaleString()
-                : "N/A (no events in epoch)"}
-            </td>
-          </tr>
-          <tr>
-            <td>Time since last read</td>
-            <td data-testid="metric-time-since-last-read"
-              >{timeSinceLastRead}</td
-            >
-          </tr>
-        </tbody>
-      </table>
-    {/if}
-  </section>
-
-  <!-- Export links -->
-  <section data-testid="export-section">
-    <h2>Export</h2>
-    <p>
-      Downloads contain all canonical (deduplicated) events, ordered by epoch
-      and sequence.
-    </p>
-    <ul>
-      <li>
-        <a
-          data-testid="export-raw-link"
-          href={api.exportRawUrl(streamId)}
-          download
-        >
-          Download export.txt (one raw_read_line per row)
-        </a>
-      </li>
-      <li>
-        <a
-          data-testid="export-csv-link"
-          href={api.exportCsvUrl(streamId)}
-          download
-        >
-          Download export.csv (stream_epoch, seq, reader_timestamp,
-          raw_read_line, read_type)
-        </a>
-      </li>
-    </ul>
-  </section>
-
-  <!-- Epoch reset -->
-  <section class="actions-section">
-    <h2>Actions</h2>
-    <button
-      data-testid="reset-epoch-btn"
-      on:click={handleResetEpoch}
-      disabled={resetBusy}
-      class="danger"
-    >
-      {resetBusy ? "Sending…" : "Reset Epoch"}
-    </button>
-    <p class="hint">
-      Sends an epoch-reset command to the connected forwarder. Only works while
-      the forwarder is connected; returns 409 otherwise.
-    </p>
-    {#if resetResult}
-      <p
-        data-testid="reset-epoch-result"
-        class:success={!resetResult.startsWith("Error")}
-        class:error={resetResult.startsWith("Error")}
-      >
-        {resetResult}
-      </p>
-    {/if}
-  </section>
 </main>
-
-<style>
-  main {
-    max-width: 900px;
-    margin: 0 auto;
-    padding: 1rem;
-    font-family: sans-serif;
-  }
-  a {
-    color: #0070f3;
-  }
-  a:hover {
-    text-decoration: underline;
-  }
-  section {
-    margin-bottom: 2rem;
-    border: 1px solid #ccc;
-    padding: 1rem;
-    border-radius: 4px;
-  }
-  h2 {
-    margin-top: 0;
-  }
-  table {
-    border-collapse: collapse;
-    width: 100%;
-  }
-  td {
-    padding: 0.35rem 0.75rem;
-    border-bottom: 1px solid #eee;
-  }
-  td:first-child {
-    font-weight: bold;
-    width: 40%;
-  }
-  ul {
-    padding-left: 1.25rem;
-  }
-  li {
-    margin-bottom: 0.5rem;
-  }
-  .badge {
-    font-size: 0.75em;
-    padding: 0.15rem 0.5rem;
-    border-radius: 3px;
-    font-weight: bold;
-  }
-  .online {
-    background: #d4edda;
-    color: #155724;
-  }
-  .offline {
-    background: #f8d7da;
-    color: #721c24;
-  }
-  button {
-    padding: 0.4rem 1rem;
-    cursor: pointer;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  button.danger {
-    background: #dc3545;
-    color: white;
-    border: none;
-    border-radius: 4px;
-  }
-  button.danger:hover:not(:disabled) {
-    background: #c82333;
-  }
-  .hint {
-    font-size: 0.8em;
-    color: #666;
-    margin-top: 0.35rem;
-  }
-  .error {
-    color: red;
-  }
-  .success {
-    color: green;
-  }
-  .meta-section {
-    border: 1px solid #ccc;
-    padding: 1rem;
-    border-radius: 4px;
-    margin-bottom: 1.5rem;
-  }
-  .actions-section {
-    border: 1px solid #ccc;
-    padding: 1rem;
-    border-radius: 4px;
-    margin-bottom: 1.5rem;
-  }
-</style>
