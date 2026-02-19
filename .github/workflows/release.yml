@@ -104,8 +104,31 @@ jobs:
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
 
+      - name: Setup Node.js (receiver only)
+        if: env.SERVICE == 'receiver'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/receiver-ui/package-lock.json
+
+      - name: Receiver UI checks (receiver only)
+        if: env.SERVICE == 'receiver'
+        working-directory: apps/receiver-ui
+        run: |
+          npm ci
+          npm run lint
+          npm run check
+          npm test
+
       - name: Build release binary
-        run: cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }}
+        shell: bash
+        run: |
+          FEATURES=""
+          if [ "${{ env.SERVICE }}" = "receiver" ]; then
+            FEATURES="--features embed-ui"
+          fi
+          cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
