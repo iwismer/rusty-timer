@@ -130,6 +130,7 @@ Group=rt-forwarder
 ExecStart=/usr/local/bin/rt-forwarder
 WorkingDirectory=/var/lib/rusty-timer
 Environment=RUST_LOG=info
+Environment=RT_FORWARDER_UPDATE_APPLY_VIA_RESTART=1
 Restart=on-failure
 RestartSec=5s
 StartLimitInterval=60s

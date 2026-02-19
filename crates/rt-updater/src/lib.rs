@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::info;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -208,9 +208,8 @@ fn download_blocking(
         .find(|r| r.version == tag)
         .ok_or_else(|| format!("release not found for tag {tag}"))?;
 
-    let asset = release
-        .asset_for(target, None)
-        .ok_or_else(|| format!("no asset found for target {target} in release {tag}"))?;
+    let asset = select_archive_asset(&release.assets, target)
+        .ok_or_else(|| format!("no archive asset found for target {target} in release {tag}"))?;
 
     // Download and stage on the same filesystem as the final staged path.
     let current_exe = std::env::current_exe()?;
@@ -256,8 +255,8 @@ fn download_blocking(
     Ok(staged_path)
 }
 
-/// Download the `.sha256` sidecar and verify the archive's hash. If the
-/// sidecar doesn't exist, log a warning and skip.
+/// Download the `.sha256` sidecar and verify the archive's hash.
+/// The sidecar is required.
 fn verify_sha256(
     assets: &[self_update::update::ReleaseAsset],
     asset_name: &str,
@@ -265,15 +264,10 @@ fn verify_sha256(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sha_asset_name = format!("{asset_name}.sha256");
 
-    let sha_asset = assets.iter().find(|a| a.name == sha_asset_name);
-
-    let Some(sha_asset) = sha_asset else {
-        warn!(
-            asset = sha_asset_name,
-            "sha256 sidecar not found — skipping verification"
-        );
-        return Ok(());
-    };
+    let sha_asset = assets
+        .iter()
+        .find(|a| a.name == sha_asset_name)
+        .ok_or_else(|| format!("missing required sha256 sidecar asset: {sha_asset_name}"))?;
 
     // Download the sidecar.
     let mut sha_buf: Vec<u8> = Vec::new();
@@ -298,6 +292,26 @@ fn verify_sha256(
 
     info!("sha256 verification passed");
     Ok(())
+}
+
+fn select_archive_asset<'a>(
+    assets: &'a [self_update::update::ReleaseAsset],
+    target: &str,
+) -> Option<&'a self_update::update::ReleaseAsset> {
+    assets.iter().find(|asset| {
+        let name = asset.name.as_str();
+        name.contains(target) && is_supported_archive_name(name)
+    })
+}
+
+fn is_supported_archive_name(name: &str) -> bool {
+    if name.to_ascii_lowercase().ends_with(".tar.gz") {
+        return true;
+    }
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
 }
 
 /// Walk the extraction directory and find the service binary.
@@ -341,6 +355,7 @@ fn find_extracted_binary(
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -411,5 +426,61 @@ mod tests {
         let exe_dir = Path::new("/usr/local/bin");
         let stage_dir = stage_root_dir_from(None, exe_dir);
         assert_eq!(stage_dir, exe_dir);
+    }
+
+    fn release_asset(name: &str) -> self_update::update::ReleaseAsset {
+        self_update::update::ReleaseAsset {
+            download_url: format!("https://example.invalid/{name}"),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn select_archive_asset_prefers_real_archive_over_sidecar() {
+        let target = "x86_64-unknown-linux-gnu";
+        let assets = vec![
+            release_asset("forwarder-v1.2.3-x86_64-unknown-linux-gnu.tar.gz.sha256"),
+            release_asset("forwarder-v1.2.3-x86_64-unknown-linux-gnu.tar.gz"),
+        ];
+
+        let selected = select_archive_asset(&assets, target).expect("archive selected");
+        assert_eq!(
+            selected.name,
+            "forwarder-v1.2.3-x86_64-unknown-linux-gnu.tar.gz"
+        );
+    }
+
+    #[test]
+    fn select_archive_asset_supports_zip_assets() {
+        let target = "x86_64-pc-windows-msvc";
+        let assets = vec![
+            release_asset("receiver-v1.2.3-x86_64-pc-windows-msvc.zip.sha256"),
+            release_asset("receiver-v1.2.3-x86_64-pc-windows-msvc.ZIP"),
+        ];
+
+        let selected = select_archive_asset(&assets, target).expect("archive selected");
+        assert_eq!(selected.name, "receiver-v1.2.3-x86_64-pc-windows-msvc.ZIP");
+    }
+
+    #[test]
+    fn verify_sha256_errors_when_sidecar_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let archive = temp
+            .path()
+            .join("forwarder-v1.2.3-x86_64-unknown-linux-gnu.tar.gz");
+        fs::write(&archive, b"test-archive-content").expect("write archive");
+
+        let error = verify_sha256(
+            &[],
+            "forwarder-v1.2.3-x86_64-unknown-linux-gnu.tar.gz",
+            &archive,
+        )
+        .expect_err("missing sidecar should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("missing required sha256 sidecar asset"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -142,6 +142,10 @@ When the forwarder self-updater stages an artifact at
 `/var/lib/rusty-timer/.forwarder-staged`, `systemd` applies it automatically on
 the next restart via `/usr/local/lib/rt-forwarder-apply-staged.sh`.
 
+On SBC installs, `POST /update/apply` is configured to restart the forwarder
+process (instead of in-process binary replacement). The root-owned
+`ExecStartPre` hook then atomically promotes the staged binary before startup.
+
 ## Configuration Reference
 
 See [`docs/runbooks/forwarder-operations.md`](../../docs/runbooks/forwarder-operations.md)

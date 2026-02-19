@@ -7,7 +7,7 @@
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
 //! - `GET /update/status`    — current rt-updater status as JSON
-//! - `POST /update/apply`    — apply a staged update and exit
+//! - `POST /update/apply`    — apply a staged update
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
@@ -800,20 +800,34 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
         Some(path) => {
             let path = path.clone();
             drop(ss);
-            let sub = state.subsystem.clone();
-            tokio::spawn(async move {
-                if let Err(e) = tokio::task::spawn_blocking(move || {
-                    rt_updater::UpdateChecker::apply_and_exit(&path)
-                })
-                .await
-                {
-                    tracing::error!(error = %e, "update apply failed");
-                    sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
-                        error: e.to_string(),
-                    };
-                }
-            });
-            json_response(StatusCode::OK, r#"{"status":"applying"}"#.to_owned())
+            if apply_via_restart_enabled() {
+                schedule_process_restart();
+                json_response(StatusCode::OK, r#"{"status":"restarting"}"#.to_owned())
+            } else {
+                let sub = state.subsystem.clone();
+                tokio::spawn(async move {
+                    match tokio::task::spawn_blocking(move || {
+                        rt_updater::UpdateChecker::apply_and_exit(&path)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::error!(error = %e, "update apply failed");
+                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            };
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "update apply task failed");
+                            sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            };
+                        }
+                    }
+                });
+                json_response(StatusCode::OK, r#"{"status":"applying"}"#.to_owned())
+            }
         }
         None => {
             drop(ss);
@@ -1552,6 +1566,28 @@ function showRestartBanner() {{
     )
 }
 
+fn apply_via_restart_enabled() -> bool {
+    apply_via_restart_from_env(std::env::var("RT_FORWARDER_UPDATE_APPLY_VIA_RESTART").ok())
+}
+
+fn apply_via_restart_from_env(value: Option<String>) -> bool {
+    value.is_some_and(|raw| {
+        let normalized = raw.trim().to_ascii_lowercase();
+        matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+    })
+}
+
+#[cfg(not(test))]
+fn schedule_process_restart() {
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::process::exit(1);
+    });
+}
+
+#[cfg(test)]
+fn schedule_process_restart() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1610,5 +1646,16 @@ mod tests {
             saw_failed,
             "status never became failed, last response: {last_body}"
         );
+    }
+
+    #[test]
+    fn apply_via_restart_env_parsing() {
+        assert!(apply_via_restart_from_env(Some("1".to_owned())));
+        assert!(apply_via_restart_from_env(Some("true".to_owned())));
+        assert!(apply_via_restart_from_env(Some("YES".to_owned())));
+        assert!(apply_via_restart_from_env(Some(" on ".to_owned())));
+        assert!(!apply_via_restart_from_env(None));
+        assert!(!apply_via_restart_from_env(Some("0".to_owned())));
+        assert!(!apply_via_restart_from_env(Some("false".to_owned())));
     }
 }

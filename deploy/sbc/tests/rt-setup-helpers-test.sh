@@ -68,6 +68,7 @@ unit="$(render_forwarder_systemd_unit)"
 assert_contains "${unit}" "User=rt-forwarder" "unit should keep service user"
 assert_contains "${unit}" "PermissionsStartOnly=true" "unit should allow root pre-start hook"
 assert_contains "${unit}" "ExecStartPre=/usr/local/lib/rt-forwarder-apply-staged.sh" "unit should include staged update hook"
+assert_contains "${unit}" "Environment=RT_FORWARDER_UPDATE_APPLY_VIA_RESTART=1" "unit should enable restart-based update apply mode"
 assert_contains "${unit}" "ExecStart=/usr/local/bin/rt-forwarder" "unit should run forwarder binary"
 
 apply_script="$(render_apply_staged_script)"
