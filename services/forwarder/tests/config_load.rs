@@ -331,7 +331,7 @@ target = "192.168.2.156:10000"
 }
 
 #[test]
-fn default_reader_read_type_and_enabled() {
+fn default_reader_enabled() {
     let token_file = write_token_file("tok");
     let toml = format!(
         r#"
@@ -350,7 +350,6 @@ target = "192.168.2.156:10000"
     );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     let r = &cfg.readers[0];
-    assert_eq!(r.read_type, "raw");
     assert!(r.enabled);
 }
 
@@ -513,5 +512,4 @@ read_type = "fsls"
     );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     assert_eq!(cfg.readers.len(), 2);
-    assert_eq!(cfg.readers[1].read_type, "fsls");
 }

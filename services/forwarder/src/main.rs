@@ -1014,7 +1014,6 @@ mod tests {
             },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
-                read_type: "raw".to_string(),
                 enabled: true,
                 local_fallback_port: None,
             }],
