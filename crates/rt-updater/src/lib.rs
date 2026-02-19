@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 /// Status of an update check / download cycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status")]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum UpdateStatus {
     UpToDate,
     Available { version: String },

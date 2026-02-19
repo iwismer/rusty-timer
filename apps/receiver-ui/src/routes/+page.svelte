@@ -8,7 +8,6 @@
     StatusResponse,
     StreamsResponse,
     LogsResponse,
-    UpdateStatusResponse,
   } from "$lib/api";
 
   let profile: Profile | null = null;
@@ -140,6 +139,7 @@
     updateBusy = true;
     try {
       await api.applyUpdate();
+      updateVersion = null;
     } catch (e) {
       error = String(e);
     } finally {
