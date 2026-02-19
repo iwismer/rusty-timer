@@ -16,6 +16,10 @@ pub enum ReceiverUiEvent {
     LogEntry {
         entry: String,
     },
+    UpdateAvailable {
+        version: String,
+        current_version: String,
+    },
 }
 
 #[cfg(test)]

@@ -17,8 +17,10 @@ use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
 use rt_protocol::StreamInfo;
+use rt_updater::UpdateStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::warn;
@@ -43,6 +45,8 @@ pub struct AppState {
     pub shutdown_tx: watch::Sender<bool>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
+    pub update_status: Arc<RwLock<UpdateStatus>>,
+    pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl AppState {
@@ -56,6 +60,8 @@ impl AppState {
             shutdown_tx,
             upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
+            update_status: Arc::new(RwLock::new(UpdateStatus::UpToDate)),
+            staged_update_path: Arc::new(RwLock::new(None)),
         });
         (state, shutdown_rx)
     }
@@ -442,6 +448,40 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
     StatusCode::ACCEPTED.into_response()
 }
 
+async fn get_update_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = state.update_status.read().await.clone();
+    Json(status).into_response()
+}
+
+async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let path = state.staged_update_path.read().await.clone();
+    match path {
+        Some(path) => {
+            // Send response before exiting
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    rt_updater::UpdateChecker::apply_and_exit(&path)
+                })
+                .await
+                {
+                    tracing::error!(error = %e, "update apply failed");
+                }
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "applying"})),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no update staged"})),
+        )
+            .into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -456,6 +496,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
         .route("/api/v1/events", get(crate::sse::receiver_sse))
+        .route("/api/v1/update/status", get(get_update_status))
+        .route("/api/v1/update/apply", post(post_update_apply))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
