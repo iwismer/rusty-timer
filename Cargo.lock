@@ -984,6 +984,7 @@ dependencies = [
  "ipico-core",
  "rt-protocol",
  "rt-test-utils",
+ "rt-updater",
  "rusqlite",
  "serde",
  "serde_json",

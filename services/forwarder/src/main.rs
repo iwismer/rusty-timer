@@ -787,6 +787,72 @@ async fn main() {
     // All worker tasks started — mark subsystem ready
     status_server.set_ready().await;
 
+    // Spawn background update check
+    {
+        let ss = status_server.clone();
+        tokio::spawn(async move {
+            let checker = match rt_updater::UpdateChecker::new(
+                "iwismer",
+                "rusty-timer",
+                "forwarder",
+                env!("CARGO_PKG_VERSION"),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "failed to create update checker");
+                    return;
+                }
+            };
+
+            let status = checker.check().await;
+            match status {
+                Ok(rt_updater::UpdateStatus::Available { ref version }) => {
+                    warn!(
+                        current = env!("CARGO_PKG_VERSION"),
+                        available = %version,
+                        "update available — POST /update/apply to install"
+                    );
+                    ss.set_update_status(rt_updater::UpdateStatus::Available {
+                        version: version.clone(),
+                    })
+                    .await;
+
+                    match checker.download(version).await {
+                        Ok(path) => {
+                            warn!(
+                                version = %version,
+                                path = %path.display(),
+                                "update downloaded and staged"
+                            );
+                            ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
+                                version: version.clone(),
+                            })
+                            .await;
+                            ss.set_staged_update_path(path).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "update download failed");
+                            ss.set_update_status(rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            })
+                            .await;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    info!("no updates available");
+                }
+                Err(e) => {
+                    warn!(error = %e, "update check failed");
+                    ss.set_update_status(rt_updater::UpdateStatus::Failed {
+                        error: e.to_string(),
+                    })
+                    .await;
+                }
+            }
+        });
+    }
+
     info!(
         readers = all_reader_ips.len(),
         forwarder_id = %forwarder_id,

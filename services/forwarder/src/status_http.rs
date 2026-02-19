@@ -6,6 +6,8 @@
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
+//! - `GET /update/status`    — current rt-updater status as JSON
+//! - `POST /update/apply`    — apply a staged update and exit
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
@@ -21,6 +23,7 @@ use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use rt_updater::UpdateStatus;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -77,6 +80,8 @@ pub struct SubsystemStatus {
     forwarder_id: String,
     local_ip: Option<String>,
     readers: HashMap<String, ReaderStatus>,
+    update_status: UpdateStatus,
+    staged_update_path: Option<std::path::PathBuf>,
     /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
     restart_needed: bool,
 }
@@ -91,6 +96,8 @@ impl SubsystemStatus {
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
+            update_status: UpdateStatus::UpToDate,
+            staged_update_path: None,
             restart_needed: false,
         }
     }
@@ -104,6 +111,8 @@ impl SubsystemStatus {
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
+            update_status: UpdateStatus::UpToDate,
+            staged_update_path: None,
             restart_needed: false,
         }
     }
@@ -214,6 +223,16 @@ impl StatusServer {
     /// Set the detected local IP (call once at startup).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.subsystem.lock().await.local_ip = ip;
+    }
+
+    /// Update the current rt-updater status (shown on `/update/status`).
+    pub async fn set_update_status(&self, status: UpdateStatus) {
+        self.subsystem.lock().await.update_status = status;
+    }
+
+    /// Record the filesystem path of a downloaded update artifact ready to apply.
+    pub async fn set_staged_update_path(&self, path: std::path::PathBuf) {
+        self.subsystem.lock().await.staged_update_path = Some(path);
     }
 
     /// Pre-populate all configured reader IPs as Disconnected.
@@ -582,6 +601,8 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/streams/:reader_ip/reset-epoch",
             post(reset_epoch_handler::<J>),
         )
+        .route("/update/status", get(update_status_handler::<J>))
+        .route("/update/apply", post(update_apply_handler::<J>))
         .route("/config", get(config_page_handler::<J>))
         .route("/api/v1/config", get(config_json_handler::<J>))
         .route(
@@ -756,6 +777,51 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
         }
         Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
         Err(EpochResetError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn update_status_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let update_status = {
+        let ss = state.subsystem.lock().await;
+        ss.update_status.clone()
+    };
+    let body = serde_json::to_string(&update_status)
+        .unwrap_or_else(|_| r#"{"status":"failed","error":"serialization error"}"#.to_owned());
+    json_response(StatusCode::OK, body)
+}
+
+async fn update_apply_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let ss = state.subsystem.lock().await;
+    match &ss.staged_update_path {
+        Some(path) => {
+            let path = path.clone();
+            drop(ss);
+            let sub = state.subsystem.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    rt_updater::UpdateChecker::apply_and_exit(&path)
+                })
+                .await
+                {
+                    tracing::error!(error = %e, "update apply failed");
+                    sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {
+                        error: e.to_string(),
+                    };
+                }
+            });
+            json_response(StatusCode::OK, r#"{"status":"applying"}"#.to_owned())
+        }
+        None => {
+            drop(ss);
+            json_response(
+                StatusCode::NOT_FOUND,
+                r#"{"error":"no update staged"}"#.to_owned(),
+            )
+        }
     }
 }
 
