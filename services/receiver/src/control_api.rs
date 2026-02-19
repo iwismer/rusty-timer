@@ -457,6 +457,7 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let path = state.staged_update_path.read().await.clone();
     match path {
         Some(path) => {
+            let state_clone = Arc::clone(&state);
             // Send response before exiting
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -465,7 +466,10 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 })
                 .await
                 {
+                    let msg = format!("{e}");
                     tracing::error!(error = %e, "update apply failed");
+                    *state_clone.update_status.write().await =
+                        rt_updater::UpdateStatus::Failed { error: msg };
                 }
             });
             (
