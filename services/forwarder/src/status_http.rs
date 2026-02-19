@@ -208,6 +208,11 @@ impl StatusServer {
         self.subsystem.clone()
     }
 
+    /// Return a clone of the UI event broadcast sender.
+    pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent> {
+        self.ui_tx.clone()
+    }
+
     /// Mark all local subsystems as ready.
     pub async fn set_ready(&self) {
         let mut ss = self.subsystem.lock().await;
@@ -217,15 +222,7 @@ impl StatusServer {
 
     /// Mark that a restart is needed to apply saved config changes.
     pub async fn set_restart_needed(&self) {
-        let mut ss = self.subsystem.lock().await;
-        ss.set_restart_needed();
-        let _ = self
-            .ui_tx
-            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-                ready: ss.is_ready(),
-                uplink_connected: ss.uplink_connected(),
-                restart_needed: true,
-            });
+        mark_restart_needed_and_emit(&self.subsystem, &self.ui_tx).await;
     }
 
     /// Return whether a restart is needed to apply saved config changes.
@@ -258,7 +255,15 @@ impl StatusServer {
 
     /// Update the current rt-updater status (shown on `/update/status`).
     pub async fn set_update_status(&self, status: UpdateStatus) {
-        self.subsystem.lock().await.update_status = status;
+        self.subsystem.lock().await.update_status = status.clone();
+        if let UpdateStatus::Downloaded { version } = status {
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::UpdateAvailable {
+                    version,
+                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
+                });
+        }
     }
 
     /// Record the filesystem path of a downloaded update artifact ready to apply.
@@ -537,6 +542,7 @@ fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
 async fn update_config_file(
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     mutate: impl FnOnce(&mut crate::config::RawConfig) -> Result<(), String>,
 ) -> Result<(), (u16, String)> {
     let _lock = config_state.write_lock.lock().await;
@@ -580,8 +586,21 @@ async fn update_config_file(
         )
     })?;
 
-    subsystem.lock().await.set_restart_needed();
+    mark_restart_needed_and_emit(subsystem, ui_tx).await;
     Ok(())
+}
+
+async fn mark_restart_needed_and_emit(
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+) {
+    let mut ss = subsystem.lock().await;
+    ss.set_restart_needed();
+    let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+        ready: ss.is_ready(),
+        uplink_connected: ss.uplink_connected(),
+        restart_needed: true,
+    });
 }
 
 /// Apply a config section update by name.
@@ -596,13 +615,14 @@ pub async fn apply_section_update(
     payload: &serde_json::Value,
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 ) -> Result<(), (u16, String)> {
     require_object_payload(payload)?;
 
     match section {
         "general" => {
             let display_name = optional_string_field(payload, "display_name")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.display_name = display_name;
                 Ok(())
             })
@@ -622,7 +642,7 @@ pub async fn apply_section_update(
                         Some(trimmed.to_owned())
                     }
                 });
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.server = Some(crate::config::RawServerConfig {
                     base_url: Some(base_url),
                     forwarders_ws_path,
@@ -636,7 +656,7 @@ pub async fn apply_section_update(
             let token_file = require_non_empty_trimmed("token_file", token_file_opt)
                 .map_err(bad_request_error)?;
             validate_token_file(&token_file).map_err(bad_request_error)?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.auth = Some(crate::config::RawAuthConfig {
                     token_file: Some(token_file),
                 });
@@ -647,7 +667,7 @@ pub async fn apply_section_update(
         "journal" => {
             let sqlite_path = optional_string_field(payload, "sqlite_path")?;
             let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.journal = Some(crate::config::RawJournalConfig {
                     sqlite_path,
                     prune_watermark_pct,
@@ -660,7 +680,7 @@ pub async fn apply_section_update(
             let batch_mode = optional_string_field(payload, "batch_mode")?;
             let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
             let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.uplink = Some(crate::config::RawUplinkConfig {
                     batch_mode,
                     batch_flush_ms,
@@ -672,7 +692,7 @@ pub async fn apply_section_update(
         }
         "status_http" => {
             let bind = optional_string_field(payload, "bind")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
                 Ok(())
             })
@@ -732,7 +752,7 @@ pub async fn apply_section_update(
                 });
             }
 
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.readers = Some(raw_readers);
                 Ok(())
             })
@@ -1230,7 +1250,7 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("general", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("general", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1257,7 +1277,7 @@ async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("server", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("server", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1284,7 +1304,7 @@ async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("auth", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("auth", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1311,7 +1331,7 @@ async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("journal", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("journal", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1338,7 +1358,7 @@ async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("uplink", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("uplink", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1365,7 +1385,7 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("status_http", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("status_http", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1392,7 +1412,7 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("readers", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("readers", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1518,6 +1538,101 @@ mod tests {
         assert_eq!(body["restart_needed"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn set_update_status_downloaded_broadcasts_update_available() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let mut rx = server.ui_tx.subscribe();
+        server
+            .set_update_status(UpdateStatus::Downloaded {
+                version: "1.2.3".to_owned(),
+            })
+            .await;
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::UpdateAvailable {
+                version,
+                current_version,
+            } => {
+                assert_eq!(version, "1.2.3");
+                assert_eq!(current_version, env!("CARGO_PKG_VERSION"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_save_broadcasts_status_changed_restart_needed() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+display_name = "Start Line"
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let mut rx = server.ui_tx.subscribe();
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/general",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"display_name":"Updated"}"#)
+            .send()
+            .await
+            .expect("post config");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::StatusChanged { restart_needed, .. } => {
+                assert!(restart_needed);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

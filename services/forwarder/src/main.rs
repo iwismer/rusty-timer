@@ -288,6 +288,7 @@ async fn handle_config_message(
     msg: WsMessage,
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<forwarder::ui_events::ForwarderUiEvent>,
 ) -> Result<(), UplinkError> {
     match msg {
         WsMessage::ConfigGetRequest(req) => {
@@ -329,6 +330,7 @@ async fn handle_config_message(
                     &req.payload,
                     config_state,
                     subsystem,
+                    ui_tx,
                 )
                 .await
                 {
@@ -405,6 +407,7 @@ async fn run_uplink(
     subsystem: Arc<Mutex<SubsystemStatus>>,
     restart_signal: Arc<Notify>,
 ) {
+    let ui_tx = status.ui_sender();
     let server_url = format!(
         "{}{}",
         cfg.server.base_url.trim_end_matches('/'),
@@ -575,7 +578,8 @@ async fn run_uplink(
                 Ok(SendBatchResult::ConfigGet(req)) => {
                     let msg = WsMessage::ConfigGetRequest(req);
                     if let Err(e) =
-                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                        handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
+                            .await
                     {
                         warn!(error = %e, "config get handler failed during replay");
                         reconnect_after_replay = true;
@@ -585,7 +589,8 @@ async fn run_uplink(
                 Ok(SendBatchResult::ConfigSet(req)) => {
                     let msg = WsMessage::ConfigSetRequest(req);
                     if let Err(e) =
-                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                        handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
+                            .await
                     {
                         warn!(error = %e, "config set handler failed during replay");
                         reconnect_after_replay = true;
@@ -634,7 +639,7 @@ async fn run_uplink(
                 result = session.recv_message() => {
                     match result {
                         Ok(msg @ WsMessage::ConfigGetRequest(_)) | Ok(msg @ WsMessage::ConfigSetRequest(_)) => {
-                            if let Err(e) = handle_config_message(&mut session, msg, &config_state, &subsystem).await {
+                            if let Err(e) = handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx).await {
                                 warn!(error = %e, "config handler failed during idle");
                                 break 'uplink;
                             }
@@ -739,7 +744,8 @@ async fn run_uplink(
                 Ok(SendBatchResult::ConfigGet(req)) => {
                     let msg = WsMessage::ConfigGetRequest(req);
                     if let Err(e) =
-                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                        handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
+                            .await
                     {
                         warn!(error = %e, "config get handler failed");
                         break 'uplink;
@@ -748,7 +754,8 @@ async fn run_uplink(
                 Ok(SendBatchResult::ConfigSet(req)) => {
                     let msg = WsMessage::ConfigSetRequest(req);
                     if let Err(e) =
-                        handle_config_message(&mut session, msg, &config_state, &subsystem).await
+                        handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
+                            .await
                     {
                         warn!(error = %e, "config set handler failed");
                         break 'uplink;
