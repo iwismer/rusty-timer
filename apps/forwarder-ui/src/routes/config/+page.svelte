@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import * as api from "$lib/api";
   import type { ForwarderConfig } from "$lib/api";
+  import { loadConfigPageState } from "$lib/config-load";
 
   let config: ForwarderConfig | null = null;
   let loadError: string | null = null;
@@ -26,8 +27,12 @@
   }> = [];
 
   onMount(async () => {
-    try {
-      config = await api.getConfig();
+    const loaded = await loadConfigPageState(api.getConfig, api.getStatus);
+    config = loaded.config;
+    restartNeeded = loaded.restartNeeded;
+    loadError = loaded.loadError;
+
+    if (config) {
       displayName = config.display_name ?? "";
       baseUrl = config.server?.base_url ?? "";
       wsPath = config.server?.forwarders_ws_path ?? "";
@@ -43,15 +48,10 @@
         enabled: r.enabled ?? true,
         local_fallback_port: r.local_fallback_port ?? null,
       }));
-    } catch (e) {
-      loadError = String(e);
     }
   });
 
-  async function saveSection(
-    section: string,
-    data: Record<string, unknown>,
-  ) {
+  async function saveSection(section: string, data: Record<string, unknown>) {
     sectionMessages = { ...sectionMessages, [section]: undefined as any };
     try {
       const result = await api.saveConfigSection(section, data);
@@ -214,12 +214,7 @@
       </label>
       <label>
         Prune Watermark %
-        <input
-          type="number"
-          bind:value={pruneWatermarkPct}
-          min="0"
-          max="100"
-        />
+        <input type="number" bind:value={pruneWatermarkPct} min="0" max="100" />
       </label>
       <button class="save" on:click={saveJournal}>Save Journal</button>
       {#if sectionMessages.journal}
@@ -321,7 +316,8 @@
     width: 100%;
     margin-bottom: 0.5rem;
   }
-  th, td {
+  th,
+  td {
     text-align: left;
     padding: 0.3rem 0.4rem;
     border-bottom: 1px solid #ddd;
