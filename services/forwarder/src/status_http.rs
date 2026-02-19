@@ -6,6 +6,11 @@
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
+//! - `GET /config`        — config editing page (when enabled)
+//! - `GET /api/v1/config` — current config as JSON
+//! - `POST /api/v1/config/{section}` — update a config section
+//! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
+//!   501 on non-Unix platforms
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
 //!
@@ -14,7 +19,7 @@
 //! Uplink connectivity does NOT affect readiness.
 //!
 //! # Security
-//! No authentication in v1. Status page is read-only.
+//! No authentication in v1.
 
 use crate::storage::journal::Journal;
 use axum::body::Bytes;
@@ -31,7 +36,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 // ---------------------------------------------------------------------------
 // Public config
@@ -174,6 +179,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
     journal: Arc<Mutex<J>>,
     version: Arc<String>,
     config_state: Option<Arc<ConfigState>>,
+    restart_signal: Option<Arc<Notify>>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -183,6 +189,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             journal: self.journal.clone(),
             version: self.version.clone(),
             config_state: self.config_state.clone(),
+            restart_signal: self.restart_signal.clone(),
         }
     }
 }
@@ -297,6 +304,7 @@ impl StatusServer {
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: None,
+            restart_signal: None,
         };
 
         let app = build_router(state);
@@ -318,6 +326,7 @@ impl StatusServer {
         subsystem: SubsystemStatus,
         journal: Arc<Mutex<J>>,
         config_state: ConfigState,
+        restart_signal: Arc<Notify>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
@@ -328,6 +337,7 @@ impl StatusServer {
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: Some(Arc::new(config_state)),
+            restart_signal: Some(restart_signal),
         };
 
         let app = build_router(state);
@@ -586,6 +596,29 @@ fn config_not_available() -> Response {
     text_response(StatusCode::NOT_FOUND, "Config editing not available")
 }
 
+async fn restart_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    match &state.restart_signal {
+        Some(signal) => {
+            if cfg!(unix) {
+                signal.notify_one();
+                json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
+            } else {
+                json_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "restart not supported on non-unix platforms"
+                    })
+                    .to_string(),
+                )
+            }
+        }
+        None => config_not_available(),
+    }
+}
+
 fn get_config_state<J: JournalAccess + Send + 'static>(
     state: &AppState<J>,
 ) -> Option<Arc<ConfigState>> {
@@ -630,6 +663,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/config/readers",
             post(post_config_readers_handler::<J>),
         )
+        .route("/api/v1/restart", post(restart_handler::<J>))
         .fallback(not_found_handler)
         .with_state(state)
 }
@@ -705,7 +739,7 @@ async fn status_page_handler<J: JournalAccess + Send + 'static>(
     }
 
     let restart_banner = if restart_needed {
-        "<div style=\"background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem\">Configuration changed. Restart the forwarder to apply changes.</div>"
+        r#"<div style="background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div><script>function doRestart(btn){btn.disabled=true;btn.textContent='Restarting\u2026';fetch('/api/v1/restart',{method:'POST'}).catch(function(){});}</script>"#
     } else {
         ""
     };
@@ -1336,7 +1370,7 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
     }
 
     let restart_banner = if restart_needed {
-        "<div class=\"banner warn\">Configuration changed. Restart the forwarder to apply changes.</div>"
+        r#"<div class="banner warn">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div>"#
     } else {
         ""
     };
@@ -1537,9 +1571,15 @@ function showRestartBanner() {{
   if (!document.querySelector('.banner')) {{
     var banner = document.createElement('div');
     banner.className = 'banner warn';
-    banner.textContent = 'Configuration changed. Restart the forwarder to apply changes.';
+    banner.innerHTML = 'Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button>';
     document.querySelector('h1').after(banner);
   }}
+}}
+
+function doRestart(btn) {{
+  btn.disabled = true;
+  btn.textContent = 'Restarting\u2026';
+  fetch('/api/v1/restart', {{method: 'POST'}}).catch(function(){{}});
 }}
 </script>
 </body></html>"#,

@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
@@ -656,19 +656,25 @@ async fn main() {
     };
     let subsystem = SubsystemStatus::not_ready("starting".to_owned());
     let config_state = ConfigState::new(config_path.clone());
-    let status_server =
-        match StatusServer::start_with_config(status_cfg, subsystem, journal.clone(), config_state)
-            .await
-        {
-            Ok(s) => {
-                info!(addr = %s.local_addr(), "status HTTP server started");
-                s
-            }
-            Err(e) => {
-                eprintln!("FATAL: failed to start status HTTP server: {}", e);
-                std::process::exit(1);
-            }
-        };
+    let restart_signal = Arc::new(Notify::new());
+    let status_server = match StatusServer::start_with_config(
+        status_cfg,
+        subsystem,
+        journal.clone(),
+        config_state,
+        restart_signal.clone(),
+    )
+    .await
+    {
+        Ok(s) => {
+            info!(addr = %s.local_addr(), "status HTTP server started");
+            s
+        }
+        Err(e) => {
+            eprintln!("FATAL: failed to start status HTTP server: {}", e);
+            std::process::exit(1);
+        }
+    };
     // Collect enabled reader endpoints
     let mut all_reader_ips: Vec<String> = Vec::new();
     let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)
@@ -867,7 +873,8 @@ async fn main() {
         "forwarder initialized — all worker tasks started"
     );
 
-    // Wait for Ctrl-C or SIGTERM
+    // Wait for Ctrl-C, SIGTERM, or restart request
+    let restart_requested;
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -884,17 +891,30 @@ async fn main() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT received, shutting down");
+                restart_requested = false;
             }
             _ = sigterm.recv() => {
                 info!("SIGTERM received, shutting down");
+                restart_requested = false;
+            }
+            _ = restart_signal.notified() => {
+                info!("restart requested via API, shutting down");
+                restart_requested = true;
             }
         }
     }
 
     #[cfg(not(unix))]
     {
-        tokio::signal::ctrl_c().await.ok();
-        info!("Ctrl-C received, shutting down");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl-C received, shutting down");
+            }
+            _ = restart_signal.notified() => {
+                info!("restart requested via API, shutting down");
+            }
+        }
+        restart_requested = false; // exec not available on non-unix
     }
 
     // Signal all tasks to stop
@@ -904,6 +924,24 @@ async fn main() {
     sleep(Duration::from_millis(200)).await;
 
     info!("forwarder shutdown complete");
+
+    // Self-exec to restart if requested
+    #[cfg(unix)]
+    if restart_requested {
+        use std::os::unix::process::CommandExt;
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                error!("could not determine executable path: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        info!(exe = %exe.display(), "exec-ing self to restart");
+        let err = std::process::Command::new(&exe).args(&args).exec();
+        error!("exec failed: {}", err);
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
