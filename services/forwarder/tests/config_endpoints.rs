@@ -160,9 +160,11 @@ target = "192.168.1.100:10000"
     let config_state = ConfigState::new(config_file.path().to_path_buf());
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server = StatusServer::start_with_config(cfg, subsystem, journal, config_state)
-        .await
-        .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server =
+        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+            .await
+            .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -207,9 +209,11 @@ target = "192.168.1.100:10000"
     let config_state = ConfigState::new(config_path.clone());
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server = StatusServer::start_with_config(cfg, subsystem, journal, config_state)
-        .await
-        .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server =
+        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+            .await
+            .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -278,9 +282,11 @@ target = "192.168.1.100:10000"
     let config_state = ConfigState::new(config_path.clone());
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server = StatusServer::start_with_config(cfg, subsystem, journal, config_state)
-        .await
-        .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server =
+        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+            .await
+            .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -340,10 +346,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_path.clone());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -398,9 +410,11 @@ target = "192.168.1.100:10000"
     let config_state = ConfigState::new(config_path.clone());
 
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server = StatusServer::start_with_config(cfg, subsystem, journal, config_state)
-        .await
-        .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server =
+        StatusServer::start_with_config(cfg, subsystem, journal, config_state, restart_signal)
+            .await
+            .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -451,10 +465,16 @@ target = "192.168.1.100:10000"
     let config_path = config_file.path().to_path_buf();
     let config_state = ConfigState::new(config_path.clone());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -503,10 +523,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -545,10 +571,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -582,10 +614,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -620,10 +658,16 @@ target = "192.168.1.100:10000"
     let config_path = config_file.path().to_path_buf();
     let config_state = ConfigState::new(config_path.clone());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -672,10 +716,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -709,10 +759,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -747,10 +803,16 @@ target = "192.168.1.100:10000"
     let config_path = config_file.path().to_path_buf();
     let config_state = ConfigState::new(config_path.clone());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -805,10 +867,16 @@ target = "192.168.1.100:10000"
     let config_path = config_file.path().to_path_buf();
     let config_state = ConfigState::new(config_path.clone());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -858,10 +926,16 @@ target = "192.168.1.100:10000"
     let config_path = config_file.path().to_path_buf();
     let config_state = ConfigState::new(config_path.clone());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -911,10 +985,16 @@ target = "192.168.1.100:10000"
     let config_path = config_file.path().to_path_buf();
     let config_state = ConfigState::new(config_path.clone());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -970,10 +1050,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1014,10 +1100,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1068,10 +1160,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1105,10 +1203,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1146,10 +1250,16 @@ target = "192.168.1.100:10000"
     };
     let config_state = ConfigState::new(config_file.path().to_path_buf());
     let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
-    let server =
-        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
-            .await
-            .expect("start failed");
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 

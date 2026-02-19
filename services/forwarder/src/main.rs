@@ -657,19 +657,25 @@ async fn main() {
     };
     let subsystem = SubsystemStatus::not_ready("starting".to_owned());
     let config_state = ConfigState::new(config_path.clone());
-    let status_server =
-        match StatusServer::start_with_config(status_cfg, subsystem, journal.clone(), config_state)
-            .await
-        {
-            Ok(s) => {
-                info!(addr = %s.local_addr(), "status HTTP server started");
-                s
-            }
-            Err(e) => {
-                eprintln!("FATAL: failed to start status HTTP server: {}", e);
-                std::process::exit(1);
-            }
-        };
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let status_server = match StatusServer::start_with_config(
+        status_cfg,
+        subsystem,
+        journal.clone(),
+        config_state,
+        restart_signal,
+    )
+    .await
+    {
+        Ok(s) => {
+            info!(addr = %s.local_addr(), "status HTTP server started");
+            s
+        }
+        Err(e) => {
+            eprintln!("FATAL: failed to start status HTTP server: {}", e);
+            std::process::exit(1);
+        }
+    };
     // Collect enabled reader endpoints
     let mut all_reader_ips: Vec<String> = Vec::new();
     let mut fanout_addrs: Vec<(String, u16, String, SocketAddr)> = Vec::new(); // (ip, port, read_type, fanout_addr)

@@ -28,7 +28,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 // ---------------------------------------------------------------------------
 // Public config
@@ -165,6 +165,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
     journal: Arc<Mutex<J>>,
     version: Arc<String>,
     config_state: Option<Arc<ConfigState>>,
+    restart_signal: Option<Arc<Notify>>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -174,6 +175,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             journal: self.journal.clone(),
             version: self.version.clone(),
             config_state: self.config_state.clone(),
+            restart_signal: self.restart_signal.clone(),
         }
     }
 }
@@ -278,6 +280,7 @@ impl StatusServer {
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: None,
+            restart_signal: None,
         };
 
         let app = build_router(state);
@@ -299,6 +302,7 @@ impl StatusServer {
         subsystem: SubsystemStatus,
         journal: Arc<Mutex<J>>,
         config_state: ConfigState,
+        restart_signal: Arc<Notify>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
@@ -309,6 +313,7 @@ impl StatusServer {
             journal,
             version: Arc::new(cfg.forwarder_version),
             config_state: Some(Arc::new(config_state)),
+            restart_signal: Some(restart_signal),
         };
 
         let app = build_router(state);
