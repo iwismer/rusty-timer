@@ -3,7 +3,12 @@
   import * as api from "$lib/api";
   import { initSSE, destroySSE } from "$lib/sse";
   import { waitForApplyResult } from "@rusty-timer/shared-ui/lib/update-flow";
-  import { UpdateBanner, StatusBadge } from "@rusty-timer/shared-ui";
+  import {
+    UpdateBanner,
+    StatusBadge,
+    Card,
+    AlertBanner,
+  } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus, ReaderStatus } from "$lib/api";
 
   let status: ForwarderStatus | null = null;
@@ -114,141 +119,156 @@
   onDestroy(() => destroySSE());
 </script>
 
-<main>
-  <h1>Forwarder Status</h1>
-
+<main class="max-w-[900px] mx-auto px-6 py-6">
   {#if updateVersion}
-    <UpdateBanner
-      version={updateVersion}
-      busy={updateBusy}
-      onApply={handleApplyUpdate}
-    />
+    <div class="mb-4">
+      <UpdateBanner
+        version={updateVersion}
+        busy={updateBusy}
+        onApply={handleApplyUpdate}
+      />
+    </div>
   {/if}
 
   {#if status?.restart_needed}
-    <div class="restart-banner">
-      Configuration changed. Restart to apply.
-      <button on:click={handleRestart}>Restart Now</button>
+    <div class="mb-4">
+      <AlertBanner
+        variant="warn"
+        message="Configuration changed. Restart to apply."
+        actionLabel="Restart Now"
+        onAction={handleRestart}
+      />
     </div>
   {/if}
 
   {#if error}
-    <p class="error">{error}</p>
+    <div class="mb-4">
+      <AlertBanner variant="err" message={error} />
+    </div>
   {/if}
+
+  <h1 class="text-xl font-bold text-text-primary mb-6">Forwarder Status</h1>
 
   {#if status}
-    <section>
-      <p>Version: {status.version}</p>
-      <p>Forwarder ID: <code>{status.forwarder_id}</code></p>
-      <p>
-        Readiness:
-        <StatusBadge
-          label={status.ready ? "ready" : "not ready"}
-          state={status.ready ? "ok" : "err"}
-        />
-        {#if status.ready_reason}
-          <span class="reason">({status.ready_reason})</span>
-        {/if}
-      </p>
-      <p>
-        Uplink:
-        <StatusBadge
-          label={status.uplink_connected ? "connected" : "disconnected"}
-          state={status.uplink_connected ? "ok" : "err"}
-        />
-      </p>
-    </section>
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <Card>
+        <p class="text-xs text-text-muted m-0">Forwarder ID</p>
+        <p class="text-sm font-mono font-medium text-text-primary m-0 mt-1">
+          {status.forwarder_id}
+        </p>
+        <p class="text-xs text-text-muted mt-2 m-0">v{status.version}</p>
+      </Card>
+      <Card>
+        <p class="text-xs text-text-muted m-0">Readiness</p>
+        <div class="mt-1 flex items-center gap-2">
+          <StatusBadge
+            label={status.ready ? "ready" : "not ready"}
+            state={status.ready ? "ok" : "err"}
+          />
+          {#if status.ready_reason}
+            <span class="text-xs text-text-muted">
+              ({status.ready_reason})
+            </span>
+          {/if}
+        </div>
+      </Card>
+      <Card>
+        <p class="text-xs text-text-muted m-0">Uplink</p>
+        <div class="mt-1">
+          <StatusBadge
+            label={status.uplink_connected ? "connected" : "disconnected"}
+            state={status.uplink_connected ? "ok" : "err"}
+          />
+        </div>
+      </Card>
+    </div>
 
-    <section>
-      <h2>Readers</h2>
+    <Card headerBg>
+      <svelte:fragment slot="header">
+        <h2 class="text-sm font-semibold text-text-primary m-0">Readers</h2>
+        <span class="ml-auto text-xs text-text-muted">
+          {status.readers.length} configured
+        </span>
+      </svelte:fragment>
+
       {#if status.readers.length === 0}
-        <p>No readers configured.</p>
+        <p class="text-sm text-text-muted m-0">No readers configured.</p>
       {:else}
-        <table>
-          <thead>
-            <tr>
-              <th>Reader IP</th>
-              <th>Status</th>
-              <th>Reads (session)</th>
-              <th>Reads (total)</th>
-              <th>Last seen</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each status.readers as reader}
-              <tr>
-                <td>{reader.ip}</td>
-                <td>
-                  <StatusBadge
-                    label={reader.state}
-                    state={readerBadgeState(reader.state)}
-                  />
-                </td>
-                <td>{reader.reads_session}</td>
-                <td>{reader.reads_total}</td>
-                <td>{formatLastSeen(reader.last_seen_secs)}</td>
-                <td>
-                  <button
-                    class="small"
-                    on:click={() => handleResetEpoch(reader.ip)}
-                  >
-                    Reset Epoch
-                  </button>
-                </td>
+        <div class="overflow-x-auto -mx-4 -mb-4">
+          <table class="w-full text-sm border-collapse">
+            <thead>
+              <tr class="border-b border-border">
+                <th
+                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
+                >
+                  Reader IP
+                </th>
+                <th
+                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
+                >
+                  Status
+                </th>
+                <th
+                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
+                >
+                  Reads (session)
+                </th>
+                <th
+                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
+                >
+                  Reads (total)
+                </th>
+                <th
+                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
+                >
+                  Last seen
+                </th>
+                <th class="px-4 py-2.5"></th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {#each status.readers as reader}
+                <tr class="border-b border-border last:border-b-0">
+                  <td class="px-4 py-2.5 font-mono text-text-primary">
+                    {reader.ip}
+                  </td>
+                  <td class="px-4 py-2.5">
+                    <StatusBadge
+                      label={reader.state}
+                      state={readerBadgeState(reader.state)}
+                    />
+                  </td>
+                  <td
+                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                  >
+                    {reader.reads_session.toLocaleString()}
+                  </td>
+                  <td
+                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                  >
+                    {reader.reads_total.toLocaleString()}
+                  </td>
+                  <td class="px-4 py-2.5 text-xs text-text-secondary">
+                    {formatLastSeen(reader.last_seen_secs)}
+                  </td>
+                  <td class="px-4 py-2.5 text-right">
+                    <button
+                      on:click={() => handleResetEpoch(reader.ip)}
+                      class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                    >
+                      Reset Epoch
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
       {/if}
-    </section>
+    </Card>
   {:else if !sseConnected}
-    <p class="error">Disconnected from forwarder.</p>
+    <AlertBanner variant="err" message="Disconnected from forwarder." />
   {:else if !error}
-    <p>Loading...</p>
+    <p class="text-sm text-text-muted">Loading...</p>
   {/if}
 </main>
-
-<style>
-  table {
-    border-collapse: collapse;
-    width: 100%;
-  }
-  th,
-  td {
-    text-align: left;
-    padding: 0.4rem 0.6rem;
-    border-bottom: 1px solid #ddd;
-  }
-  th {
-    font-weight: 600;
-  }
-  code {
-    background: #f5f5f5;
-    padding: 0.15rem 0.3rem;
-    border-radius: 3px;
-    font-size: 0.9em;
-  }
-  .error {
-    color: var(--color-err);
-  }
-  .reason {
-    color: #666;
-    font-size: 0.9em;
-  }
-  .restart-banner {
-    background: var(--color-warn-bg);
-    color: var(--color-warn);
-    border: 1px solid #ffc107;
-    padding: 0.75rem 1rem;
-    border-radius: 4px;
-    margin-bottom: 1rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .small {
-    padding: 0.2rem 0.5rem;
-    font-size: 0.85em;
-  }
-</style>
