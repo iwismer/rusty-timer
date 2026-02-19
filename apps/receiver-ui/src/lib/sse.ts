@@ -1,6 +1,6 @@
 import type { StatusResponse, StreamsResponse, LogsResponse } from "./api";
 
-const SSE_BASE = import.meta.env.DEV ? "" : "http://127.0.0.1:9090";
+const SSE_BASE = "";
 
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;

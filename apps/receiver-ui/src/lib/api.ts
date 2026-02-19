@@ -1,8 +1,8 @@
 // Receiver UI - Control API client
 // All UI-to-receiver communication goes through this module exclusively.
-// Base URL: http://127.0.0.1:9090
+// Uses same-origin requests (UI is served by the receiver's axum server).
 
-const BASE = import.meta.env.DEV ? "" : "http://127.0.0.1:9090";
+const BASE = "";
 
 export interface Profile {
   server_url: string;
