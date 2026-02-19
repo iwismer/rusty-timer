@@ -304,6 +304,68 @@ target = "192.168.1.100:10000"
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn post_config_general_preserves_file_mode_on_atomic_replace() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "/tmp/fake-token"
+
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let config_path = config_file.path().to_path_buf();
+    let expected_mode: u32 = 0o640;
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(expected_mode))
+        .expect("set file mode");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_path.clone());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/general",
+        r#"{"display_name":"Mode Preserve"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "config update should succeed: {}", response);
+
+    let actual_mode = std::fs::metadata(&config_path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        actual_mode, expected_mode,
+        "atomic write must preserve file mode"
+    );
+}
+
 #[tokio::test]
 async fn post_config_general_accepts_fragmented_http_body() {
     use forwarder::status_http::ConfigState;

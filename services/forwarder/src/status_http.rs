@@ -411,6 +411,8 @@ fn format_last_seen(instant: Option<Instant>) -> String {
 }
 
 fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let original_permissions = std::fs::metadata(path).map(|m| m.permissions()).ok();
+
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -439,6 +441,11 @@ fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
                 let result = (|| -> std::io::Result<()> {
                     temp_file.write_all(content.as_bytes())?;
                     temp_file.sync_all()?;
+
+                    if let Some(perms) = &original_permissions {
+                        std::fs::set_permissions(&tmp_path, perms.clone())?;
+                    }
+
                     std::fs::rename(&tmp_path, path)?;
                     if let Ok(parent_dir) = std::fs::File::open(parent) {
                         let _ = parent_dir.sync_all();
