@@ -3,6 +3,9 @@ name = "receiver"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+embed-ui = ["dep:rust-embed", "dep:mime_guess"]
+
 [lib]
 name = "receiver"
 path = "src/lib.rs"
@@ -31,6 +34,8 @@ bytes = "1"
 thiserror = "2"
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

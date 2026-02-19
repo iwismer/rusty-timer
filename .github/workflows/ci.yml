@@ -9,6 +9,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/ci.yml"
+      - "apps/receiver-ui/**"
   pull_request:
     branches: [master]
     paths:
@@ -17,6 +18,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/ci.yml"
+      - "apps/receiver-ui/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -85,3 +87,56 @@ jobs:
 
       - name: Run integration tests (requires Docker)
         run: cargo test --workspace --tests -- --test-threads=4
+
+  receiver-embed-ui:
+    name: Receiver embed-ui build
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/receiver-ui/package-lock.json
+
+      - name: Build and test receiver with embedded UI
+        run: cargo test -p receiver --features embed-ui --test ui_embed_fallback
+
+  receiver-ui:
+    name: Receiver UI Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/receiver-ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/receiver-ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prettier check
+        run: npm run lint
+
+      - name: Svelte type check
+        run: npm run check
+
+      - name: Vitest
+        run: npm test

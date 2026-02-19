@@ -18,7 +18,7 @@ This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust worksp
 - `services/server/` — Axum/Postgres: ingest, dedup, fanout, dashboard API
 - `services/receiver/` — Windows app: subscribes to server, proxies streams to local TCP ports
 - `apps/dashboard/` — SvelteKit static web dashboard (served by the server)
-- `apps/receiver-ui/` — Tauri v2 + SvelteKit desktop app for the receiver
+- `apps/receiver-ui/` — SvelteKit static frontend for the receiver (embedded in binary via `--features embed-ui`)
 - `crates/rt-protocol/` — Frozen WebSocket message types (WsMessage enum)
 - `crates/ipico-core/` — Frozen IPICO chip read parser
 - `crates/emulator-v2/` — Deterministic multi-reader playback for integration testing

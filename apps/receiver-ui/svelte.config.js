@@ -11,7 +11,7 @@ const config = {
       precompress: false,
       strict: true,
     }),
-    prerender: { entries: [] },
+    prerender: { entries: ["/"], handleHttpError: "warn" },
   },
 };
 
