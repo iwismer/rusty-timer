@@ -355,6 +355,14 @@ impl JournalAccess for NoJournal {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 fn format_last_seen(instant: Option<Instant>) -> String {
     match instant {
         None => "never".to_owned(),
@@ -423,30 +431,39 @@ async fn update_config_file(
     let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
         (
             500u16,
-            format!("{{\"ok\":false,\"error\":\"File read error: {}\"}}", e),
+            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                .to_string(),
         )
     })?;
 
     let mut raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
         (
             500u16,
-            format!("{{\"ok\":false,\"error\":\"TOML parse error: {}\"}}", e),
+            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                .to_string(),
         )
     })?;
 
-    mutate(&mut raw).map_err(|e| (400u16, format!("{{\"ok\":false,\"error\":\"{}\"}}", e)))?;
+    mutate(&mut raw).map_err(|e| {
+        (
+            400u16,
+            serde_json::json!({"ok": false, "error": e}).to_string(),
+        )
+    })?;
 
     let new_toml = toml::to_string_pretty(&raw).map_err(|e| {
         (
             500u16,
-            format!("{{\"ok\":false,\"error\":\"TOML serialize error: {}\"}}", e),
+            serde_json::json!({"ok": false, "error": format!("TOML serialize error: {}", e)})
+                .to_string(),
         )
     })?;
 
     std::fs::write(&config_state.path, new_toml).map_err(|e| {
         (
             500u16,
-            format!("{{\"ok\":false,\"error\":\"File write error: {}\"}}", e),
+            serde_json::json!({"ok": false, "error": format!("File write error: {}", e)})
+                .to_string(),
         )
     })?;
 
@@ -488,14 +505,27 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
     version: Arc<String>,
     config_state: Option<Arc<ConfigState>>,
 ) {
-    // Read the request (limited to 4 KiB — sufficient for a simple HTTP/1.1 request line + headers)
-    let mut buf = vec![0u8; 4096];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
+    // Read the request into a 64 KiB buffer, looping until we see the header/body separator
+    let mut buf = vec![0u8; 65536];
+    let mut total = 0usize;
+    loop {
+        let n = match stream.read(&mut buf[total..]).await {
+            Ok(n) if n > 0 => n,
+            _ => {
+                if total == 0 {
+                    return;
+                }
+                break;
+            }
+        };
+        total += n;
+        // Stop once we've seen the header/body separator or buffer is full
+        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") || total >= buf.len() {
+            break;
+        }
+    }
 
-    let request = match std::str::from_utf8(&buf[..n]) {
+    let request = match std::str::from_utf8(&buf[..total]) {
         Ok(s) => s,
         Err(_) => {
             send_response(&mut stream, 400, "text/plain", "Bad Request").await;
@@ -689,7 +719,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 let update: GeneralUpdate = match serde_json::from_str(body_str) {
                     Ok(u) => u,
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -703,7 +733,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                        send_response(
+                            &mut stream,
+                            200,
+                            "application/json",
+                            &serde_json::json!({"ok": true}).to_string(),
+                        )
+                        .await;
                     }
                     Err((status_code, body)) => {
                         send_response(&mut stream, status_code, "application/json", &body).await;
@@ -745,7 +781,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 let update: ServerUpdate = match serde_json::from_str(body_str) {
                     Ok(u) => u,
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -773,7 +809,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                        send_response(
+                            &mut stream,
+                            200,
+                            "application/json",
+                            &serde_json::json!({"ok": true}).to_string(),
+                        )
+                        .await;
                     }
                     Err((status_code, body)) => {
                         send_response(&mut stream, status_code, "application/json", &body).await;
@@ -814,7 +856,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 let update: AuthUpdate = match serde_json::from_str(body_str) {
                     Ok(u) => u,
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -841,7 +883,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                        send_response(
+                            &mut stream,
+                            200,
+                            "application/json",
+                            &serde_json::json!({"ok": true}).to_string(),
+                        )
+                        .await;
                     }
                     Err((status_code, body)) => {
                         send_response(&mut stream, status_code, "application/json", &body).await;
@@ -883,7 +931,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 let update: JournalUpdate = match serde_json::from_str(body_str) {
                     Ok(u) => u,
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -900,7 +948,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                        send_response(
+                            &mut stream,
+                            200,
+                            "application/json",
+                            &serde_json::json!({"ok": true}).to_string(),
+                        )
+                        .await;
                     }
                     Err((status_code, body)) => {
                         send_response(&mut stream, status_code, "application/json", &body).await;
@@ -943,7 +997,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 let update: UplinkUpdate = match serde_json::from_str(body_str) {
                     Ok(u) => u,
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -961,7 +1015,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                        send_response(
+                            &mut stream,
+                            200,
+                            "application/json",
+                            &serde_json::json!({"ok": true}).to_string(),
+                        )
+                        .await;
                     }
                     Err((status_code, body)) => {
                         send_response(&mut stream, status_code, "application/json", &body).await;
@@ -1002,7 +1062,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 let update: StatusHttpUpdate = match serde_json::from_str(body_str) {
                     Ok(u) => u,
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -1017,7 +1077,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                        send_response(
+                            &mut stream,
+                            200,
+                            "application/json",
+                            &serde_json::json!({"ok": true}).to_string(),
+                        )
+                        .await;
                     }
                     Err((status_code, body)) => {
                         send_response(&mut stream, status_code, "application/json", &body).await;
@@ -1066,7 +1132,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 let update: ReadersUpdate = match serde_json::from_str(body_str) {
                     Ok(u) => u,
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("Invalid JSON: {}", e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -1088,19 +1154,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                     let target = match &r.target {
                         Some(t) => t,
                         None => {
-                            let body = format!(
-                                "{{\"ok\":false,\"error\":\"readers[{}].target is required\"}}",
-                                i
-                            );
+                            let body = serde_json::json!({"ok": false, "error": format!("readers[{}].target is required", i)}).to_string();
                             send_response(&mut stream, 400, "application/json", &body).await;
                             return;
                         }
                     };
                     if let Err(e) = crate::discovery::expand_target(target) {
-                        let body = format!(
-                            "{{\"ok\":false,\"error\":\"readers[{}].target invalid: {}\"}}",
-                            i, e
-                        );
+                        let body = serde_json::json!({"ok": false, "error": format!("readers[{}].target invalid: {}", i, e)}).to_string();
                         send_response(&mut stream, 400, "application/json", &body).await;
                         return;
                     }
@@ -1125,7 +1185,13 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                        send_response(
+                            &mut stream,
+                            200,
+                            "application/json",
+                            &serde_json::json!({"ok": true}).to_string(),
+                        )
+                        .await;
                     }
                     Err((status_code, body)) => {
                         send_response(&mut stream, status_code, "application/json", &body).await;
@@ -1185,21 +1251,17 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                                 send_response(&mut stream, 200, "application/json", &json).await;
                             }
                             Err(e) => {
-                                let body = format!(
-                                    "{{\"ok\":false,\"error\":\"JSON serialize error: {}\"}}",
-                                    e
-                                );
+                                let body = serde_json::json!({"ok": false, "error": format!("JSON serialize error: {}", e)}).to_string();
                                 send_response(&mut stream, 500, "application/json", &body).await;
                             }
                         },
                         Err(e) => {
-                            let body =
-                                format!("{{\"ok\":false,\"error\":\"TOML parse error: {}\"}}", e);
+                            let body = serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)}).to_string();
                             send_response(&mut stream, 500, "application/json", &body).await;
                         }
                     },
                     Err(e) => {
-                        let body = format!("{{\"ok\":false,\"error\":\"File read error: {}\"}}", e);
+                        let body = serde_json::json!({"ok": false, "error": format!("File read error: {}", e)}).to_string();
                         send_response(&mut stream, 500, "application/json", &body).await;
                     }
                 }
@@ -1225,26 +1287,28 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
 // ---------------------------------------------------------------------------
 
 fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> String {
-    let display_name = raw.display_name.as_deref().unwrap_or("");
+    let display_name = html_escape(raw.display_name.as_deref().unwrap_or(""));
 
     let server = raw.server.as_ref();
-    let base_url = server.and_then(|s| s.base_url.as_deref()).unwrap_or("");
-    let ws_path = server
-        .and_then(|s| s.forwarders_ws_path.as_deref())
-        .unwrap_or("");
+    let base_url = html_escape(server.and_then(|s| s.base_url.as_deref()).unwrap_or(""));
+    let ws_path = html_escape(
+        server
+            .and_then(|s| s.forwarders_ws_path.as_deref())
+            .unwrap_or(""),
+    );
 
     let auth = raw.auth.as_ref();
-    let token_file = auth.and_then(|a| a.token_file.as_deref()).unwrap_or("");
+    let token_file = html_escape(auth.and_then(|a| a.token_file.as_deref()).unwrap_or(""));
 
     let journal = raw.journal.as_ref();
-    let sqlite_path = journal.and_then(|j| j.sqlite_path.as_deref()).unwrap_or("");
+    let sqlite_path = html_escape(journal.and_then(|j| j.sqlite_path.as_deref()).unwrap_or(""));
     let prune_pct = journal
         .and_then(|j| j.prune_watermark_pct)
         .map(|v| v.to_string())
         .unwrap_or_default();
 
     let uplink = raw.uplink.as_ref();
-    let batch_mode = uplink.and_then(|u| u.batch_mode.as_deref()).unwrap_or("");
+    let batch_mode = html_escape(uplink.and_then(|u| u.batch_mode.as_deref()).unwrap_or(""));
     let batch_flush_ms = uplink
         .and_then(|u| u.batch_flush_ms)
         .map(|v| v.to_string())
@@ -1255,20 +1319,21 @@ fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> S
         .unwrap_or_default();
 
     let status_http = raw.status_http.as_ref();
-    let bind = status_http.and_then(|s| s.bind.as_deref()).unwrap_or("");
+    let bind = html_escape(status_http.and_then(|s| s.bind.as_deref()).unwrap_or(""));
 
     // Build reader rows
     let mut reader_rows = String::new();
     if let Some(readers) = &raw.readers {
         for (i, r) in readers.iter().enumerate() {
-            let target = r.target.as_deref().unwrap_or("");
+            let target = html_escape(r.target.as_deref().unwrap_or(""));
             let read_type = r.read_type.as_deref().unwrap_or("raw");
             let enabled = r.enabled.unwrap_or(true);
             let checked = if enabled { "checked" } else { "" };
-            let fallback_port = r
-                .local_fallback_port
-                .map(|v| v.to_string())
-                .unwrap_or_default();
+            let fallback_port = html_escape(
+                &r.local_fallback_port
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+            );
 
             reader_rows.push_str(&format!(
                 "<tr class=\"reader-row\">\
