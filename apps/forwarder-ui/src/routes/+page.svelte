@@ -76,6 +76,7 @@
   }
 
   onMount(() => {
+    loadAll();
     initSSE({
       onStatusChanged: (data) => {
         if (status) {
