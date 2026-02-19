@@ -88,6 +88,30 @@ jobs:
       - name: Run integration tests (requires Docker)
         run: cargo test --workspace --tests -- --test-threads=4
 
+  receiver-embed-ui:
+    name: Receiver embed-ui build
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/receiver-ui/package-lock.json
+
+      - name: Build receiver with embedded UI
+        run: cargo build -p receiver --features embed-ui
+
   receiver-ui:
     name: Receiver UI Checks
     runs-on: ubuntu-latest

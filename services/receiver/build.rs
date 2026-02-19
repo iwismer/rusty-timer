@@ -14,8 +14,11 @@ fn main() {
     );
 
     // Rerun when frontend source changes.
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/src");
+    println!("cargo:rerun-if-changed=../../apps/receiver-ui/package.json");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/package-lock.json");
+    println!("cargo:rerun-if-changed=../../apps/receiver-ui/tsconfig.json");
+    println!("cargo:rerun-if-changed=../../apps/receiver-ui/src");
+    println!("cargo:rerun-if-changed=../../apps/receiver-ui/static");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/svelte.config.js");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/vite.config.ts");
 

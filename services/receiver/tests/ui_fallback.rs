@@ -35,3 +35,26 @@ async fn api_routes_still_work() {
     let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn unknown_api_path_returns_not_found() {
+    let app = build_router(make_state());
+    let req = axum::http::Request::builder()
+        .uri("/api/v1/does-not-exist")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn post_to_ui_path_is_not_allowed() {
+    let app = build_router(make_state());
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
