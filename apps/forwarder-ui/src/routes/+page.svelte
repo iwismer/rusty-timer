@@ -100,6 +100,9 @@
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {
         sseConnected = connected;
+        if (!connected) {
+          status = null;
+        }
       },
       onUpdateAvailable: (version) => {
         updateVersion = version;
@@ -198,6 +201,8 @@
         </table>
       {/if}
     </section>
+  {:else if !sseConnected}
+    <p class="error">Disconnected from forwarder.</p>
   {:else if !error}
     <p>Loading...</p>
   {/if}
