@@ -16,7 +16,7 @@ class EmulatorSpecToCmdTests(unittest.TestCase):
         cmd = spec.to_cmd()
         self.assertEqual(
             cmd,
-            "cargo run -p emulator -- --port 10001 --delay 500 --type raw"
+            "./target/debug/emulator --port 10001 --delay 500 --type raw"
             " --file 'data/my reads.txt'",
         )
 
@@ -30,7 +30,7 @@ class EmulatorSpecToCmdTests(unittest.TestCase):
         cmd = spec.to_cmd()
         self.assertEqual(
             cmd,
-            "cargo run -p emulator -- --port 10001 --delay 2000 --type raw",
+            "./target/debug/emulator --port 10001 --delay 2000 --type raw",
         )
 
 

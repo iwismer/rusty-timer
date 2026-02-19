@@ -227,14 +227,18 @@ async fn test_mismatched_payload_rejected() {
         }))
         .await
         .unwrap();
-    match client.recv_message().await {
-        Ok(WsMessage::Error(e)) => {
-            assert_eq!(e.code, rt_protocol::error_codes::INTEGRITY_CONFLICT);
-        }
-        Ok(WsMessage::ForwarderAck(_)) => {}
-        Err(_) => {}
-        Ok(other) => panic!("got {:?}", other),
-    }
+    let ack = match client.recv_message().await {
+        Ok(WsMessage::ForwarderAck(ack)) => ack,
+        Ok(other) => panic!("expected ForwarderAck, got {:?}", other),
+        Err(err) => panic!("expected ForwarderAck, got recv error: {:?}", err),
+    };
+    assert_eq!(ack.session_id, session_id);
+    assert_eq!(ack.entries.len(), 1);
+    let entry = &ack.entries[0];
+    assert_eq!(entry.forwarder_id, "fwd-003");
+    assert_eq!(entry.reader_ip, "192.168.1.30:10000");
+    assert_eq!(entry.stream_epoch, 1);
+    assert_eq!(entry.last_seq, 1);
     let raw_line: String = sqlx::query_scalar("SELECT raw_read_line FROM events WHERE seq = 1")
         .fetch_one(&pool)
         .await
