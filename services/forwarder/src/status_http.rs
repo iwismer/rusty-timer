@@ -444,7 +444,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
     subsystem: Arc<Mutex<SubsystemStatus>>,
     journal: Arc<Mutex<J>>,
     version: Arc<String>,
-    _config_state: Option<Arc<ConfigState>>,
+    config_state: Option<Arc<ConfigState>>,
 ) {
     // Read the request (limited to 4 KiB — sufficient for a simple HTTP/1.1 request line + headers)
     let mut buf = vec![0u8; 4096];
@@ -613,6 +613,45 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 }
             }
         }
+        ("GET", "/api/v1/config") => match &config_state {
+            Some(cs) => {
+                let _lock = cs.write_lock.lock().await;
+                match std::fs::read_to_string(&cs.path) {
+                    Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
+                        Ok(raw) => match serde_json::to_string(&raw) {
+                            Ok(json) => {
+                                send_response(&mut stream, 200, "application/json", &json).await;
+                            }
+                            Err(e) => {
+                                let body = format!(
+                                    "{{\"ok\":false,\"error\":\"JSON serialize error: {}\"}}",
+                                    e
+                                );
+                                send_response(&mut stream, 500, "application/json", &body).await;
+                            }
+                        },
+                        Err(e) => {
+                            let body =
+                                format!("{{\"ok\":false,\"error\":\"TOML parse error: {}\"}}", e);
+                            send_response(&mut stream, 500, "application/json", &body).await;
+                        }
+                    },
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"File read error: {}\"}}", e);
+                        send_response(&mut stream, 500, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
         _ => {
             send_response(&mut stream, 404, "text/plain", "Not Found").await;
         }
