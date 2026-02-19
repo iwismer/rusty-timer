@@ -39,16 +39,30 @@ pub async fn get_forwarder_config(
         reply: reply_tx,
     };
 
-    if tx.send(cmd).await.is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(HttpErrorEnvelope {
-                code: "NOT_FOUND".to_owned(),
-                message: "forwarder disconnected".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+    match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, tx.send(cmd)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(HttpErrorEnvelope {
+                    code: "NOT_FOUND".to_owned(),
+                    message: "forwarder disconnected".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(HttpErrorEnvelope {
+                    code: "TIMEOUT".to_owned(),
+                    message: "forwarder command queue is saturated".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
     }
 
     match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, reply_rx).await {
@@ -136,24 +150,44 @@ pub async fn set_forwarder_config(
         reply: reply_tx,
     };
 
-    if tx.send(cmd).await.is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(HttpErrorEnvelope {
-                code: "NOT_FOUND".to_owned(),
-                message: "forwarder disconnected".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+    match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, tx.send(cmd)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(HttpErrorEnvelope {
+                    code: "NOT_FOUND".to_owned(),
+                    message: "forwarder disconnected".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(HttpErrorEnvelope {
+                    code: "TIMEOUT".to_owned(),
+                    message: "forwarder command queue is saturated".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
     }
 
     match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, reply_rx).await {
         Ok(Ok(ForwarderProxyReply::Response(resp))) => {
             let status = if resp.ok {
                 StatusCode::OK
-            } else {
+            } else if resp
+                .status_code
+                .is_some_and(|code| (400..500).contains(&code))
+                || resp.status_code.is_none()
+            {
                 StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
             };
             (
                 status,
@@ -161,6 +195,7 @@ pub async fn set_forwarder_config(
                     "ok": resp.ok,
                     "error": resp.error,
                     "restart_needed": resp.restart_needed,
+                    "status_code": resp.status_code,
                 })),
             )
                 .into_response()
@@ -223,16 +258,30 @@ pub async fn restart_forwarder(
         reply: reply_tx,
     };
 
-    if tx.send(cmd).await.is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(HttpErrorEnvelope {
-                code: "NOT_FOUND".to_owned(),
-                message: "forwarder disconnected".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+    match tokio::time::timeout(RESTART_REQUEST_TIMEOUT, tx.send(cmd)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(HttpErrorEnvelope {
+                    code: "NOT_FOUND".to_owned(),
+                    message: "forwarder disconnected".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(HttpErrorEnvelope {
+                    code: "TIMEOUT".to_owned(),
+                    message: "forwarder command queue is saturated".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
     }
 
     match tokio::time::timeout(RESTART_REQUEST_TIMEOUT, reply_rx).await {

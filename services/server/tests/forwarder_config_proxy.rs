@@ -5,6 +5,7 @@ use rt_test_utils::MockWsClient;
 use sha2::{Digest, Sha256};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
+use tokio::sync::{mpsc, oneshot};
 
 async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, raw_token: &[u8]) {
     let hash = Sha256::digest(raw_token);
@@ -29,6 +30,64 @@ async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
             .unwrap();
     });
     addr
+}
+
+#[tokio::test]
+async fn get_forwarder_config_returns_gateway_timeout_when_command_queue_is_saturated() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let app_state = server::AppState::new(pool.clone());
+    let (tx, mut rx) = mpsc::channel::<server::state::ForwarderCommand>(1);
+    let (reply_tx, _reply_rx) = oneshot::channel();
+    tx.send(server::state::ForwarderCommand::Restart {
+        request_id: "prefill".to_owned(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    {
+        let mut senders = app_state.forwarder_command_senders.write().await;
+        senders.insert("fwd-saturated".to_owned(), tx);
+    }
+
+    // Keep receiver alive but do not drain it, so the sender remains saturated.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let _ = rx.recv().await;
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state))
+            .await
+            .unwrap();
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let response = client
+        .get(format!(
+            "http://{}/api/v1/forwarders/{}/config",
+            addr, "fwd-saturated"
+        ))
+        .send()
+        .await
+        .expect("request should complete with timeout response");
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::GATEWAY_TIMEOUT,
+        "saturated command queue should surface as 504 timeout"
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "TIMEOUT");
 }
 
 #[tokio::test]
@@ -221,4 +280,140 @@ async fn get_forwarder_config_returns_gateway_timeout_when_forwarder_never_repli
     assert_eq!(body["code"], "TIMEOUT");
 
     fwd.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn set_forwarder_config_returns_bad_request_for_forwarder_validation_error() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(
+        &pool,
+        "fwd-cfg-set-validation",
+        "forwarder",
+        b"fwd-cfg-set-validation-token",
+    )
+    .await;
+
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-cfg-set-validation-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-cfg-set-validation".to_owned(),
+        reader_ips: vec!["10.10.0.4:10000".to_owned()],
+        resume: vec![],
+        display_name: Some("Proxy Target".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let _ = fwd.recv_message().await.unwrap(); // initial heartbeat
+
+    let client = reqwest::Client::new();
+    let request_task = tokio::spawn(async move {
+        client
+            .post(format!(
+                "http://{}/api/v1/forwarders/{}/config/{}",
+                addr, "fwd-cfg-set-validation", "general"
+            ))
+            .json(&serde_json::json!({"display_name":"New Name"}))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    let proxied = fwd.recv_message().await.unwrap();
+    let request_id = match proxied {
+        WsMessage::ConfigSetRequest(req) => req.request_id,
+        other => panic!("expected ConfigSetRequest, got {:?}", other),
+    };
+
+    fwd.send_message(&WsMessage::ConfigSetResponse(
+        rt_protocol::ConfigSetResponse {
+            request_id,
+            ok: false,
+            error: Some("display_name must not be empty".to_owned()),
+            restart_needed: false,
+            status_code: Some(400),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let response = request_task.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["ok"], false);
+}
+
+#[tokio::test]
+async fn set_forwarder_config_returns_bad_gateway_for_forwarder_internal_error() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(
+        &pool,
+        "fwd-cfg-set-internal",
+        "forwarder",
+        b"fwd-cfg-set-internal-token",
+    )
+    .await;
+
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-cfg-set-internal-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-cfg-set-internal".to_owned(),
+        reader_ips: vec!["10.10.0.5:10000".to_owned()],
+        resume: vec![],
+        display_name: Some("Proxy Target".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let _ = fwd.recv_message().await.unwrap(); // initial heartbeat
+
+    let client = reqwest::Client::new();
+    let request_task = tokio::spawn(async move {
+        client
+            .post(format!(
+                "http://{}/api/v1/forwarders/{}/config/{}",
+                addr, "fwd-cfg-set-internal", "general"
+            ))
+            .json(&serde_json::json!({"display_name":"New Name"}))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    let proxied = fwd.recv_message().await.unwrap();
+    let request_id = match proxied {
+        WsMessage::ConfigSetRequest(req) => req.request_id,
+        other => panic!("expected ConfigSetRequest, got {:?}", other),
+    };
+
+    fwd.send_message(&WsMessage::ConfigSetResponse(
+        rt_protocol::ConfigSetResponse {
+            request_id,
+            ok: false,
+            error: Some("file write error".to_owned()),
+            restart_needed: false,
+            status_code: Some(500),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let response = request_task.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["ok"], false);
 }

@@ -253,6 +253,8 @@ pub struct ConfigSetResponse {
     pub ok: bool,
     pub error: Option<String>,
     pub restart_needed: bool,
+    /// Optional status hint from forwarder local handler (e.g. 400 vs 500).
+    pub status_code: Option<u16>,
 }
 
 /// Server-to-forwarder: request a graceful restart.

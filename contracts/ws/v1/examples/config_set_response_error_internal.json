@@ -1,0 +1,8 @@
+{
+  "kind": "config_set_response",
+  "request_id": "550e8400-e29b-41d4-a716-446655440002",
+  "ok": false,
+  "error": "File write error: permission denied",
+  "restart_needed": false,
+  "status_code": 500
+}

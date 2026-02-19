@@ -241,6 +241,20 @@ fn config_set_response_round_trip() {
         WsMessage::ConfigSetResponse(inner) => {
             assert!(!inner.request_id.is_empty());
             assert!(inner.ok);
+            assert!(inner.status_code.is_none());
+        }
+        other => panic!("Expected ConfigSetResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn config_set_response_internal_error_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/config_set_response_error_internal.json");
+    match msg {
+        WsMessage::ConfigSetResponse(inner) => {
+            assert!(!inner.request_id.is_empty());
+            assert!(!inner.ok);
+            assert_eq!(inner.status_code, Some(500));
         }
         other => panic!("Expected ConfigSetResponse, got {:?}", other),
     }

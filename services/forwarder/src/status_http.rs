@@ -568,6 +568,8 @@ pub async fn apply_section_update(
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
 ) -> Result<(), (u16, String)> {
+    require_object_payload(payload)?;
+
     match section {
         "general" => {
             let display_name = optional_string_field(payload, "display_name")?;
@@ -769,6 +771,14 @@ fn bad_request_error(message: impl Into<String>) -> (u16, String) {
         400u16,
         serde_json::json!({"ok": false, "error": message.into()}).to_string(),
     )
+}
+
+fn require_object_payload(payload: &serde_json::Value) -> Result<(), (u16, String)> {
+    if payload.is_object() {
+        Ok(())
+    } else {
+        Err(bad_request_error("payload must be a JSON object"))
+    }
 }
 
 fn optional_string_field(
