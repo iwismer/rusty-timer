@@ -4,6 +4,7 @@
   import { buildUpdatedSubscriptions } from "$lib/subscriptions";
   import { initSSE, destroySSE } from "$lib/sse";
   import { waitForApplyResult } from "@rusty-timer/shared-ui/lib/update-flow";
+  import { UpdateBanner, LogViewer } from "@rusty-timer/shared-ui";
   import type {
     Profile,
     StatusResponse,
@@ -194,16 +195,11 @@
   <h1>Rusty Timer Receiver</h1>
 
   {#if updateVersion}
-    <section class="update-banner" data-testid="update-banner">
-      <p>Update v{updateVersion} available</p>
-      <button
-        data-testid="apply-update-btn"
-        on:click={handleApplyUpdate}
-        disabled={updateBusy}
-      >
-        {updateBusy ? "Applying..." : "Update Now"}
-      </button>
-    </section>
+    <UpdateBanner
+      version={updateVersion}
+      busy={updateBusy}
+      onApply={handleApplyUpdate}
+    />
   {/if}
 
   {#if error}
@@ -346,19 +342,7 @@
     {/if}
   </section>
 
-  <!-- Logs -->
-  <section data-testid="logs-section">
-    <h2>Logs</h2>
-    {#if logs?.entries.length === 0}
-      <p>No log entries.</p>
-    {:else}
-      <ul class="logs">
-        {#each logs?.entries ?? [] as entry}
-          <li>{entry}</li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
+  <LogViewer entries={logs?.entries ?? []} />
 </main>
 
 <style>
@@ -415,40 +399,22 @@
     color: gray;
     font-size: 0.85em;
   }
-  .logs {
-    font-family: monospace;
-    font-size: 0.85em;
-    max-height: 300px;
-    overflow-y: auto;
-  }
-  section ul:not(.logs) {
+  section ul {
     list-style: none;
     padding: 0;
   }
-  section ul:not(.logs) li {
+  section ul li {
     display: flex;
     align-items: center;
     gap: 0.5em;
     padding: 0.35em 0;
     border-bottom: 1px solid #eee;
   }
-  section ul:not(.logs) li:last-child {
+  section ul li:last-child {
     border-bottom: none;
   }
   .port-input {
     width: 5em;
     display: inline-block;
-  }
-  .update-banner {
-    background: #d4edda;
-    border-color: #c3e6cb;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .update-banner p {
-    margin: 0;
-    font-weight: 600;
-    color: #155724;
   }
 </style>

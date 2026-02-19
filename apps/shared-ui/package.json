@@ -5,7 +5,10 @@
   "type": "module",
   "svelte": "./src/lib/index.ts",
   "exports": {
-    ".": "./src/lib/index.ts",
+    ".": {
+      "svelte": "./src/lib/index.ts",
+      "default": "./src/lib/index.ts"
+    },
     "./lib/*": "./src/lib/*.ts",
     "./components/*": "./src/components/*",
     "./styles/*": "./src/styles/*"
