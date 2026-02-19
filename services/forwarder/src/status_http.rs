@@ -70,6 +70,8 @@ pub struct SubsystemStatus {
     forwarder_id: String,
     local_ip: Option<String>,
     readers: HashMap<String, ReaderStatus>,
+    /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
+    restart_needed: bool,
 }
 
 impl SubsystemStatus {
@@ -82,6 +84,7 @@ impl SubsystemStatus {
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
+            restart_needed: false,
         }
     }
 
@@ -94,6 +97,7 @@ impl SubsystemStatus {
             forwarder_id: String::new(),
             local_ip: None,
             readers: HashMap::new(),
+            restart_needed: false,
         }
     }
 
@@ -110,6 +114,16 @@ impl SubsystemStatus {
     /// Return the uplink connection state.
     pub fn uplink_connected(&self) -> bool {
         self.uplink_connected
+    }
+
+    /// Return whether a restart is needed to apply saved config changes.
+    pub fn restart_needed(&self) -> bool {
+        self.restart_needed
+    }
+
+    /// Mark that a restart is needed to apply saved config changes.
+    pub fn set_restart_needed(&mut self) {
+        self.restart_needed = true;
     }
 }
 
@@ -135,6 +149,16 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         ss.ready = true;
         ss.reason = None;
+    }
+
+    /// Mark that a restart is needed to apply saved config changes.
+    pub async fn set_restart_needed(&self) {
+        self.subsystem.lock().await.set_restart_needed();
+    }
+
+    /// Return whether a restart is needed to apply saved config changes.
+    pub async fn restart_needed(&self) -> bool {
+        self.subsystem.lock().await.restart_needed()
     }
 
     /// Update the uplink connection state (does not affect readiness).
