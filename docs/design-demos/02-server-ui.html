@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rusty Timer - Server UI Layout</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', '"Fira Code"', 'ui-monospace', 'monospace'],
+      },
+    },
+  },
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --surface-0: #ffffff; --surface-1: #f8f9fa; --surface-2: #f0f1f3; --surface-3: #e4e6e9;
+    --border: #dde0e4; --border-strong: #c0c4ca;
+    --text-primary: #1a1d23; --text-secondary: #4a5060; --text-muted: #7c8494;
+    --status-ok: #117a3e; --status-ok-bg: #e6f4ec; --status-ok-border: #a3d9b8;
+    --status-warn: #8a6d00; --status-warn-bg: #fef7e0; --status-warn-border: #f0d460;
+    --status-err: #c42b2b; --status-err-bg: #fde8e8; --status-err-border: #f0a0a0;
+    --accent: #2563eb; --accent-hover: #1d4ed8; --accent-bg: #eff4ff;
+  }
+  .dark {
+    --surface-0: #0f1114; --surface-1: #161921; --surface-2: #1e222c; --surface-3: #282d3a;
+    --border: #2e3443; --border-strong: #404858;
+    --text-primary: #e8eaef; --text-secondary: #a0a8b8; --text-muted: #6b7385;
+    --status-ok: #3ccc6e; --status-ok-bg: #0f2918; --status-ok-border: #1a4d2e;
+    --status-warn: #f0c030; --status-warn-bg: #2a2310; --status-warn-border: #4d3f1a;
+    --status-err: #f06060; --status-err-bg: #2a1010; --status-err-border: #4d1a1a;
+    --accent: #5b8def; --accent-hover: #7ba3ff; --accent-bg: #1a2540;
+  }
+  body { font-family: 'IBM Plex Sans', system-ui, sans-serif; background: var(--surface-0); color: var(--text-primary); margin: 0; }
+</style>
+</head>
+<body>
+
+<!-- ===== NAV BAR (shared component: AppShell/NavBar) ===== -->
+<header style="background: var(--surface-1); border-bottom: 1px solid var(--border);">
+  <div style="max-width: 1100px; margin: 0 auto; padding: 0 1.5rem; display: flex; align-items: center; height: 48px; gap: 2rem;">
+    <span class="text-sm font-bold" style="color: var(--text-primary); letter-spacing: -0.02em;">Rusty Timer</span>
+    <nav class="flex gap-1" style="height: 100%;">
+      <a href="#" class="flex items-center px-3 text-sm font-medium" style="color: var(--accent); border-bottom: 2px solid var(--accent); height: 100%; text-decoration: none;">Streams</a>
+    </nav>
+    <div style="margin-left: auto; display: flex; align-items: center; gap: 0.75rem;">
+      <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+        <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+        Server OK
+      </span>
+      <button onclick="document.documentElement.classList.toggle('dark')" class="p-1.5 rounded-md" style="background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; color: var(--text-secondary); font-size: 0.75rem;">
+        Theme
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ===== MAIN CONTENT ===== -->
+<main style="max-width: 1100px; margin: 0 auto; padding: 1.5rem;">
+
+  <!-- Page header -->
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-xl font-bold" style="color: var(--text-primary);">Streams</h1>
+  </div>
+
+  <!-- ===== FORWARDER GROUP 1 ===== -->
+  <section class="mb-6 rounded-lg overflow-hidden" style="border: 1px solid var(--border); background: var(--surface-1);">
+
+    <!-- Forwarder header -->
+    <div class="px-4 py-3 flex items-center gap-3" style="border-bottom: 1px solid var(--border); background: var(--surface-2);">
+      <h2 class="text-sm font-semibold" style="color: var(--text-primary);">Start Line</h2>
+      <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+        <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+        2/2 online
+      </span>
+      <div style="margin-left: auto; display: flex; align-items: center; gap: 0.75rem;">
+        <span class="text-xs" style="color: var(--text-muted);">2,494 reads &middot; 1,842 chips</span>
+        <a href="#" class="text-xs font-medium px-2.5 py-1 rounded-md" style="color: var(--accent); text-decoration: none; background: var(--accent-bg); border: 1px solid transparent;">Configure</a>
+      </div>
+    </div>
+
+    <!-- Stream cards -->
+    <div class="p-4 grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));">
+
+      <!-- Stream card 1 -->
+      <div class="rounded-md p-4" style="background: var(--surface-0); border: 1px solid var(--border);">
+        <div class="flex items-center gap-2 mb-3">
+          <a href="#" class="text-sm font-semibold" style="color: var(--accent); text-decoration: none;">Mat A</a>
+          <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+            <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+            online
+          </span>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3 mb-3">
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Reads</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-primary);">1,247</p>
+          </div>
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Chips</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-primary);">983</p>
+          </div>
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Last read</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-primary);">3s</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 text-xs" style="color: var(--text-muted);">
+          <span class="font-mono">192.168.1.50</span>
+          <span>&middot;</span>
+          <span>epoch 4</span>
+        </div>
+      </div>
+
+      <!-- Stream card 2 -->
+      <div class="rounded-md p-4" style="background: var(--surface-0); border: 1px solid var(--border);">
+        <div class="flex items-center gap-2 mb-3">
+          <a href="#" class="text-sm font-semibold" style="color: var(--accent); text-decoration: none;">Mat B</a>
+          <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+            <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+            online
+          </span>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3 mb-3">
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Reads</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-primary);">1,247</p>
+          </div>
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Chips</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-primary);">859</p>
+          </div>
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Last read</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-primary);">8s</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 text-xs" style="color: var(--text-muted);">
+          <span class="font-mono">192.168.1.51</span>
+          <span>&middot;</span>
+          <span>epoch 4</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FORWARDER GROUP 2 (with a problem) ===== -->
+  <section class="mb-6 rounded-lg overflow-hidden" style="border: 1px solid var(--status-err-border); background: var(--surface-1);">
+
+    <!-- Forwarder header with problem -->
+    <div class="px-4 py-3 flex items-center gap-3" style="border-bottom: 1px solid var(--border); background: var(--status-err-bg);">
+      <h2 class="text-sm font-semibold" style="color: var(--text-primary);">Finish Line</h2>
+      <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border);">
+        <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-err); display: inline-block;"></span>
+        0/1 online
+      </span>
+      <div style="margin-left: auto; display: flex; align-items: center; gap: 0.75rem;">
+        <span class="text-xs" style="color: var(--text-muted);">0 reads &middot; 0 chips</span>
+        <a href="#" class="text-xs font-medium px-2.5 py-1 rounded-md" style="color: var(--accent); text-decoration: none; background: var(--accent-bg);">Configure</a>
+      </div>
+    </div>
+
+    <!-- Stream cards -->
+    <div class="p-4">
+      <!-- Stream card - offline -->
+      <div class="rounded-md p-4" style="background: var(--surface-0); border: 1px solid var(--status-err-border);">
+        <div class="flex items-center gap-2 mb-3">
+          <a href="#" class="text-sm font-semibold" style="color: var(--accent); text-decoration: none;">192.168.2.50</a>
+          <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border);">
+            <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-err); display: inline-block;"></span>
+            offline
+          </span>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3 mb-3">
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Reads</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-muted);">0</p>
+          </div>
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Chips</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-muted);">0</p>
+          </div>
+          <div>
+            <p class="text-xs" style="color: var(--text-muted);">Last read</p>
+            <p class="text-lg font-bold font-mono" style="color: var(--text-muted);">&mdash;</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 text-xs" style="color: var(--text-muted);">
+          <span class="font-mono">192.168.2.50</span>
+          <span>&middot;</span>
+          <span>epoch 1</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== STREAM DETAIL VIEW (shown below as if navigated) ===== -->
+  <div style="border-top: 3px dashed var(--border); margin: 3rem 0; padding-top: 1rem;">
+    <p class="text-xs font-medium mb-4" style="color: var(--text-muted);">Below: Stream Detail page (navigated from clicking a stream name above)</p>
+  </div>
+
+  <!-- Breadcrumb -->
+  <div class="mb-4">
+    <a href="#" class="text-xs" style="color: var(--accent); text-decoration: none;">&larr; Back to streams</a>
+  </div>
+
+  <div class="flex items-center gap-3 mb-6">
+    <h1 class="text-xl font-bold" style="color: var(--text-primary);">Mat A</h1>
+    <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+      <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+      online
+    </span>
+  </div>
+
+  <div class="grid grid-cols-2 gap-4 mb-6" style="grid-template-columns: 1fr 1fr;">
+
+    <!-- Stream Info -->
+    <div class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
+      <h2 class="text-sm font-semibold mb-3" style="color: var(--text-primary);">Info</h2>
+      <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
+        <dt style="color: var(--text-muted);">Stream ID</dt>
+        <dd class="font-mono" style="color: var(--text-primary);">abc123-def456</dd>
+        <dt style="color: var(--text-muted);">Forwarder</dt>
+        <dd style="color: var(--text-primary);">Start Line</dd>
+        <dt style="color: var(--text-muted);">Reader IP</dt>
+        <dd class="font-mono" style="color: var(--text-primary);">192.168.1.50</dd>
+        <dt style="color: var(--text-muted);">Epoch</dt>
+        <dd class="font-mono" style="color: var(--text-primary);">4</dd>
+        <dt style="color: var(--text-muted);">Created</dt>
+        <dd style="color: var(--text-primary);">Jan 15, 2025 10:30 AM</dd>
+      </dl>
+    </div>
+
+    <!-- Metrics -->
+    <div class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
+      <h2 class="text-sm font-semibold mb-3" style="color: var(--text-primary);">Metrics</h2>
+      <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
+        <dt style="color: var(--text-muted);">Raw count</dt>
+        <dd class="font-mono text-right" style="color: var(--text-primary);">1,247</dd>
+        <dt style="color: var(--text-muted);">Dedup count</dt>
+        <dd class="font-mono text-right" style="color: var(--text-primary);">1,180</dd>
+        <dt style="color: var(--text-muted);">Retransmit</dt>
+        <dd class="font-mono text-right" style="color: var(--text-primary);">67</dd>
+        <dt style="color: var(--text-muted);">Lag</dt>
+        <dd class="font-mono text-right" style="color: var(--text-primary);">45 ms</dd>
+        <dt style="color: var(--text-muted);">Backlog</dt>
+        <dd class="font-mono text-right" style="color: var(--text-primary);">0</dd>
+      </dl>
+
+      <div class="mt-3 pt-3" style="border-top: 1px solid var(--border);">
+        <p class="text-xs font-medium mb-2" style="color: var(--text-muted);">Current Epoch</p>
+        <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
+          <dt style="color: var(--text-muted);">Raw (epoch)</dt>
+          <dd class="font-mono text-right" style="color: var(--text-primary);">1,247</dd>
+          <dt style="color: var(--text-muted);">Unique chips</dt>
+          <dd class="font-mono text-right" style="color: var(--text-primary);">983</dd>
+          <dt style="color: var(--text-muted);">Last read</dt>
+          <dd class="text-right" style="color: var(--text-primary);">3s ago</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export & Actions -->
+  <div class="grid grid-cols-2 gap-4 mb-6">
+    <div class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
+      <h2 class="text-sm font-semibold mb-3" style="color: var(--text-primary);">Export</h2>
+      <p class="text-xs mb-3" style="color: var(--text-secondary);">All canonical (deduplicated) events, ordered by epoch and sequence.</p>
+      <div class="flex flex-col gap-2">
+        <a href="#" class="text-sm" style="color: var(--accent); text-decoration: none;">Download export.txt</a>
+        <a href="#" class="text-sm" style="color: var(--accent); text-decoration: none;">Download export.csv</a>
+      </div>
+    </div>
+
+    <div class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
+      <h2 class="text-sm font-semibold mb-3" style="color: var(--text-primary);">Actions</h2>
+      <button class="px-3 py-1.5 text-sm font-medium rounded-md" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border); cursor: pointer;">
+        Reset Epoch
+      </button>
+      <p class="text-xs mt-2" style="color: var(--text-muted);">Sends an epoch-reset command to the connected forwarder.</p>
+    </div>
+  </div>
+
+</main>
+
+<!-- ===== FOOTER ===== -->
+<footer style="border-top: 1px solid var(--border); padding: 0.75rem 1.5rem; text-align: center;">
+  <p class="text-xs" style="color: var(--text-muted);">Rusty Timer &middot; Server</p>
+</footer>
+
+</body>
+</html>
