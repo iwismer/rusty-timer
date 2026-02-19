@@ -26,6 +26,7 @@ This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust worksp
 
 ### Key Decisions
 - Rust 1.89.0 (see `rust-toolchain.toml`)
+- Node 20.x / npm 10.x (see root `package.json` + `.nvmrc`)
 - Server config: env vars only (`DATABASE_URL`, `BIND_ADDR`, `LOG_LEVEL`)
 - Forwarder config: TOML only (no env var overrides)
 - sqlx 0.8 offline cache at `services/server/.sqlx/`
@@ -38,7 +39,7 @@ git config core.hooksPath .githooks
 ```
 
 The pre-commit hook automatically:
-1. Strips `"resolved"` fields from `apps/*/package-lock.json`
+1. Strips registry URL `"resolved"` fields from all `package-lock.json` files (root and `apps/*/`), while keeping local workspace `"resolved"` paths
 2. Checks Rust formatting: `cargo fmt --all -- --check`
 3. Runs Clippy: `cargo clippy --workspace --all-targets`
 4. For touched frontend apps, runs `npm run lint` and `npm run check` (blocking)
@@ -75,6 +76,7 @@ cargo clippy --workspace --all-targets
 
 # Format JS/TS
 cd apps/dashboard && npm run format
+cd apps/forwarder-ui && npm run format
 cd apps/receiver-ui && npm run format
 ```
 
@@ -85,3 +87,4 @@ cd apps/receiver-ui && npm run format
 - The `.sqlx/` offline cache is at `services/server/.sqlx/` — regenerate with `cargo sqlx prepare` if schema changes
 - `docs/plans/` is gitignored; all other docs (runbooks, specs, guides) are tracked
 - Clippy is configured with `pedantic = warn` at the workspace level (see `Cargo.toml` `[workspace.lints.clippy]`)
+- **Never commit `package-lock.json` files with registry URL `"resolved"` fields** — they leak internal registry URLs and bloat diffs. Keep local workspace path `"resolved"` fields (for workspace links). The pre-commit hook handles this automatically, but if you bypass hooks, clean manually with: `jq 'walk(if type == "object" then with_entries(select(.key != "resolved" or (.value | type) != "string" or (.value | test("^https?://") | not))) else . end)' package-lock.json > /tmp/clean.json && mv /tmp/clean.json package-lock.json`

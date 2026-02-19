@@ -1,18 +1,18 @@
 //! Local status HTTP server for Task 8.
 //!
 //! Provides:
-//! - `GET /`              — read-only HTML status page
 //! - `GET /healthz`       — always 200 OK (process is running)
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
+//! - `GET /api/v1/status`  — current forwarder state as JSON
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
-//! - `GET /config`        — config editing page (when enabled)
 //! - `GET /api/v1/config` — current config as JSON
 //! - `POST /api/v1/config/{section}` — update a config section
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
 //!   501 on non-Unix platforms
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
+//! - All other routes fall back to the embedded SvelteKit UI
 //!
 //! # Readiness contract
 //! `/readyz` reflects local prerequisites only (config + SQLite + worker loops).
@@ -25,7 +25,7 @@ use crate::storage::journal::Journal;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use rt_updater::UpdateStatus;
@@ -157,6 +157,7 @@ impl SubsystemStatus {
 pub struct StatusServer {
     local_addr: SocketAddr,
     subsystem: Arc<Mutex<SubsystemStatus>>,
+    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -180,6 +181,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
     version: Arc<String>,
     config_state: Option<Arc<ConfigState>>,
     restart_signal: Option<Arc<Notify>>,
+    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -190,6 +192,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             version: self.version.clone(),
             config_state: self.config_state.clone(),
             restart_signal: self.restart_signal.clone(),
+            ui_tx: self.ui_tx.clone(),
         }
     }
 }
@@ -205,16 +208,28 @@ impl StatusServer {
         self.subsystem.clone()
     }
 
+    /// Return a clone of the UI event broadcast sender.
+    pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent> {
+        self.ui_tx.clone()
+    }
+
     /// Mark all local subsystems as ready.
     pub async fn set_ready(&self) {
         let mut ss = self.subsystem.lock().await;
         ss.ready = true;
         ss.reason = None;
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+                ready: ss.is_ready(),
+                uplink_connected: ss.uplink_connected(),
+                restart_needed: ss.restart_needed(),
+            });
     }
 
     /// Mark that a restart is needed to apply saved config changes.
     pub async fn set_restart_needed(&self) {
-        self.subsystem.lock().await.set_restart_needed();
+        mark_restart_needed_and_emit(&self.subsystem, &self.ui_tx).await;
     }
 
     /// Return whether a restart is needed to apply saved config changes.
@@ -224,7 +239,15 @@ impl StatusServer {
 
     /// Update the uplink connection state (does not affect readiness).
     pub async fn set_uplink_connected(&self, connected: bool) {
-        self.subsystem.lock().await.set_uplink_connected(connected);
+        let mut ss = self.subsystem.lock().await;
+        ss.set_uplink_connected(connected);
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+                ready: ss.is_ready(),
+                uplink_connected: connected,
+                restart_needed: ss.restart_needed(),
+            });
     }
 
     /// Set the forwarder ID (call once at startup).
@@ -239,7 +262,15 @@ impl StatusServer {
 
     /// Update the current rt-updater status (shown on `/update/status`).
     pub async fn set_update_status(&self, status: UpdateStatus) {
-        self.subsystem.lock().await.update_status = status;
+        self.subsystem.lock().await.update_status = status.clone();
+        if let UpdateStatus::Downloaded { version } = status {
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::UpdateAvailable {
+                    version,
+                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
+                });
+        }
     }
 
     /// Record the filesystem path of a downloaded update artifact ready to apply.
@@ -273,6 +304,20 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.state = state;
+            let state_str = match &r.state {
+                ReaderConnectionState::Connected => "connected",
+                ReaderConnectionState::Connecting => "connecting",
+                ReaderConnectionState::Disconnected => "disconnected",
+            };
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: state_str.to_owned(),
+                    reads_session: r.reads_since_restart,
+                    reads_total: r.reads_total,
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                });
         }
     }
 
@@ -283,6 +328,20 @@ impl StatusServer {
             r.reads_since_restart += 1;
             r.reads_total += 1;
             r.last_seen = Some(Instant::now());
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: match &r.state {
+                        ReaderConnectionState::Connected => "connected",
+                        ReaderConnectionState::Connecting => "connecting",
+                        ReaderConnectionState::Disconnected => "disconnected",
+                    }
+                    .to_owned(),
+                    reads_session: r.reads_since_restart,
+                    reads_total: r.reads_total,
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                });
         }
     }
 
@@ -303,6 +362,7 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
+        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -310,6 +370,7 @@ impl StatusServer {
             version: Arc::new(cfg.forwarder_version),
             config_state: None,
             restart_signal: None,
+            ui_tx: ui_tx.clone(),
         };
 
         let app = build_router(state);
@@ -322,6 +383,7 @@ impl StatusServer {
         Ok(StatusServer {
             local_addr,
             subsystem,
+            ui_tx,
         })
     }
 
@@ -336,6 +398,7 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
+        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -343,6 +406,7 @@ impl StatusServer {
             version: Arc::new(cfg.forwarder_version),
             config_state: Some(config_state),
             restart_signal: Some(restart_signal),
+            ui_tx: ui_tx.clone(),
         };
 
         let app = build_router(state);
@@ -355,6 +419,7 @@ impl StatusServer {
         Ok(StatusServer {
             local_addr,
             subsystem,
+            ui_tx,
         })
     }
 }
@@ -420,30 +485,6 @@ impl JournalAccess for NoJournal {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
-}
-
-fn format_last_seen(instant: Option<Instant>) -> String {
-    match instant {
-        None => "never".to_owned(),
-        Some(t) => {
-            let elapsed = t.elapsed().as_secs();
-            if elapsed < 60 {
-                format!("{}s ago", elapsed)
-            } else if elapsed < 3600 {
-                format!("{}m ago", elapsed / 60)
-            } else {
-                format!("{}h ago", elapsed / 3600)
-            }
-        }
-    }
-}
-
 fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     let original_permissions = std::fs::metadata(path).map(|m| m.permissions()).ok();
 
@@ -508,6 +549,7 @@ fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
 async fn update_config_file(
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     mutate: impl FnOnce(&mut crate::config::RawConfig) -> Result<(), String>,
 ) -> Result<(), (u16, String)> {
     let _lock = config_state.write_lock.lock().await;
@@ -551,8 +593,21 @@ async fn update_config_file(
         )
     })?;
 
-    subsystem.lock().await.set_restart_needed();
+    mark_restart_needed_and_emit(subsystem, ui_tx).await;
     Ok(())
+}
+
+async fn mark_restart_needed_and_emit(
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+) {
+    let mut ss = subsystem.lock().await;
+    ss.set_restart_needed();
+    let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+        ready: ss.is_ready(),
+        uplink_connected: ss.uplink_connected(),
+        restart_needed: true,
+    });
 }
 
 /// Apply a config section update by name.
@@ -567,13 +622,14 @@ pub async fn apply_section_update(
     payload: &serde_json::Value,
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 ) -> Result<(), (u16, String)> {
     require_object_payload(payload)?;
 
     match section {
         "general" => {
             let display_name = optional_string_field(payload, "display_name")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.display_name = display_name;
                 Ok(())
             })
@@ -593,7 +649,7 @@ pub async fn apply_section_update(
                         Some(trimmed.to_owned())
                     }
                 });
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.server = Some(crate::config::RawServerConfig {
                     base_url: Some(base_url),
                     forwarders_ws_path,
@@ -607,7 +663,7 @@ pub async fn apply_section_update(
             let token_file = require_non_empty_trimmed("token_file", token_file_opt)
                 .map_err(bad_request_error)?;
             validate_token_file(&token_file).map_err(bad_request_error)?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.auth = Some(crate::config::RawAuthConfig {
                     token_file: Some(token_file),
                 });
@@ -618,7 +674,7 @@ pub async fn apply_section_update(
         "journal" => {
             let sqlite_path = optional_string_field(payload, "sqlite_path")?;
             let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.journal = Some(crate::config::RawJournalConfig {
                     sqlite_path,
                     prune_watermark_pct,
@@ -631,7 +687,7 @@ pub async fn apply_section_update(
             let batch_mode = optional_string_field(payload, "batch_mode")?;
             let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
             let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.uplink = Some(crate::config::RawUplinkConfig {
                     batch_mode,
                     batch_flush_ms,
@@ -643,7 +699,7 @@ pub async fn apply_section_update(
         }
         "status_http" => {
             let bind = optional_string_field(payload, "bind")?;
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
                 Ok(())
             })
@@ -703,7 +759,7 @@ pub async fn apply_section_update(
                 });
             }
 
-            update_config_file(config_state, subsystem, |raw| {
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.readers = Some(raw_readers);
                 Ok(())
             })
@@ -925,18 +981,110 @@ fn get_config_state<J: JournalAccess + Send + 'static>(
     state.config_state.clone()
 }
 
+#[derive(serde::Serialize)]
+struct StatusJsonResponse {
+    forwarder_id: String,
+    version: String,
+    ready: bool,
+    ready_reason: Option<String>,
+    uplink_connected: bool,
+    restart_needed: bool,
+    readers: Vec<ReaderStatusJson>,
+}
+
+#[derive(serde::Serialize)]
+struct ReaderStatusJson {
+    ip: String,
+    state: String,
+    reads_session: u64,
+    reads_total: i64,
+    last_seen_secs: Option<u64>,
+}
+
+async fn status_json_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let ss = state.subsystem.lock().await;
+    let mut readers: Vec<_> = ss
+        .readers
+        .iter()
+        .map(|(ip, r)| {
+            let state_str = match r.state {
+                ReaderConnectionState::Connected => "connected",
+                ReaderConnectionState::Connecting => "connecting",
+                ReaderConnectionState::Disconnected => "disconnected",
+            };
+            ReaderStatusJson {
+                ip: ip.clone(),
+                state: state_str.to_owned(),
+                reads_session: r.reads_since_restart,
+                reads_total: r.reads_total,
+                last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+            }
+        })
+        .collect();
+    readers.sort_by(|a, b| a.ip.cmp(&b.ip));
+
+    let resp = StatusJsonResponse {
+        forwarder_id: ss.forwarder_id.clone(),
+        version: (*state.version).clone(),
+        ready: ss.is_ready(),
+        ready_reason: ss.reason.clone(),
+        uplink_connected: ss.uplink_connected(),
+        restart_needed: ss.restart_needed(),
+        readers,
+    };
+
+    let body = serde_json::to_string(&resp)
+        .unwrap_or_else(|_| r#"{"error":"serialization error"}"#.to_owned());
+    json_response(StatusCode::OK, body)
+}
+
+async fn events_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> axum::response::sse::Sse<
+    impl futures_util::stream::Stream<
+        Item = Result<axum::response::sse::Event, std::convert::Infallible>,
+    >,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use std::time::Duration;
+    use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+
+    let rx = state.ui_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(event) => {
+            let event_type = match &event {
+                crate::ui_events::ForwarderUiEvent::StatusChanged { .. } => "status_changed",
+                crate::ui_events::ForwarderUiEvent::ReaderUpdated { .. } => "reader_updated",
+                crate::ui_events::ForwarderUiEvent::LogEntry { .. } => "log_entry",
+                crate::ui_events::ForwarderUiEvent::UpdateAvailable { .. } => "update_available",
+            };
+            match serde_json::to_string(&event) {
+                Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
+                Err(_) => None,
+            }
+        }
+        Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
+}
+
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/readyz", get(readyz_handler::<J>))
-        .route("/", get(status_page_handler::<J>))
         .route(
-            "/api/v1/streams/:reader_ip/reset-epoch",
+            "/api/v1/streams/{reader_ip}/reset-epoch",
             post(reset_epoch_handler::<J>),
         )
         .route("/update/status", get(update_status_handler::<J>))
         .route("/update/apply", post(update_apply_handler::<J>))
-        .route("/config", get(config_page_handler::<J>))
         .route("/api/v1/config", get(config_json_handler::<J>))
         .route(
             "/api/v1/config/general",
@@ -964,7 +1112,9 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(post_config_readers_handler::<J>),
         )
         .route("/api/v1/restart", post(restart_handler::<J>))
-        .fallback(not_found_handler)
+        .route("/api/v1/status", get(status_json_handler::<J>))
+        .route("/api/v1/events", get(events_handler::<J>))
+        .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
 
@@ -982,113 +1132,6 @@ async fn readyz_handler<J: JournalAccess + Send + 'static>(
         let reason = ss.reason.clone().unwrap_or_else(|| "not ready".to_owned());
         text_response(StatusCode::SERVICE_UNAVAILABLE, reason)
     }
-}
-
-async fn status_page_handler<J: JournalAccess + Send + 'static>(
-    State(state): State<AppState<J>>,
-) -> Html<String> {
-    let (ready, uplink_connected, forwarder_id, local_ip, readers, restart_needed) = {
-        let ss = state.subsystem.lock().await;
-        let mut readers: Vec<_> = ss
-            .readers
-            .iter()
-            .map(|(ip, r)| (ip.clone(), r.clone()))
-            .collect();
-        readers.sort_by(|a, b| a.0.cmp(&b.0));
-        (
-            ss.is_ready(),
-            ss.uplink_connected(),
-            ss.forwarder_id.clone(),
-            ss.local_ip.clone(),
-            readers,
-            ss.restart_needed(),
-        )
-    };
-
-    let ready_state = if ready { "ready" } else { "not-ready" };
-    let ready_class = if ready { "ok" } else { "err" };
-    let uplink_state = if uplink_connected {
-        "connected"
-    } else {
-        "disconnected"
-    };
-    let uplink_class = if uplink_connected { "ok" } else { "err" };
-    let local_ip_display = local_ip.as_deref().unwrap_or("unknown");
-
-    let mut reader_rows = String::new();
-    for (ip, r) in &readers {
-        let (state_text, state_class) = match r.state {
-            ReaderConnectionState::Connected => ("connected", "ok"),
-            ReaderConnectionState::Connecting => ("connecting", "warn"),
-            ReaderConnectionState::Disconnected => ("disconnected", "err"),
-        };
-        let last_seen = format_last_seen(r.last_seen);
-        reader_rows.push_str(&format!(
-            "<tr><td>{ip}</td>\
-             <td><span class=\"status {sc}\">{st}</span></td>\
-             <td>{session}</td>\
-             <td>{total}</td>\
-             <td>{ls}</td></tr>",
-            ip = ip,
-            sc = state_class,
-            st = state_text,
-            session = r.reads_since_restart,
-            total = r.reads_total,
-            ls = last_seen,
-        ));
-    }
-
-    let restart_banner = if restart_needed {
-        r#"<div style="background:#fff3cd;color:#856404;border:1px solid #ffc107;padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div><script>function doRestart(btn){btn.disabled=true;btn.textContent='Restarting\u2026';fetch('/api/v1/restart',{method:'POST'}).catch(function(){});}</script>"#
-    } else {
-        ""
-    };
-
-    let html = format!(
-        "<!DOCTYPE html>\
-         <html><head><title>Forwarder Status</title>\
-         <style>\
-         body{{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem}}\
-         h1{{margin-bottom:.5rem}}\
-         h2{{margin-top:1.5rem;margin-bottom:.5rem}}\
-         .status{{padding:.25rem .5rem;border-radius:4px;display:inline-block}}\
-         .ok{{background:#d4edda;color:#155724}}\
-         .warn{{background:#fff3cd;color:#856404}}\
-         .err{{background:#f8d7da;color:#721c24}}\
-         table{{border-collapse:collapse;width:100%}}\
-         th,td{{text-align:left;padding:.4rem .6rem;border-bottom:1px solid #ddd}}\
-         th{{font-weight:600}}\
-         </style>\
-         </head><body>\
-         {restart_banner}\
-         <h1>Forwarder Status</h1>\
-         <p><a href=\"/config\">Configure</a></p>\
-         <p>Version: {version}</p>\
-         <p>Forwarder ID: <code>{fwd_id}</code></p>\
-         <p>Local IP: {local_ip}</p>\
-         <p>Readiness: <span class=\"status {rc}\">{rs}</span></p>\
-         <p>Uplink: <span class=\"status {uc}\">{us}</span></p>\
-         <h2>Readers</h2>\
-         <table>\
-         <tr><th>Reader IP</th><th>Status</th><th>Reads (session)</th><th>Reads (total)</th><th>Last seen</th></tr>\
-         {reader_rows}\
-         </table>\
-         <script>\
-         setTimeout(()=>location.reload(),2000);\
-         </script>\
-         </body></html>",
-        restart_banner = restart_banner,
-        version = *state.version,
-        fwd_id = forwarder_id,
-        local_ip = local_ip_display,
-        rs = ready_state,
-        rc = ready_class,
-        us = uplink_state,
-        uc = uplink_class,
-        reader_rows = reader_rows,
-    );
-
-    Html(html)
 }
 
 async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
@@ -1173,34 +1216,6 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
-async fn config_page_handler<J: JournalAccess + Send + 'static>(
-    State(state): State<AppState<J>>,
-) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-
-    let _lock = cs.write_lock.lock().await;
-    let raw = match std::fs::read_to_string(&cs.path) {
-        Ok(toml_str) => match toml::from_str::<crate::config::RawConfig>(&toml_str) {
-            Ok(raw) => raw,
-            Err(e) => {
-                let body = format!("Error parsing config: {}", e);
-                return text_response(StatusCode::INTERNAL_SERVER_ERROR, body);
-            }
-        },
-        Err(e) => {
-            let body = format!("Error reading config: {}", e);
-            return text_response(StatusCode::INTERNAL_SERVER_ERROR, body);
-        }
-    };
-
-    let restart_needed = state.subsystem.lock().await.restart_needed();
-    let html = render_config_page(&raw, restart_needed);
-    Html(html).into_response()
-}
-
 async fn config_json_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
@@ -1242,7 +1257,7 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("general", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("general", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1269,7 +1284,7 @@ async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("server", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("server", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1296,7 +1311,7 @@ async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("auth", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("auth", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1323,7 +1338,7 @@ async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("journal", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("journal", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1350,7 +1365,7 @@ async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("uplink", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("uplink", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1377,7 +1392,7 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("status_http", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("status_http", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1404,312 +1419,13 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("readers", &payload, &cs, &state.subsystem).await {
+    match apply_section_update("readers", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
-}
-
-async fn not_found_handler() -> Response {
-    text_response(StatusCode::NOT_FOUND, "Not Found")
-}
-
-// ---------------------------------------------------------------------------
-// Config page renderer
-// ---------------------------------------------------------------------------
-
-fn render_config_page(raw: &crate::config::RawConfig, restart_needed: bool) -> String {
-    let display_name = html_escape(raw.display_name.as_deref().unwrap_or(""));
-
-    let server = raw.server.as_ref();
-    let base_url = html_escape(server.and_then(|s| s.base_url.as_deref()).unwrap_or(""));
-    let ws_path = html_escape(
-        server
-            .and_then(|s| s.forwarders_ws_path.as_deref())
-            .unwrap_or(""),
-    );
-
-    let auth = raw.auth.as_ref();
-    let token_file = html_escape(auth.and_then(|a| a.token_file.as_deref()).unwrap_or(""));
-
-    let journal = raw.journal.as_ref();
-    let sqlite_path = html_escape(journal.and_then(|j| j.sqlite_path.as_deref()).unwrap_or(""));
-    let prune_pct = journal
-        .and_then(|j| j.prune_watermark_pct)
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-
-    let uplink = raw.uplink.as_ref();
-    let batch_mode = html_escape(uplink.and_then(|u| u.batch_mode.as_deref()).unwrap_or(""));
-    let batch_flush_ms = uplink
-        .and_then(|u| u.batch_flush_ms)
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let batch_max_events = uplink
-        .and_then(|u| u.batch_max_events)
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-
-    let status_http = raw.status_http.as_ref();
-    let bind = html_escape(status_http.and_then(|s| s.bind.as_deref()).unwrap_or(""));
-
-    // Build reader rows.
-    let mut reader_rows = String::new();
-    if let Some(readers) = &raw.readers {
-        for r in readers {
-            let target = html_escape(r.target.as_deref().unwrap_or(""));
-            let enabled = r.enabled.unwrap_or(true);
-            let checked = if enabled { "checked" } else { "" };
-            let fallback_port = html_escape(
-                &r.local_fallback_port
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-            );
-
-            reader_rows.push_str(&format!(
-                "<tr class=\"reader-row\">\
-                 <td><input type=\"text\" name=\"target\" value=\"{target}\" required></td>\
-                 <td><input type=\"checkbox\" name=\"enabled\" {checked}></td>\
-                 <td><input type=\"number\" name=\"local_fallback_port\" value=\"{fallback_port}\" min=\"1\" max=\"65535\"></td>\
-                 <td><button type=\"button\" onclick=\"removeReader(this)\">Remove</button></td>\
-                 </tr>",
-                target = target,
-                checked = checked,
-                fallback_port = fallback_port,
-            ));
-        }
-    }
-
-    let restart_banner = if restart_needed {
-        r#"<div class="banner warn">Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button></div>"#
-    } else {
-        ""
-    };
-
-    format!(
-        r#"<!DOCTYPE html>
-<html><head><title>Forwarder Configuration</title>
-<style>
-body{{font-family:system-ui,sans-serif;max-width:700px;margin:2rem auto;padding:0 1rem}}
-h1{{margin-bottom:.5rem}}
-h2{{margin-top:1.5rem;margin-bottom:.5rem;font-size:1.1rem}}
-.card{{border:1px solid #ddd;border-radius:6px;padding:1rem;margin-bottom:1rem}}
-label{{display:block;margin:.5rem 0 .2rem;font-weight:500}}
-input[type="text"],input[type="number"],select{{width:100%;padding:.4rem;box-sizing:border-box;border:1px solid #ccc;border-radius:3px}}
-button{{padding:.4rem .8rem;border:1px solid #ccc;border-radius:3px;cursor:pointer;background:#f8f8f8}}
-button:hover{{background:#e8e8e8}}
-button.save{{background:#d4edda;border-color:#155724;color:#155724}}
-button.save:hover{{background:#c3e6cb}}
-table{{border-collapse:collapse;width:100%}}
-th,td{{text-align:left;padding:.3rem .4rem;border-bottom:1px solid #ddd}}
-th{{font-weight:600;font-size:.9rem}}
-.msg{{padding:.5rem;border-radius:4px;margin-top:.5rem;display:none}}
-.msg.ok{{background:#d4edda;color:#155724;display:block}}
-.msg.err{{background:#f8d7da;color:#721c24;display:block}}
-.banner{{padding:.75rem 1rem;border-radius:4px;margin-bottom:1rem}}
-.banner.warn{{background:#fff3cd;color:#856404;border:1px solid #ffc107}}
-a{{color:#0366d6;text-decoration:none}}
-a:hover{{text-decoration:underline}}
-</style>
-</head><body>
-<h1>Forwarder Configuration</h1>
-<p><a href="/">← Back to Status</a></p>
-{restart_banner}
-
-<div class="card">
-<h2>General</h2>
-<form id="form-general" onsubmit="return saveSection('/api/v1/config/general','form-general')">
-<label>Display Name</label>
-<input type="text" name="display_name" value="{display_name}">
-<br><button type="submit" class="save">Save General</button>
-<div id="msg-general" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Server</h2>
-<form id="form-server" onsubmit="return saveSection('/api/v1/config/server','form-server')">
-<label>Base URL *</label>
-<input type="text" name="base_url" value="{base_url}" required>
-<label>Forwarders WS Path</label>
-<input type="text" name="forwarders_ws_path" value="{ws_path}">
-<br><button type="submit" class="save">Save Server</button>
-<div id="msg-server" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Auth</h2>
-<form id="form-auth" onsubmit="return saveSection('/api/v1/config/auth','form-auth')">
-<label>Token File Path *</label>
-<input type="text" name="token_file" value="{token_file}" required>
-<br><button type="submit" class="save">Save Auth</button>
-<div id="msg-auth" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Journal</h2>
-<form id="form-journal" onsubmit="return saveSection('/api/v1/config/journal','form-journal')">
-<label>SQLite Path</label>
-<input type="text" name="sqlite_path" value="{sqlite_path}">
-<label>Prune Watermark %</label>
-<input type="number" name="prune_watermark_pct" value="{prune_pct}" min="0" max="100">
-<br><button type="submit" class="save">Save Journal</button>
-<div id="msg-journal" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Uplink</h2>
-<form id="form-uplink" onsubmit="return saveSection('/api/v1/config/uplink','form-uplink')">
-<label>Batch Mode</label>
-<input type="text" name="batch_mode" value="{batch_mode}">
-<label>Batch Flush (ms)</label>
-<input type="number" name="batch_flush_ms" value="{batch_flush_ms}" min="1">
-<label>Batch Max Events</label>
-<input type="number" name="batch_max_events" value="{batch_max_events}" min="1">
-<br><button type="submit" class="save">Save Uplink</button>
-<div id="msg-uplink" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Status HTTP</h2>
-<form id="form-status_http" onsubmit="return saveSection('/api/v1/config/status_http','form-status_http')">
-<label>Bind Address</label>
-<input type="text" name="bind" value="{bind}">
-<br><button type="submit" class="save">Save Status HTTP</button>
-<div id="msg-status_http" class="msg"></div>
-</form>
-</div>
-
-<div class="card">
-<h2>Readers</h2>
-<table id="readers-table">
-<tr><th>Target *</th><th>Enabled</th><th>Fallback Port</th><th></th></tr>
-{reader_rows}
-</table>
-<button type="button" onclick="addReader()">+ Add Reader</button>
-<button type="button" class="save" onclick="saveReaders()">Save Readers</button>
-<div id="msg-readers" class="msg"></div>
-</div>
-
-<script>
-function saveSection(endpoint, formId) {{
-  var form = document.getElementById(formId);
-  var data = {{}};
-  var inputs = form.querySelectorAll('input,select');
-  for (var i = 0; i < inputs.length; i++) {{
-    var inp = inputs[i];
-    if (!inp.name) continue;
-    if (inp.type === 'number') {{
-      data[inp.name] = inp.value ? Number(inp.value) : null;
-    }} else if (inp.type === 'checkbox') {{
-      data[inp.name] = inp.checked;
-    }} else {{
-      data[inp.name] = inp.value || null;
-    }}
-  }}
-  fetch(endpoint, {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify(data)
-  }}).then(function(r) {{ return r.json(); }}).then(function(j) {{
-    var msgId = 'msg-' + formId.replace('form-','');
-    var msg = document.getElementById(msgId);
-    if (j.ok) {{
-      msg.className = 'msg ok';
-      msg.textContent = 'Saved. Restart to apply.';
-      showRestartBanner();
-    }} else {{
-      msg.className = 'msg err';
-      msg.textContent = j.error || 'Unknown error';
-    }}
-  }}).catch(function(e) {{
-    alert('Request failed: ' + e);
-  }});
-  return false;
-}}
-
-function saveReaders() {{
-  var rows = document.querySelectorAll('.reader-row');
-  var readers = [];
-  for (var i = 0; i < rows.length; i++) {{
-    var row = rows[i];
-    var entry = {{}};
-    entry.target = row.querySelector('[name=target]').value || null;
-    entry.enabled = row.querySelector('[name=enabled]').checked;
-    var port = row.querySelector('[name=local_fallback_port]').value;
-    entry.local_fallback_port = port ? Number(port) : null;
-    readers.push(entry);
-  }}
-  fetch('/api/v1/config/readers', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{readers: readers}})
-  }}).then(function(r) {{ return r.json(); }}).then(function(j) {{
-    var msg = document.getElementById('msg-readers');
-    if (j.ok) {{
-      msg.className = 'msg ok';
-      msg.textContent = 'Saved. Restart to apply.';
-      showRestartBanner();
-    }} else {{
-      msg.className = 'msg err';
-      msg.textContent = j.error || 'Unknown error';
-    }}
-  }}).catch(function(e) {{
-    alert('Request failed: ' + e);
-  }});
-}}
-
-function addReader() {{
-  var table = document.getElementById('readers-table');
-  var row = document.createElement('tr');
-  row.className = 'reader-row';
-  row.innerHTML = '<td><input type="text" name="target" required></td>' +
-    '<td><input type="checkbox" name="enabled" checked></td>' +
-    '<td><input type="number" name="local_fallback_port" min="1" max="65535"></td>' +
-    '<td><button type="button" onclick="removeReader(this)">Remove</button></td>';
-  table.appendChild(row);
-}}
-
-function removeReader(el) {{
-  el.closest('tr').remove();
-}}
-
-function showRestartBanner() {{
-  if (!document.querySelector('.banner')) {{
-    var banner = document.createElement('div');
-    banner.className = 'banner warn';
-    banner.innerHTML = 'Configuration changed. Restart the forwarder to apply changes. <button onclick="doRestart(this)" style="margin-left:.5rem;padding:.25rem .6rem;border:1px solid #856404;border-radius:3px;background:#ffc107;color:#856404;cursor:pointer">Restart Now</button>';
-    document.querySelector('h1').after(banner);
-  }}
-}}
-
-function doRestart(btn) {{
-  btn.disabled = true;
-  btn.textContent = 'Restarting\u2026';
-  fetch('/api/v1/restart', {{method: 'POST'}}).catch(function(){{}});
-}}
-</script>
-</body></html>"#,
-        restart_banner = restart_banner,
-        display_name = display_name,
-        base_url = base_url,
-        ws_path = ws_path,
-        token_file = token_file,
-        sqlite_path = sqlite_path,
-        prune_pct = prune_pct,
-        batch_mode = batch_mode,
-        batch_flush_ms = batch_flush_ms,
-        batch_max_events = batch_max_events,
-        bind = bind,
-        reader_rows = reader_rows,
-    )
 }
 
 fn apply_via_restart_enabled() -> bool {
@@ -1792,6 +1508,165 @@ mod tests {
             saw_failed,
             "status never became failed, last response: {last_body}"
         );
+    }
+
+    #[tokio::test]
+    async fn status_json_returns_forwarder_state() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.set_forwarder_id("fwd-abc123").await;
+        server.init_readers(&["192.168.1.10".to_owned()]).await;
+        server
+            .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
+            .await;
+
+        let addr = server.local_addr();
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/v1/status", addr))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["forwarder_id"], "fwd-abc123");
+        assert_eq!(body["version"], "0.2.0");
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["uplink_connected"], false);
+        assert_eq!(body["restart_needed"], false);
+        assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
+        assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn set_ready_broadcasts_status_changed() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::not_ready("starting".to_owned()),
+        )
+        .await
+        .expect("start status server");
+
+        let mut rx = server.ui_tx.subscribe();
+        server.set_ready().await;
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::StatusChanged { ready, .. } => {
+                assert!(ready);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_update_status_downloaded_broadcasts_update_available() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let mut rx = server.ui_tx.subscribe();
+        server
+            .set_update_status(UpdateStatus::Downloaded {
+                version: "1.2.3".to_owned(),
+            })
+            .await;
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::UpdateAvailable {
+                version,
+                current_version,
+            } => {
+                assert_eq!(version, "1.2.3");
+                assert_eq!(current_version, env!("CARGO_PKG_VERSION"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_save_broadcasts_status_changed_restart_needed() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+display_name = "Start Line"
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let mut rx = server.ui_tx.subscribe();
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/general",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"display_name":"Updated"}"#)
+            .send()
+            .await
+            .expect("post config");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::StatusChanged { restart_needed, .. } => {
+                assert!(restart_needed);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

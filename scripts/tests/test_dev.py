@@ -1,7 +1,9 @@
 import argparse
+import tempfile
 import sys
 import unittest
 import urllib.error
+from pathlib import Path
 from unittest.mock import patch
 
 import scripts.dev as dev
@@ -101,8 +103,7 @@ class BuildForwarderTomlTests(unittest.TestCase):
         )
         self.assertIn('target              = "127.0.0.1:10001"', text)
         self.assertIn('target              = "127.0.0.1:10002"', text)
-        self.assertIn('read_type           = "raw"', text)
-        self.assertIn('read_type           = "fsls"', text)
+        self.assertNotIn("read_type", text)
 
 
 class MainValidationTests(unittest.TestCase):
@@ -263,6 +264,65 @@ class DetectAndLaunchTests(unittest.TestCase):
 
         auto_config_mock.assert_called_once_with()
         launch_iterm2_mock.assert_called_once()
+
+
+class SetupOrderingTests(unittest.TestCase):
+    @patch("scripts.dev.seed_tokens")
+    @patch("scripts.dev.write_config_files")
+    @patch("scripts.dev.apply_migrations")
+    @patch("scripts.dev.wait_for_postgres")
+    @patch("scripts.dev.start_postgres")
+    @patch("scripts.dev.check_prereqs")
+    @patch("scripts.dev.npm_install")
+    @patch("scripts.dev.build_rust")
+    def test_setup_installs_npm_before_rust_build(
+        self,
+        build_rust_mock,
+        npm_install_mock,
+        _check_prereqs_mock,
+        _start_postgres_mock,
+        _wait_for_postgres_mock,
+        _apply_migrations_mock,
+        _write_config_files_mock,
+        _seed_tokens_mock,
+    ) -> None:
+        call_order: list[str] = []
+        npm_install_mock.side_effect = lambda: call_order.append("npm_install")
+        build_rust_mock.side_effect = lambda skip_build: call_order.append(
+            f"build_rust({skip_build})"
+        )
+
+        dev.setup(skip_build=False, emulators=[dev.EmulatorSpec(port=10001)])
+
+        self.assertEqual(call_order[0], "npm_install")
+        self.assertEqual(call_order[1], "build_rust(False)")
+
+
+class NpmInstallTests(unittest.TestCase):
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.subprocess.run")
+    def test_npm_install_runs_once_in_workspace_root_when_missing(
+        self, run_mock, _print_mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            with patch.object(dev, "REPO_ROOT", repo_root):
+                dev.npm_install()
+
+        run_mock.assert_called_once_with(["npm", "install"], check=True, cwd=repo_root)
+
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.subprocess.run")
+    def test_npm_install_skips_when_workspace_node_modules_exists(
+        self, run_mock, _print_mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "node_modules").mkdir()
+            with patch.object(dev, "REPO_ROOT", repo_root):
+                dev.npm_install()
+
+        run_mock.assert_not_called()
 
 
 class StartReceiverAutoConfigTests(unittest.TestCase):

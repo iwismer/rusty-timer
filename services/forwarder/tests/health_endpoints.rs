@@ -336,7 +336,7 @@ async fn epoch_reset_unknown_stream_returns_404() {
 }
 
 #[tokio::test]
-async fn status_page_returns_html() {
+async fn status_json_returns_version() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
@@ -349,21 +349,16 @@ async fn status_page_returns_html() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, body) = http_get(addr, "/").await;
-    assert_eq!(status, 200, "status page must return 200");
-    assert!(
-        body.contains("text/html"),
-        "response must be HTML content-type, got: {}",
-        &body[..200.min(body.len())]
-    );
+    let (status, body) = http_get(addr, "/api/v1/status").await;
+    assert_eq!(status, 200, "status JSON must return 200");
     assert!(
         body.contains("0.1.0-test"),
-        "status page must include forwarder version"
+        "status JSON must include forwarder version"
     );
 }
 
 #[tokio::test]
-async fn unknown_path_returns_404() {
+async fn unknown_api_path_returns_404() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
@@ -376,12 +371,48 @@ async fn unknown_path_returns_404() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, _) = http_get(addr, "/no/such/path").await;
-    assert_eq!(status, 404, "unknown path must return 404");
+    let (status, _) = http_get(addr, "/api/no/such/path").await;
+    assert_eq!(status, 404, "unknown API path must return 404");
 }
 
 #[tokio::test]
-async fn status_page_shows_forwarder_id() {
+async fn unknown_update_path_returns_404() {
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start(cfg, subsystem)
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_get(addr, "/update/no/such/path").await;
+    assert_eq!(status, 404, "unknown update path must return 404");
+}
+
+#[tokio::test]
+async fn bare_update_path_returns_404() {
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let server = StatusServer::start(cfg, subsystem)
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_get(addr, "/update").await;
+    assert_eq!(status, 404, "bare update path must return 404");
+}
+
+#[tokio::test]
+async fn status_json_shows_forwarder_id() {
     let cfg = StatusConfig {
         bind: "127.0.0.1:0".to_owned(),
         forwarder_version: "0.1.0-test".to_owned(),
@@ -394,16 +425,16 @@ async fn status_page_shows_forwarder_id() {
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, body) = http_get(addr, "/").await;
+    let (status, body) = http_get(addr, "/api/v1/status").await;
     assert_eq!(status, 200);
     assert!(
         body.contains("fwd-abc123"),
-        "status page must show forwarder ID"
+        "status JSON must show forwarder ID"
     );
 }
 
 #[tokio::test]
-async fn status_page_shows_reader_status() {
+async fn status_json_shows_reader_status() {
     use forwarder::status_http::ReaderConnectionState;
 
     let cfg = StatusConfig {
@@ -423,12 +454,12 @@ async fn status_page_shows_reader_status() {
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, body) = http_get(addr, "/").await;
+    let (status, body) = http_get(addr, "/api/v1/status").await;
     assert_eq!(status, 200);
-    assert!(body.contains("10.0.0.1"), "status page must show reader IP");
+    assert!(body.contains("10.0.0.1"), "status JSON must show reader IP");
     assert!(
         body.contains("connected"),
-        "status page must show connection state"
+        "status JSON must show connection state"
     );
 }
 
@@ -449,12 +480,12 @@ async fn record_read_increments_counter() {
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, body) = http_get(addr, "/").await;
+    let (status, body) = http_get(addr, "/api/v1/status").await;
     assert_eq!(status, 200);
-    // The page should show "5" as the session read count in a table cell
+    // The JSON response should show reads_session of 5
     assert!(
-        body.contains(">5<"),
-        "status page must show session read count of 5"
+        body.contains("\"reads_session\":5"),
+        "status JSON must show session read count of 5"
     );
 }
 

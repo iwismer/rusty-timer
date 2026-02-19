@@ -1,9 +1,13 @@
 import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
-import type { StatusResponse, StreamsResponse } from "./api";
+import type { ReaderStatus } from "./api";
 
-export type SseCallbacks = {
-  onStatusChanged: (status: StatusResponse) => void;
-  onStreamsSnapshot: (streams: StreamsResponse) => void;
+export type ForwarderSseCallbacks = {
+  onStatusChanged: (data: {
+    ready: boolean;
+    uplink_connected: boolean;
+    restart_needed: boolean;
+  }) => void;
+  onReaderUpdated: (reader: ReaderStatus) => void;
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
@@ -12,7 +16,7 @@ export type SseCallbacks = {
 
 let handle: SseHandle | null = null;
 
-export function initSSE(callbacks: SseCallbacks): void {
+export function initSSE(callbacks: ForwarderSseCallbacks): void {
   if (handle) return;
 
   handle = createSSE(
@@ -20,17 +24,13 @@ export function initSSE(callbacks: SseCallbacks): void {
     {
       status_changed: (data: any) => {
         callbacks.onStatusChanged({
-          connection_state: data.connection_state,
-          local_ok: true,
-          streams_count: data.streams_count,
+          ready: data.ready,
+          uplink_connected: data.uplink_connected,
+          restart_needed: data.restart_needed,
         });
       },
-      streams_snapshot: (data: any) => {
-        callbacks.onStreamsSnapshot({
-          streams: data.streams,
-          degraded: data.degraded,
-          upstream_error: data.upstream_error ?? null,
-        });
+      reader_updated: (data: any) => {
+        callbacks.onReaderUpdated(data as ReaderStatus);
       },
       log_entry: (data: any) => {
         callbacks.onLogEntry(data.entry);

@@ -5,14 +5,27 @@ echo "--- pre-commit: running checks ---"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
-# 1. Strip 'resolved' entries from all package-lock.json files
-# This keeps package-lock diffs clean and avoids leaking internal registry URLs.
+# 1. Strip registry URL 'resolved' entries from all package-lock.json files.
+# Keep local workspace "resolved" paths (e.g. "apps/shared-ui") because npm
+# needs them to resolve workspace links.
 for lockfile in \
+  "$REPO_ROOT/package-lock.json" \
   "$REPO_ROOT/apps/dashboard/package-lock.json" \
   "$REPO_ROOT/apps/receiver-ui/package-lock.json"; do
   if [ -f "$lockfile" ] && command -v jq &>/dev/null; then
-    echo "  Cleaning resolved fields from ${lockfile##$REPO_ROOT/} ..."
-    jq 'walk(if type == "object" then with_entries(select(.key | test("resolved") | not)) else . end)' \
+    echo "  Cleaning registry resolved fields from ${lockfile##$REPO_ROOT/} ..."
+    jq 'walk(
+      if type == "object" then
+        with_entries(
+          select(
+            .key != "resolved" or
+            (.value | type) != "string" or
+            (.value | test("^https?://") | not)
+          )
+        )
+      else .
+      end
+    )' \
       "$lockfile" > /tmp/package-lock-clean.json && \
     mv /tmp/package-lock-clean.json "$lockfile"
     git add "$lockfile"
@@ -48,6 +61,10 @@ staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
 # 4. JS/TS checks for touched frontend apps (blocking)
 if echo "$staged_files" | grep -q '^apps/dashboard/'; then
   run_js_checks "$REPO_ROOT/apps/dashboard"
+fi
+
+if echo "$staged_files" | grep -q '^apps/forwarder-ui/'; then
+  run_js_checks "$REPO_ROOT/apps/forwarder-ui"
 fi
 
 if echo "$staged_files" | grep -q '^apps/receiver-ui/'; then

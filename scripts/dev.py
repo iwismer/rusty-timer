@@ -165,10 +165,9 @@ PANES_BEFORE_EMULATOR = [
 ]
 
 PANES_AFTER_EMULATOR = [
-    ("Forwarder", f"cargo run -p forwarder -- --config {FORWARDER_TOML_PATH}"),
-    ("Receiver",     "cargo run -p receiver"),
+    ("Forwarder", f"cargo run -p forwarder --features embed-ui -- --config {FORWARDER_TOML_PATH}"),
+    ("Receiver",     "cargo run -p receiver --features embed-ui"),
     ("Dashboard",    "cd apps/dashboard && npm run dev"),
-    ("Receiver UI",  "cd apps/receiver-ui && npm run dev"),
 ]
 
 FORWARDER_TOML_HEADER = f"""\
@@ -514,7 +513,7 @@ def build_rust(skip_build: bool) -> None:
         return
     console.print("[bold]Building Rust binaries…[/bold]")
     subprocess.run(
-        ["cargo", "build", "-p", "server", "-p", "forwarder", "-p", "receiver", "-p", "emulator"],
+        ["cargo", "build", "-p", "server", "-p", "forwarder", "--features", "forwarder/embed-ui", "-p", "receiver", "--features", "receiver/embed-ui", "-p", "emulator"],
         check=True,
         cwd=REPO_ROOT,
     )
@@ -522,14 +521,13 @@ def build_rust(skip_build: bool) -> None:
 
 
 def npm_install() -> None:
-    for app_name in ("dashboard", "receiver-ui"):
-        app_dir = REPO_ROOT / "apps" / app_name
-        if (app_dir / "node_modules").exists():
-            console.print(f"[dim]node_modules present in apps/{app_name} — skipping npm install.[/dim]")
-        else:
-            console.print(f"[bold]Running npm install in apps/{app_name}…[/bold]")
-            subprocess.run(["npm", "install"], check=True, cwd=app_dir)
-            console.print("  [green]npm install complete.[/green]")
+    if (REPO_ROOT / "node_modules").exists():
+        console.print("[dim]node_modules present in workspace root — skipping npm install.[/dim]")
+        return
+
+    console.print("[bold]Running npm install in workspace root…[/bold]")
+    subprocess.run(["npm", "install"], check=True, cwd=REPO_ROOT)
+    console.print("  [green]npm install complete.[/green]")
 
 
 def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None) -> None:
@@ -539,8 +537,8 @@ def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None)
     apply_migrations()
     write_config_files(emulators or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)])
     seed_tokens()
-    build_rust(skip_build=skip_build)
     npm_install()
+    build_rust(skip_build=skip_build)
 
 
 # ---------------------------------------------------------------------------

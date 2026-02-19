@@ -1,4 +1,8 @@
-import type { UpdateStatusResponse } from "./api";
+export type UpdateStatusResponse = {
+  status: "up_to_date" | "available" | "downloaded" | "failed";
+  version?: string;
+  error?: string;
+};
 
 export type ApplyResult =
   | { outcome: "applied" }

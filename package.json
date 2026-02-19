@@ -1,0 +1,13 @@
+{
+  "packageManager": "npm@10.8.2",
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
+  },
+  "private": true,
+  "workspaces": [
+    "apps/shared-ui",
+    "apps/forwarder-ui",
+    "apps/receiver-ui"
+  ]
+}

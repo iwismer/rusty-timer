@@ -7,20 +7,20 @@ fn main() {
         return;
     }
 
-    let ui_dir = Path::new("../../apps/receiver-ui");
+    let ui_dir = Path::new("../../apps/forwarder-ui");
     assert!(
         ui_dir.join("package.json").exists(),
-        "Cannot find apps/receiver-ui/package.json — run from the workspace root"
+        "Cannot find apps/forwarder-ui/package.json — run from the workspace root"
     );
 
     // Rerun when frontend source changes.
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/package.json");
+    println!("cargo:rerun-if-changed=../../apps/forwarder-ui/package.json");
     println!("cargo:rerun-if-changed=../../package-lock.json");
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/tsconfig.json");
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/src");
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/static");
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/svelte.config.js");
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/vite.config.ts");
+    println!("cargo:rerun-if-changed=../../apps/forwarder-ui/tsconfig.json");
+    println!("cargo:rerun-if-changed=../../apps/forwarder-ui/src");
+    println!("cargo:rerun-if-changed=../../apps/forwarder-ui/static");
+    println!("cargo:rerun-if-changed=../../apps/forwarder-ui/svelte.config.js");
+    println!("cargo:rerun-if-changed=../../apps/forwarder-ui/vite.config.ts");
     println!("cargo:rerun-if-changed=../../apps/shared-ui/src");
 
     // Verify that dependencies are installed (dev.py / CI handles npm install
