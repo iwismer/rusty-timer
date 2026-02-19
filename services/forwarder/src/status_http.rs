@@ -1024,6 +1024,114 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
                 .await;
             }
         },
+        ("POST", "/api/v1/config/readers") => match &config_state {
+            Some(cs) => {
+                let body_str = match extract_request_body(request) {
+                    Some(b) => b,
+                    None => {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            "{\"ok\":false,\"error\":\"missing request body\"}",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+
+                #[derive(serde::Deserialize)]
+                struct ReaderEntry {
+                    target: Option<String>,
+                    read_type: Option<String>,
+                    enabled: Option<bool>,
+                    local_fallback_port: Option<u16>,
+                }
+
+                #[derive(serde::Deserialize)]
+                struct ReadersUpdate {
+                    readers: Vec<ReaderEntry>,
+                }
+
+                let update: ReadersUpdate = match serde_json::from_str(body_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let body = format!("{{\"ok\":false,\"error\":\"Invalid JSON: {}\"}}", e);
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                };
+
+                if update.readers.is_empty() {
+                    send_response(
+                        &mut stream,
+                        400,
+                        "application/json",
+                        "{\"ok\":false,\"error\":\"at least one reader is required\"}",
+                    )
+                    .await;
+                    return;
+                }
+
+                // Validate all targets before writing
+                for (i, r) in update.readers.iter().enumerate() {
+                    let target = match &r.target {
+                        Some(t) => t,
+                        None => {
+                            let body = format!(
+                                "{{\"ok\":false,\"error\":\"readers[{}].target is required\"}}",
+                                i
+                            );
+                            send_response(&mut stream, 400, "application/json", &body).await;
+                            return;
+                        }
+                    };
+                    if let Err(e) = crate::discovery::expand_target(target) {
+                        let body = format!(
+                            "{{\"ok\":false,\"error\":\"readers[{}].target invalid: {}\"}}",
+                            i, e
+                        );
+                        send_response(&mut stream, 400, "application/json", &body).await;
+                        return;
+                    }
+                }
+
+                let raw_readers: Vec<crate::config::RawReaderConfig> = update
+                    .readers
+                    .into_iter()
+                    .map(|r| crate::config::RawReaderConfig {
+                        target: r.target,
+                        read_type: r.read_type,
+                        enabled: r.enabled,
+                        local_fallback_port: r.local_fallback_port,
+                    })
+                    .collect();
+
+                let _lock = cs.write_lock.lock().await;
+                match update_config_file(cs, &subsystem, |raw| {
+                    raw.readers = Some(raw_readers);
+                    Ok(())
+                })
+                .await
+                {
+                    Ok(()) => {
+                        send_response(&mut stream, 200, "application/json", "{\"ok\":true}").await;
+                    }
+                    Err((status_code, body)) => {
+                        send_response(&mut stream, status_code, "application/json", &body).await;
+                    }
+                }
+            }
+            None => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain",
+                    "Config editing not available",
+                )
+                .await;
+            }
+        },
         ("GET", "/api/v1/config") => match &config_state {
             Some(cs) => {
                 let _lock = cs.write_lock.lock().await;
