@@ -15,20 +15,21 @@ fn main() {
 
     // Rerun when frontend source changes.
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/package.json");
-    println!("cargo:rerun-if-changed=../../apps/receiver-ui/package-lock.json");
+    println!("cargo:rerun-if-changed=../../package-lock.json");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/tsconfig.json");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/src");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/static");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/svelte.config.js");
     println!("cargo:rerun-if-changed=../../apps/receiver-ui/vite.config.ts");
+    println!("cargo:rerun-if-changed=../../apps/shared-ui/src");
 
-    // npm ci — install dependencies.
-    let status = Command::new("npm")
-        .args(["ci"])
-        .current_dir(ui_dir)
-        .status()
-        .expect("failed to run npm ci — is Node.js installed?");
-    assert!(status.success(), "npm ci failed");
+    // Verify that dependencies are installed (dev.py / CI handles npm install
+    // before cargo build; we just need to run the build here).
+    let workspace_root = Path::new("../../");
+    assert!(
+        workspace_root.join("node_modules").exists(),
+        "node_modules not found — run `npm install` from the workspace root first"
+    );
 
     // npm run build — produce static assets in build/.
     let status = Command::new("npm")

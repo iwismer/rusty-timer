@@ -166,9 +166,8 @@ PANES_BEFORE_EMULATOR = [
 
 PANES_AFTER_EMULATOR = [
     ("Forwarder", f"cargo run -p forwarder --features embed-ui -- --config {FORWARDER_TOML_PATH}"),
-    ("Receiver",     "cargo run -p receiver"),
+    ("Receiver",     "cargo run -p receiver --features embed-ui"),
     ("Dashboard",    "cd apps/dashboard && npm run dev"),
-    ("Receiver UI",  "cd apps/receiver-ui && npm run dev"),
 ]
 
 FORWARDER_TOML_HEADER = f"""\
@@ -514,7 +513,7 @@ def build_rust(skip_build: bool) -> None:
         return
     console.print("[bold]Building Rust binaries…[/bold]")
     subprocess.run(
-        ["cargo", "build", "-p", "server", "-p", "forwarder", "--features", "forwarder/embed-ui", "-p", "receiver", "-p", "emulator"],
+        ["cargo", "build", "-p", "server", "-p", "forwarder", "--features", "forwarder/embed-ui", "-p", "receiver", "--features", "receiver/embed-ui", "-p", "emulator"],
         check=True,
         cwd=REPO_ROOT,
     )
