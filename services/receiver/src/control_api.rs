@@ -456,6 +456,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
         .route("/api/v1/events", get(crate::sse::receiver_sse))
+        .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
 

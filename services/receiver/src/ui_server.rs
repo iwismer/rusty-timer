@@ -41,7 +41,7 @@ pub async fn serve_ui(uri: axum::http::Uri) -> Response {
                 .into_response();
         }
 
-        return StatusCode::NOT_FOUND.into_response();
+        StatusCode::NOT_FOUND.into_response()
     }
 
     #[cfg(not(feature = "embed-ui"))]
