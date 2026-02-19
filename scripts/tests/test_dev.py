@@ -1,4 +1,5 @@
 import argparse
+import shlex
 import tempfile
 import sys
 import unittest
@@ -274,10 +275,12 @@ class SetupOrderingTests(unittest.TestCase):
     @patch("scripts.dev.start_postgres")
     @patch("scripts.dev.check_prereqs")
     @patch("scripts.dev.npm_install")
+    @patch("scripts.dev.build_dashboard")
     @patch("scripts.dev.build_rust")
     def test_setup_installs_npm_before_rust_build(
         self,
         build_rust_mock,
+        build_dashboard_mock,
         npm_install_mock,
         _check_prereqs_mock,
         _start_postgres_mock,
@@ -288,6 +291,9 @@ class SetupOrderingTests(unittest.TestCase):
     ) -> None:
         call_order: list[str] = []
         npm_install_mock.side_effect = lambda: call_order.append("npm_install")
+        build_dashboard_mock.side_effect = lambda skip_build: call_order.append(
+            f"build_dashboard({skip_build})"
+        )
         build_rust_mock.side_effect = lambda skip_build: call_order.append(
             f"build_rust({skip_build})"
         )
@@ -295,7 +301,8 @@ class SetupOrderingTests(unittest.TestCase):
         dev.setup(skip_build=False, emulators=[dev.EmulatorSpec(port=10001)])
 
         self.assertEqual(call_order[0], "npm_install")
-        self.assertEqual(call_order[1], "build_rust(False)")
+        self.assertEqual(call_order[1], "build_dashboard(False)")
+        self.assertEqual(call_order[2], "build_rust(False)")
 
 
 class NpmInstallTests(unittest.TestCase):
@@ -323,6 +330,42 @@ class NpmInstallTests(unittest.TestCase):
                 dev.npm_install()
 
         run_mock.assert_not_called()
+
+
+class BuildDashboardTests(unittest.TestCase):
+    @patch("scripts.dev.subprocess.run")
+    def test_build_dashboard_installs_workspace_before_build(self, run_mock) -> None:
+        dev.build_dashboard(skip_build=False)
+
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["npm", "install", "--workspace=apps/dashboard"],
+        )
+        self.assertEqual(
+            run_mock.call_args_list[1].args[0],
+            ["npm", "run", "build", "--workspace=apps/dashboard"],
+        )
+        for call in run_mock.call_args_list:
+            self.assertTrue(call.kwargs["check"])
+            self.assertEqual(call.kwargs["cwd"], dev.REPO_ROOT)
+
+    @patch("scripts.dev.subprocess.run")
+    def test_build_dashboard_skips_subprocess_when_no_build(self, run_mock) -> None:
+        dev.build_dashboard(skip_build=True)
+        run_mock.assert_not_called()
+
+
+class BuildPanesTests(unittest.TestCase):
+    def test_server_pane_uses_current_repo_root_with_shell_safe_dashboard_dir(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="repo with spaces ") as tmp:
+            repo_root = Path(tmp)
+            with patch.object(dev, "REPO_ROOT", repo_root):
+                panes = dev.build_panes([dev.EmulatorSpec(port=10001)])
+
+        server_cmd = next(cmd for title, cmd in panes if title == "Server")
+        expected_dashboard_dir = shlex.quote(str(repo_root / "apps" / "dashboard" / "build"))
+        self.assertIn(f"DASHBOARD_DIR={expected_dashboard_dir}", server_cmd)
 
 
 class StartReceiverAutoConfigTests(unittest.TestCase):

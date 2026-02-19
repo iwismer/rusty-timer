@@ -2,6 +2,7 @@
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
@@ -28,6 +29,40 @@ async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
             .unwrap();
     });
     addr
+}
+
+fn make_lazy_pool() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
+        .expect("lazy pool")
+}
+
+async fn make_server_with_dashboard(dashboard_dir: PathBuf) -> std::net::SocketAddr {
+    let app_state = server::AppState::new(make_lazy_pool());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            server::build_router(app_state, Some(dashboard_dir)),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
+fn write_dashboard_fixture() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rt-dashboard-fixture-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create dashboard fixture dir");
+    std::fs::write(
+        dir.join("index.html"),
+        "<!doctype html><html><body>dashboard-marker</body></html>",
+    )
+    .expect("write dashboard index");
+    std::fs::write(dir.join("app.js"), "console.log('dashboard')").expect("write dashboard asset");
+    dir
 }
 
 #[tokio::test]
@@ -496,4 +531,61 @@ async fn test_forwarder_display_name_refreshes_all_forwarder_streams() {
         assert_eq!(stream["forwarder_id"], "fwd-dn-refresh-all");
         assert_eq!(stream["forwarder_display_name"], "Finish Line");
     }
+}
+
+#[tokio::test]
+async fn test_dashboard_fallback_unknown_api_path_stays_not_found() {
+    let dashboard_dir = write_dashboard_fixture();
+    let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
+
+    let resp = reqwest::get(format!("http://{}/api/v1/does-not-exist", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+    std::fs::remove_dir_all(dashboard_dir).ok();
+}
+
+#[tokio::test]
+async fn test_dashboard_fallback_unknown_ws_path_stays_not_found() {
+    let dashboard_dir = write_dashboard_fixture();
+    let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
+
+    let resp = reqwest::get(format!("http://{}/ws/v1/does-not-exist", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+    std::fs::remove_dir_all(dashboard_dir).ok();
+}
+
+#[tokio::test]
+async fn test_dashboard_fallback_route_like_path_serves_index_html() {
+    let dashboard_dir = write_dashboard_fixture();
+    let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
+
+    let resp = reqwest::get(format!("http://{}/settings", addr))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("dashboard-marker"));
+    std::fs::remove_dir_all(dashboard_dir).ok();
+}
+
+#[tokio::test]
+async fn test_dashboard_fallback_ui_paths_reject_post_method() {
+    let dashboard_dir = write_dashboard_fixture();
+    let addr = make_server_with_dashboard(dashboard_dir.clone()).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 405);
+    std::fs::remove_dir_all(dashboard_dir).ok();
 }

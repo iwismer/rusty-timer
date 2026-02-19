@@ -12,11 +12,13 @@ pub use state::AppState;
 use std::path::PathBuf;
 
 use axum::{
-    http::StatusCode,
-    response::{Html, IntoResponse},
+    extract::Request,
+    http::{Method, StatusCode, Uri},
+    response::{Html, IntoResponse, Response},
     routing::{get, patch, post},
     Router,
 };
+use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
 
 pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
@@ -61,14 +63,41 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         );
 
     let router = match dashboard_dir {
-        Some(dir) => {
-            let index = dir.join("index.html");
-            router.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
-        }
+        Some(dir) => router.fallback(move |method: Method, uri: Uri, req: Request| {
+            let dir = dir.clone();
+            async move { dashboard_fallback(method, uri, req, dir).await }
+        }),
         None => router.fallback(fallback_404),
     };
 
     router.with_state(state)
+}
+
+fn is_reserved_backend_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/") || path == "/ws" || path.starts_with("/ws/")
+}
+
+async fn dashboard_fallback(
+    method: Method,
+    uri: Uri,
+    req: Request,
+    dashboard_dir: PathBuf,
+) -> Response {
+    let path = uri.path();
+    if is_reserved_backend_path(path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    let index = dashboard_dir.join("index.html");
+    let mut service = ServeDir::new(dashboard_dir).fallback(ServeFile::new(index));
+    match service.call(req).await {
+        Ok(response) => response.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn fallback_404() -> impl IntoResponse {
