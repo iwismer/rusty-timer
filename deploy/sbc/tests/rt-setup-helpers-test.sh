@@ -31,7 +31,7 @@ assert_nonempty() {
 
 # --- release selection across pages ---
 page1='[{"tag_name":"server-v1.0.0","published_at":"2026-02-01T00:00:00Z","draft":false,"prerelease":false,"assets":[]}]'
-page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-linux-arm64.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
+page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
 
 url="$(select_latest_forwarder_asset_from_pages "${page1}" "${page2}")"
 assert_nonempty "${url}" "release URL should be found across multiple pages"
@@ -45,8 +45,8 @@ assert_eq "http://192.168.1.50:8080/healthz" "$(status_probe_url_from_bind '192.
 assert_eq "http://[::1]:7070/healthz" "$(status_probe_url_from_bind '[::1]:7070')" "explicit ipv6 bind should preserve probe host"
 
 # --- checksum extraction helper ---
-checksums=$'aaaaaaaa  forwarder-v1.2.3-linux-arm64.tar.gz\nbbbbbbbb  forwarder-v1.2.3-linux-x86_64.tar.gz\n'
-assert_eq "aaaaaaaa" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-linux-arm64.tar.gz")" "should pick checksum for requested asset"
+checksums=$'aaaaaaaa  forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz\nbbbbbbbb  forwarder-v1.2.3-linux-x86_64.tar.gz\n'
+assert_eq "aaaaaaaa" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz")" "should pick checksum for requested asset"
 assert_eq "" "$(checksum_for_asset_from_sha256sums "${checksums}" "forwarder-v1.2.3-linux-armv7.tar.gz")" "should return empty when asset missing"
 
 # --- verify policy helper ---

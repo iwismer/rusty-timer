@@ -130,7 +130,7 @@ To update to a newer version, choose one of:
   sudo bash rt-setup.sh
   ```
 
-- **Manual update.** Download the new `forwarder-*-linux-arm64.tar.gz` from
+- **Manual update.** Download the new `forwarder-*-aarch64-unknown-linux-gnu.tar.gz` from
   [GitHub Releases](https://github.com/iwismer/rusty-timer/releases), extract
   it, copy the binary to `/usr/local/bin/rt-forwarder`, and restart the service:
 

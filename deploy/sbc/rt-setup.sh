@@ -40,7 +40,7 @@ select_latest_forwarder_asset_from_pages() {
     | reverse
     | .[]
     | .assets[]?
-    | select((.name // "") | test("forwarder-.*-linux-arm64\\.tar\\.gz$"))
+    | select((.name // "") | test("forwarder-.*-aarch64-unknown-linux-gnu\\.tar\\.gz$"))
     | .browser_download_url
     | select(type == "string" and length > 0)
   ' | head -n 1
