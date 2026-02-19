@@ -160,7 +160,7 @@ PANES_BEFORE_EMULATOR = [
     (
         "Server",
         f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
-        f"DASHBOARD_DIR=apps/dashboard/build "
+        f"DASHBOARD_DIR={REPO_ROOT / 'apps' / 'dashboard' / 'build'} "
         f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server",
     ),
 ]

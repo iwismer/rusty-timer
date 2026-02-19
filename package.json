@@ -7,6 +7,7 @@
   "private": true,
   "workspaces": [
     "apps/shared-ui",
+    "apps/dashboard",
     "apps/forwarder-ui",
     "apps/receiver-ui"
   ]
