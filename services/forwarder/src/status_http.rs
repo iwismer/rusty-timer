@@ -138,6 +138,21 @@ pub struct StatusServer {
     subsystem: Arc<Mutex<SubsystemStatus>>,
 }
 
+/// Holds the config file path and a write lock for read-modify-write operations.
+pub struct ConfigState {
+    pub path: std::path::PathBuf,
+    write_lock: Mutex<()>,
+}
+
+impl ConfigState {
+    pub fn new(path: std::path::PathBuf) -> Self {
+        ConfigState {
+            path,
+            write_lock: Mutex::new(()),
+        }
+    }
+}
+
 impl StatusServer {
     /// Return the bound listen address.
     pub fn local_addr(&self) -> SocketAddr {
@@ -237,7 +252,39 @@ impl StatusServer {
 
         let server_subsystem = subsystem.clone();
         tokio::spawn(async move {
-            run_server(listener, server_subsystem, journal, version).await;
+            run_server(listener, server_subsystem, journal, version, None).await;
+        });
+
+        Ok(StatusServer {
+            local_addr,
+            subsystem,
+        })
+    }
+
+    /// Start the status HTTP server with config editing support.
+    pub async fn start_with_config<J: JournalAccess + Send + 'static>(
+        cfg: StatusConfig,
+        subsystem: SubsystemStatus,
+        journal: Arc<Mutex<J>>,
+        config_state: ConfigState,
+    ) -> Result<Self, std::io::Error> {
+        let listener = TcpListener::bind(&cfg.bind).await?;
+        let local_addr = listener.local_addr()?;
+
+        let subsystem = Arc::new(Mutex::new(subsystem));
+        let version = cfg.forwarder_version.clone();
+        let config_state = Arc::new(config_state);
+
+        let server_subsystem = subsystem.clone();
+        tokio::spawn(async move {
+            run_server(
+                listener,
+                server_subsystem,
+                journal,
+                version,
+                Some(config_state),
+            )
+            .await;
         });
 
         Ok(StatusServer {
@@ -366,14 +413,16 @@ async fn run_server<J: JournalAccess + Send + 'static>(
     subsystem: Arc<Mutex<SubsystemStatus>>,
     journal: Arc<Mutex<J>>,
     version: String,
+    config_state: Option<Arc<ConfigState>>,
 ) {
     let version = Arc::new(version);
     while let Ok((stream, _)) = listener.accept().await {
         let subsystem = subsystem.clone();
         let journal = journal.clone();
         let version = version.clone();
+        let config_state = config_state.clone();
         tokio::spawn(async move {
-            handle_connection(stream, subsystem, journal, version).await;
+            handle_connection(stream, subsystem, journal, version, config_state).await;
         });
     }
 }
@@ -387,6 +436,7 @@ async fn handle_connection<J: JournalAccess + Send + 'static>(
     subsystem: Arc<Mutex<SubsystemStatus>>,
     journal: Arc<Mutex<J>>,
     version: Arc<String>,
+    _config_state: Option<Arc<ConfigState>>,
 ) {
     // Read the request (limited to 4 KiB — sufficient for a simple HTTP/1.1 request line + headers)
     let mut buf = vec![0u8; 4096];
