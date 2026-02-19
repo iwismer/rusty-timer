@@ -168,6 +168,7 @@ PANES_AFTER_EMULATOR = [
     ("Forwarder", f"cargo run -p forwarder -- --config {FORWARDER_TOML_PATH}"),
     ("Receiver",     "cargo run -p receiver"),
     ("Dashboard",    "cd apps/dashboard && npm run dev"),
+    ("Forwarder UI", "cd apps/forwarder-ui && npm run dev"),
     ("Receiver UI",  "cd apps/receiver-ui && npm run dev"),
 ]
 
@@ -522,7 +523,7 @@ def build_rust(skip_build: bool) -> None:
 
 
 def npm_install() -> None:
-    for app_name in ("dashboard", "receiver-ui"):
+    for app_name in ("dashboard", "forwarder-ui", "receiver-ui"):
         app_dir = REPO_ROOT / "apps" / app_name
         if (app_dir / "node_modules").exists():
             console.print(f"[dim]node_modules present in apps/{app_name} — skipping npm install.[/dim]")
