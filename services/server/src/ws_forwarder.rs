@@ -6,7 +6,7 @@ use crate::{
         fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
         upsert_stream, IngestResult,
     },
-    state::AppState,
+    state::{AppState, ForwarderCommand},
 };
 use axum::{
     extract::{
@@ -16,7 +16,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use rt_protocol::{error_codes, AckEntry, EpochResetCommand, ForwarderAck, Heartbeat, WsMessage};
+use rt_protocol::{error_codes, AckEntry, ForwarderAck, Heartbeat, WsMessage};
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -234,7 +234,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         }
     }
 
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<EpochResetCommand>(8);
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<ForwarderCommand>(8);
     {
         let mut senders = state.forwarder_command_senders.write().await;
         senders.insert(device_id.clone(), cmd_tx);
@@ -242,6 +242,15 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
 
     let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat_interval.tick().await;
+
+    let mut pending_config_gets: HashMap<
+        String,
+        tokio::sync::oneshot::Sender<rt_protocol::ConfigGetResponse>,
+    > = HashMap::new();
+    let mut pending_config_sets: HashMap<
+        String,
+        tokio::sync::oneshot::Sender<rt_protocol::ConfigSetResponse>,
+    > = HashMap::new();
 
     loop {
         tokio::select! {
@@ -332,6 +341,16 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
+                            Ok(WsMessage::ConfigGetResponse(resp)) => {
+                                if let Some(reply) = pending_config_gets.remove(&resp.request_id) {
+                                    let _ = reply.send(resp);
+                                }
+                            }
+                            Ok(WsMessage::ConfigSetResponse(resp)) => {
+                                if let Some(reply) = pending_config_sets.remove(&resp.request_id) {
+                                    let _ = reply.send(resp);
+                                }
+                            }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
                             Err(e) => { send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await; break; }
                         }
@@ -348,8 +367,49 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
             }
             Some(cmd) = cmd_rx.recv() => {
-                let msg = WsMessage::EpochResetCommand(cmd);
-                if let Ok(json) = serde_json::to_string(&msg) { if socket.send(Message::Text(json)).await.is_err() { break; } }
+                match cmd {
+                    ForwarderCommand::EpochReset(epoch_cmd) => {
+                        let msg = WsMessage::EpochResetCommand(epoch_cmd);
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() { break; }
+                        }
+                    }
+                    ForwarderCommand::ConfigGet { request_id, reply } => {
+                        let msg = WsMessage::ConfigGetRequest(rt_protocol::ConfigGetRequest {
+                            request_id: request_id.clone(),
+                        });
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() {
+                                let _ = reply.send(rt_protocol::ConfigGetResponse {
+                                    request_id,
+                                    config: serde_json::Value::Null,
+                                    restart_needed: false,
+                                });
+                                break;
+                            }
+                        }
+                        pending_config_gets.insert(request_id, reply);
+                    }
+                    ForwarderCommand::ConfigSet { request_id, section, payload, reply } => {
+                        let msg = WsMessage::ConfigSetRequest(rt_protocol::ConfigSetRequest {
+                            request_id: request_id.clone(),
+                            section,
+                            payload,
+                        });
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if socket.send(Message::Text(json)).await.is_err() {
+                                let _ = reply.send(rt_protocol::ConfigSetResponse {
+                                    request_id,
+                                    ok: false,
+                                    error: Some("send failed".to_owned()),
+                                    restart_needed: false,
+                                });
+                                break;
+                            }
+                        }
+                        pending_config_sets.insert(request_id, reply);
+                    }
+                }
             }
         }
     }

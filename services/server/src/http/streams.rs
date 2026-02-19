@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppState, ForwarderCommand};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -137,7 +137,7 @@ pub async fn reset_epoch(
                     reader_ip: s.reader_ip.clone(),
                     new_stream_epoch: (s.stream_epoch + 1) as u64,
                 };
-                if tx.send(cmd).await.is_ok() {
+                if tx.send(ForwarderCommand::EpochReset(cmd)).await.is_ok() {
                     return StatusCode::NO_CONTENT.into_response();
                 }
             }
