@@ -45,7 +45,7 @@ values, and installs the systemd service.
 3. Open `deploy/sbc/network-config` and edit the static IP settings:
 
    - **`addresses`** -- the static IP for this Pi (default: `192.168.1.50/24`).
-   - **`gateway4`** -- the default gateway (default: `192.168.1.1`).
+   - **`routes` → `via`** -- the default gateway (default: `192.168.1.1`).
    - **`nameservers`** -- DNS servers (default: `8.8.8.8`, `8.8.4.4`).
 
 4. Copy both files to the SD card's **boot** partition:
