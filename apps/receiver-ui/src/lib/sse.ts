@@ -8,6 +8,7 @@ export type SseCallbacks = {
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
+  onUpdateAvailable: (version: string, currentVersion: string) => void;
 };
 
 let eventSource: EventSource | null = null;
@@ -42,6 +43,11 @@ export function initSSE(callbacks: SseCallbacks): void {
 
   eventSource.addEventListener("resync", () => {
     callbacks.onResync();
+  });
+
+  eventSource.addEventListener("update_available", (e: MessageEvent) => {
+    const data = JSON.parse(e.data);
+    callbacks.onUpdateAvailable(data.version, data.current_version);
   });
 
   eventSource.onopen = () => {

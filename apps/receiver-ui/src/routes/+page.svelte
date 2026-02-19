@@ -8,6 +8,7 @@
     StatusResponse,
     StreamsResponse,
     LogsResponse,
+    UpdateStatusResponse,
   } from "$lib/api";
 
   let profile: Profile | null = null;
@@ -23,6 +24,8 @@
   let saving = false;
   let connectBusy = false;
   let sseConnected = false;
+  let updateVersion: string | null = null;
+  let updateBusy = false;
   let portOverrides: Record<string, string | number | null> = {};
   let subscriptionsBusy = false;
   let activeSubscriptionKey: string | null = null;
@@ -87,6 +90,10 @@
         editToken = p.token;
         editLogLevel = p.log_level;
       }
+      const updateStatus = await api.getUpdateStatus().catch(() => null);
+      if (updateStatus?.status === "downloaded" && updateStatus.version) {
+        updateVersion = updateStatus.version;
+      }
     } catch (e) {
       error = String(e);
     }
@@ -129,6 +136,17 @@
     }
   }
 
+  async function handleApplyUpdate() {
+    updateBusy = true;
+    try {
+      await api.applyUpdate();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      updateBusy = false;
+    }
+  }
+
   onMount(() => {
     initSSE({
       onStatusChanged: (s) => {
@@ -150,6 +168,9 @@
       onConnectionChange: (connected) => {
         sseConnected = connected;
       },
+      onUpdateAvailable: (version, _currentVersion) => {
+        updateVersion = version;
+      },
     });
   });
 
@@ -160,6 +181,19 @@
 
 <main>
   <h1>Rusty Timer Receiver</h1>
+
+  {#if updateVersion}
+    <section class="update-banner" data-testid="update-banner">
+      <p>Update v{updateVersion} available</p>
+      <button
+        data-testid="apply-update-btn"
+        on:click={handleApplyUpdate}
+        disabled={updateBusy}
+      >
+        {updateBusy ? "Applying..." : "Update Now"}
+      </button>
+    </section>
+  {/if}
 
   {#if error}
     <p class="error">{error}</p>
@@ -393,5 +427,17 @@
   .port-input {
     width: 5em;
     display: inline-block;
+  }
+  .update-banner {
+    background: #d4edda;
+    border-color: #c3e6cb;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .update-banner p {
+    margin: 0;
+    font-weight: 600;
+    color: #155724;
   }
 </style>
