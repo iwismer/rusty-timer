@@ -158,6 +158,7 @@ impl SubsystemStatus {
 pub struct StatusServer {
     local_addr: SocketAddr,
     subsystem: Arc<Mutex<SubsystemStatus>>,
+    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -181,6 +182,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
     version: Arc<String>,
     config_state: Option<Arc<ConfigState>>,
     restart_signal: Option<Arc<Notify>>,
+    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -191,6 +193,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             version: self.version.clone(),
             config_state: self.config_state.clone(),
             restart_signal: self.restart_signal.clone(),
+            ui_tx: self.ui_tx.clone(),
         }
     }
 }
@@ -215,7 +218,15 @@ impl StatusServer {
 
     /// Mark that a restart is needed to apply saved config changes.
     pub async fn set_restart_needed(&self) {
-        self.subsystem.lock().await.set_restart_needed();
+        let mut ss = self.subsystem.lock().await;
+        ss.set_restart_needed();
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+                ready: ss.is_ready(),
+                uplink_connected: ss.uplink_connected(),
+                restart_needed: true,
+            });
     }
 
     /// Return whether a restart is needed to apply saved config changes.
@@ -225,7 +236,15 @@ impl StatusServer {
 
     /// Update the uplink connection state (does not affect readiness).
     pub async fn set_uplink_connected(&self, connected: bool) {
-        self.subsystem.lock().await.set_uplink_connected(connected);
+        let mut ss = self.subsystem.lock().await;
+        ss.set_uplink_connected(connected);
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+                ready: ss.is_ready(),
+                uplink_connected: connected,
+                restart_needed: ss.restart_needed(),
+            });
     }
 
     /// Set the forwarder ID (call once at startup).
@@ -274,6 +293,20 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.state = state;
+            let state_str = match &r.state {
+                ReaderConnectionState::Connected => "connected",
+                ReaderConnectionState::Connecting => "connecting",
+                ReaderConnectionState::Disconnected => "disconnected",
+            };
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: state_str.to_owned(),
+                    reads_session: r.reads_since_restart,
+                    reads_total: r.reads_total,
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                });
         }
     }
 
@@ -284,6 +317,20 @@ impl StatusServer {
             r.reads_since_restart += 1;
             r.reads_total += 1;
             r.last_seen = Some(Instant::now());
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: match &r.state {
+                        ReaderConnectionState::Connected => "connected",
+                        ReaderConnectionState::Connecting => "connecting",
+                        ReaderConnectionState::Disconnected => "disconnected",
+                    }
+                    .to_owned(),
+                    reads_session: r.reads_since_restart,
+                    reads_total: r.reads_total,
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                });
         }
     }
 
@@ -304,6 +351,7 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
+        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -311,6 +359,7 @@ impl StatusServer {
             version: Arc::new(cfg.forwarder_version),
             config_state: None,
             restart_signal: None,
+            ui_tx: ui_tx.clone(),
         };
 
         let app = build_router(state);
@@ -323,6 +372,7 @@ impl StatusServer {
         Ok(StatusServer {
             local_addr,
             subsystem,
+            ui_tx,
         })
     }
 
@@ -337,6 +387,7 @@ impl StatusServer {
         let listener = TcpListener::bind(&cfg.bind).await?;
         let local_addr = listener.local_addr()?;
 
+        let (ui_tx, _) = tokio::sync::broadcast::channel(256);
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -344,6 +395,7 @@ impl StatusServer {
             version: Arc::new(cfg.forwarder_version),
             config_state: Some(config_state),
             restart_signal: Some(restart_signal),
+            ui_tx: ui_tx.clone(),
         };
 
         let app = build_router(state);
@@ -356,6 +408,7 @@ impl StatusServer {
         Ok(StatusServer {
             local_addr,
             subsystem,
+            ui_tx,
         })
     }
 }
@@ -985,13 +1038,48 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
     json_response(StatusCode::OK, body)
 }
 
+async fn events_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> axum::response::sse::Sse<
+    impl futures_util::stream::Stream<
+        Item = Result<axum::response::sse::Event, std::convert::Infallible>,
+    >,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use std::time::Duration;
+    use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+
+    let rx = state.ui_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(event) => {
+            let event_type = match &event {
+                crate::ui_events::ForwarderUiEvent::StatusChanged { .. } => "status_changed",
+                crate::ui_events::ForwarderUiEvent::ReaderUpdated { .. } => "reader_updated",
+                crate::ui_events::ForwarderUiEvent::LogEntry { .. } => "log_entry",
+                crate::ui_events::ForwarderUiEvent::UpdateAvailable { .. } => "update_available",
+            };
+            match serde_json::to_string(&event) {
+                Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
+                Err(_) => None,
+            }
+        }
+        Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
+}
+
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/readyz", get(readyz_handler::<J>))
         .route("/", get(status_page_handler::<J>))
         .route(
-            "/api/v1/streams/:reader_ip/reset-epoch",
+            "/api/v1/streams/{reader_ip}/reset-epoch",
             post(reset_epoch_handler::<J>),
         )
         .route("/update/status", get(update_status_handler::<J>))
@@ -1025,6 +1113,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         )
         .route("/api/v1/restart", post(restart_handler::<J>))
         .route("/api/v1/status", get(status_json_handler::<J>))
+        .route("/api/v1/events", get(events_handler::<J>))
         .fallback(not_found_handler)
         .with_state(state)
 }

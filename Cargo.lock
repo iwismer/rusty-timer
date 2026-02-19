@@ -998,19 +998,22 @@ dependencies = [
 name = "forwarder"
 version = "0.1.0"
 dependencies = [
- "axum 0.7.9",
+ "axum 0.8.8",
  "futures-util",
  "ipico-core",
+ "mime_guess",
  "reqwest",
  "rt-protocol",
  "rt-test-utils",
  "rt-updater",
  "rusqlite",
+ "rust-embed",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite 0.26.2",
  "toml",
  "tracing",
