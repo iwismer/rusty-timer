@@ -1533,4 +1533,242 @@ mod tests {
         assert_eq!(events[0].read_type, "raw");
         assert_eq!(events[1].read_type, "fsls");
     }
+
+    #[tokio::test]
+    async fn config_get_set_over_websocket() {
+        // 1. Set up tempdir, write a minimal TOML config file
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let config_path = temp_dir.path().join("forwarder.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+schema_version = 1
+display_name = "Test Forwarder"
+
+[server]
+base_url = "http://localhost:9999"
+
+[auth]
+token_file = "/tmp/test-token"
+"#,
+        )
+        .expect("write test config");
+
+        // 2. Open journal
+        let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
+
+        // 3. Bind mock server
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        // 4. Use a oneshot channel to collect test results from server task
+        let (result_tx, result_rx) = oneshot::channel::<(
+            serde_json::Value, // config from ConfigGetResponse
+            bool,              // restart_needed from ConfigGetResponse
+            bool,              // ok from ConfigSetResponse (valid section)
+            bool,              // ok from ConfigSetResponse (invalid section)
+            Option<String>,    // error from ConfigSetResponse (invalid section)
+        )>();
+
+        // 5. Server task: accept WS, do hello/heartbeat handshake, then test config messages
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let ws = accept_async(stream).await.expect("ws accept");
+            let (mut write, mut read) = ws.split();
+
+            // Receive forwarder_hello
+            let hello = read.next().await.expect("hello").expect("hello frame");
+            let hello = parse_ws_text_message(hello);
+            let forwarder_id = match hello {
+                WsMessage::ForwarderHello(h) => h.forwarder_id,
+                other => panic!("expected ForwarderHello, got {:?}", other),
+            };
+
+            // Send heartbeat
+            let hb = WsMessage::Heartbeat(Heartbeat {
+                session_id: "test-session".to_string(),
+                device_id: forwarder_id.clone(),
+            });
+            write
+                .send(Message::Text(serde_json::to_string(&hb).unwrap().into()))
+                .await
+                .expect("send heartbeat");
+
+            // Wait a moment for the forwarder to enter its idle polling loop
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            // --- Test 1: ConfigGetRequest ---
+            let get_req = WsMessage::ConfigGetRequest(rt_protocol::ConfigGetRequest {
+                request_id: "test-get-1".to_string(),
+            });
+            write
+                .send(Message::Text(
+                    serde_json::to_string(&get_req).unwrap().into(),
+                ))
+                .await
+                .expect("send config get request");
+
+            // Receive ConfigGetResponse
+            let get_resp = timeout(std::time::Duration::from_secs(5), read.next())
+                .await
+                .expect("get response timeout")
+                .expect("get response")
+                .expect("get response frame");
+            let get_resp = parse_ws_text_message(get_resp);
+            let (config, restart_needed) = match get_resp {
+                WsMessage::ConfigGetResponse(r) => {
+                    assert_eq!(r.request_id, "test-get-1");
+                    (r.config, r.restart_needed)
+                }
+                other => panic!("expected ConfigGetResponse, got {:?}", other),
+            };
+
+            // --- Test 2: ConfigSetRequest (valid section) ---
+            let set_req = WsMessage::ConfigSetRequest(rt_protocol::ConfigSetRequest {
+                request_id: "test-set-1".to_string(),
+                section: "general".to_string(),
+                payload: serde_json::json!({ "display_name": "Updated Name" }),
+            });
+            write
+                .send(Message::Text(
+                    serde_json::to_string(&set_req).unwrap().into(),
+                ))
+                .await
+                .expect("send config set request");
+
+            let set_resp = timeout(std::time::Duration::from_secs(5), read.next())
+                .await
+                .expect("set response timeout")
+                .expect("set response")
+                .expect("set response frame");
+            let set_resp = parse_ws_text_message(set_resp);
+            let set_ok = match set_resp {
+                WsMessage::ConfigSetResponse(r) => {
+                    assert_eq!(r.request_id, "test-set-1");
+                    r.ok
+                }
+                other => panic!("expected ConfigSetResponse, got {:?}", other),
+            };
+
+            // --- Test 3: ConfigSetRequest (invalid section) ---
+            let bad_req = WsMessage::ConfigSetRequest(rt_protocol::ConfigSetRequest {
+                request_id: "test-set-2".to_string(),
+                section: "nonexistent".to_string(),
+                payload: serde_json::json!({}),
+            });
+            write
+                .send(Message::Text(
+                    serde_json::to_string(&bad_req).unwrap().into(),
+                ))
+                .await
+                .expect("send bad config set request");
+
+            let bad_resp = timeout(std::time::Duration::from_secs(5), read.next())
+                .await
+                .expect("bad set response timeout")
+                .expect("bad set response")
+                .expect("bad set response frame");
+            let bad_resp = parse_ws_text_message(bad_resp);
+            let (bad_ok, bad_error) = match bad_resp {
+                WsMessage::ConfigSetResponse(r) => {
+                    assert_eq!(r.request_id, "test-set-2");
+                    (r.ok, r.error)
+                }
+                other => panic!(
+                    "expected ConfigSetResponse for bad section, got {:?}",
+                    other
+                ),
+            };
+
+            let _ = result_tx.send((config, restart_needed, set_ok, bad_ok, bad_error));
+        });
+
+        // 6. Create ForwarderConfig and spawn run_uplink
+        let cfg = ForwarderConfig {
+            schema_version: 1,
+            token: "test-token".to_string(),
+            display_name: Some("Test Forwarder".to_string()),
+            server: forwarder::config::ServerConfig {
+                base_url: format!("http://{}", addr),
+                forwarders_ws_path: "/ws/v1/forwarders".to_string(),
+            },
+            journal: forwarder::config::JournalConfig {
+                sqlite_path: db_path.display().to_string(),
+                prune_watermark_pct: 80,
+            },
+            status_http: forwarder::config::StatusHttpConfig {
+                bind: "127.0.0.1:0".to_string(),
+            },
+            uplink: forwarder::config::UplinkConfig {
+                batch_mode: "immediate".to_string(),
+                batch_flush_ms: 50,
+                batch_max_events: 50,
+            },
+            readers: vec![],
+        };
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start test status server");
+        let config_state = Arc::new(ConfigState::new(config_path));
+        let subsystem_arc = status.subsystem_arc();
+        let uplink_task = tokio::spawn(run_uplink(
+            cfg,
+            "fwd-config-test".to_string(),
+            vec![],
+            journal,
+            shutdown_rx,
+            status,
+            config_state,
+            subsystem_arc,
+        ));
+
+        // 7. Wait for results
+        let (config, restart_needed, set_ok, bad_ok, bad_error) =
+            timeout(std::time::Duration::from_secs(10), result_rx)
+                .await
+                .expect("test observation timeout")
+                .expect("test result");
+
+        // 8. Assert config get response
+        assert!(!config.is_null(), "config should not be null");
+        assert_eq!(
+            config.get("display_name").and_then(|v| v.as_str()),
+            Some("Test Forwarder"),
+            "config should contain display_name"
+        );
+        assert!(!restart_needed, "restart_needed should be false initially");
+
+        // 9. Assert valid config set response
+        assert!(
+            set_ok,
+            "config set for valid section should return ok: true"
+        );
+
+        // 10. Assert invalid config set response
+        assert!(
+            !bad_ok,
+            "config set for invalid section should return ok: false"
+        );
+        assert!(
+            bad_error.is_some(),
+            "config set for invalid section should return an error message"
+        );
+
+        // 11. Cleanup
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(2), uplink_task)
+            .await
+            .expect("uplink task shutdown timeout")
+            .expect("uplink task join");
+        server_task.await.expect("server task join");
+    }
 }
