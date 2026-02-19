@@ -1273,3 +1273,114 @@ target = "192.168.1.100:10000"
         "status page must show restart banner when restart_needed is true"
     );
 }
+
+#[tokio::test]
+async fn restart_endpoint_returns_ok() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal.clone(),
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(addr, "/api/v1/restart", "{}").await;
+    assert_eq!(status, 200);
+    let body = response_body(&response);
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+}
+
+#[tokio::test]
+async fn restart_endpoint_returns_404_without_config() {
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let server = StatusServer::start(cfg, SubsystemStatus::ready())
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(addr, "/api/v1/restart", "{}").await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn status_page_restart_banner_has_button() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        config_state,
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    server.set_restart_needed().await;
+
+    let (status, body) = http_get(addr, "/").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Restart Now"),
+        "status page restart banner must contain 'Restart Now' button"
+    );
+}
