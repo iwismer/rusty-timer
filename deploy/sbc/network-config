@@ -1,0 +1,21 @@
+# deploy/sbc/network-config
+#
+# cloud-init network configuration for Raspberry Pi.
+#
+# This file sets a static IPv4 address on the ethernet adapter.
+# Edit the values below to match your network, then copy this file
+# to the SD card boot partition as "network-config" (no extension).
+#
+# See deploy/sbc/README.md for full instructions.
+
+version: 2
+ethernets:
+  eth0:
+    dhcp4: false
+    addresses:
+      - 192.168.1.50/24
+    gateway4: 192.168.1.1
+    nameservers:
+      addresses:
+        - 8.8.8.8
+        - 8.8.4.4
