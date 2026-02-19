@@ -17,12 +17,13 @@
 use crate::storage::journal::Journal;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -409,6 +410,57 @@ fn format_last_seen(instant: Option<Instant>) -> String {
     }
 }
 
+fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no parent: {}", path.display()),
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no file name: {}", path.display()),
+        )
+    })?;
+
+    let file_name = file_name.to_string_lossy();
+    let pid = std::process::id();
+
+    for attempt in 0..=16 {
+        let tmp_name = format!(".{}.tmp.{}.{}", file_name, pid, attempt);
+        let tmp_path = parent.join(tmp_name);
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+        {
+            Ok(mut temp_file) => {
+                let result = (|| -> std::io::Result<()> {
+                    temp_file.write_all(content.as_bytes())?;
+                    temp_file.sync_all()?;
+                    std::fs::rename(&tmp_path, path)?;
+                    if let Ok(parent_dir) = std::fs::File::open(parent) {
+                        let _ = parent_dir.sync_all();
+                    }
+                    Ok(())
+                })();
+                if result.is_err() {
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
+                return result;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("failed to allocate temp path for {}", path.display()),
+    ))
+}
+
 /// Read the TOML config file, apply a mutation, and write it back.
 ///
 /// Returns Ok(()) on success or Err((status_code, json_error_body)) on failure.
@@ -448,7 +500,7 @@ async fn update_config_file(
         )
     })?;
 
-    std::fs::write(&config_state.path, new_toml).map_err(|e| {
+    write_atomic(&config_state.path, &new_toml).map_err(|e| {
         (
             500u16,
             serde_json::json!({"ok": false, "error": format!("File write error: {}", e)})
@@ -470,6 +522,38 @@ fn json_response(status: StatusCode, body: String) -> Response {
 
 fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, String> {
     serde_json::from_slice::<T>(body).map_err(|e| format!("Invalid JSON: {}", e))
+}
+
+fn require_non_empty_trimmed(field: &str, value: Option<String>) -> Result<String, String> {
+    let raw = value.ok_or_else(|| format!("{} is required", field))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{} must not be empty", field));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn validate_base_url(base_url: &str) -> Result<(), String> {
+    let uri: Uri = base_url
+        .parse()
+        .map_err(|_| "base_url must be a valid absolute URL".to_owned())?;
+    let scheme = uri
+        .scheme_str()
+        .ok_or_else(|| "base_url must include scheme".to_owned())?;
+    if scheme != "http" && scheme != "https" {
+        return Err("base_url scheme must be http or https".to_owned());
+    }
+    if uri.authority().is_none() {
+        return Err("base_url must include host".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_token_file(token_file: &str) -> Result<(), String> {
+    if token_file.contains('\n') || token_file.contains('\r') {
+        return Err("token_file must be a single-line path".to_owned());
+    }
+    Ok(())
 }
 
 fn config_not_available() -> Response {
@@ -791,18 +875,35 @@ async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    if update.base_url.is_none() {
+    let base_url = match require_non_empty_trimmed("base_url", update.base_url) {
+        Ok(base_url) => base_url,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+    if let Err(err) = validate_base_url(&base_url) {
         return json_response(
             StatusCode::BAD_REQUEST,
-            "{\"ok\":false,\"error\":\"base_url is required\"}".to_owned(),
+            serde_json::json!({"ok": false, "error": err}).to_string(),
         );
     }
+    let forwarders_ws_path = update.forwarders_ws_path.and_then(|path| {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    });
 
     let _lock = cs.write_lock.lock().await;
     match update_config_file(&cs, &state.subsystem, |raw| {
         raw.server = Some(crate::config::RawServerConfig {
-            base_url: update.base_url,
-            forwarders_ws_path: update.forwarders_ws_path,
+            base_url: Some(base_url),
+            forwarders_ws_path,
         });
         Ok(())
     })
@@ -839,17 +940,26 @@ async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    if update.token_file.is_none() {
+    let token_file = match require_non_empty_trimmed("token_file", update.token_file) {
+        Ok(token_file) => token_file,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+    if let Err(err) = validate_token_file(&token_file) {
         return json_response(
             StatusCode::BAD_REQUEST,
-            "{\"ok\":false,\"error\":\"token_file is required\"}".to_owned(),
+            serde_json::json!({"ok": false, "error": err}).to_string(),
         );
     }
 
     let _lock = cs.write_lock.lock().await;
     match update_config_file(&cs, &state.subsystem, |raw| {
         raw.auth = Some(crate::config::RawAuthConfig {
-            token_file: update.token_file,
+            token_file: Some(token_file),
         });
         Ok(())
     })

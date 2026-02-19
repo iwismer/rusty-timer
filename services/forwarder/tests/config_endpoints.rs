@@ -241,6 +241,70 @@ target = "192.168.1.100:10000"
 }
 
 #[tokio::test]
+async fn post_config_general_updates_readonly_config_via_atomic_replace() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "/tmp/fake-token"
+
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let config_path = config_file.path().to_path_buf();
+    let mut perms = std::fs::metadata(&config_path)
+        .expect("metadata")
+        .permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&config_path, perms).expect("set readonly");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let subsystem = SubsystemStatus::ready();
+    let config_state = ConfigState::new(config_path.clone());
+
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server = StatusServer::start_with_config(cfg, subsystem, journal, config_state)
+        .await
+        .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/general",
+        r#"{"display_name":"Atomic Replace"}"#,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "readonly config should still be replaceable, response: {}",
+        response
+    );
+
+    let toml_str = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        toml_str.contains("Atomic Replace"),
+        "TOML file must contain updated display_name, got: {}",
+        toml_str
+    );
+}
+
+#[tokio::test]
 async fn post_config_general_accepts_fragmented_http_body() {
     use forwarder::status_http::ConfigState;
     use std::io::Write;
@@ -394,6 +458,80 @@ target = "192.168.1.100:10000"
 }
 
 #[tokio::test]
+async fn post_config_server_rejects_empty_base_url() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://old.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(addr, "/api/v1/config/server", r#"{"base_url":""}"#).await;
+    assert_eq!(status, 400, "empty base_url must return 400");
+}
+
+#[tokio::test]
+async fn post_config_server_rejects_invalid_base_url() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://old.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(addr, "/api/v1/config/server", r#"{"base_url":"not-a-url"}"#).await;
+    assert_eq!(status, 400, "invalid base_url must return 400");
+}
+
+#[tokio::test]
 async fn post_config_auth_updates_token_file() {
     use forwarder::status_http::ConfigState;
     use std::io::Write;
@@ -481,6 +619,43 @@ target = "192.168.1.100:10000"
 
     let (status, _) = http_post(addr, "/api/v1/config/auth", r#"{}"#).await;
     assert_eq!(status, 400, "missing token_file must return 400");
+}
+
+#[tokio::test]
+async fn post_config_auth_rejects_whitespace_token_file() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server =
+        StatusServer::start_with_config(cfg, SubsystemStatus::ready(), journal, config_state)
+            .await
+            .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(addr, "/api/v1/config/auth", r#"{"token_file":"   "}"#).await;
+    assert_eq!(status, 400, "whitespace token_file must return 400");
 }
 
 #[tokio::test]
