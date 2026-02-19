@@ -4,6 +4,7 @@
 //! - `GET /`              — read-only HTML status page
 //! - `GET /healthz`       — always 200 OK (process is running)
 //! - `GET /readyz`        — 200 when local subsystems ready, 503 otherwise
+//! - `GET /api/v1/status`  — current forwarder state as JSON
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
 //! - `GET /config`        — config editing page (when enabled)
@@ -925,6 +926,65 @@ fn get_config_state<J: JournalAccess + Send + 'static>(
     state.config_state.clone()
 }
 
+#[derive(serde::Serialize)]
+struct StatusJsonResponse {
+    forwarder_id: String,
+    version: String,
+    ready: bool,
+    ready_reason: Option<String>,
+    uplink_connected: bool,
+    restart_needed: bool,
+    readers: Vec<ReaderStatusJson>,
+}
+
+#[derive(serde::Serialize)]
+struct ReaderStatusJson {
+    ip: String,
+    state: String,
+    reads_session: u64,
+    reads_total: i64,
+    last_seen_secs: Option<u64>,
+}
+
+async fn status_json_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let ss = state.subsystem.lock().await;
+    let mut readers: Vec<_> = ss
+        .readers
+        .iter()
+        .map(|(ip, r)| {
+            let state_str = match r.state {
+                ReaderConnectionState::Connected => "connected",
+                ReaderConnectionState::Connecting => "connecting",
+                ReaderConnectionState::Disconnected => "disconnected",
+            };
+            ReaderStatusJson {
+                ip: ip.clone(),
+                state: state_str.to_owned(),
+                reads_session: r.reads_since_restart,
+                reads_total: r.reads_total,
+                last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+            }
+        })
+        .collect();
+    readers.sort_by(|a, b| a.ip.cmp(&b.ip));
+
+    let resp = StatusJsonResponse {
+        forwarder_id: ss.forwarder_id.clone(),
+        version: (*state.version).clone(),
+        ready: ss.is_ready(),
+        ready_reason: ss.reason.clone(),
+        uplink_connected: ss.uplink_connected(),
+        restart_needed: ss.restart_needed(),
+        readers,
+    };
+
+    let body = serde_json::to_string(&resp)
+        .unwrap_or_else(|_| r#"{"error":"serialization error"}"#.to_owned());
+    json_response(StatusCode::OK, body)
+}
+
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
@@ -964,6 +1024,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(post_config_readers_handler::<J>),
         )
         .route("/api/v1/restart", post(restart_handler::<J>))
+        .route("/api/v1/status", get(status_json_handler::<J>))
         .fallback(not_found_handler)
         .with_state(state)
 }
@@ -1792,6 +1853,43 @@ mod tests {
             saw_failed,
             "status never became failed, last response: {last_body}"
         );
+    }
+
+    #[tokio::test]
+    async fn status_json_returns_forwarder_state() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.set_forwarder_id("fwd-abc123").await;
+        server.init_readers(&["192.168.1.10".to_owned()]).await;
+        server
+            .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
+            .await;
+
+        let addr = server.local_addr();
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/v1/status", addr))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["forwarder_id"], "fwd-abc123");
+        assert_eq!(body["version"], "0.2.0");
+        assert_eq!(body["ready"], true);
+        assert_eq!(body["uplink_connected"], false);
+        assert_eq!(body["restart_needed"], false);
+        assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
+        assert_eq!(body["readers"][0]["state"], "connected");
     }
 
     #[test]
