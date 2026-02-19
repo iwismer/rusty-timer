@@ -9,7 +9,8 @@
 //! - `GET /config`        — config editing page (when enabled)
 //! - `GET /api/v1/config` — current config as JSON
 //! - `POST /api/v1/config/{section}` — update a config section
-//! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled
+//! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
+//!   501 on non-Unix platforms
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
 //!
@@ -600,8 +601,19 @@ async fn restart_handler<J: JournalAccess + Send + 'static>(
 ) -> Response {
     match &state.restart_signal {
         Some(signal) => {
-            signal.notify_one();
-            json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
+            if cfg!(unix) {
+                signal.notify_one();
+                json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string())
+            } else {
+                json_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "restart not supported on non-unix platforms"
+                    })
+                    .to_string(),
+                )
+            }
         }
         None => config_not_available(),
     }

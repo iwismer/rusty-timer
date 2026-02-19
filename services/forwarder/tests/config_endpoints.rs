@@ -1326,10 +1326,24 @@ target = "192.168.1.100:10000"
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let (status, response) = http_post(addr, "/api/v1/restart", "{}").await;
-    assert_eq!(status, 200);
     let body = response_body(&response);
     let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
-    assert_eq!(json["ok"], true);
+
+    #[cfg(unix)]
+    {
+        assert_eq!(status, 200);
+        assert_eq!(json["ok"], true);
+        tokio::time::timeout(Duration::from_millis(200), restart_signal.notified())
+            .await
+            .expect("restart endpoint must notify restart signal");
+    }
+
+    #[cfg(not(unix))]
+    {
+        assert_eq!(status, 501);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error"], "restart not supported on non-unix platforms");
+    }
 }
 
 #[tokio::test]
