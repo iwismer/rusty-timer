@@ -151,6 +151,9 @@
           {stats.totalRaw} reads · {stats.totalChips} chips · {stats.onlineCount}/{stats.totalStreams}
           online
         </span>
+        <a href="/forwarders/{group.forwarderId}/config" class="configure-link"
+          >Configure</a
+        >
       </div>
 
       <ul data-testid="stream-list">
@@ -260,6 +263,10 @@
   .group-stats {
     font-size: 0.85em;
     color: #666;
+  }
+  .configure-link {
+    font-size: 0.85em;
+    margin-left: auto;
   }
   ul {
     list-style: none;
