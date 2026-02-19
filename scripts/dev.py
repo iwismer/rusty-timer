@@ -189,7 +189,7 @@ def build_forwarder_toml(emulators: list[EmulatorSpec]) -> str:
 
 
 def build_panes(emulators: list[EmulatorSpec]) -> list[tuple[str, str]]:
-    dashboard_build_dir = REPO_ROOT / "apps" / "dashboard" / "build"
+    dashboard_build_dir = REPO_ROOT / "apps" / "server-ui" / "build"
     dashboard_env = ""
     if dashboard_build_dir.is_dir():
         dashboard_env = f"DASHBOARD_DIR={shlex.quote(str(dashboard_build_dir))} "
@@ -541,13 +541,13 @@ def build_dashboard(skip_build: bool = False) -> None:
         return
     console.print("[bold]Ensuring dashboard workspace dependencies…[/bold]")
     subprocess.run(
-        ["npm", "install", "--workspace=apps/dashboard"],
+        ["npm", "install", "--workspace=apps/server-ui"],
         check=True,
         cwd=REPO_ROOT,
     )
     console.print("[bold]Building dashboard…[/bold]")
     subprocess.run(
-        ["npm", "run", "build", "--workspace=apps/dashboard"],
+        ["npm", "run", "build", "--workspace=apps/server-ui"],
         check=True,
         cwd=REPO_ROOT,
     )

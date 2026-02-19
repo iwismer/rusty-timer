@@ -17,7 +17,7 @@ This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust worksp
 - `services/forwarder/` — Reads from IPICO hardware, journals to SQLite, forwards over WebSocket
 - `services/server/` — Axum/Postgres: ingest, dedup, fanout, dashboard API
 - `services/receiver/` — Windows app: subscribes to server, proxies streams to local TCP ports
-- `apps/dashboard/` — SvelteKit static web dashboard (served by the server)
+- `apps/server-ui/` — SvelteKit static web dashboard (served by the server)
 - `apps/receiver-ui/` — SvelteKit static frontend for the receiver (embedded in binary via `--features embed-ui`)
 - `crates/rt-protocol/` — Frozen WebSocket message types (WsMessage enum)
 - `crates/ipico-core/` — Frozen IPICO chip read parser
@@ -59,7 +59,7 @@ cargo test --workspace --lib
 cargo test --workspace -- --test-threads=4
 
 # Dashboard unit tests
-cd apps/dashboard && npm test
+cd apps/server-ui && npm test
 
 # Packaging validation
 bash scripts/validate-packaging.sh
@@ -75,7 +75,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets
 
 # Format JS/TS
-cd apps/dashboard && npm run format
+cd apps/server-ui && npm run format
 cd apps/forwarder-ui && npm run format
 cd apps/receiver-ui && npm run format
 ```

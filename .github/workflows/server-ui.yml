@@ -1,16 +1,16 @@
-name: Dashboard CI
+name: Server UI CI
 
 on:
   push:
     branches: [master]
     paths:
-      - "apps/dashboard/**"
-      - ".github/workflows/dashboard.yml"
+      - "apps/server-ui/**"
+      - ".github/workflows/server-ui.yml"
   pull_request:
     branches: [master]
     paths:
-      - "apps/dashboard/**"
-      - ".github/workflows/dashboard.yml"
+      - "apps/server-ui/**"
+      - ".github/workflows/server-ui.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,11 +18,11 @@ concurrency:
 
 jobs:
   test:
-    name: Dashboard Tests
+    name: Server UI Tests
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/dashboard
+        working-directory: apps/server-ui
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: apps/dashboard/package-lock.json
+          cache-dependency-path: apps/server-ui/package-lock.json
 
       - name: Install dependencies
         run: npm ci
