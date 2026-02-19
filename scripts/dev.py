@@ -526,10 +526,6 @@ def build_rust(skip_build: bool) -> None:
 
 
 def npm_install() -> None:
-    if (REPO_ROOT / "node_modules").exists():
-        console.print("[dim]node_modules present in workspace root — skipping npm install.[/dim]")
-        return
-
     console.print("[bold]Running npm install in workspace root…[/bold]")
     subprocess.run(["npm", "install"], check=True, cwd=REPO_ROOT)
     console.print("  [green]npm install complete.[/green]")
