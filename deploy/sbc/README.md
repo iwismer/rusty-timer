@@ -63,6 +63,12 @@ values, and installs the systemd service.
 3. Connect via SSH using the static IP you configured in `network-config`:
 
    ```bash
+   ssh pi@<static-ip-from-network-config>
+   ```
+
+   For example, if you kept the default address:
+
+   ```bash
    ssh pi@192.168.1.50
    ```
 
