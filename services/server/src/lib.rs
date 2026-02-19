@@ -9,15 +9,20 @@ pub mod ws_receiver;
 
 pub use state::AppState;
 
+use std::path::PathBuf;
+
 use axum::{
-    http::StatusCode,
-    response::{Html, IntoResponse},
+    extract::Request,
+    http::{Method, StatusCode, Uri},
+    response::{Html, IntoResponse, Response},
     routing::{get, patch, post},
     Router,
 };
+use tower::Service;
+use tower_http::services::{ServeDir, ServeFile};
 
-pub fn build_router(state: AppState) -> Router {
-    Router::new()
+pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
+    let router = Router::new()
         .route("/ws/v1/forwarders", get(ws_forwarder::ws_forwarder_handler))
         .route("/ws/v1/receivers", get(ws_receiver::ws_receiver_handler))
         .route("/healthz", get(health::healthz))
@@ -55,9 +60,48 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/forwarders/:forwarder_id/restart",
             post(http::forwarder_config::restart_forwarder),
-        )
-        .fallback(fallback_404)
-        .with_state(state)
+        );
+
+    let router = match dashboard_dir {
+        Some(dir) => router.fallback(move |method: Method, uri: Uri, req: Request| {
+            let dir = dir.clone();
+            async move { dashboard_fallback(method, uri, req, dir).await }
+        }),
+        None => router.fallback(fallback_404),
+    };
+
+    router.with_state(state)
+}
+
+fn is_reserved_backend_path(path: &str) -> bool {
+    let first_segment = path.trim_start_matches('/').split('/').next().unwrap_or("");
+    matches!(
+        first_segment,
+        "api" | "ws" | "healthz" | "readyz" | "metrics"
+    )
+}
+
+async fn dashboard_fallback(
+    method: Method,
+    uri: Uri,
+    req: Request,
+    dashboard_dir: PathBuf,
+) -> Response {
+    let path = uri.path();
+    if is_reserved_backend_path(path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    let index = dashboard_dir.join("index.html");
+    let mut service = ServeDir::new(dashboard_dir).fallback(ServeFile::new(index));
+    match service.call(req).await {
+        Ok(response) => response.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn fallback_404() -> impl IntoResponse {

@@ -1,12 +1,12 @@
 {
-  "packageManager": "npm@10.8.2",
   "engines": {
-    "node": "20.x",
-    "npm": "10.x"
+    "node": ">=20",
+    "npm": ">=10"
   },
   "private": true,
   "workspaces": [
     "apps/shared-ui",
+    "apps/dashboard",
     "apps/forwarder-ui",
     "apps/receiver-ui"
   ]

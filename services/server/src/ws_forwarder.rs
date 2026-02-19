@@ -514,7 +514,6 @@ async fn handle_event_batch(
     batch: rt_protocol::ForwarderEventBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut high_water: HashMap<(String, u64), u64> = HashMap::new();
-    let mut had_conflict = false;
     let mut epoch_transitions: HashMap<Uuid, i64> = HashMap::new();
 
     for event in &batch.events {
@@ -569,21 +568,21 @@ async fn handle_event_batch(
                 }
             }
             IngestResult::IntegrityConflict => {
-                had_conflict = true;
+                warn!(
+                    device_id = %device_id,
+                    reader_ip = %event.reader_ip,
+                    stream_epoch = event.stream_epoch,
+                    seq = event.seq,
+                    "integrity conflict: payload mismatch for existing event, keeping original"
+                );
+                let entry = high_water
+                    .entry((event.reader_ip.clone(), event.stream_epoch))
+                    .or_insert(0);
+                if event.seq > *entry {
+                    *entry = event.seq;
+                }
             }
         }
-    }
-
-    if had_conflict {
-        let msg = WsMessage::Error(rt_protocol::ErrorMessage {
-            code: error_codes::INTEGRITY_CONFLICT.to_owned(),
-            message: "one or more events had mismatched payload for an existing key".to_owned(),
-            retryable: false,
-        });
-        if let Ok(json) = serde_json::to_string(&msg) {
-            socket.send(Message::Text(json)).await?;
-        }
-        return Ok(());
     }
 
     let entries: Vec<AckEntry> = high_water

@@ -82,7 +82,7 @@ class EmulatorSpec:
             raise ValueError(f"Invalid read_type {self.read_type!r}")
 
     def to_cmd(self) -> str:
-        cmd = f"cargo run -p emulator -- --port {self.port} --delay {self.delay} --type {self.read_type}"
+        cmd = f"./target/debug/emulator --port {self.port} --delay {self.delay} --type {self.read_type}"
         if self.file:
             cmd += f" --file {shlex.quote(self.file)}"
         return cmd
@@ -155,19 +155,9 @@ def parse_emulator_spec(value: str) -> EmulatorSpec:
     )
 
 
-PANES_BEFORE_EMULATOR = [
-    ("Postgres",  f"docker logs -f {PG_CONTAINER}"),
-    (
-        "Server",
-        f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
-        f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug cargo run -p server",
-    ),
-]
-
 PANES_AFTER_EMULATOR = [
-    ("Forwarder", f"cargo run -p forwarder --features embed-ui -- --config {FORWARDER_TOML_PATH}"),
-    ("Receiver",     "cargo run -p receiver --features embed-ui"),
-    ("Dashboard",    "cd apps/dashboard && npm run dev"),
+    ("Forwarder", f"./target/debug/forwarder --config {FORWARDER_TOML_PATH}"),
+    ("Receiver",     "./target/debug/receiver"),
 ]
 
 FORWARDER_TOML_HEADER = f"""\
@@ -199,13 +189,28 @@ def build_forwarder_toml(emulators: list[EmulatorSpec]) -> str:
 
 
 def build_panes(emulators: list[EmulatorSpec]) -> list[tuple[str, str]]:
+    dashboard_build_dir = REPO_ROOT / "apps" / "dashboard" / "build"
+    dashboard_env = ""
+    if dashboard_build_dir.is_dir():
+        dashboard_env = f"DASHBOARD_DIR={shlex.quote(str(dashboard_build_dir))} "
+
+    panes_before_emulator = [
+        ("Postgres", f"docker logs -f {PG_CONTAINER}"),
+        (
+            "Server",
+            f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
+            f"{dashboard_env}"
+            "BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug ./target/debug/server",
+        ),
+    ]
+
     if len(emulators) == 1:
         emu_panes = [("Emulator", emulators[0].to_cmd())]
     else:
         emu_panes = [
             (f"Emulator {i + 1}", e.to_cmd()) for i, e in enumerate(emulators)
         ]
-    return PANES_BEFORE_EMULATOR + emu_panes + PANES_AFTER_EMULATOR
+    return panes_before_emulator + emu_panes + PANES_AFTER_EMULATOR
 
 console = Console()
 stderr_console = Console(stderr=True)
@@ -530,6 +535,25 @@ def npm_install() -> None:
     console.print("  [green]npm install complete.[/green]")
 
 
+def build_dashboard(skip_build: bool = False) -> None:
+    if skip_build:
+        console.print("[dim]Skipping dashboard build (--no-build)[/dim]")
+        return
+    console.print("[bold]Ensuring dashboard workspace dependencies…[/bold]")
+    subprocess.run(
+        ["npm", "install", "--workspace=apps/dashboard"],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    console.print("[bold]Building dashboard…[/bold]")
+    subprocess.run(
+        ["npm", "run", "build", "--workspace=apps/dashboard"],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    console.print("  [green]Dashboard build complete.[/green]")
+
+
 def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None) -> None:
     check_prereqs()
     start_postgres()
@@ -538,6 +562,7 @@ def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None)
     write_config_files(emulators or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)])
     seed_tokens()
     npm_install()
+    build_dashboard(skip_build=skip_build)
     build_rust(skip_build=skip_build)
 
 
@@ -722,7 +747,11 @@ def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rusty Timer Dev Launcher")
-    parser.add_argument("--no-build", action="store_true", help="Skip the Rust build step")
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="Skip Rust and dashboard build steps",
+    )
     parser.add_argument("--clear", action="store_true", help="Tear down dev artifacts and exit")
     parser.add_argument(
         "--emulator", action="append", type=parse_emulator_spec, metavar="SPEC",

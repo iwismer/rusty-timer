@@ -30,7 +30,7 @@ async fn test_first_insert_stores_event_and_acks() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -94,7 +94,7 @@ async fn test_identical_retransmit_no_dup() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -172,7 +172,7 @@ async fn test_mismatched_payload_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -227,14 +227,18 @@ async fn test_mismatched_payload_rejected() {
         }))
         .await
         .unwrap();
-    match client.recv_message().await {
-        Ok(WsMessage::Error(e)) => {
-            assert_eq!(e.code, rt_protocol::error_codes::INTEGRITY_CONFLICT);
-        }
-        Ok(WsMessage::ForwarderAck(_)) => {}
-        Err(_) => {}
-        Ok(other) => panic!("got {:?}", other),
-    }
+    let ack = match client.recv_message().await {
+        Ok(WsMessage::ForwarderAck(ack)) => ack,
+        Ok(other) => panic!("expected ForwarderAck, got {:?}", other),
+        Err(err) => panic!("expected ForwarderAck, got recv error: {:?}", err),
+    };
+    assert_eq!(ack.session_id, session_id);
+    assert_eq!(ack.entries.len(), 1);
+    let entry = &ack.entries[0];
+    assert_eq!(entry.forwarder_id, "fwd-003");
+    assert_eq!(entry.reader_ip, "192.168.1.30:10000");
+    assert_eq!(entry.stream_epoch, 1);
+    assert_eq!(entry.last_seq, 1);
     let raw_line: String = sqlx::query_scalar("SELECT raw_read_line FROM events WHERE seq = 1")
         .fetch_one(&pool)
         .await
@@ -253,7 +257,7 @@ async fn test_first_connection_wins() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -311,7 +315,7 @@ async fn test_invalid_token_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -348,7 +352,7 @@ async fn test_path_unsafe_forwarder_id_rejected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });

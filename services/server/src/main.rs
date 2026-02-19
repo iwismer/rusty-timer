@@ -13,6 +13,16 @@ async fn main() {
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
+    let dashboard_dir = env::var("DASHBOARD_DIR").ok().map(std::path::PathBuf::from);
+
+    if let Some(ref dir) = dashboard_dir {
+        if !dir.is_dir() {
+            panic!("DASHBOARD_DIR {:?} is not a valid directory", dir);
+        }
+        info!(path = %dir.display(), "serving dashboard from static directory");
+    } else {
+        info!("DASHBOARD_DIR not set, dashboard will not be served");
+    }
 
     info!("connecting to database...");
     let pool = db::create_pool(&database_url).await;
@@ -27,7 +37,7 @@ async fn main() {
         .expect("failed to reset stream online status");
 
     let state = AppState::new(pool);
-    let router = server::build_router(state);
+    let router = server::build_router(state, dashboard_dir);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .expect("failed to bind");

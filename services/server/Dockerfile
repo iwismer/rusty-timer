@@ -7,7 +7,7 @@
 #   2. rust-builder: Compiles the server binary in release mode.
 #   3. runtime: Minimal Debian image with server binary + dashboard static files.
 #
-# The server binary serves the dashboard from an embedded static file path.
+# The server binary serves the dashboard from DASHBOARD_DIR (/srv/dashboard).
 #
 # Build:
 #   docker build -t rt-server -f services/server/Dockerfile .

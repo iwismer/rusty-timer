@@ -29,7 +29,7 @@ async fn test_metrics_invariant_maintained() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
@@ -117,7 +117,7 @@ async fn test_multi_stream_metrics_independent() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state))
+        axum::serve(listener, server::build_router(app_state, None))
             .await
             .unwrap();
     });
