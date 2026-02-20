@@ -5,7 +5,11 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rand::RngCore;
 use rt_protocol::HttpErrorEnvelope;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub async fn list_tokens(State(state): State<AppState>) -> impl IntoResponse {
@@ -66,6 +70,88 @@ pub async fn revoke_token(
                 message: "token not found or already revoked".to_owned(),
                 details: None,
             }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateTokenRequest {
+    pub device_id: String,
+    pub device_type: String,
+    pub token: Option<String>,
+}
+
+pub async fn create_token(
+    State(state): State<AppState>,
+    Json(body): Json<CreateTokenRequest>,
+) -> impl IntoResponse {
+    // Validate device_type
+    if body.device_type != "forwarder" && body.device_type != "receiver" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(HttpErrorEnvelope {
+                code: "BAD_REQUEST".to_owned(),
+                message: "device_type must be \"forwarder\" or \"receiver\"".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Validate device_id
+    if body.device_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(HttpErrorEnvelope {
+                code: "BAD_REQUEST".to_owned(),
+                message: "device_id must not be empty".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Generate or use provided token
+    let raw_token = match &body.token {
+        Some(t) if !t.is_empty() => t.clone(),
+        _ => {
+            let mut bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            URL_SAFE_NO_PAD.encode(bytes)
+        }
+    };
+
+    // Hash the token
+    let hash = Sha256::digest(raw_token.as_bytes());
+
+    // Insert into DB
+    match sqlx::query!(
+        r#"INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3) RETURNING token_id"#,
+        hash.as_slice(),
+        body.device_type,
+        body.device_id.trim(),
+    )
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(row) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "token_id": row.token_id.to_string(),
+                "device_id": body.device_id.trim(),
+                "device_type": body.device_type,
+                "token": raw_token,
+            })),
         )
             .into_response(),
         Err(e) => (

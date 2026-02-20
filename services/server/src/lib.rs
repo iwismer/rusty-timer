@@ -61,7 +61,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             "/api/v1/forwarders/:forwarder_id/restart",
             post(http::forwarder_config::restart_forwarder),
         )
-        .route("/api/v1/admin/tokens", get(http::admin::list_tokens))
+        .route(
+            "/api/v1/admin/tokens",
+            get(http::admin::list_tokens).post(http::admin::create_token),
+        )
         .route(
             "/api/v1/admin/tokens/:token_id/revoke",
             post(http::admin::revoke_token),
