@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3) RETURNING token_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "device_tokens",
+            "name": "token_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b01e9451939f882c6effb9b68df288bfa7c51e6a7ecd70ec61dea02cfb59716e"
+}

@@ -38,6 +38,14 @@ export interface StreamMetrics {
   unique_chips: number;
 }
 
+export interface EpochInfo {
+  epoch: number;
+  event_count: number;
+  first_event_at: string | null;
+  last_event_at: string | null;
+  is_current: boolean;
+}
+
 export interface ApiError {
   code: string;
   message: string;
@@ -118,6 +126,11 @@ export async function resetEpoch(streamId: string): Promise<void> {
   });
 }
 
+/** GET /api/v1/streams/{stream_id}/epochs — list epochs with metadata */
+export async function getStreamEpochs(streamId: string): Promise<EpochInfo[]> {
+  return apiFetch<EpochInfo[]>(`/api/v1/streams/${streamId}/epochs`);
+}
+
 // ----- Forwarder config types -----
 
 export interface ForwarderConfigResponse {
@@ -166,6 +179,135 @@ export async function restartForwarder(
   return apiFetch<{ ok: boolean; error?: string }>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/restart`,
     { method: "POST" },
+  );
+}
+
+// ----- Admin types -----
+
+export interface TokenEntry {
+  token_id: string;
+  device_type: string;
+  device_id: string;
+  created_at: string;
+  revoked: boolean;
+}
+
+export interface TokensResponse {
+  tokens: TokenEntry[];
+}
+
+export interface CreateTokenRequest {
+  device_id: string;
+  device_type: "forwarder" | "receiver";
+  token?: string;
+}
+
+export interface CreateTokenResponse {
+  token_id: string;
+  device_id: string;
+  device_type: string;
+  token: string;
+}
+
+export interface CursorEntry {
+  receiver_id: string;
+  stream_id: string;
+  stream_epoch: number;
+  last_seq: number;
+  updated_at: string;
+}
+
+export interface CursorsResponse {
+  cursors: CursorEntry[];
+}
+
+// ----- Admin API -----
+
+/** GET /api/v1/admin/tokens */
+export async function getTokens(): Promise<TokensResponse> {
+  return apiFetch<TokensResponse>("/api/v1/admin/tokens");
+}
+
+/** POST /api/v1/admin/tokens/{tokenId}/revoke — returns 204 */
+export async function revokeToken(tokenId: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/admin/tokens/${tokenId}/revoke`, {
+    method: "POST",
+  });
+}
+
+/** POST /api/v1/admin/tokens — create a new device token */
+export async function createToken(
+  req: CreateTokenRequest,
+): Promise<CreateTokenResponse> {
+  return apiFetch<CreateTokenResponse>("/api/v1/admin/tokens", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+/** DELETE /api/v1/admin/streams/{streamId} — cascade delete, returns 204 */
+export async function deleteStream(streamId: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/admin/streams/${streamId}`, {
+    method: "DELETE",
+  });
+}
+
+/** DELETE /api/v1/admin/streams — delete ALL streams, returns 204 */
+export async function deleteAllStreams(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/streams", { method: "DELETE" });
+}
+
+/** DELETE /api/v1/admin/events — clear ALL events, returns 204 */
+export async function deleteAllEvents(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/events", { method: "DELETE" });
+}
+
+/** DELETE /api/v1/admin/streams/{streamId}/events — clear events for a stream, returns 204 */
+export async function deleteStreamEvents(streamId: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/admin/streams/${streamId}/events`, {
+    method: "DELETE",
+  });
+}
+
+/** DELETE /api/v1/admin/streams/{streamId}/epochs/{epoch}/events — clear events for an epoch, returns 204 */
+export async function deleteEpochEvents(
+  streamId: string,
+  epoch: number,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/admin/streams/${streamId}/epochs/${epoch}/events`,
+    { method: "DELETE" },
+  );
+}
+
+/** DELETE /api/v1/admin/receiver-cursors — clear ALL receiver cursors, returns 204 */
+export async function deleteAllCursors(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/receiver-cursors", {
+    method: "DELETE",
+  });
+}
+
+/** GET /api/v1/admin/receiver-cursors — list all receiver cursors */
+export async function getCursors(): Promise<CursorsResponse> {
+  return apiFetch<CursorsResponse>("/api/v1/admin/receiver-cursors");
+}
+
+/** DELETE /api/v1/admin/receiver-cursors/{receiverId} — clear cursors for one receiver, returns 204 */
+export async function deleteReceiverCursors(receiverId: string): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/admin/receiver-cursors/${encodeURIComponent(receiverId)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** DELETE /api/v1/admin/receiver-cursors/{receiverId}/{streamId} — clear a single cursor, returns 204 */
+export async function deleteReceiverStreamCursor(
+  receiverId: string,
+  streamId: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/admin/receiver-cursors/${encodeURIComponent(receiverId)}/${encodeURIComponent(streamId)}`,
+    { method: "DELETE" },
   );
 }
 

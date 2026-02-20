@@ -710,3 +710,83 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_initial_hell
 
     std::mem::forget(container);
 }
+
+#[tokio::test]
+async fn test_sse_emits_resync_after_admin_stream_delete() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state, None))
+            .await
+            .unwrap();
+    });
+
+    let stream_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, stream_epoch, online, created_at)
+         VALUES ($1, $2, $3, $4, $5, now())",
+    )
+    .bind(stream_id)
+    .bind("fwd-admin-delete")
+    .bind("192.168.200.1:10000")
+    .bind(1_i64)
+    .bind(false)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO stream_metrics (stream_id) VALUES ($1)")
+        .bind(stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let sse_url = format!("http://{}/api/v1/events", addr);
+    let mut sse_response = reqwest::Client::new().get(&sse_url).send().await.unwrap();
+    assert_eq!(sse_response.status(), 200);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let delete_resp = reqwest::Client::new()
+        .delete(format!(
+            "http://{}/api/v1/admin/streams/{}",
+            addr, stream_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), 204);
+
+    let mut collected = String::new();
+    let mut saw_resync = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                let text = String::from_utf8_lossy(&chunk);
+                collected.push_str(&text);
+                if collected.contains("event: resync") {
+                    saw_resync = true;
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => panic!("error reading SSE chunk: {:?}", e),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        saw_resync,
+        "expected 'event: resync' in SSE stream after admin delete, got:\n{}",
+        collected
+    );
+
+    std::mem::forget(container);
+}

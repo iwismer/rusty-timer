@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM receiver_cursors WHERE stream_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cfb0cfb058ef22b531c2b8c8aab3f6a8c9707e5bf0b0d6e1d45144d7d29f57b6"
+}

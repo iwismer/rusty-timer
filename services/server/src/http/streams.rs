@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use rt_protocol::HttpErrorEnvelope;
+use sqlx::Row;
 use uuid::Uuid;
 
 pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
@@ -160,6 +161,92 @@ pub async fn reset_epoch(
             }),
         )
             .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn list_epochs(
+    State(state): State<AppState>,
+    Path(stream_id): Path<Uuid>,
+) -> impl IntoResponse {
+    // Verify the stream exists
+    let stream = sqlx::query("SELECT stream_id FROM streams WHERE stream_id = $1")
+        .bind(stream_id)
+        .fetch_optional(&state.pool)
+        .await;
+
+    match stream {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(HttpErrorEnvelope {
+                    code: "NOT_FOUND".to_owned(),
+                    message: "stream not found".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+
+    // Query distinct epochs with metadata
+    let rows = sqlx::query(
+        r#"SELECT e.stream_epoch AS epoch,
+                  COUNT(*) AS event_count,
+                  MIN(e.received_at) AS first_event_at,
+                  MAX(e.received_at) AS last_event_at,
+                  (e.stream_epoch = s.stream_epoch) AS is_current
+           FROM events e
+           JOIN streams s ON s.stream_id = e.stream_id
+           WHERE e.stream_id = $1
+           GROUP BY e.stream_epoch, s.stream_epoch
+           ORDER BY e.stream_epoch ASC"#,
+    )
+    .bind(stream_id)
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let epochs: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    let epoch: i64 = r.get("epoch");
+                    let event_count: i64 = r.get("event_count");
+                    let first_event_at: chrono::DateTime<chrono::Utc> = r.get("first_event_at");
+                    let last_event_at: chrono::DateTime<chrono::Utc> = r.get("last_event_at");
+                    let is_current: bool = r.get("is_current");
+                    serde_json::json!({
+                        "epoch": epoch,
+                        "event_count": event_count,
+                        "first_event_at": first_event_at.to_rfc3339(),
+                        "last_event_at": last_event_at.to_rfc3339(),
+                        "is_current": is_current,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!(epochs))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HttpErrorEnvelope {
