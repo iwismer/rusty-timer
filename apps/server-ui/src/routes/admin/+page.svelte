@@ -166,6 +166,7 @@
       newDeviceId = "";
       newDeviceType = "forwarder";
       newTokenInput = "";
+      await loadTokens();
     } catch (e) {
       feedback = { message: String(e), ok: false };
     } finally {
@@ -173,9 +174,8 @@
     }
   }
 
-  async function dismissReveal() {
+  function dismissReveal() {
     revealedToken = null;
-    await loadTokens();
   }
 
   async function copyToken() {
