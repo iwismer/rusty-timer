@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { Card, ConfirmDialog } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
+  import { createLatestRequestGate } from "$lib/latestRequestGate";
   import type {
     StreamEntry,
     TokenEntry,
@@ -40,6 +41,7 @@
   let epochs: EpochInfo[] = $state([]);
   let epochsLoading = $state(false);
   let epochsError = $state(false);
+  const epochRequestGate = createLatestRequestGate();
 
   onMount(() => {
     loadStreams();
@@ -76,18 +78,29 @@
 
   async function loadEpochs(streamId: string) {
     if (!streamId) {
+      epochRequestGate.invalidate();
       epochs = [];
+      epochsError = false;
+      epochsLoading = false;
       return;
     }
+    const token = epochRequestGate.next();
     epochsLoading = true;
     epochsError = false;
     try {
-      epochs = await api.getStreamEpochs(streamId);
+      const data = await api.getStreamEpochs(streamId);
+      if (!epochRequestGate.isLatest(token) || streamId !== selectedStreamId)
+        return;
+      epochs = data;
     } catch {
+      if (!epochRequestGate.isLatest(token) || streamId !== selectedStreamId)
+        return;
       epochs = [];
       epochsError = true;
     } finally {
-      epochsLoading = false;
+      if (epochRequestGate.isLatest(token)) {
+        epochsLoading = false;
+      }
     }
   }
 

@@ -1,3 +1,4 @@
+use crate::dashboard_events::DashboardEvent;
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
@@ -290,6 +291,7 @@ pub async fn delete_stream(
                 )
                     .into_response();
             }
+            let _ = state.dashboard_tx.send(DashboardEvent::Resync);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (
@@ -386,6 +388,7 @@ pub async fn delete_all_streams(State(state): State<AppState>) -> impl IntoRespo
             .into_response();
     }
 
+    let _ = state.dashboard_tx.send(DashboardEvent::Resync);
     StatusCode::NO_CONTENT.into_response()
 }
 
