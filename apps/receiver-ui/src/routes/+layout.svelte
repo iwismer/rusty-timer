@@ -7,6 +7,10 @@
   onMount(() => initDarkMode());
 </script>
 
+<svelte:head>
+  <title>Receiver · Rusty Timer</title>
+</svelte:head>
+
 <NavBar links={[{ href: "/", label: "Receiver", active: true }]} />
 
 <slot />

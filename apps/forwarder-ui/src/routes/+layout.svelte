@@ -10,6 +10,10 @@
   $: currentPath = $page.url.pathname;
 </script>
 
+<svelte:head>
+  <title>Forwarder · Rusty Timer</title>
+</svelte:head>
+
 <NavBar
   links={[
     { href: "/", label: "Status", active: currentPath === "/" },

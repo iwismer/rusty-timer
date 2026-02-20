@@ -15,6 +15,10 @@
   });
 </script>
 
+<svelte:head>
+  <title>Server · Rusty Timer</title>
+</svelte:head>
+
 <NavBar links={[{ href: "/", label: "Streams", active: true }]} />
 
 <slot />
