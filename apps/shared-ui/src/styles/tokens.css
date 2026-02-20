@@ -93,6 +93,10 @@
   --accent-bg: #1a2540;
 }
 
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   font-family: var(--font-sans);
   color: var(--text-primary);
