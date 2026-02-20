@@ -869,7 +869,15 @@ async fn test_list_cursors_returns_all_rows() {
 
     // Verify sorted by receiver_id, then stream_id
     assert_eq!(cursors[0]["receiver_id"], "rcv-1");
+    assert_eq!(cursors[1]["receiver_id"], "rcv-1");
     assert_eq!(cursors[2]["receiver_id"], "rcv-2");
+    // Verify secondary sort: rcv-1's two rows should be in ascending stream_id order
+    let sid_0 = cursors[0]["stream_id"].as_str().unwrap();
+    let sid_1 = cursors[1]["stream_id"].as_str().unwrap();
+    assert!(
+        sid_0 <= sid_1,
+        "rcv-1 rows should be sorted by stream_id ASC"
+    );
 
     // Verify fields present
     let c = &cursors[0];
