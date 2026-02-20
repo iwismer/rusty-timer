@@ -795,7 +795,7 @@ SERVER_PORT = 8080
 def _kill_listeners(port: int) -> None:
     """Kill all processes listening on the given TCP port."""
     result = subprocess.run(
-        ["lsof", "-t", "-i", f":{port}"],
+        ["lsof", "-t", "-sTCP:LISTEN", "-i", f":{port}"],
         capture_output=True,
         text=True,
     )
