@@ -3,6 +3,8 @@
 @import "@fontsource/jetbrains-mono/500.css";
 @import "tailwindcss";
 
+@source "../components/**/*.svelte";
+
 @theme {
   --font-sans: "IBM Plex Sans Variable", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Fira Code",
