@@ -1,6 +1,11 @@
 <script lang="ts">
-  export let label: string;
-  export let state: "ok" | "warn" | "err" = "ok";
+  let {
+    label,
+    state = "ok",
+  }: {
+    label: string;
+    state?: "ok" | "warn" | "err";
+  } = $props();
 
   const styles: Record<string, string> = {
     ok: "bg-status-ok-bg text-status-ok border-status-ok-border",

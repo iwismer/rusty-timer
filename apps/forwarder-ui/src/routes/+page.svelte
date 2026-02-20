@@ -18,19 +18,21 @@
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
 
-  let status: ForwarderStatus | null = null;
-  let error: string | null = null;
-  let updateVersion: string | null = null;
-  let updateBusy = false;
-  let sseConnected = false;
-  let logs: string[] = [];
+  let status = $state<ForwarderStatus | null>(null);
+  let error = $state<string | null>(null);
+  let updateVersion = $state<string | null>(null);
+  let updateBusy = $state(false);
+  let sseConnected = $state(false);
+  let logs = $state<string[]>([]);
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
 
-  $: readersSummary = status
-    ? readerConnectionSummary(status.readers)
-    : { connected: 0, configured: 0, label: "0 connected / 0 configured" };
+  let readersSummary = $derived(
+    status
+      ? readerConnectionSummary(status.readers)
+      : { connected: 0, configured: 0, label: "0 connected / 0 configured" },
+  );
 
   async function loadAll() {
     error = null;
@@ -195,7 +197,7 @@
         <div class="flex gap-2 mt-3 pt-3 border-t border-border">
           <button
             class={btnPrimary}
-            on:click={handleRestart}
+            onclick={handleRestart}
             disabled={!status.restart_needed}
           >
             Restart Now
@@ -208,12 +210,12 @@
     </div>
 
     <Card headerBg>
-      <svelte:fragment slot="header">
+      {#snippet header()}
         <h2 class="text-sm font-semibold text-text-primary m-0">Readers</h2>
         <span class="ml-auto text-xs text-text-muted">
           {readersSummary.label}
         </span>
-      </svelte:fragment>
+      {/snippet}
 
       {#if status.readers.length === 0}
         <p class="text-sm text-text-muted m-0">No readers configured.</p>
@@ -277,7 +279,7 @@
                   </td>
                   <td class="px-4 py-2.5 text-right">
                     <button
-                      on:click={() => handleResetEpoch(reader.ip)}
+                      onclick={() => handleResetEpoch(reader.ip)}
                       class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
                     >
                       Reset Epoch

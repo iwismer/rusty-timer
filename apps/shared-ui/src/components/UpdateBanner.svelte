@@ -1,7 +1,13 @@
 <script lang="ts">
-  export let version: string;
-  export let busy: boolean = false;
-  export let onApply: () => void;
+  let {
+    version,
+    busy = false,
+    onApply,
+  }: {
+    version: string;
+    busy?: boolean;
+    onApply: () => void;
+  } = $props();
 </script>
 
 <div
@@ -11,7 +17,7 @@
   <span class="font-medium">Update v{version} available</span>
   <button
     data-testid="apply-update-btn"
-    on:click={onApply}
+    onclick={onApply}
     disabled={busy}
     class="px-3 py-1 text-xs font-medium rounded-md text-white border-none cursor-pointer bg-status-ok disabled:opacity-50 disabled:cursor-not-allowed"
   >

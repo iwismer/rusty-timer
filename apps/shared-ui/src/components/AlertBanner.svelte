@@ -1,9 +1,17 @@
 <script lang="ts">
-  export let variant: "ok" | "warn" | "err" = "warn";
-  export let message: string;
-  export let actionLabel: string | undefined = undefined;
-  export let actionBusy: boolean = false;
-  export let onAction: (() => void) | undefined = undefined;
+  let {
+    variant = "warn",
+    message,
+    actionLabel = undefined,
+    actionBusy = false,
+    onAction = undefined,
+  }: {
+    variant?: "ok" | "warn" | "err";
+    message: string;
+    actionLabel?: string;
+    actionBusy?: boolean;
+    onAction?: () => void;
+  } = $props();
 
   const styles = {
     ok: "bg-status-ok-bg border-status-ok-border text-status-ok",
@@ -26,7 +34,7 @@
   <span class="font-medium">{message}</span>
   {#if actionLabel && onAction}
     <button
-      on:click={onAction}
+      onclick={onAction}
       disabled={actionBusy}
       class="px-3 py-1 text-xs font-medium rounded-md text-white border-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed {btnStyles[
         variant

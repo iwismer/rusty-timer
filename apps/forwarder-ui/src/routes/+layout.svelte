@@ -5,9 +5,11 @@
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import "@rusty-timer/shared-ui/styles/tokens.css";
 
+  let { children } = $props();
+
   onMount(() => initDarkMode());
 
-  $: currentPath = $page.url.pathname;
+  let currentPath = $derived($page.url.pathname);
 </script>
 
 <svelte:head>
@@ -21,7 +23,7 @@
   ]}
 />
 
-<slot />
+{@render children()}
 
 <footer class="border-t border-border py-3 px-6 text-center mt-8">
   <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Forwarder</p>

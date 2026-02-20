@@ -1,8 +1,15 @@
 <script lang="ts">
-  export let label: string;
-  export let value: string | number;
-  export let subtitle: string | undefined = undefined;
-  export let muted: boolean = false;
+  let {
+    label,
+    value,
+    subtitle = undefined,
+    muted = false,
+  }: {
+    label: string;
+    value: string | number;
+    subtitle?: string;
+    muted?: boolean;
+  } = $props();
 </script>
 
 <div>

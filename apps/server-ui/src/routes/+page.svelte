@@ -7,27 +7,31 @@
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
 
   // Per-stream rename state (keyed by stream_id)
-  let renameValues: Record<string, string> = {};
-  let renameBusy: Record<string, boolean> = {};
-  let renameError: Record<string, string | null> = {};
+  let renameValues: Record<string, string> = $state({});
+  let renameBusy: Record<string, boolean> = $state({});
+  let renameError: Record<string, string | null> = $state({});
 
   // Metrics fetching state
-  let requestedMetricStreamIds = new Set<string>();
-  let inFlightMetricStreamIds = new Set<string>();
+  let requestedMetricStreamIds = $state(new Set<string>());
+  let inFlightMetricStreamIds = $state(new Set<string>());
   const METRICS_RETRY_DELAY_MS = 1000;
   let metricsRetryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
   // Keep rename inputs in sync as streams arrive via SSE
-  $: for (const s of $streamsStore) {
-    if (!(s.stream_id in renameValues)) {
-      renameValues[s.stream_id] = s.display_alias ?? "";
+  $effect(() => {
+    for (const s of $streamsStore) {
+      if (!(s.stream_id in renameValues)) {
+        renameValues[s.stream_id] = s.display_alias ?? "";
+      }
     }
-  }
+  });
 
   // Fetch initial metrics for all streams
-  $: for (const s of $streamsStore) {
-    void maybeFetchMetrics(s.stream_id);
-  }
+  $effect(() => {
+    for (const s of $streamsStore) {
+      void maybeFetchMetrics(s.stream_id);
+    }
+  });
 
   function maybeFetchMetrics(id: string): void {
     if (
@@ -71,7 +75,7 @@
   }
 
   // Group streams by forwarder_id.
-  $: groupedStreams = groupStreamsByForwarder($streamsStore);
+  let groupedStreams = $derived(groupStreamsByForwarder($streamsStore));
 
   // Time-since-last-read helpers
   function formatDuration(ms: number): string {
@@ -93,7 +97,7 @@
   }
 
   // Tick to force re-render every second for time-since-last-read
-  let tick = 0;
+  let tick = $state(0);
   const timerHandle = setInterval(() => {
     tick++;
   }, 1000);
@@ -164,7 +168,7 @@
     {@const border = groupBorderStatus(stats)}
     <div class="mb-6">
       <Card borderStatus={border} headerBg>
-        <svelte:fragment slot="header">
+        {#snippet header()}
           <h2 class="text-sm font-semibold text-text-primary m-0">
             {group.displayName}
           </h2>
@@ -188,7 +192,7 @@
               Configure
             </a>
           </div>
-        </svelte:fragment>
+        {/snippet}
 
         <div
           data-testid="stream-list"
@@ -280,7 +284,7 @@
                 />
                 <button
                   data-testid="rename-btn"
-                  on:click={() => handleRename(stream.stream_id)}
+                  onclick={() => handleRename(stream.stream_id)}
                   disabled={renameBusy[stream.stream_id]}
                   class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
                 >

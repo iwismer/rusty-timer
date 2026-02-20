@@ -4,6 +4,8 @@
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import "@rusty-timer/shared-ui/styles/tokens.css";
 
+  let { children } = $props();
+
   onMount(() => initDarkMode());
 </script>
 
@@ -13,7 +15,7 @@
 
 <NavBar links={[{ href: "/", label: "Receiver", active: true }]} />
 
-<slot />
+{@render children()}
 
 <footer class="border-t border-border py-3 px-8 text-center">
   <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Receiver</p>

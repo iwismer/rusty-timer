@@ -1,6 +1,11 @@
 <script lang="ts">
-  export let entries: string[] = [];
-  export let maxHeight: string = "300px";
+  let {
+    entries = [],
+    maxHeight = "300px",
+  }: {
+    entries?: string[];
+    maxHeight?: string;
+  } = $props();
 </script>
 
 <section data-testid="logs-section">

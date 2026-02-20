@@ -1,9 +1,16 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import { cycleTheme, themeMode } from "../lib/dark-mode";
 
-  export let appName: string = "";
-  export let links: Array<{ href: string; label: string; active?: boolean }> =
-    [];
+  let {
+    appName = "",
+    links = [],
+    status,
+  }: {
+    appName?: string;
+    links?: Array<{ href: string; label: string; active?: boolean }>;
+    status?: Snippet;
+  } = $props();
 
   const labels = { light: "Day", dark: "Night", auto: "Auto" } as const;
 </script>
@@ -34,14 +41,16 @@
     {/if}
 
     <div class="ml-auto flex items-center gap-3">
-      <slot name="status" />
+      {#if status}
+        {@render status()}
+      {/if}
 
       {#if appName}
         <span class="text-xs text-text-muted font-mono">{appName}</span>
       {/if}
 
       <button
-        on:click={cycleTheme}
+        onclick={cycleTheme}
         class="p-1.5 rounded-md bg-surface-2 border border-border text-text-secondary text-xs cursor-pointer hover:bg-surface-3 flex items-center gap-1.5"
         aria-label="Toggle theme"
       >

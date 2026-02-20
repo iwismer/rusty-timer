@@ -18,24 +18,24 @@
     LogsResponse,
   } from "$lib/api";
 
-  let profile: Profile | null = null;
-  let status: StatusResponse | null = null;
-  let streams: StreamsResponse | null = null;
-  let logs: LogsResponse | null = null;
-  let error: string | null = null;
+  let profile = $state<Profile | null>(null);
+  let status = $state<StatusResponse | null>(null);
+  let streams = $state<StreamsResponse | null>(null);
+  let logs = $state<LogsResponse | null>(null);
+  let error = $state<string | null>(null);
 
   // Edit state
-  let editServerUrl = "";
-  let editToken = "";
-  let editLogLevel = "info";
-  let saving = false;
-  let connectBusy = false;
-  let sseConnected = false;
-  let updateVersion: string | null = null;
-  let updateBusy = false;
-  let portOverrides: Record<string, string | number | null> = {};
-  let subscriptionsBusy = false;
-  let activeSubscriptionKey: string | null = null;
+  let editServerUrl = $state("");
+  let editToken = $state("");
+  let editLogLevel = $state("info");
+  let saving = $state(false);
+  let connectBusy = $state(false);
+  let sseConnected = $state(false);
+  let updateVersion = $state<string | null>(null);
+  let updateBusy = $state(false);
+  let portOverrides = $state<Record<string, string | number | null>>({});
+  let subscriptionsBusy = $state(false);
+  let activeSubscriptionKey = $state<string | null>(null);
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
     return `${forwarder_id}/${reader_ip}`;
@@ -196,16 +196,18 @@
     destroySSE();
   });
 
-  $: connectionState = status?.connection_state ?? "unknown";
-  $: connectionBadgeState = (
-    connectionState === "connected"
+  let connectionState = $derived(status?.connection_state ?? "unknown");
+  let connectionBadgeState = $derived(
+    (connectionState === "connected"
       ? "ok"
       : connectionState === "disconnected"
         ? "err"
-        : "warn"
-  ) as "ok" | "warn" | "err";
-  $: subscribedCount = streams?.streams.filter((s) => s.subscribed).length ?? 0;
-  $: totalCount = streams?.streams.length ?? 0;
+        : "warn") as "ok" | "warn" | "err",
+  );
+  let subscribedCount = $derived(
+    streams?.streams.filter((s) => s.subscribed).length ?? 0,
+  );
+  let totalCount = $derived(streams?.streams.length ?? 0);
 
   const inputClass =
     "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
@@ -259,14 +261,14 @@
           <div class="flex gap-2 mt-3 pt-3 border-t border-border">
             <button
               class={btnPrimary}
-              on:click={handleConnect}
+              onclick={handleConnect}
               disabled={connectBusy || connectionState === "connected"}
             >
               Connect
             </button>
             <button
               class={btnSecondary}
-              on:click={handleDisconnect}
+              onclick={handleDisconnect}
               disabled={connectBusy || connectionState === "disconnected"}
             >
               Disconnect
@@ -317,7 +319,7 @@
         <button
           data-testid="save-profile-btn"
           class="{btnPrimary} mt-3"
-          on:click={saveProfile}
+          onclick={saveProfile}
           disabled={saving}
         >
           {saving ? "Saving..." : "Save Profile"}
@@ -329,19 +331,21 @@
   <!-- Streams Section -->
   <div class="mb-6">
     <Card>
-      <div slot="header" class="flex items-center justify-between w-full">
-        <h2 class="text-sm font-semibold text-text-primary">
-          Available Streams
-          {#if streams?.degraded}
-            <span class="text-status-warn text-xs font-normal ml-1"
-              >(degraded)</span
-            >
-          {/if}
-        </h2>
-        <span class="text-xs text-text-muted"
-          >{subscribedCount} subscribed / {totalCount} available</span
-        >
-      </div>
+      {#snippet header()}
+        <div class="flex items-center justify-between w-full">
+          <h2 class="text-sm font-semibold text-text-primary">
+            Available Streams
+            {#if streams?.degraded}
+              <span class="text-status-warn text-xs font-normal ml-1"
+                >(degraded)</span
+              >
+            {/if}
+          </h2>
+          <span class="text-xs text-text-muted"
+            >{subscribedCount} subscribed / {totalCount} available</span
+          >
+        </div>
+      {/snippet}
 
       <section data-testid="streams-section" class="-mx-4 -mb-4">
         {#if streams?.upstream_error}
@@ -385,7 +389,7 @@
                     <button
                       data-testid="unsub-{key}"
                       class="px-2.5 py-1 text-xs font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-                      on:click={() =>
+                      onclick={() =>
                         toggleSubscription(
                           stream.forwarder_id,
                           stream.reader_ip,
@@ -412,7 +416,7 @@
                     <button
                       data-testid="sub-{key}"
                       class="{btnPrimary} !px-2.5 !py-1 !text-xs"
-                      on:click={() =>
+                      onclick={() =>
                         toggleSubscription(
                           stream.forwarder_id,
                           stream.reader_ip,

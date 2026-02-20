@@ -5,14 +5,15 @@
   import { ForwarderConfig } from "@rusty-timer/shared-ui";
   import type { ConfigApi } from "@rusty-timer/shared-ui";
 
-  const forwarderId = $page.params.forwarderId;
+  const forwarderId = $page.params.forwarderId!;
 
-  $: isOnline = $streamsStore.some(
-    (s) => s.forwarder_id === forwarderId && s.online,
+  let isOnline = $derived(
+    $streamsStore.some((s) => s.forwarder_id === forwarderId && s.online),
   );
-  $: displayName =
+  let displayName = $derived(
     $streamsStore.find((s) => s.forwarder_id === forwarderId)
-      ?.forwarder_display_name ?? forwarderId;
+      ?.forwarder_display_name ?? forwarderId,
+  );
 
   const configApi: ConfigApi = {
     async getConfig() {

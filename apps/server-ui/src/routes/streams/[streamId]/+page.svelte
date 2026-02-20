@@ -6,15 +6,20 @@
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
 
-  let resetResult: string | null = null;
-  let resetBusy = false;
-  let requestedMetricStreamIds = new Set<string>();
-  let inFlightMetricStreamIds = new Set<string>();
+  let resetResult: string | null = $state(null);
+  let resetBusy = $state(false);
+  let requestedMetricStreamIds = $state(new Set<string>());
+  let inFlightMetricStreamIds = $state(new Set<string>());
 
-  $: streamId = $page.params.streamId;
-  $: stream = $streamsStore.find((s) => s.stream_id === streamId) ?? null;
-  $: metrics = $metricsStore[streamId] ?? null;
-  $: void maybeFetchMetrics(streamId);
+  let streamId = $derived($page.params.streamId!);
+  let stream = $derived(
+    $streamsStore.find((s) => s.stream_id === streamId) ?? null,
+  );
+  let metrics = $derived($metricsStore[streamId] ?? null);
+
+  $effect(() => {
+    void maybeFetchMetrics(streamId);
+  });
 
   function maybeFetchMetrics(id: string): void {
     if (
@@ -65,8 +70,7 @@
     return `${(lag / 1000).toFixed(1)} s`;
   }
 
-  let timeSinceLastRead: string = "N/A";
-  let timerHandle: ReturnType<typeof setInterval> | null = null;
+  let timeSinceLastRead: string = $state("N/A");
 
   function formatDuration(ms: number): string {
     if (ms < 1000) return "< 1s";
@@ -89,14 +93,13 @@
     }
   }
 
-  $: {
-    if (timerHandle) clearInterval(timerHandle);
+  // Set up interval for time-since-last-read, with cleanup on re-run and destroy
+  $effect(() => {
     updateTimeSinceLastRead();
-    timerHandle = setInterval(updateTimeSinceLastRead, 1000);
-  }
-
-  onDestroy(() => {
-    if (timerHandle) clearInterval(timerHandle);
+    const handle = setInterval(updateTimeSinceLastRead, 1000);
+    return () => {
+      clearInterval(handle);
+    };
   });
 </script>
 
@@ -289,7 +292,7 @@
       <Card title="Actions">
         <button
           data-testid="reset-epoch-btn"
-          on:click={handleResetEpoch}
+          onclick={handleResetEpoch}
           disabled={resetBusy}
           class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
         >

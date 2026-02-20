@@ -18,31 +18,37 @@
   import AlertBanner from "./AlertBanner.svelte";
   import StatusBadge from "./StatusBadge.svelte";
 
-  export let configApi: ConfigApi;
-  export let displayName: string | undefined = undefined;
-  export let isOnline: boolean | undefined = undefined;
+  let {
+    configApi,
+    displayName = undefined,
+    isOnline = undefined,
+  }: {
+    configApi: ConfigApi;
+    displayName?: string;
+    isOnline?: boolean;
+  } = $props();
 
-  let loading = true;
-  let loadError: string | null = null;
-  let configLoaded = false;
-  let restartNeeded = false;
-  let sectionMessages: Record<string, { ok: boolean; text: string }> = {};
-  let savingSection: Record<string, boolean> = {};
-  let restarting = false;
-  let restartMessage: { ok: boolean; text: string } | null = null;
+  let loading = $state(true);
+  let loadError: string | null = $state(null);
+  let configLoaded = $state(false);
+  let restartNeeded = $state(false);
+  let sectionMessages: Record<string, { ok: boolean; text: string }> = $state({});
+  let savingSection: Record<string, boolean> = $state({});
+  let restarting = $state(false);
+  let restartMessage: { ok: boolean; text: string } | null = $state(null);
 
   // Form fields
-  let generalDisplayName = "";
-  let serverBaseUrl = "";
-  let serverForwardersWsPath = "";
-  let authTokenFile = "";
-  let journalSqlitePath = "";
-  let journalPruneWatermarkPct = "";
-  let uplinkBatchMode = "";
-  let uplinkBatchFlushMs = "";
-  let uplinkBatchMaxEvents = "";
-  let statusHttpBind = "";
-  let readers: ReaderEntry[] = [];
+  let generalDisplayName = $state("");
+  let serverBaseUrl = $state("");
+  let serverForwardersWsPath = $state("");
+  let authTokenFile = $state("");
+  let journalSqlitePath = $state("");
+  let journalPruneWatermarkPct = $state("");
+  let uplinkBatchMode = $state("");
+  let uplinkBatchFlushMs = $state("");
+  let uplinkBatchMaxEvents = $state("");
+  let statusHttpBind = $state("");
+  let readers: ReaderEntry[] = $state([]);
 
   onMount(async () => {
     await loadConfig();
@@ -236,7 +242,7 @@
           </label>
           <button
             class={saveBtnClass}
-            on:click={saveGeneral}
+            onclick={saveGeneral}
             disabled={savingSection["general"]}
           >
             {savingSection["general"] ? "Saving..." : "Save General"}
@@ -266,7 +272,7 @@
           </div>
           <button
             class={saveBtnClass}
-            on:click={saveServer}
+            onclick={saveServer}
             disabled={savingSection["server"]}
           >
             {savingSection["server"] ? "Saving..." : "Save Server"}
@@ -292,7 +298,7 @@
           </label>
           <button
             class={saveBtnClass}
-            on:click={saveAuth}
+            onclick={saveAuth}
             disabled={savingSection["auth"]}
           >
             {savingSection["auth"] ? "Saving..." : "Save Auth"}
@@ -322,7 +328,7 @@
           </div>
           <button
             class={saveBtnClass}
-            on:click={saveJournal}
+            onclick={saveJournal}
             disabled={savingSection["journal"]}
           >
             {savingSection["journal"] ? "Saving..." : "Save Journal"}
@@ -358,7 +364,7 @@
           </div>
           <button
             class={saveBtnClass}
-            on:click={saveUplink}
+            onclick={saveUplink}
             disabled={savingSection["uplink"]}
           >
             {savingSection["uplink"] ? "Saving..." : "Save Uplink"}
@@ -382,7 +388,7 @@
           </label>
           <button
             class={saveBtnClass}
-            on:click={saveStatusHttp}
+            onclick={saveStatusHttp}
             disabled={savingSection["status_http"]}
           >
             {savingSection["status_http"] ? "Saving..." : "Save Status HTTP"}
@@ -444,7 +450,7 @@
                   </td>
                   <td class="py-1.5 px-2">
                     <button
-                      on:click={() => removeReader(i)}
+                      onclick={() => removeReader(i)}
                       class="px-2 py-1 text-xs rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80"
                     >
                       Remove
@@ -457,14 +463,14 @@
         </div>
         <div class="flex gap-2 mt-2">
           <button
-            on:click={addReader}
+            onclick={addReader}
             class="px-3 py-1.5 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3"
           >
             + Add Reader
           </button>
           <button
             class={saveBtnClass}
-            on:click={saveReaders}
+            onclick={saveReaders}
             disabled={savingSection["readers"]}
           >
             {savingSection["readers"] ? "Saving..." : "Save Readers"}
