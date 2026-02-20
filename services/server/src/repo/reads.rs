@@ -48,7 +48,7 @@ pub async fn fetch_stream_reads(
                    LEFT JOIN chips c ON c.race_id = $2 AND c.chip_id = e.tag_id
                    LEFT JOIN participants p ON p.race_id = $2 AND p.bib = c.bib
                    WHERE e.stream_id = $1 AND e.stream_epoch = s.stream_epoch
-                   ORDER BY e.received_at ASC"#,
+                   ORDER BY e.received_at ASC, e.stream_id ASC, e.seq ASC"#,
             )
             .bind(stream_id)
             .bind(rid)
@@ -62,7 +62,7 @@ pub async fn fetch_stream_reads(
                    FROM events e
                    JOIN streams s ON s.stream_id = e.stream_id
                    WHERE e.stream_id = $1 AND e.stream_epoch = s.stream_epoch
-                   ORDER BY e.received_at ASC"#,
+                   ORDER BY e.received_at ASC, e.stream_id ASC, e.seq ASC"#,
             )
             .bind(stream_id)
             .fetch_all(pool)
@@ -101,7 +101,7 @@ pub async fn fetch_forwarder_reads(
                    LEFT JOIN chips c ON c.race_id = $2 AND c.chip_id = e.tag_id
                    LEFT JOIN participants p ON p.race_id = $2 AND p.bib = c.bib
                    WHERE s.forwarder_id = $1 AND e.stream_epoch = s.stream_epoch
-                   ORDER BY e.received_at ASC"#,
+                   ORDER BY e.received_at ASC, e.stream_id ASC, e.seq ASC"#,
             )
             .bind(forwarder_id)
             .bind(rid)
@@ -115,7 +115,7 @@ pub async fn fetch_forwarder_reads(
                    FROM events e
                    JOIN streams s ON s.stream_id = e.stream_id
                    WHERE s.forwarder_id = $1 AND e.stream_epoch = s.stream_epoch
-                   ORDER BY e.received_at ASC"#,
+                   ORDER BY e.received_at ASC, e.stream_id ASC, e.seq ASC"#,
             )
             .bind(forwarder_id)
             .fetch_all(pool)
@@ -167,7 +167,13 @@ pub fn apply_dedup(reads: Vec<ReadRow>, mode: DedupMode, window_secs: u64) -> Ve
     let mut result: Vec<ReadRow> = no_tag;
     let window = chrono::Duration::seconds(window_secs as i64);
 
-    for (_tag, chip_reads) in by_chip {
+    for (_tag, mut chip_reads) in by_chip {
+        chip_reads.sort_by(|a, b| {
+            a.received_at
+                .cmp(&b.received_at)
+                .then_with(|| a.stream_id.cmp(&b.stream_id))
+                .then_with(|| a.seq.cmp(&b.seq))
+        });
         match mode {
             DedupMode::First => {
                 let mut anchor: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -216,7 +222,12 @@ pub fn apply_dedup(reads: Vec<ReadRow>, mode: DedupMode, window_secs: u64) -> Ve
         }
     }
 
-    result.sort_by_key(|r| r.received_at);
+    result.sort_by(|a, b| {
+        a.received_at
+            .cmp(&b.received_at)
+            .then_with(|| a.stream_id.cmp(&b.stream_id))
+            .then_with(|| a.seq.cmp(&b.seq))
+    });
     result
 }
 
@@ -320,6 +331,68 @@ mod tests {
         assert_eq!(first.len(), 1);
         let last = apply_dedup(reads, DedupMode::Last, 5);
         assert_eq!(last.len(), 1);
+    }
+
+    #[test]
+    fn dedup_first_tie_breaks_on_seq() {
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let reads = vec![
+            ReadRow {
+                stream_id: Uuid::nil(),
+                seq: 2,
+                reader_timestamp: None,
+                tag_id: Some("A".to_owned()),
+                received_at: base,
+                bib: None,
+                first_name: None,
+                last_name: None,
+            },
+            ReadRow {
+                stream_id: Uuid::nil(),
+                seq: 1,
+                reader_timestamp: None,
+                tag_id: Some("A".to_owned()),
+                received_at: base,
+                bib: None,
+                first_name: None,
+                last_name: None,
+            },
+        ];
+
+        let result = apply_dedup(reads, DedupMode::First, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].seq, 1);
+    }
+
+    #[test]
+    fn dedup_last_tie_breaks_on_seq() {
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let reads = vec![
+            ReadRow {
+                stream_id: Uuid::nil(),
+                seq: 2,
+                reader_timestamp: None,
+                tag_id: Some("A".to_owned()),
+                received_at: base,
+                bib: None,
+                first_name: None,
+                last_name: None,
+            },
+            ReadRow {
+                stream_id: Uuid::nil(),
+                seq: 1,
+                reader_timestamp: None,
+                tag_id: Some("A".to_owned()),
+                received_at: base,
+                bib: None,
+                first_name: None,
+                last_name: None,
+            },
+        ];
+
+        let result = apply_dedup(reads, DedupMode::Last, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].seq, 2);
     }
 
     #[test]

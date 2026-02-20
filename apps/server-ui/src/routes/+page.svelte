@@ -7,6 +7,7 @@
     setMetrics,
     forwarderRacesStore,
     racesStore,
+    setForwarderRace,
   } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { groupStreamsByForwarder } from "$lib/groupStreams";
@@ -141,10 +142,12 @@
   });
 
   async function handleRaceChange(forwarderId: string, raceId: string | null) {
+    const previousRaceId = $forwarderRacesStore[forwarderId] ?? null;
+    setForwarderRace(forwarderId, raceId);
     try {
       await api.setForwarderRace(forwarderId, raceId);
     } catch {
-      // SSE will correct any stale state
+      setForwarderRace(forwarderId, previousRaceId);
     }
   }
 

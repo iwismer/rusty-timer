@@ -92,9 +92,20 @@ pub async fn get_stream_reads(
         }
     };
 
-    let race_id = forwarder_races::get_forwarder_race(&state.pool, &forwarder_id)
-        .await
-        .unwrap_or(None);
+    let race_id = match forwarder_races::get_forwarder_race(&state.pool, &forwarder_id).await {
+        Ok(race_id) => race_id,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
 
     let all_reads = match reads::fetch_stream_reads(&state.pool, stream_id, race_id).await {
         Ok(r) => r,
@@ -141,9 +152,20 @@ pub async fn get_forwarder_reads(
         }
     };
 
-    let race_id = forwarder_races::get_forwarder_race(&state.pool, &forwarder_id)
-        .await
-        .unwrap_or(None);
+    let race_id = match forwarder_races::get_forwarder_race(&state.pool, &forwarder_id).await {
+        Ok(race_id) => race_id,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
 
     let all_reads = match reads::fetch_forwarder_reads(&state.pool, &forwarder_id, race_id).await {
         Ok(r) => r,

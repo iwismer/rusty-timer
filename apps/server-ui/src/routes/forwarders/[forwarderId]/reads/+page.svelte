@@ -2,9 +2,10 @@
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
-  import { metricsStore } from "$lib/stores";
+  import { metricsStore, streamsStore } from "$lib/stores";
   import { Card } from "@rusty-timer/shared-ui";
   import ReadsTable from "$lib/components/ReadsTable.svelte";
+  import { createLatestRequestGate } from "$lib/latestRequestGate";
 
   let forwarderId = $derived($page.params.forwarderId!);
 
@@ -16,16 +17,32 @@
   let readsLimit = $state(100);
   let readsOffset = $state(0);
   let readsOrder: SortOrder = $state("desc");
+  const readsRequestGate = createLatestRequestGate();
+
+  let forwarderStreamIds = $derived(
+    $streamsStore
+      .filter((s) => s.forwarder_id === forwarderId)
+      .map((s) => s.stream_id),
+  );
+  let forwarderMetricsSignature = $derived(
+    forwarderStreamIds
+      .map((streamId) => {
+        const m = $metricsStore[streamId];
+        return `${streamId}:${m?.epoch_raw_count ?? -1}:${m?.epoch_last_received_at ?? ""}`;
+      })
+      .join("|"),
+  );
 
   // Load reads on mount and re-fetch when new data arrives (metrics update via SSE)
   let readsInitialized = false;
   $effect(() => {
-    $metricsStore; // re-run when any stream's metrics change (signals new reads arrived)
+    forwarderMetricsSignature;
     void loadReads(forwarderId, readsInitialized);
     readsInitialized = true;
   });
 
   async function loadReads(fwdId: string, silent = false): Promise<void> {
+    const token = readsRequestGate.next();
     if (!silent) readsLoading = true;
     try {
       const resp = await api.getForwarderReads(fwdId, {
@@ -35,12 +52,15 @@
         offset: readsOffset,
         order: readsOrder,
       });
+      if (!readsRequestGate.isLatest(token)) return;
       reads = resp.reads;
       readsTotal = resp.total;
     } catch {
+      if (!readsRequestGate.isLatest(token)) return;
       reads = [];
       readsTotal = 0;
     } finally {
+      if (!readsRequestGate.isLatest(token)) return;
       readsLoading = false;
     }
   }

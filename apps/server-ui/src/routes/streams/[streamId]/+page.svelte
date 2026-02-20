@@ -9,10 +9,12 @@
     setMetrics,
     forwarderRacesStore,
     racesStore,
+    setForwarderRace,
   } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
   import ReadsTable from "$lib/components/ReadsTable.svelte";
+  import { createLatestRequestGate } from "$lib/latestRequestGate";
 
   let resetResult: string | null = $state(null);
   let resetBusy = $state(false);
@@ -31,6 +33,7 @@
   let readsLimit = $state(100);
   let readsOffset = $state(0);
   let readsOrder: SortOrder = $state("desc");
+  const readsRequestGate = createLatestRequestGate();
 
   let streamId = $derived($page.params.streamId!);
   let stream = $derived(
@@ -139,6 +142,7 @@
   });
 
   async function loadReads(id: string, silent = false): Promise<void> {
+    const token = readsRequestGate.next();
     if (!silent) readsLoading = true;
     try {
       const resp = await api.getStreamReads(id, {
@@ -148,12 +152,15 @@
         offset: readsOffset,
         order: readsOrder,
       });
+      if (!readsRequestGate.isLatest(token)) return;
       reads = resp.reads;
       readsTotal = resp.total;
     } catch {
+      if (!readsRequestGate.isLatest(token)) return;
       reads = [];
       readsTotal = 0;
     } finally {
+      if (!readsRequestGate.isLatest(token)) return;
       readsLoading = false;
     }
   }
@@ -171,10 +178,12 @@
   }
 
   async function handleRaceChange(forwarderId: string, raceId: string | null) {
+    const previousRaceId = $forwarderRacesStore[forwarderId] ?? null;
+    setForwarderRace(forwarderId, raceId);
     try {
       await api.setForwarderRace(forwarderId, raceId);
     } catch {
-      // SSE will correct any stale state
+      setForwarderRace(forwarderId, previousRaceId);
     }
   }
 
