@@ -44,7 +44,7 @@
   }
 
   function handleReadsParamsChange() {
-    void loadReads(forwarderId);
+    void loadReads(forwarderId, true);
   }
 </script>
 

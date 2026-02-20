@@ -155,7 +155,7 @@
   }
 
   function handleReadsParamsChange() {
-    void loadReads(streamId);
+    void loadReads(streamId, true);
   }
 </script>
 
