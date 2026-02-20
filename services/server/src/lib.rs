@@ -48,6 +48,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             "/api/v1/streams/:stream_id/reset-epoch",
             post(http::streams::reset_epoch),
         )
+        .route(
+            "/api/v1/streams/:stream_id/epochs",
+            get(http::streams::list_epochs),
+        )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
         .route(
             "/api/v1/forwarders/:forwarder_id/config",
