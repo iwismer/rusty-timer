@@ -10,6 +10,14 @@
     toUplinkPayload,
     toStatusHttpPayload,
     toReadersPayload,
+    validateGeneral,
+    validateServer,
+    validateAuth,
+    validateJournal,
+    validateUplink,
+    validateStatusHttp,
+    validateReaders,
+    defaultFallbackPort,
     type ReaderEntry,
     type ForwarderConfigFormState,
   } from "../lib/forwarder-config-form";
@@ -36,6 +44,7 @@
   let savingSection: Record<string, boolean> = $state({});
   let restarting = $state(false);
   let restartMessage: { ok: boolean; text: string } | null = $state(null);
+  let showAdvanced = $state(false);
 
   // Form fields
   let generalDisplayName = $state("");
@@ -129,26 +138,42 @@
     }
   }
 
+  function saveSectionWithValidation(
+    section: string,
+    validator: ((form: ForwarderConfigFormState) => string | null) | null,
+    payloadFn: (form: ForwarderConfigFormState) => Record<string, unknown>,
+  ) {
+    const form = currentFormState();
+    if (validator) {
+      const error = validator(form);
+      if (error) {
+        sectionMessages[section] = { ok: false, text: error };
+        return;
+      }
+    }
+    saveSection(section, payloadFn(form));
+  }
+
   function saveGeneral() {
-    saveSection("general", toGeneralPayload(currentFormState()));
+    saveSectionWithValidation("general", validateGeneral, toGeneralPayload);
   }
   function saveServer() {
-    saveSection("server", toServerPayload(currentFormState()));
+    saveSectionWithValidation("server", validateServer, toServerPayload);
   }
   function saveAuth() {
-    saveSection("auth", toAuthPayload(currentFormState()));
+    saveSectionWithValidation("auth", validateAuth, toAuthPayload);
   }
   function saveJournal() {
-    saveSection("journal", toJournalPayload(currentFormState()));
+    saveSectionWithValidation("journal", validateJournal, toJournalPayload);
   }
   function saveUplink() {
-    saveSection("uplink", toUplinkPayload(currentFormState()));
+    saveSectionWithValidation("uplink", validateUplink, toUplinkPayload);
   }
   function saveStatusHttp() {
-    saveSection("status_http", toStatusHttpPayload(currentFormState()));
+    saveSectionWithValidation("status_http", validateStatusHttp, toStatusHttpPayload);
   }
   function saveReaders() {
-    saveSection("readers", toReadersPayload(currentFormState()));
+    saveSectionWithValidation("readers", validateReaders, toReadersPayload);
   }
 
   function addReader() {
@@ -184,8 +209,11 @@
 
   const inputClass =
     "w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent";
+  const selectClass =
+    "w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary focus:outline-none focus:border-accent";
   const saveBtnClass =
     "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+  const hintClass = "text-xs text-text-muted mt-1";
 </script>
 
 <div>
@@ -233,12 +261,14 @@
     </div>
   {:else if configLoaded}
     <div class="space-y-4">
+      <!-- Basic Settings -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <!-- General -->
         <Card title="General">
-          <label class="block text-sm font-medium text-text-secondary mb-1">
+          <label class="block text-sm font-medium text-text-secondary">
             Display Name
             <input type="text" bind:value={generalDisplayName} class="mt-1 {inputClass}" />
+            <p class={hintClass}>Optional. Used to identify this forwarder.</p>
           </label>
           <button
             class={saveBtnClass}
@@ -262,12 +292,9 @@
         <Card title="Server">
           <div class="space-y-3">
             <label class="block text-sm font-medium text-text-secondary">
-              Base URL *
-              <input type="text" bind:value={serverBaseUrl} required class="mt-1 {inputClass}" />
-            </label>
-            <label class="block text-sm font-medium text-text-secondary">
-              Forwarders WS Path
-              <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
+              Base URL
+              <input type="text" bind:value={serverBaseUrl} class="mt-1 {inputClass}" />
+              <p class={hintClass}>HTTP or HTTPS URL of the server. (Automatically converted to WebSocket for communication.)</p>
             </label>
           </div>
           <button
@@ -289,131 +316,26 @@
         </Card>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <!-- Auth -->
-        <Card title="Auth">
-          <label class="block text-sm font-medium text-text-secondary mb-1">
-            Token File Path *
-            <input type="text" bind:value={authTokenFile} required class="mt-1 {inputClass}" />
-          </label>
-          <button
-            class={saveBtnClass}
-            onclick={saveAuth}
-            disabled={savingSection["auth"]}
-          >
-            {savingSection["auth"] ? "Saving..." : "Save Auth"}
-          </button>
-          {#if sectionMessages["auth"]}
-            <p
-              class="text-xs mt-1 m-0 {sectionMessages['auth'].ok
-                ? 'text-status-ok'
-                : 'text-status-err'}"
-            >
-              {sectionMessages["auth"].text}
-            </p>
-          {/if}
-        </Card>
-
-        <!-- Journal -->
-        <Card title="Journal">
-          <div class="space-y-3">
-            <label class="block text-sm font-medium text-text-secondary">
-              SQLite Path
-              <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
-            </label>
-            <label class="block text-sm font-medium text-text-secondary">
-              Prune Watermark %
-              <input type="number" bind:value={journalPruneWatermarkPct} min="0" max="100" class="mt-1 {inputClass}" />
-            </label>
-          </div>
-          <button
-            class={saveBtnClass}
-            onclick={saveJournal}
-            disabled={savingSection["journal"]}
-          >
-            {savingSection["journal"] ? "Saving..." : "Save Journal"}
-          </button>
-          {#if sectionMessages["journal"]}
-            <p
-              class="text-xs mt-1 m-0 {sectionMessages['journal'].ok
-                ? 'text-status-ok'
-                : 'text-status-err'}"
-            >
-              {sectionMessages["journal"].text}
-            </p>
-          {/if}
-        </Card>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <!-- Uplink -->
-        <Card title="Uplink">
-          <div class="space-y-3">
-            <label class="block text-sm font-medium text-text-secondary">
-              Batch Mode
-              <input type="text" bind:value={uplinkBatchMode} class="mt-1 {inputClass}" />
-            </label>
-            <label class="block text-sm font-medium text-text-secondary">
-              Batch Flush (ms)
-              <input type="number" bind:value={uplinkBatchFlushMs} min="0" class="mt-1 {inputClass}" />
-            </label>
-            <label class="block text-sm font-medium text-text-secondary">
-              Batch Max Events
-              <input type="number" bind:value={uplinkBatchMaxEvents} min="0" class="mt-1 {inputClass}" />
-            </label>
-          </div>
-          <button
-            class={saveBtnClass}
-            onclick={saveUplink}
-            disabled={savingSection["uplink"]}
-          >
-            {savingSection["uplink"] ? "Saving..." : "Save Uplink"}
-          </button>
-          {#if sectionMessages["uplink"]}
-            <p
-              class="text-xs mt-1 m-0 {sectionMessages['uplink'].ok
-                ? 'text-status-ok'
-                : 'text-status-err'}"
-            >
-              {sectionMessages["uplink"].text}
-            </p>
-          {/if}
-        </Card>
-
-        <!-- Status HTTP -->
-        <Card title="Status HTTP">
-          <label class="block text-sm font-medium text-text-secondary mb-1">
-            Bind Address
-            <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
-          </label>
-          <button
-            class={saveBtnClass}
-            onclick={saveStatusHttp}
-            disabled={savingSection["status_http"]}
-          >
-            {savingSection["status_http"] ? "Saving..." : "Save Status HTTP"}
-          </button>
-          {#if sectionMessages["status_http"]}
-            <p
-              class="text-xs mt-1 m-0 {sectionMessages['status_http'].ok
-                ? 'text-status-ok'
-                : 'text-status-err'}"
-            >
-              {sectionMessages["status_http"].text}
-            </p>
-          {/if}
-        </Card>
-      </div>
-
       <!-- Readers -->
       <Card title="Readers">
+        <p class={hintClass}>
+          IPICO reader devices this forwarder connects to. At least one reader is required.
+        </p>
         <div class="overflow-x-auto">
           <table class="w-full text-sm border-collapse">
             <thead>
               <tr class="border-b-2 border-border">
-                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">Target *</th>
+                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">
+                  Target
+                  <span class="font-normal block text-text-muted">IP address and port of the reader</span>
+                </th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">Enabled</th>
-                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">Fallback Port</th>
+                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
+                  Default Port
+                </th>
+                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
+                  Port Override
+                </th>
                 <th class="py-2 px-2"></th>
               </tr>
             </thead>
@@ -424,7 +346,6 @@
                     <input
                       type="text"
                       bind:value={reader.target}
-                      required
                       placeholder="192.168.0.50:10000"
                       aria-label="Reader {i + 1} target"
                       class={inputClass}
@@ -438,17 +359,27 @@
                       class="accent-accent"
                     />
                   </td>
-                  <td class="py-1.5 px-2">
+                  <td class="py-1.5 px-2 w-28">
+                    <input
+                      type="text"
+                      disabled
+                      value={defaultFallbackPort(reader.target) || "—"}
+                      aria-label="Reader {i + 1} default port"
+                      class="{inputClass} opacity-50"
+                    />
+                  </td>
+                  <td class="py-1.5 px-2 w-28">
                     <input
                       type="number"
                       bind:value={reader.local_fallback_port}
                       min="1"
                       max="65535"
-                      aria-label="Reader {i + 1} fallback port"
+                      placeholder="None"
+                      aria-label="Reader {i + 1} port override"
                       class={inputClass}
                     />
                   </td>
-                  <td class="py-1.5 px-2">
+                  <td class="py-1.5 px-2 text-right">
                     <button
                       onclick={() => removeReader(i)}
                       class="px-2 py-1 text-xs rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80"
@@ -486,6 +417,171 @@
           </p>
         {/if}
       </Card>
+
+      <!-- Advanced Settings Toggle -->
+      <div>
+        <button
+          onclick={() => (showAdvanced = !showAdvanced)}
+          class="text-sm font-medium text-accent hover:underline"
+        >
+          {showAdvanced ? "▼" : "▶"} Advanced Settings
+        </button>
+      </div>
+
+      <!-- Advanced Settings -->
+      {#if showAdvanced}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Server WS Path -->
+          <Card title="Forwarders WebSocket Path">
+            <label class="block text-sm font-medium text-text-secondary">
+              WebSocket Path
+              <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
+              <p class={hintClass}>Optional. WebSocket endpoint path. Default if unset: auto-detected.</p>
+            </label>
+            <button
+              class={saveBtnClass}
+              onclick={saveServer}
+              disabled={savingSection["server"]}
+            >
+              {savingSection["server"] ? "Saving..." : "Save Server"}
+            </button>
+            {#if sectionMessages["server"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['server'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["server"].text}
+              </p>
+            {/if}
+          </Card>
+
+          <!-- Auth -->
+          <Card title="Auth">
+            <label class="block text-sm font-medium text-text-secondary">
+              Token File Path
+              <input type="text" bind:value={authTokenFile} class="mt-1 {inputClass}" />
+              <p class={hintClass}>Path to file containing authentication token.</p>
+            </label>
+            <button
+              class={saveBtnClass}
+              onclick={saveAuth}
+              disabled={savingSection["auth"]}
+            >
+              {savingSection["auth"] ? "Saving..." : "Save Auth"}
+            </button>
+            {#if sectionMessages["auth"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['auth'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["auth"].text}
+              </p>
+            {/if}
+          </Card>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Journal -->
+          <Card title="Journal">
+            <div class="space-y-3">
+              <label class="block text-sm font-medium text-text-secondary">
+                SQLite Path
+                <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
+                <p class={hintClass}>Optional. Path to SQLite journal. Default if unset: in-memory.</p>
+              </label>
+              <label class="block text-sm font-medium text-text-secondary">
+                Prune Watermark %
+                <input type="number" bind:value={journalPruneWatermarkPct} min="0" max="100" class="mt-1 {inputClass}" />
+                <p class={hintClass}>Trigger journal pruning at this percentage full. Default if unset: 80%.</p>
+              </label>
+            </div>
+            <button
+              class={saveBtnClass}
+              onclick={saveJournal}
+              disabled={savingSection["journal"]}
+            >
+              {savingSection["journal"] ? "Saving..." : "Save Journal"}
+            </button>
+            {#if sectionMessages["journal"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['journal'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["journal"].text}
+              </p>
+            {/if}
+          </Card>
+
+          <!-- Uplink -->
+          <Card title="Uplink">
+            <div class="space-y-3">
+              <label class="block text-sm font-medium text-text-secondary">
+                Batch Mode
+                <select bind:value={uplinkBatchMode} class="mt-1 {selectClass}">
+                  <option value="">Default (immediate)</option>
+                  <option value="immediate">Immediate</option>
+                  <option value="batched">Batched</option>
+                </select>
+                <p class={hintClass}>How to send events to server. Default if unset: immediate.</p>
+              </label>
+              <label class="block text-sm font-medium text-text-secondary">
+                Batch Flush (ms)
+                <input type="number" bind:value={uplinkBatchFlushMs} min="0" class="mt-1 {inputClass}" />
+                <p class={hintClass}>Max time to wait before sending batch. Default if unset: 100ms.</p>
+              </label>
+              <label class="block text-sm font-medium text-text-secondary">
+                Batch Max Events
+                <input type="number" bind:value={uplinkBatchMaxEvents} min="0" class="mt-1 {inputClass}" />
+                <p class={hintClass}>Max events per batch. Default if unset: 1000.</p>
+              </label>
+            </div>
+            <button
+              class={saveBtnClass}
+              onclick={saveUplink}
+              disabled={savingSection["uplink"]}
+            >
+              {savingSection["uplink"] ? "Saving..." : "Save Uplink"}
+            </button>
+            {#if sectionMessages["uplink"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['uplink'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["uplink"].text}
+              </p>
+            {/if}
+          </Card>
+
+          <!-- Status HTTP -->
+          <Card title="Status HTTP">
+            <label class="block text-sm font-medium text-text-secondary">
+              Bind Address
+              <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
+              <p class={hintClass}>IP:port to listen on for status HTTP server. Example: 0.0.0.0:8080. Default if unset: 127.0.0.1:8080.</p>
+            </label>
+            <button
+              class={saveBtnClass}
+              onclick={saveStatusHttp}
+              disabled={savingSection["status_http"]}
+            >
+              {savingSection["status_http"] ? "Saving..." : "Save Status HTTP"}
+            </button>
+            {#if sectionMessages["status_http"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['status_http'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["status_http"].text}
+              </p>
+            {/if}
+          </Card>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
