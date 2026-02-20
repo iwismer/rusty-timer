@@ -34,6 +34,11 @@
         page.url.pathname.startsWith("/forwarders"),
     },
     {
+      href: "/races",
+      label: "Races",
+      active: page.url.pathname.startsWith("/races"),
+    },
+    {
       href: "/admin",
       label: "Admin",
       active: page.url.pathname.startsWith("/admin"),

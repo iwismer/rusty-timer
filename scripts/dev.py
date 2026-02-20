@@ -17,6 +17,7 @@ Usage:
     uv run scripts/dev.py --clear
     uv run scripts/dev.py --emulator port=10001,delay=500,file=start.txt
     uv run scripts/dev.py --emulator port=10001 --emulator port=10002,delay=500
+    uv run scripts/dev.py --bibchip test_assets/bibchip/large.txt --ppl test_assets/ppl/large.ppl
 """
 
 import argparse
@@ -31,6 +32,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +47,7 @@ FORWARDER_TOKEN_PATH = TMP_DIR / "forwarder-token.txt"
 RECEIVER_TOKEN_PATH = TMP_DIR / "receiver-token.txt"
 RECEIVER_CONFIG_SCRIPT_PATH = TMP_DIR / "configure-receiver.sh"
 FORWARDER_JOURNAL_PATH = TMP_DIR / "forwarder.sqlite3"
+ITERM_WINDOW_ID_PATH = TMP_DIR / "iterm-window-id.txt"
 
 FORWARDER_TOKEN_TEXT = "rusty-dev-forwarder"
 RECEIVER_TOKEN_TEXT = "rusty-dev-receiver"
@@ -164,7 +167,7 @@ FORWARDER_TOML_HEADER = f"""\
 schema_version = 1
 
 [server]
-base_url = "ws://127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
 
 [auth]
 token_file = "{FORWARDER_TOKEN_PATH}"
@@ -262,6 +265,164 @@ def receiver_default_local_port(reader_ip: str) -> int | None:
 
     span = MAX_PORT - RECEIVER_DYNAMIC_MIN_PORT + 1
     return RECEIVER_DYNAMIC_MIN_PORT + (fnv1a_64(reader_ip) % span)
+
+
+def generate_reads_from_bibchip(bibchip_path: Path) -> Path:
+    """Generate an emulator-compatible reads file from a bibchip CSV.
+
+    Produces one valid IPICO RAW read per chip, spread across a simulated
+    race finish window (starting at 10:32:00 on 2025-06-15, ~14s apart).
+    Returns the path to the generated file in TMP_DIR.
+    """
+    chips: list[str] = []
+    text = bibchip_path.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line[0].isdigit():
+            continue
+        parts = line.split(",")
+        if len(parts) >= 2 and parts[1].strip():
+            chips.append(parts[1].strip())
+
+    if not chips:
+        console.print(f"[yellow]Warning:[/yellow] No chips found in {bibchip_path}")
+        return bibchip_path  # fallback — won't be valid reads, but won't crash
+
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = TMP_DIR / "generated-reads.txt"
+    reads: list[str] = []
+    base_min, base_sec = 32, 0
+
+    for i, chip_id in enumerate(chips):
+        total_seconds = base_sec + i * 14
+        minutes = base_min + total_seconds // 60
+        seconds = total_seconds % 60
+        hours = 10 + minutes // 60
+        minutes = minutes % 60
+        centiseconds = (i * 7) % 100
+
+        read = (
+            f"aa00{chip_id}0001"
+            f"{25:02d}{6:02d}{15:02d}"
+            f"{hours:02d}{minutes:02d}{seconds:02d}{centiseconds:02x}"
+        )
+        checksum = sum(ord(c) for c in read[2:34]) % 256
+        read += f"{checksum:02x}"
+        reads.append(read)
+
+    out_path.write_text("\n".join(reads) + "\n")
+    console.print(f"  [green]Generated[/green] {len(reads)} reads → {out_path}")
+    return out_path
+
+
+def _multipart_upload(url: str, file_bytes: bytes, filename: str) -> bytes:
+    """POST a file as multipart/form-data using only stdlib."""
+    boundary = uuid.uuid4().hex
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: application/octet-stream\r\n"
+        f"\r\n"
+    ).encode() + file_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read()
+
+
+def setup_race_data(bibchip_path: Path | None, ppl_path: Path | None) -> None:
+    """Wait for the server, then create a race and upload bibchip/ppl files.
+
+    Writes a diagnostic log to TMP_DIR/race-setup.log so results are visible
+    even when tmux has taken over the terminal.
+    """
+    log_path = TMP_DIR / "race-setup.log"
+    log_lines: list[str] = []
+
+    def log(msg: str) -> None:
+        log_lines.append(msg)
+        stderr_console.print(msg)
+
+    try:
+        _do_setup_race_data(bibchip_path, ppl_path, log)
+    except Exception as exc:
+        log(f"[red]Race data setup crashed:[/red] {type(exc).__name__}: {exc}")
+    finally:
+        TMP_DIR.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("\n".join(log_lines) + "\n")
+
+
+def _do_setup_race_data(
+    bibchip_path: Path | None,
+    ppl_path: Path | None,
+    log: callable,
+) -> None:
+    base = "http://127.0.0.1:8080"
+
+    # Wait for server health
+    for attempt in range(60):
+        try:
+            urllib.request.urlopen(f"{base}/healthz", timeout=2)
+            break
+        except (urllib.error.URLError, OSError):
+            if attempt == 59:
+                log(
+                    "[yellow]Warning:[/yellow] Server not ready after 60s — "
+                    "skipping race data setup."
+                )
+            time.sleep(1)
+    else:
+        return
+
+    log(f"  Server ready, setting up race data…")
+
+    # Create race
+    race_name = "Dev Race"
+    payload = json.dumps({"name": race_name}).encode()
+    req = urllib.request.Request(
+        f"{base}/api/v1/races",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            race = json.loads(resp.read())
+        race_id = race["race_id"]
+    except (urllib.error.URLError, OSError, KeyError, json.JSONDecodeError) as exc:
+        log(f"[yellow]Warning:[/yellow] Failed to create race: {exc}")
+        return
+
+    log(f"  [green]Created race:[/green] {race_name} ({race_id})")
+
+    # Upload bibchip
+    if bibchip_path:
+        try:
+            resp_body = _multipart_upload(
+                f"{base}/api/v1/races/{race_id}/chips/upload",
+                bibchip_path.read_bytes(),
+                bibchip_path.name,
+            )
+            log(f"  [green]Uploaded bibchip:[/green] {bibchip_path.name} → {resp_body.decode()}")
+        except (urllib.error.URLError, OSError) as exc:
+            log(f"[yellow]Warning:[/yellow] Bibchip upload failed: {exc}")
+
+    # Upload PPL
+    if ppl_path:
+        try:
+            resp_body = _multipart_upload(
+                f"{base}/api/v1/races/{race_id}/participants/upload",
+                ppl_path.read_bytes(),
+                ppl_path.name,
+            )
+            log(f"  [green]Uploaded PPL:[/green] {ppl_path.name} → {resp_body.decode()}")
+        except (urllib.error.URLError, OSError) as exc:
+            log(f"[yellow]Warning:[/yellow] PPL upload failed: {exc}")
 
 
 def clear() -> None:
@@ -609,9 +770,31 @@ async def _split_n(session, n: int, *, vertical: bool) -> list:
 
 
 async def _iterm2_async(connection, panes: list[tuple[str, str]]) -> None:
+    import asyncio
     import iterm2
+
+    # async_get_app subscribes to iTerm2 layout/focus notifications.  When
+    # run_until_complete finishes and closes the websocket those handlers fire
+    # on a dead connection, producing noisy "Task exception was never retrieved"
+    # ConnectionClosedError tracebacks.  Suppress them here.
+    loop = asyncio.get_event_loop()
+    _orig = loop.get_exception_handler()
+
+    def _quiet(loop, ctx):
+        exc = ctx.get("exception")
+        if exc and "ConnectionClosed" in type(exc).__name__:
+            return
+        if _orig:
+            _orig(loop, ctx)
+        else:
+            loop.default_exception_handler(ctx)
+
+    loop.set_exception_handler(_quiet)
+
     await iterm2.async_get_app(connection)
     window = await iterm2.Window.async_create(connection)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    ITERM_WINDOW_ID_PATH.write_text(window.window_id)
     tab = window.tabs[0]
     root = tab.sessions[0]
 
@@ -719,10 +902,203 @@ def start_receiver_auto_config() -> None:
     thread.start()
 
 
-def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
+DEV_BINARIES = ("server", "forwarder", "receiver", "emulator")
+
+
+def close_iterm2_window() -> None:
+    """Close the iTerm2 dev window using the saved window ID."""
+    if not ITERM_WINDOW_ID_PATH.exists():
+        return
+    window_id = ITERM_WINDOW_ID_PATH.read_text().strip()
+    ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
+    if not window_id:
+        return
+
+    try:
+        import iterm2
+    except ImportError:
+        return
+
+    async def _close(connection):
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        _orig = loop.get_exception_handler()
+
+        def _quiet(loop, ctx):
+            exc = ctx.get("exception")
+            if exc and "ConnectionClosed" in type(exc).__name__:
+                return
+            if _orig:
+                _orig(loop, ctx)
+            else:
+                loop.default_exception_handler(ctx)
+
+        loop.set_exception_handler(_quiet)
+
+        app = await iterm2.async_get_app(connection)
+        for window in app.windows:
+            if window.window_id == window_id:
+                await window.async_close(force=True)
+                break
+
+    try:
+        iterm2.run_until_complete(_close)
+    except Exception:
+        pass
+
+
+SERVER_PORT = 8080
+
+
+def _listener_pids(port: int) -> list[int]:
+    """Return PIDs currently listening on the given TCP port."""
+    result = subprocess.run(
+        ["lsof", "-t", "-sTCP:LISTEN", "-i", f":{port}"],
+        capture_output=True,
+        text=True,
+    )
+    pids: list[int] = []
+    for raw_pid in result.stdout.strip().split():
+        try:
+            pids.append(int(raw_pid))
+        except ValueError:
+            continue
+    return pids
+
+
+def _pid_command(pid: int) -> str:
+    """Return the full command line for a process, or empty string on failure."""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _has_saved_iterm_window_id() -> bool:
+    """Return True when we have a persisted iTerm dev window id."""
+    if not ITERM_WINDOW_ID_PATH.exists():
+        return False
+    try:
+        return bool(ITERM_WINDOW_ID_PATH.read_text().strip())
+    except OSError:
+        return False
+
+
+def _is_dev_server_command(command: str) -> bool:
+    """Return True when command line looks like this repo's server binary."""
+    if "target/debug/server" in command or "target/release/server" in command:
+        return True
+
+    # On macOS, `ps -o command=` may return only the executable basename.
+    # If we also have a saved iTerm window id from this script, treat `server`
+    # as our dev server.
+    try:
+        argv0 = shlex.split(command)[0]
+    except (ValueError, IndexError):
+        argv0 = command.strip().split(" ", 1)[0] if command.strip() else ""
+
+    return Path(argv0).name == "server" and _has_saved_iterm_window_id()
+
+
+def _kill_pids(pids: list[int]) -> None:
+    """Kill specific process IDs."""
+    for pid in pids:
+        subprocess.run(["kill", str(pid)], capture_output=True)
+
+
+def check_existing_instance() -> None:
+    """Detect a running dev environment and optionally tear it down."""
+    tmux_running = False
+    if shutil.which("tmux"):
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", "rusty-dev"],
+            capture_output=True,
+        )
+        tmux_running = result.returncode == 0
+
+    listener_pids = _listener_pids(SERVER_PORT)
+    dev_listener_pids = [
+        pid for pid in listener_pids
+        if _is_dev_server_command(_pid_command(pid))
+    ]
+    foreign_listener_pids = [
+        pid for pid in listener_pids
+        if pid not in dev_listener_pids
+    ]
+
+    if not tmux_running and not listener_pids:
+        ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
+        return
+
+    if foreign_listener_pids and not dev_listener_pids:
+        console.print(
+            f"[yellow]Port :{SERVER_PORT} is in use by a non-dev process. "
+            f"Refusing to stop it automatically.[/yellow]"
+        )
+        console.print("[bold]  \\[n] Continue anyway  \\[c] Cancel[/bold]")
+        answer = console.input("[bold]> [/bold]").strip().lower()
+        if answer in ("c", "cancel"):
+            console.print("[dim]Aborted.[/dim]")
+            sys.exit(0)
+        console.print("[dim]Proceeding without stopping non-dev process.[/dim]")
+        return
+
+    parts = []
+    if tmux_running:
+        parts.append("tmux session 'rusty-dev'")
+    if dev_listener_pids:
+        parts.append(f"dev server listening on :{SERVER_PORT}")
+    elif listener_pids:
+        parts.append(f"listener on :{SERVER_PORT}")
+
+    console.print(
+        f"[yellow]Existing dev environment detected:[/yellow] {'; '.join(parts)}"
+    )
+    console.print("[bold]  \\[Y] Kill and restart  \\[n] Continue anyway  \\[c] Cancel[/bold]")
+    answer = console.input("[bold]> [/bold]").strip().lower()
+    if answer in ("c", "cancel"):
+        console.print("[dim]Aborted.[/dim]")
+        sys.exit(0)
+    if answer not in ("", "y", "yes"):
+        console.print("[dim]Proceeding without stopping existing instance.[/dim]")
+        return
+
+    if tmux_running:
+        subprocess.run(["tmux", "kill-session", "-t", "rusty-dev"], capture_output=True)
+        console.print("  [green]Killed[/green] tmux session: rusty-dev")
+
+    close_iterm2_window()
+
+    # Kill the server by port (pkill -f is unreliable on macOS), then mop up
+    # any remaining dev binaries with pkill as a safety net.
+    if dev_listener_pids:
+        _kill_pids(dev_listener_pids)
+    for name in DEV_BINARIES:
+        subprocess.run(["pkill", "-f", f"target/debug/{name}"], capture_output=True)
+    console.print(f"  [green]Killed[/green] dev processes")
+
+    if shutil.which("docker"):
+        subprocess.run(["docker", "rm", "-f", PG_CONTAINER], capture_output=True)
+        console.print(f"  [green]Stopped[/green] Docker container: {PG_CONTAINER}")
+
+
+def detect_and_launch(
+    emulators: list[EmulatorSpec],
+    *,
+    bibchip_path: Path | None = None,
+    ppl_path: Path | None = None,
+) -> None:
     panes = build_panes(emulators)
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
     start_receiver_auto_config()
+    if bibchip_path or ppl_path:
+        console.print("[dim]Race data will be uploaded to server when ready.[/dim]")
+        start_race_data_setup(bibchip_path, ppl_path)
     if shutil.which("tmux"):
         console.print("[blue]Multiplexer:[/blue] tmux")
         launch_tmux(panes)
@@ -756,7 +1132,31 @@ def parse_args() -> argparse.Namespace:
             "Repeatable for multiple emulators. Default: single emulator on port 10001."
         ),
     )
+    parser.add_argument(
+        "--bibchip", type=Path, metavar="PATH",
+        help=(
+            "Path to a bibchip CSV file. Generates emulator reads matching these chips "
+            "and uploads the file to a new race after server startup."
+        ),
+    )
+    parser.add_argument(
+        "--ppl", type=Path, metavar="PATH",
+        help="Path to a PPL participant file. Uploaded to a new race after server startup.",
+    )
     return parser.parse_args()
+
+
+def start_race_data_setup(
+    bibchip_path: Path | None, ppl_path: Path | None,
+) -> None:
+    """Run race data setup in a background daemon thread."""
+    thread = threading.Thread(
+        target=setup_race_data,
+        args=(bibchip_path, ppl_path),
+        name="race-data-setup",
+        daemon=True,
+    )
+    thread.start()
 
 
 def main() -> None:
@@ -766,7 +1166,24 @@ def main() -> None:
         clear()
         return
 
+    # Validate file paths early.
+    bibchip_path: Path | None = args.bibchip
+    ppl_path: Path | None = args.ppl
+    if bibchip_path and not bibchip_path.is_file():
+        console.print(f"[red]Error: bibchip file not found: {bibchip_path}[/red]")
+        sys.exit(1)
+    if ppl_path and not ppl_path.is_file():
+        console.print(f"[red]Error: PPL file not found: {ppl_path}[/red]")
+        sys.exit(1)
+
     emulators: list[EmulatorSpec] = args.emulator or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)]
+
+    # When a bibchip file is provided and the first emulator has no explicit
+    # file, generate a reads file from the bibchip and attach it.
+    if bibchip_path and emulators[0].file is None:
+        console.print("[bold]Generating emulator reads from bibchip…[/bold]")
+        reads_path = generate_reads_from_bibchip(bibchip_path)
+        emulators[0].file = str(reads_path)
 
     # Validate no duplicate ports across emulator, fallback, and receiver defaults.
     ports = [e.port for e in emulators]
@@ -787,6 +1204,8 @@ def main() -> None:
         )
         sys.exit(1)
 
+    check_existing_instance()
+
     console.print(Panel.fit(
         "[bold cyan]Rusty Timer Dev Launcher[/bold cyan]\n"
         "Setting up local dev environment…",
@@ -794,7 +1213,7 @@ def main() -> None:
     ))
     setup(skip_build=args.no_build, emulators=emulators)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
-    detect_and_launch(emulators)
+    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path)
 
 
 if __name__ == "__main__":

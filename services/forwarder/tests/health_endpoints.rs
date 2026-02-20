@@ -445,7 +445,7 @@ async fn status_json_shows_reader_status() {
     let server = StatusServer::start(cfg, subsystem)
         .await
         .expect("start failed");
-    server.init_readers(&["10.0.0.1".to_owned()]).await;
+    server.init_readers(&[("10.0.0.1".to_owned(), 10001)]).await;
     server
         .update_reader_state("10.0.0.1", ReaderConnectionState::Connected)
         .await;
@@ -461,6 +461,10 @@ async fn status_json_shows_reader_status() {
         body.contains("connected"),
         "status JSON must show connection state"
     );
+    assert!(
+        body.contains("\"local_port\":10001"),
+        "status JSON must show local port"
+    );
 }
 
 #[tokio::test]
@@ -473,7 +477,7 @@ async fn record_read_increments_counter() {
     let server = StatusServer::start(cfg, subsystem)
         .await
         .expect("start failed");
-    server.init_readers(&["10.0.0.5".to_owned()]).await;
+    server.init_readers(&[("10.0.0.5".to_owned(), 10005)]).await;
     for _ in 0..5 {
         server.record_read("10.0.0.5").await;
     }
@@ -522,7 +526,7 @@ async fn status_page_does_not_query_journal_for_totals() {
     let server = StatusServer::start_with_journal(cfg, subsystem, journal)
         .await
         .expect("start failed");
-    server.init_readers(&["10.0.0.9".to_owned()]).await;
+    server.init_readers(&[("10.0.0.9".to_owned(), 10009)]).await;
     let addr = server.local_addr();
     tokio::time::sleep(Duration::from_millis(50)).await;
 

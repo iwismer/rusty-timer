@@ -14,6 +14,7 @@ pub enum ForwarderUiEvent {
         reads_session: u64,
         reads_total: i64,
         last_seen_secs: Option<u64>,
+        local_port: u16,
     },
     LogEntry {
         entry: String,
@@ -48,10 +49,12 @@ mod tests {
             reads_session: 42,
             reads_total: 100,
             last_seen_secs: Some(3),
+            local_port: 10010,
         };
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "reader_updated");
         assert_eq!(json["ip"], "192.168.1.10");
+        assert_eq!(json["local_port"], 10010);
     }
 
     #[test]

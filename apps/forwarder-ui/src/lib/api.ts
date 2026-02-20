@@ -6,6 +6,7 @@ export interface ReaderStatus {
   reads_session: number;
   reads_total: number;
   last_seen_secs: number | null;
+  local_port: number;
 }
 
 export interface ForwarderStatus {

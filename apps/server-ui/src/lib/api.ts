@@ -310,3 +310,110 @@ export async function deleteReceiverStreamCursor(
     { method: "DELETE" },
   );
 }
+
+// ----- Race types -----
+
+export interface RaceEntry {
+  race_id: string;
+  name: string;
+  created_at: string;
+  participant_count: number;
+  chip_count: number;
+}
+
+export interface RacesResponse {
+  races: RaceEntry[];
+}
+
+export interface ParticipantEntry {
+  bib: number;
+  first_name: string;
+  last_name: string;
+  gender: string;
+  affiliation: string | null;
+  chip_ids: string[];
+}
+
+export interface UnmatchedChip {
+  chip_id: string;
+  bib: number;
+}
+
+export interface ParticipantsResponse {
+  participants: ParticipantEntry[];
+  chips_without_participant: UnmatchedChip[];
+}
+
+export interface UploadResult {
+  imported: number;
+}
+
+// ----- Race API -----
+
+/** GET /api/v1/races */
+export async function getRaces(): Promise<RacesResponse> {
+  return apiFetch<RacesResponse>("/api/v1/races");
+}
+
+/** POST /api/v1/races */
+export async function createRace(name: string): Promise<RaceEntry> {
+  return apiFetch<RaceEntry>("/api/v1/races", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** DELETE /api/v1/races/{raceId} */
+export async function deleteRace(raceId: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/races/${encodeURIComponent(raceId)}`, {
+    method: "DELETE",
+  });
+}
+
+/** GET /api/v1/races/{raceId}/participants */
+export async function getParticipants(
+  raceId: string,
+): Promise<ParticipantsResponse> {
+  return apiFetch<ParticipantsResponse>(
+    `/api/v1/races/${encodeURIComponent(raceId)}/participants`,
+  );
+}
+
+/** POST /api/v1/races/{raceId}/participants/upload (multipart file) */
+export async function uploadParticipants(
+  raceId: string,
+  file: File,
+): Promise<UploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  const resp = await fetch(
+    `${BASE}/api/v1/races/${encodeURIComponent(raceId)}/participants/upload`,
+    { method: "POST", body: form },
+  );
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Upload failed: ${resp.status}: ${text}`);
+  }
+  return resp.json();
+}
+
+/** POST /api/v1/races/{raceId}/chips/upload (multipart file) */
+export async function uploadChips(
+  raceId: string,
+  file: File,
+): Promise<UploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  const resp = await fetch(
+    `${BASE}/api/v1/races/${encodeURIComponent(raceId)}/chips/upload`,
+    {
+      method: "POST",
+      body: form,
+    },
+  );
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Upload failed: ${resp.status}: ${text}`);
+  }
+  return resp.json();
+}

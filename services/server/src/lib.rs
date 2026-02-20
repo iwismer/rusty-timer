@@ -104,6 +104,26 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/v1/admin/receiver-cursors/:receiver_id/:stream_id",
             delete(http::admin::delete_receiver_stream_cursor),
+        )
+        .route(
+            "/api/v1/races",
+            get(http::races::list_races).post(http::races::create_race),
+        )
+        .route(
+            "/api/v1/races/:race_id",
+            axum::routing::delete(http::races::delete_race),
+        )
+        .route(
+            "/api/v1/races/:race_id/participants",
+            get(http::races::list_participants),
+        )
+        .route(
+            "/api/v1/races/:race_id/participants/upload",
+            post(http::races::upload_participants),
+        )
+        .route(
+            "/api/v1/races/:race_id/chips/upload",
+            post(http::races::upload_chips),
         );
 
     let router = match dashboard_dir {

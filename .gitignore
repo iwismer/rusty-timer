@@ -19,6 +19,7 @@ __pycache__/
 
 # Node / SvelteKit / Tauri build artifacts (applies across all apps/)
 node_modules/
+node_modules
 .svelte-kit/
 build/
 dist/
