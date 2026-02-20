@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rusty Timer - Design System</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', '"Fira Code"', 'ui-monospace', 'monospace'],
+      },
+      colors: {
+        surface: {
+          0: 'var(--surface-0)',
+          1: 'var(--surface-1)',
+          2: 'var(--surface-2)',
+          3: 'var(--surface-3)',
+        },
+        border: {
+          DEFAULT: 'var(--border)',
+          strong: 'var(--border-strong)',
+        },
+        text: {
+          primary: 'var(--text-primary)',
+          secondary: 'var(--text-secondary)',
+          muted: 'var(--text-muted)',
+        },
+        status: {
+          ok: 'var(--status-ok)',
+          'ok-bg': 'var(--status-ok-bg)',
+          'ok-border': 'var(--status-ok-border)',
+          warn: 'var(--status-warn)',
+          'warn-bg': 'var(--status-warn-bg)',
+          'warn-border': 'var(--status-warn-border)',
+          err: 'var(--status-err)',
+          'err-bg': 'var(--status-err-bg)',
+          'err-border': 'var(--status-err-border)',
+        },
+        accent: {
+          DEFAULT: 'var(--accent)',
+          hover: 'var(--accent-hover)',
+          bg: 'var(--accent-bg)',
+        },
+      },
+    },
+  },
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ===== LIGHT THEME (default) ===== */
+  :root {
+    --surface-0: #ffffff;
+    --surface-1: #f8f9fa;
+    --surface-2: #f0f1f3;
+    --surface-3: #e4e6e9;
+
+    --border: #dde0e4;
+    --border-strong: #c0c4ca;
+
+    --text-primary: #1a1d23;
+    --text-secondary: #4a5060;
+    --text-muted: #7c8494;
+
+    --status-ok: #117a3e;
+    --status-ok-bg: #e6f4ec;
+    --status-ok-border: #a3d9b8;
+
+    --status-warn: #8a6d00;
+    --status-warn-bg: #fef7e0;
+    --status-warn-border: #f0d460;
+
+    --status-err: #c42b2b;
+    --status-err-bg: #fde8e8;
+    --status-err-border: #f0a0a0;
+
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-bg: #eff4ff;
+  }
+
+  /* ===== DARK THEME ===== */
+  .dark {
+    --surface-0: #0f1114;
+    --surface-1: #161921;
+    --surface-2: #1e222c;
+    --surface-3: #282d3a;
+
+    --border: #2e3443;
+    --border-strong: #404858;
+
+    --text-primary: #e8eaef;
+    --text-secondary: #a0a8b8;
+    --text-muted: #6b7385;
+
+    --status-ok: #3ccc6e;
+    --status-ok-bg: #0f2918;
+    --status-ok-border: #1a4d2e;
+
+    --status-warn: #f0c030;
+    --status-warn-bg: #2a2310;
+    --status-warn-border: #4d3f1a;
+
+    --status-err: #f06060;
+    --status-err-bg: #2a1010;
+    --status-err-border: #4d1a1a;
+
+    --accent: #5b8def;
+    --accent-hover: #7ba3ff;
+    --accent-bg: #1a2540;
+  }
+
+  body {
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    background: var(--surface-0);
+    color: var(--text-primary);
+    margin: 0;
+    padding: 2rem;
+    transition: background 0.2s, color 0.2s;
+  }
+</style>
+</head>
+<body>
+  <div style="max-width: 960px; margin: 0 auto;">
+
+    <!-- Theme Toggle -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
+      <div>
+        <h1 class="text-2xl font-bold" style="color: var(--text-primary);">Rusty Timer Design System</h1>
+        <p class="text-sm" style="color: var(--text-secondary);">Click the toggle to switch between light and dark mode</p>
+      </div>
+      <button onclick="document.documentElement.classList.toggle('dark')"
+        class="px-4 py-2 text-sm font-medium rounded-md"
+        style="background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border);">
+        Toggle Dark Mode
+      </button>
+    </div>
+
+    <!-- ===== TYPOGRAPHY ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Typography</h2>
+
+      <div class="mb-4">
+        <p class="text-xs mb-1 font-medium" style="color: var(--text-muted);">IBM Plex Sans / Body Font</p>
+        <p class="text-2xl font-bold" style="color: var(--text-primary);">Page Heading (2xl / bold)</p>
+        <p class="text-lg font-semibold" style="color: var(--text-primary);">Section Heading (lg / semibold)</p>
+        <p class="text-base font-medium" style="color: var(--text-primary);">Card Title (base / medium)</p>
+        <p class="text-sm" style="color: var(--text-primary);">Body text (sm / regular) - The primary readable text size</p>
+        <p class="text-xs" style="color: var(--text-secondary);">Secondary info (xs) - metadata, timestamps, subtle labels</p>
+        <p class="text-xs" style="color: var(--text-muted);">Muted text (xs / muted) - least important</p>
+      </div>
+
+      <div>
+        <p class="text-xs mb-1 font-medium" style="color: var(--text-muted);">JetBrains Mono / Monospace Font</p>
+        <p class="text-sm" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">192.168.1.50:10000 &mdash; IP addresses, IDs, technical values</p>
+        <p class="text-xs" style="font-family: 'JetBrains Mono', monospace; color: var(--text-secondary);">2024-01-15T10:32:45.123Z &mdash; timestamps, log entries</p>
+      </div>
+    </section>
+
+    <!-- ===== SURFACES ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Surfaces &amp; Borders</h2>
+      <div class="grid grid-cols-4 gap-3 mb-4">
+        <div class="p-4 rounded-md text-center text-xs font-medium" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-secondary);">
+          Surface 0<br><span style="color: var(--text-muted);">Page bg</span>
+        </div>
+        <div class="p-4 rounded-md text-center text-xs font-medium" style="background: var(--surface-1); border: 1px solid var(--border); color: var(--text-secondary);">
+          Surface 1<br><span style="color: var(--text-muted);">Cards</span>
+        </div>
+        <div class="p-4 rounded-md text-center text-xs font-medium" style="background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary);">
+          Surface 2<br><span style="color: var(--text-muted);">Hover/active</span>
+        </div>
+        <div class="p-4 rounded-md text-center text-xs font-medium" style="background: var(--surface-3); border: 1px solid var(--border); color: var(--text-secondary);">
+          Surface 3<br><span style="color: var(--text-muted);">Pressed</span>
+        </div>
+      </div>
+      <div class="flex gap-4">
+        <div class="flex-1 p-3 rounded-md text-xs text-center" style="border: 1px solid var(--border); color: var(--text-secondary);">
+          Default border
+        </div>
+        <div class="flex-1 p-3 rounded-md text-xs text-center" style="border: 1px solid var(--border-strong); color: var(--text-secondary);">
+          Strong border
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== STATUS COLORS ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Status Colors</h2>
+      <p class="text-xs mb-4" style="color: var(--text-muted);">These are the primary color accents in the UI. Everything else is neutral.</p>
+
+      <div class="grid grid-cols-3 gap-4 mb-4">
+        <!-- OK -->
+        <div class="rounded-md overflow-hidden" style="border: 1px solid var(--status-ok-border);">
+          <div class="px-3 py-2 text-sm font-medium" style="background: var(--status-ok-bg); color: var(--status-ok);">
+            OK / Healthy
+          </div>
+          <div class="px-3 py-3" style="background: var(--surface-0);">
+            <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+              connected
+            </span>
+            <span class="ml-2 inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+              online
+            </span>
+            <span class="ml-2 inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+              ready
+            </span>
+          </div>
+        </div>
+
+        <!-- Warning -->
+        <div class="rounded-md overflow-hidden" style="border: 1px solid var(--status-warn-border);">
+          <div class="px-3 py-2 text-sm font-medium" style="background: var(--status-warn-bg); color: var(--status-warn);">
+            Warning / Degraded
+          </div>
+          <div class="px-3 py-3" style="background: var(--surface-0);">
+            <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-warn-bg); color: var(--status-warn); border: 1px solid var(--status-warn-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-warn); display: inline-block;"></span>
+              connecting
+            </span>
+            <span class="ml-2 inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-warn-bg); color: var(--status-warn); border: 1px solid var(--status-warn-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-warn); display: inline-block;"></span>
+              degraded
+            </span>
+            <span class="ml-2 inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-warn-bg); color: var(--status-warn); border: 1px solid var(--status-warn-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-warn); display: inline-block;"></span>
+              restart needed
+            </span>
+          </div>
+        </div>
+
+        <!-- Error -->
+        <div class="rounded-md overflow-hidden" style="border: 1px solid var(--status-err-border);">
+          <div class="px-3 py-2 text-sm font-medium" style="background: var(--status-err-bg); color: var(--status-err);">
+            Error / Offline
+          </div>
+          <div class="px-3 py-3" style="background: var(--surface-0);">
+            <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-err); display: inline-block;"></span>
+              disconnected
+            </span>
+            <span class="ml-2 inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-err); display: inline-block;"></span>
+              offline
+            </span>
+            <span class="ml-2 inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border);">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-err); display: inline-block;"></span>
+              not ready
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== ACCENT COLOR ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Accent &amp; Interactive</h2>
+      <div class="flex gap-4 items-center flex-wrap">
+        <a href="#" style="color: var(--accent); text-decoration: none; font-size: 0.875rem;" onmouseover="this.style.color='var(--accent-hover)'" onmouseout="this.style.color='var(--accent)'">Link text</a>
+        <button class="px-3 py-1.5 text-sm font-medium rounded-md text-white" style="background: var(--accent); border: none; cursor: pointer;">Primary Button</button>
+        <button class="px-3 py-1.5 text-sm font-medium rounded-md" style="background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); cursor: pointer;">Secondary Button</button>
+        <button class="px-3 py-1.5 text-sm font-medium rounded-md" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border); cursor: pointer;">Danger Button</button>
+        <button class="px-3 py-1.5 text-sm font-medium rounded-md opacity-50 cursor-not-allowed" style="background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border);">Disabled</button>
+      </div>
+    </section>
+
+    <!-- ===== FORM ELEMENTS ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Form Elements</h2>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Text Input</label>
+          <input type="text" value="192.168.1.50:10000"
+            class="w-full px-3 py-1.5 text-sm rounded-md outline-none"
+            style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">
+        </div>
+        <div>
+          <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Select</label>
+          <select class="w-full px-3 py-1.5 text-sm rounded-md outline-none"
+            style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
+            <option>info</option>
+            <option>debug</option>
+            <option>warn</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Number Input</label>
+          <input type="number" value="8080"
+            class="w-full px-3 py-1.5 text-sm rounded-md outline-none"
+            style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">
+        </div>
+        <div>
+          <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Password Input</label>
+          <input type="password" value="secrettoken"
+            class="w-full px-3 py-1.5 text-sm rounded-md outline-none"
+            style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
+        </div>
+      </div>
+      <div class="mt-4 flex items-center gap-3">
+        <label class="flex items-center gap-2 text-sm" style="color: var(--text-primary);">
+          <input type="checkbox" checked class="rounded" style="accent-color: var(--accent);">
+          Enabled
+        </label>
+      </div>
+    </section>
+
+    <!-- ===== ALERT BANNERS ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Alert Banners</h2>
+
+      <div class="rounded-md px-4 py-3 mb-3 flex items-center justify-between text-sm"
+        style="background: var(--status-ok-bg); border: 1px solid var(--status-ok-border); color: var(--status-ok);">
+        <span class="font-medium">Update v2.1.0 available</span>
+        <button class="px-3 py-1 text-xs font-medium rounded-md text-white" style="background: var(--status-ok); border: none; cursor: pointer;">Update Now</button>
+      </div>
+
+      <div class="rounded-md px-4 py-3 mb-3 flex items-center justify-between text-sm"
+        style="background: var(--status-warn-bg); border: 1px solid var(--status-warn-border); color: var(--status-warn);">
+        <span class="font-medium">Configuration changed. Restart to apply.</span>
+        <button class="px-3 py-1 text-xs font-medium rounded-md text-white" style="background: var(--status-warn); border: none; cursor: pointer;">Restart Now</button>
+      </div>
+
+      <div class="rounded-md px-4 py-3 flex items-center text-sm"
+        style="background: var(--status-err-bg); border: 1px solid var(--status-err-border); color: var(--status-err);">
+        <span class="font-medium">Disconnected from forwarder.</span>
+      </div>
+    </section>
+
+    <!-- ===== DATA TABLE ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Data Table</h2>
+      <div class="overflow-x-auto rounded-md" style="border: 1px solid var(--border);">
+        <table class="w-full text-sm" style="border-collapse: collapse;">
+          <thead>
+            <tr style="background: var(--surface-2); border-bottom: 1px solid var(--border);">
+              <th class="text-left px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Reader IP</th>
+              <th class="text-left px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Status</th>
+              <th class="text-right px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Reads (session)</th>
+              <th class="text-right px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Reads (total)</th>
+              <th class="text-left px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Last seen</th>
+              <th class="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td class="px-3 py-2" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">192.168.1.50</td>
+              <td class="px-3 py-2">
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+                  connected
+                </span>
+              </td>
+              <td class="px-3 py-2 text-right" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">1,247</td>
+              <td class="px-3 py-2 text-right" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">12,891</td>
+              <td class="px-3 py-2 text-xs" style="color: var(--text-secondary);">3s ago</td>
+              <td class="px-3 py-2 text-right">
+                <button class="px-2 py-1 text-xs rounded-md" style="background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border); cursor: pointer;">Reset Epoch</button>
+              </td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <td class="px-3 py-2" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">192.168.1.51</td>
+              <td class="px-3 py-2">
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-warn-bg); color: var(--status-warn); border: 1px solid var(--status-warn-border);">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-warn); display: inline-block;"></span>
+                  connecting
+                </span>
+              </td>
+              <td class="px-3 py-2 text-right" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">0</td>
+              <td class="px-3 py-2 text-right" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">8,432</td>
+              <td class="px-3 py-2 text-xs" style="color: var(--text-secondary);">2m ago</td>
+              <td class="px-3 py-2 text-right">
+                <button class="px-2 py-1 text-xs rounded-md" style="background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border); cursor: pointer;">Reset Epoch</button>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-3 py-2" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">192.168.1.52</td>
+              <td class="px-3 py-2">
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-err-bg); color: var(--status-err); border: 1px solid var(--status-err-border);">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-err); display: inline-block;"></span>
+                  disconnected
+                </span>
+              </td>
+              <td class="px-3 py-2 text-right" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">0</td>
+              <td class="px-3 py-2 text-right" style="font-family: 'JetBrains Mono', monospace; color: var(--text-primary);">3,201</td>
+              <td class="px-3 py-2 text-xs" style="color: var(--text-secondary);">45m ago</td>
+              <td class="px-3 py-2 text-right">
+                <button class="px-2 py-1 text-xs rounded-md" style="background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border); cursor: pointer;">Reset Epoch</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===== CARD ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Cards</h2>
+      <div class="grid grid-cols-2 gap-4">
+        <!-- Stat card -->
+        <div class="rounded-md p-4" style="background: var(--surface-0); border: 1px solid var(--border);">
+          <p class="text-xs font-medium mb-1" style="color: var(--text-muted);">Total Reads</p>
+          <p class="text-2xl font-bold" style="color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">24,524</p>
+          <p class="text-xs mt-1" style="color: var(--text-secondary);">across 3 readers</p>
+        </div>
+        <!-- Stat card -->
+        <div class="rounded-md p-4" style="background: var(--surface-0); border: 1px solid var(--border);">
+          <p class="text-xs font-medium mb-1" style="color: var(--text-muted);">Unique Chips</p>
+          <p class="text-2xl font-bold" style="color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">1,842</p>
+          <p class="text-xs mt-1" style="color: var(--text-secondary);">this epoch</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== LOG VIEWER ===== -->
+    <section style="background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;">
+      <h2 class="text-lg font-semibold mb-4" style="color: var(--text-primary);">Log Viewer</h2>
+      <div class="rounded-md overflow-hidden" style="border: 1px solid var(--border); background: var(--surface-0);">
+        <div class="px-3 py-1.5 text-xs font-medium flex items-center justify-between" style="background: var(--surface-2); border-bottom: 1px solid var(--border); color: var(--text-secondary);">
+          <span>Logs</span>
+          <span style="color: var(--text-muted);">24 entries</span>
+        </div>
+        <div style="max-height: 180px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; line-height: 1.6;">
+          <div class="px-3 py-0.5" style="border-bottom: 1px solid var(--border);">
+            <span style="color: var(--text-muted);">10:32:45</span>
+            <span class="ml-2 px-1 rounded text-xs" style="background: var(--status-ok-bg); color: var(--status-ok);">INFO</span>
+            <span class="ml-2" style="color: var(--text-primary);">Reader 192.168.1.50 connected</span>
+          </div>
+          <div class="px-3 py-0.5" style="border-bottom: 1px solid var(--border);">
+            <span style="color: var(--text-muted);">10:32:44</span>
+            <span class="ml-2 px-1 rounded text-xs" style="background: var(--status-warn-bg); color: var(--status-warn);">WARN</span>
+            <span class="ml-2" style="color: var(--text-primary);">Uplink reconnecting, attempt 3</span>
+          </div>
+          <div class="px-3 py-0.5" style="border-bottom: 1px solid var(--border);">
+            <span style="color: var(--text-muted);">10:32:40</span>
+            <span class="ml-2 px-1 rounded text-xs" style="background: var(--status-err-bg); color: var(--status-err);">ERROR</span>
+            <span class="ml-2" style="color: var(--text-primary);">Connection to server timed out after 30s</span>
+          </div>
+          <div class="px-3 py-0.5" style="border-bottom: 1px solid var(--border);">
+            <span style="color: var(--text-muted);">10:32:38</span>
+            <span class="ml-2 px-1 rounded text-xs" style="background: var(--surface-2); color: var(--text-muted);">DEBUG</span>
+            <span class="ml-2" style="color: var(--text-primary);">Batch flush: 42 events in 250ms</span>
+          </div>
+          <div class="px-3 py-0.5">
+            <span style="color: var(--text-muted);">10:32:35</span>
+            <span class="ml-2 px-1 rounded text-xs" style="background: var(--status-ok-bg); color: var(--status-ok);">INFO</span>
+            <span class="ml-2" style="color: var(--text-primary);">Epoch reset completed for stream abc123</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</body>
+</html>

@@ -1,21 +1,30 @@
 <script>
-  import "@rusty-timer/shared-ui/styles/global.css";
+  import { onMount } from "svelte";
+  import { page } from "$app/stores";
+  import { NavBar } from "@rusty-timer/shared-ui";
+  import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
+  import "@rusty-timer/shared-ui/styles/tokens.css";
+
+  let { children } = $props();
+
+  onMount(() => initDarkMode());
+
+  let currentPath = $derived($page.url.pathname);
 </script>
 
-<nav>
-  <a href="/">Status</a>
-  <a href="/config">Config</a>
-</nav>
+<svelte:head>
+  <title>Forwarder · Rusty Timer</title>
+</svelte:head>
 
-<slot />
+<NavBar
+  links={[
+    { href: "/", label: "Status", active: currentPath === "/" },
+    { href: "/config", label: "Config", active: currentPath === "/config" },
+  ]}
+/>
 
-<style>
-  nav {
-    display: flex;
-    gap: 1rem;
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid #ddd;
-    max-width: 800px;
-    margin: 0 auto;
-  }
-</style>
+{@render children()}
+
+<footer class="border-t border-border py-3 px-6 text-center mt-8">
+  <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Forwarder</p>
+</footer>

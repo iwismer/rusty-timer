@@ -4,29 +4,34 @@
   import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { groupStreamsByForwarder } from "$lib/groupStreams";
+  import { StatusBadge, Card } from "@rusty-timer/shared-ui";
 
   // Per-stream rename state (keyed by stream_id)
-  let renameValues: Record<string, string> = {};
-  let renameBusy: Record<string, boolean> = {};
-  let renameError: Record<string, string | null> = {};
+  let renameValues: Record<string, string> = $state({});
+  let renameBusy: Record<string, boolean> = $state({});
+  let renameError: Record<string, string | null> = $state({});
 
   // Metrics fetching state
-  let requestedMetricStreamIds = new Set<string>();
-  let inFlightMetricStreamIds = new Set<string>();
+  let requestedMetricStreamIds = $state(new Set<string>());
+  let inFlightMetricStreamIds = $state(new Set<string>());
   const METRICS_RETRY_DELAY_MS = 1000;
   let metricsRetryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
   // Keep rename inputs in sync as streams arrive via SSE
-  $: for (const s of $streamsStore) {
-    if (!(s.stream_id in renameValues)) {
-      renameValues[s.stream_id] = s.display_alias ?? "";
+  $effect(() => {
+    for (const s of $streamsStore) {
+      if (!(s.stream_id in renameValues)) {
+        renameValues[s.stream_id] = s.display_alias ?? "";
+      }
     }
-  }
+  });
 
   // Fetch initial metrics for all streams
-  $: for (const s of $streamsStore) {
-    void maybeFetchMetrics(s.stream_id);
-  }
+  $effect(() => {
+    for (const s of $streamsStore) {
+      void maybeFetchMetrics(s.stream_id);
+    }
+  });
 
   function maybeFetchMetrics(id: string): void {
     if (
@@ -70,7 +75,7 @@
   }
 
   // Group streams by forwarder_id.
-  $: groupedStreams = groupStreamsByForwarder($streamsStore);
+  let groupedStreams = $derived(groupStreamsByForwarder($streamsStore));
 
   // Time-since-last-read helpers
   function formatDuration(ms: number): string {
@@ -92,7 +97,7 @@
   }
 
   // Tick to force re-render every second for time-since-last-read
-  let tick = 0;
+  let tick = $state(0);
   const timerHandle = setInterval(() => {
     tick++;
   }, 1000);
@@ -137,214 +142,169 @@
       renameBusy[streamId] = false;
     }
   }
+
+  function groupBorderStatus(
+    stats: ReturnType<typeof groupStats>,
+  ): "ok" | "warn" | "err" | undefined {
+    if (stats.totalStreams === 0) return undefined;
+    if (stats.onlineCount === 0) return "err";
+    if (stats.onlineCount < stats.totalStreams) return "warn";
+    return undefined;
+  }
 </script>
 
-<main>
-  <h1 data-testid="streams-heading">Dashboard – Streams</h1>
+<main class="max-w-[1100px] mx-auto px-6 py-6">
+  <div class="flex items-center justify-between mb-6">
+    <h1
+      data-testid="streams-heading"
+      class="text-xl font-bold text-text-primary m-0"
+    >
+      Streams
+    </h1>
+  </div>
 
-  {#each groupedStreams as group (group.forwarderId)}
+  {#each groupedStreams as group, groupIdx (group.forwarderId)}
     {@const stats = groupStats(group.streams, $metricsStore)}
-    <section class="forwarder-group">
-      <div class="forwarder-header">
-        <h2>{group.displayName}</h2>
-        <span class="group-stats">
-          {stats.totalRaw} reads · {stats.totalChips} chips · {stats.onlineCount}/{stats.totalStreams}
-          online
-        </span>
-        <!-- server enforces path-safe forwarder IDs -->
-        <a href="/forwarders/{group.forwarderId}/config" class="configure-link"
-          >Configure</a
+    {@const border = groupBorderStatus(stats)}
+    <div class="mb-6">
+      <Card borderStatus={border} headerBg>
+        {#snippet header()}
+          <h2 class="text-sm font-semibold text-text-primary m-0">
+            {group.displayName}
+          </h2>
+          <StatusBadge
+            label="{stats.onlineCount}/{stats.totalStreams} online"
+            state={stats.onlineCount === 0
+              ? "err"
+              : stats.onlineCount < stats.totalStreams
+                ? "warn"
+                : "ok"}
+          />
+          <div class="ml-auto flex items-center gap-3">
+            <span class="text-xs text-text-muted">
+              {stats.totalRaw.toLocaleString()} reads &middot;
+              {stats.totalChips.toLocaleString()} chips
+            </span>
+            <a
+              href="/forwarders/{group.forwarderId}/config"
+              class="text-xs font-medium px-2.5 py-1 rounded-md text-accent no-underline bg-accent-bg hover:underline"
+            >
+              Configure
+            </a>
+          </div>
+        {/snippet}
+
+        <div
+          data-testid="stream-list"
+          class="grid gap-3"
+          style="grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));"
         >
-      </div>
-
-      <ul data-testid="stream-list">
-        {#each group.streams as stream (stream.stream_id)}
-          <li data-testid="stream-item">
-            <div class="stream-header">
-              <a
-                data-testid="stream-detail-link"
-                href="/streams/{stream.stream_id}"
-              >
-                {#if stream.display_alias}
-                  <strong>{stream.display_alias}</strong>
+          {#each group.streams as stream (stream.stream_id)}
+            <div
+              data-testid="stream-item"
+              class="rounded-md p-4 bg-surface-0 border {stream.online
+                ? 'border-border'
+                : 'border-status-err-border'}"
+            >
+              <div class="flex items-center gap-2 mb-3">
+                <a
+                  data-testid="stream-detail-link"
+                  href="/streams/{stream.stream_id}"
+                  class="text-sm font-semibold text-accent no-underline hover:underline"
+                >
+                  {stream.display_alias || stream.reader_ip}
+                </a>
+                {#if stream.online}
+                  <span data-testid="stream-online-badge">
+                    <StatusBadge label="online" state="ok" />
+                  </span>
                 {:else}
-                  <strong>{stream.reader_ip}</strong>
+                  <span data-testid="stream-offline-badge">
+                    <StatusBadge label="offline" state="err" />
+                  </span>
                 {/if}
-              </a>
-              {#if stream.online}
-                <span data-testid="stream-online-badge" class="badge online"
-                  >online</span
+              </div>
+
+              <div class="grid grid-cols-3 gap-3 mb-3">
+                {#if $metricsStore[stream.stream_id]}
+                  <div>
+                    <p class="text-xs text-text-muted m-0">Reads</p>
+                    <p
+                      class="text-lg font-bold font-mono text-text-primary m-0"
+                    >
+                      {$metricsStore[
+                        stream.stream_id
+                      ].epoch_raw_count.toLocaleString()}
+                    </p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-text-muted m-0">Chips</p>
+                    <p
+                      class="text-lg font-bold font-mono text-text-primary m-0"
+                    >
+                      {$metricsStore[
+                        stream.stream_id
+                      ].unique_chips.toLocaleString()}
+                    </p>
+                  </div>
+                  <div>
+                    <p class="text-xs text-text-muted m-0">Last read</p>
+                    <p
+                      class="text-lg font-bold font-mono text-text-primary m-0"
+                    >
+                      {tick !== undefined
+                        ? timeSinceLastRead(stream.stream_id)
+                        : ""}
+                    </p>
+                  </div>
+                {:else}
+                  <div class="col-span-3">
+                    <p class="text-sm text-text-muted italic m-0">
+                      Loading metrics…
+                    </p>
+                  </div>
+                {/if}
+              </div>
+
+              <div class="flex items-center gap-3 text-xs text-text-muted mb-3">
+                <span class="font-mono">{stream.reader_ip}</span>
+                <span>&middot;</span>
+                <span>epoch {stream.stream_epoch}</span>
+              </div>
+
+              <!-- Rename form -->
+              <div class="flex gap-2 items-center">
+                <input
+                  data-testid="rename-input"
+                  type="text"
+                  bind:value={renameValues[stream.stream_id]}
+                  placeholder="Display alias"
+                  aria-label="Rename stream {stream.stream_id}"
+                  class="flex-1 px-2 py-1 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+                />
+                <button
+                  data-testid="rename-btn"
+                  onclick={() => handleRename(stream.stream_id)}
+                  disabled={renameBusy[stream.stream_id]}
+                  class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-              {:else}
-                <span data-testid="stream-offline-badge" class="badge offline"
-                  >offline</span
-                >
+                  {renameBusy[stream.stream_id] ? "Saving…" : "Rename"}
+                </button>
+              </div>
+
+              {#if renameError[stream.stream_id]}
+                <p class="text-xs text-status-err mt-1 m-0">
+                  {renameError[stream.stream_id]}
+                </p>
               {/if}
             </div>
-
-            <div class="stream-stats">
-              {#if $metricsStore[stream.stream_id]}
-                <span
-                  >Reads: {$metricsStore[stream.stream_id]
-                    .epoch_raw_count}</span
-                >
-                <span
-                  >Chips: {$metricsStore[stream.stream_id].unique_chips}</span
-                >
-                <span
-                  >Last read: {tick !== undefined
-                    ? timeSinceLastRead(stream.stream_id)
-                    : ""}</span
-                >
-              {:else}
-                <span class="loading">Loading metrics…</span>
-              {/if}
-            </div>
-
-            <div class="stream-meta">
-              <span>reader: {stream.reader_ip}</span>
-              <span>epoch: {stream.stream_epoch}</span>
-            </div>
-
-            <!-- Rename form -->
-            <div class="rename-row">
-              <input
-                data-testid="rename-input"
-                type="text"
-                bind:value={renameValues[stream.stream_id]}
-                placeholder="Display alias"
-                aria-label="Rename stream {stream.stream_id}"
-              />
-              <button
-                data-testid="rename-btn"
-                on:click={() => handleRename(stream.stream_id)}
-                disabled={renameBusy[stream.stream_id]}
-              >
-                {renameBusy[stream.stream_id] ? "Saving…" : "Rename"}
-              </button>
-            </div>
-
-            {#if renameError[stream.stream_id]}
-              <p class="error">{renameError[stream.stream_id]}</p>
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    </section>
+          {/each}
+        </div>
+      </Card>
+    </div>
   {/each}
 
   {#if $streamsStore.length === 0}
-    <p>No streams found.</p>
+    <p class="text-sm text-text-muted">No streams found.</p>
   {/if}
 </main>
-
-<style>
-  main {
-    max-width: 900px;
-    margin: 0 auto;
-    padding: 1rem;
-    font-family: sans-serif;
-  }
-  .forwarder-group {
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    padding: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .forwarder-header {
-    display: flex;
-    align-items: baseline;
-    gap: 1rem;
-    margin-bottom: 0.75rem;
-  }
-  .forwarder-header h2 {
-    margin: 0;
-    font-size: 1.2rem;
-  }
-  .group-stats {
-    font-size: 0.85em;
-    color: #666;
-  }
-  .configure-link {
-    font-size: 0.85em;
-    margin-left: auto;
-  }
-  ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  li {
-    border: 1px solid #ccc;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.75rem;
-    border-radius: 4px;
-  }
-  .stream-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 0.4rem;
-  }
-  .stream-stats {
-    display: flex;
-    gap: 1rem;
-    font-size: 0.85em;
-    margin-bottom: 0.4rem;
-  }
-  .stream-stats .loading {
-    color: #999;
-    font-style: italic;
-  }
-  .stream-meta {
-    font-size: 0.8em;
-    color: #666;
-    display: flex;
-    gap: 1rem;
-    margin-bottom: 0.4rem;
-  }
-  .rename-row {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    margin-top: 0.4rem;
-  }
-  .rename-row input {
-    flex: 1;
-    padding: 0.25rem 0.5rem;
-  }
-  .badge {
-    font-size: 0.75em;
-    padding: 0.15rem 0.5rem;
-    border-radius: 3px;
-    font-weight: bold;
-  }
-  .online {
-    background: #d4edda;
-    color: #155724;
-  }
-  .offline {
-    background: #f8d7da;
-    color: #721c24;
-  }
-  a {
-    text-decoration: none;
-    color: #0070f3;
-  }
-  a:hover {
-    text-decoration: underline;
-  }
-  button {
-    padding: 0.25rem 0.75rem;
-    cursor: pointer;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .error {
-    color: red;
-    margin: 0.25rem 0;
-    font-size: 0.85em;
-  }
-</style>

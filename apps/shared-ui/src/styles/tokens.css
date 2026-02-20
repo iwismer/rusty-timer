@@ -1,0 +1,102 @@
+@import "@fontsource-variable/ibm-plex-sans";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "tailwindcss";
+
+@source "../components/**/*.svelte";
+
+@theme {
+  --font-sans: "IBM Plex Sans Variable", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Fira Code",
+    monospace;
+
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-status-ok: var(--status-ok);
+  --color-status-ok-bg: var(--status-ok-bg);
+  --color-status-ok-border: var(--status-ok-border);
+  --color-status-warn: var(--status-warn);
+  --color-status-warn-bg: var(--status-warn-bg);
+  --color-status-warn-border: var(--status-warn-border);
+  --color-status-err: var(--status-err);
+  --color-status-err-bg: var(--status-err-bg);
+  --color-status-err-border: var(--status-err-border);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-bg: var(--accent-bg);
+}
+
+:root {
+  --surface-0: #ffffff;
+  --surface-1: #f8f9fa;
+  --surface-2: #f0f1f3;
+  --surface-3: #e4e6e9;
+
+  --border: #dde0e4;
+  --border-strong: #c0c4ca;
+
+  --text-primary: #1a1d23;
+  --text-secondary: #4a5060;
+  --text-muted: #7c8494;
+
+  --status-ok: #117a3e;
+  --status-ok-bg: #e6f4ec;
+  --status-ok-border: #a3d9b8;
+  --status-warn: #8a6d00;
+  --status-warn-bg: #fef7e0;
+  --status-warn-border: #f0d460;
+  --status-err: #c42b2b;
+  --status-err-bg: #fde8e8;
+  --status-err-border: #f0a0a0;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-bg: #eff4ff;
+}
+
+.dark {
+  --surface-0: #0f1114;
+  --surface-1: #161921;
+  --surface-2: #1e222c;
+  --surface-3: #282d3a;
+
+  --border: #2e3443;
+  --border-strong: #404858;
+
+  --text-primary: #e8eaef;
+  --text-secondary: #a0a8b8;
+  --text-muted: #6b7385;
+
+  --status-ok: #3ccc6e;
+  --status-ok-bg: #0f2918;
+  --status-ok-border: #1a4d2e;
+  --status-warn: #f0c030;
+  --status-warn-bg: #2a2310;
+  --status-warn-border: #4d3f1a;
+  --status-err: #f06060;
+  --status-err-bg: #2a1010;
+  --status-err-border: #4d1a1a;
+
+  --accent: #5b8def;
+  --accent-hover: #7ba3ff;
+  --accent-bg: #1a2540;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background-color: var(--surface-0);
+  margin: 0;
+  padding: 0;
+}

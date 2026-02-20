@@ -5,13 +5,19 @@ on:
     branches: [master]
     paths:
       - "apps/receiver-ui/**"
+      - "apps/shared-ui/**"
       - "services/receiver/**"
+      - "package-lock.json"
+      - "package.json"
       - ".github/workflows/receiver-embed-ui.yml"
   pull_request:
     branches: [master]
     paths:
       - "apps/receiver-ui/**"
+      - "apps/shared-ui/**"
       - "services/receiver/**"
+      - "package-lock.json"
+      - "package.json"
       - ".github/workflows/receiver-embed-ui.yml"
 
 concurrency:
@@ -40,7 +46,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: apps/receiver-ui/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install npm dependencies
         run: npm ci

@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rusty Timer - Forwarder UI Layout</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', '"Fira Code"', 'ui-monospace', 'monospace'],
+      },
+    },
+  },
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --surface-0: #ffffff; --surface-1: #f8f9fa; --surface-2: #f0f1f3; --surface-3: #e4e6e9;
+    --border: #dde0e4; --border-strong: #c0c4ca;
+    --text-primary: #1a1d23; --text-secondary: #4a5060; --text-muted: #7c8494;
+    --status-ok: #117a3e; --status-ok-bg: #e6f4ec; --status-ok-border: #a3d9b8;
+    --status-warn: #8a6d00; --status-warn-bg: #fef7e0; --status-warn-border: #f0d460;
+    --status-err: #c42b2b; --status-err-bg: #fde8e8; --status-err-border: #f0a0a0;
+    --accent: #2563eb; --accent-hover: #1d4ed8; --accent-bg: #eff4ff;
+  }
+  .dark {
+    --surface-0: #0f1114; --surface-1: #161921; --surface-2: #1e222c; --surface-3: #282d3a;
+    --border: #2e3443; --border-strong: #404858;
+    --text-primary: #e8eaef; --text-secondary: #a0a8b8; --text-muted: #6b7385;
+    --status-ok: #3ccc6e; --status-ok-bg: #0f2918; --status-ok-border: #1a4d2e;
+    --status-warn: #f0c030; --status-warn-bg: #2a2310; --status-warn-border: #4d3f1a;
+    --status-err: #f06060; --status-err-bg: #2a1010; --status-err-border: #4d1a1a;
+    --accent: #5b8def; --accent-hover: #7ba3ff; --accent-bg: #1a2540;
+  }
+  body { font-family: 'IBM Plex Sans', system-ui, sans-serif; background: var(--surface-0); color: var(--text-primary); margin: 0; }
+</style>
+</head>
+<body>
+
+<!-- ===== NAV BAR ===== -->
+<header style="background: var(--surface-1); border-bottom: 1px solid var(--border);">
+  <div style="max-width: 900px; margin: 0 auto; padding: 0 1.5rem; display: flex; align-items: center; height: 48px; gap: 2rem;">
+    <span class="text-sm font-bold" style="color: var(--text-primary); letter-spacing: -0.02em;">Rusty Timer</span>
+    <nav class="flex gap-1" style="height: 100%;">
+      <a href="#" class="flex items-center px-3 text-sm font-medium" style="color: var(--accent); border-bottom: 2px solid var(--accent); height: 100%; text-decoration: none;">Status</a>
+      <a href="#" class="flex items-center px-3 text-sm font-medium" style="color: var(--text-secondary); height: 100%; text-decoration: none; border-bottom: 2px solid transparent;">Config</a>
+    </nav>
+    <div style="margin-left: auto; display: flex; align-items: center; gap: 0.75rem;">
+      <span class="text-xs font-mono" style="color: var(--text-muted);">v1.4.2</span>
+      <button onclick="document.documentElement.classList.toggle('dark')" class="p-1.5 rounded-md" style="background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; color: var(--text-secondary); font-size: 0.75rem;">
+        Theme
+      </button>
+    </div>
+  </div>
+</header>
+
+<main style="max-width: 900px; margin: 0 auto; padding: 1.5rem;">
+
+  <!-- Update banner -->
+  <div class="rounded-md px-4 py-3 mb-4 flex items-center justify-between text-sm"
+    style="background: var(--status-ok-bg); border: 1px solid var(--status-ok-border); color: var(--status-ok);">
+    <span class="font-medium">Update v1.5.0 available</span>
+    <button class="px-3 py-1 text-xs font-medium rounded-md text-white" style="background: var(--status-ok); border: none; cursor: pointer;">Update Now</button>
+  </div>
+
+  <h1 class="text-xl font-bold mb-6" style="color: var(--text-primary);">Forwarder Status</h1>
+
+  <!-- Status overview -->
+  <div class="grid grid-cols-3 gap-4 mb-6">
+    <div class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
+      <p class="text-xs font-medium mb-1" style="color: var(--text-muted);">Forwarder ID</p>
+      <p class="text-sm font-mono font-medium" style="color: var(--text-primary);">start-line-01</p>
+    </div>
+    <div class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
+      <p class="text-xs font-medium mb-1" style="color: var(--text-muted);">Readiness</p>
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+          <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+          ready
+        </span>
+      </div>
+    </div>
+    <div class="rounded-lg p-4" style="background: var(--surface-1); border: 1px solid var(--border);">
+      <p class="text-xs font-medium mb-1" style="color: var(--text-muted);">Uplink</p>
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+          <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+          connected
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Readers section -->
+  <section class="rounded-lg overflow-hidden mb-6" style="border: 1px solid var(--border); background: var(--surface-1);">
+    <div class="px-4 py-3 flex items-center justify-between" style="border-bottom: 1px solid var(--border); background: var(--surface-2);">
+      <h2 class="text-sm font-semibold" style="color: var(--text-primary);">Readers</h2>
+      <span class="text-xs" style="color: var(--text-muted);">2 configured</span>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm" style="border-collapse: collapse;">
+        <thead>
+          <tr style="border-bottom: 1px solid var(--border);">
+            <th class="text-left px-4 py-2.5 font-medium text-xs" style="color: var(--text-secondary);">Reader IP</th>
+            <th class="text-left px-4 py-2.5 font-medium text-xs" style="color: var(--text-secondary);">Status</th>
+            <th class="text-right px-4 py-2.5 font-medium text-xs" style="color: var(--text-secondary);">Reads (session)</th>
+            <th class="text-right px-4 py-2.5 font-medium text-xs" style="color: var(--text-secondary);">Reads (total)</th>
+            <th class="text-left px-4 py-2.5 font-medium text-xs" style="color: var(--text-secondary);">Last seen</th>
+            <th class="px-4 py-2.5"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom: 1px solid var(--border);">
+            <td class="px-4 py-2.5 font-mono" style="color: var(--text-primary);">192.168.1.50</td>
+            <td class="px-4 py-2.5">
+              <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+                <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+                connected
+              </span>
+            </td>
+            <td class="px-4 py-2.5 text-right font-mono" style="color: var(--text-primary);">1,247</td>
+            <td class="px-4 py-2.5 text-right font-mono" style="color: var(--text-primary);">12,891</td>
+            <td class="px-4 py-2.5 text-xs" style="color: var(--text-secondary);">3s ago</td>
+            <td class="px-4 py-2.5 text-right">
+              <button class="px-2 py-1 text-xs rounded-md" style="background: var(--surface-0); color: var(--text-secondary); border: 1px solid var(--border); cursor: pointer;">Reset Epoch</button>
+            </td>
+          </tr>
+          <tr>
+            <td class="px-4 py-2.5 font-mono" style="color: var(--text-primary);">192.168.1.51</td>
+            <td class="px-4 py-2.5">
+              <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full" style="background: var(--status-ok-bg); color: var(--status-ok); border: 1px solid var(--status-ok-border);">
+                <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); display: inline-block;"></span>
+                connected
+              </span>
+            </td>
+            <td class="px-4 py-2.5 text-right font-mono" style="color: var(--text-primary);">1,247</td>
+            <td class="px-4 py-2.5 text-right font-mono" style="color: var(--text-primary);">8,432</td>
+            <td class="px-4 py-2.5 text-xs" style="color: var(--text-secondary);">5s ago</td>
+            <td class="px-4 py-2.5 text-right">
+              <button class="px-2 py-1 text-xs rounded-md" style="background: var(--surface-0); color: var(--text-secondary); border: 1px solid var(--border); cursor: pointer;">Reset Epoch</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Restart button -->
+  <div class="flex items-center gap-3">
+    <button class="px-3 py-1.5 text-sm font-medium rounded-md" style="background: var(--status-warn-bg); color: var(--status-warn); border: 1px solid var(--status-warn-border); cursor: pointer;">
+      Restart Forwarder
+    </button>
+    <span class="text-xs" style="color: var(--text-muted);">Restarts the forwarder service. Readers will reconnect automatically.</span>
+  </div>
+
+  <!-- ===== CONFIG PAGE (shown below as second tab) ===== -->
+  <div style="border-top: 3px dashed var(--border); margin: 3rem 0; padding-top: 1rem;">
+    <p class="text-xs font-medium mb-4" style="color: var(--text-muted);">Below: Config page (the second tab)</p>
+  </div>
+
+  <!-- Restart needed banner -->
+  <div class="rounded-md px-4 py-3 mb-4 flex items-center justify-between text-sm"
+    style="background: var(--status-warn-bg); border: 1px solid var(--status-warn-border); color: var(--status-warn);">
+    <span class="font-medium">Configuration changed. Restart to apply.</span>
+    <button class="px-3 py-1 text-xs font-medium rounded-md text-white" style="background: var(--status-warn); border: none; cursor: pointer;">Restart Now</button>
+  </div>
+
+  <h1 class="text-xl font-bold mb-6" style="color: var(--text-primary);">Configuration</h1>
+
+  <!-- Config sections -->
+  <div class="space-y-4">
+
+    <!-- General -->
+    <section class="rounded-lg overflow-hidden" style="border: 1px solid var(--border); background: var(--surface-1);">
+      <div class="px-4 py-3" style="border-bottom: 1px solid var(--border); background: var(--surface-2);">
+        <h2 class="text-sm font-semibold" style="color: var(--text-primary);">General</h2>
+      </div>
+      <div class="p-4">
+        <div class="mb-3">
+          <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Display Name</label>
+          <input type="text" value="Start Line" class="w-full px-3 py-1.5 text-sm rounded-md" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary); max-width: 400px;">
+        </div>
+        <div class="flex items-center gap-3">
+          <button class="px-3 py-1.5 text-sm font-medium rounded-md text-white" style="background: var(--accent); border: none; cursor: pointer;">Save</button>
+          <span class="text-xs font-medium px-2 py-0.5 rounded" style="background: var(--status-ok-bg); color: var(--status-ok);">Saved. Restart to apply.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Server -->
+    <section class="rounded-lg overflow-hidden" style="border: 1px solid var(--border); background: var(--surface-1);">
+      <div class="px-4 py-3" style="border-bottom: 1px solid var(--border); background: var(--surface-2);">
+        <h2 class="text-sm font-semibold" style="color: var(--text-primary);">Server</h2>
+      </div>
+      <div class="p-4">
+        <div class="grid gap-3 mb-3" style="max-width: 500px;">
+          <div>
+            <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Base URL <span style="color: var(--status-err);">*</span></label>
+            <input type="text" value="https://timer.example.com" class="w-full px-3 py-1.5 text-sm rounded-md font-mono" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
+          </div>
+          <div>
+            <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Forwarders WS Path</label>
+            <input type="text" value="/ws/forwarders" class="w-full px-3 py-1.5 text-sm rounded-md font-mono" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
+          </div>
+        </div>
+        <button class="px-3 py-1.5 text-sm font-medium rounded-md text-white" style="background: var(--accent); border: none; cursor: pointer;">Save</button>
+      </div>
+    </section>
+
+    <!-- Readers -->
+    <section class="rounded-lg overflow-hidden" style="border: 1px solid var(--border); background: var(--surface-1);">
+      <div class="px-4 py-3 flex items-center justify-between" style="border-bottom: 1px solid var(--border); background: var(--surface-2);">
+        <h2 class="text-sm font-semibold" style="color: var(--text-primary);">Readers</h2>
+      </div>
+      <div class="p-4">
+        <div class="overflow-x-auto rounded-md mb-3" style="border: 1px solid var(--border);">
+          <table class="w-full text-sm" style="border-collapse: collapse;">
+            <thead>
+              <tr style="background: var(--surface-2); border-bottom: 1px solid var(--border);">
+                <th class="text-left px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Target <span style="color: var(--status-err);">*</span></th>
+                <th class="text-center px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Enabled</th>
+                <th class="text-left px-3 py-2 font-medium text-xs" style="color: var(--text-secondary);">Fallback Port</th>
+                <th class="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="border-bottom: 1px solid var(--border);">
+                <td class="px-3 py-2">
+                  <input type="text" value="192.168.1.50:10000" class="w-full px-2 py-1 text-sm rounded font-mono" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
+                </td>
+                <td class="px-3 py-2 text-center">
+                  <input type="checkbox" checked style="accent-color: var(--accent);">
+                </td>
+                <td class="px-3 py-2">
+                  <input type="number" class="px-2 py-1 text-sm rounded font-mono" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary); width: 100px;" placeholder="">
+                </td>
+                <td class="px-3 py-2 text-right">
+                  <button class="px-2 py-1 text-xs rounded-md" style="color: var(--status-err); border: 1px solid var(--status-err-border); background: var(--surface-0); cursor: pointer;">Remove</button>
+                </td>
+              </tr>
+              <tr>
+                <td class="px-3 py-2">
+                  <input type="text" value="192.168.1.51:10000" class="w-full px-2 py-1 text-sm rounded font-mono" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary);">
+                </td>
+                <td class="px-3 py-2 text-center">
+                  <input type="checkbox" checked style="accent-color: var(--accent);">
+                </td>
+                <td class="px-3 py-2">
+                  <input type="number" class="px-2 py-1 text-sm rounded font-mono" style="background: var(--surface-0); border: 1px solid var(--border); color: var(--text-primary); width: 100px;" placeholder="">
+                </td>
+                <td class="px-3 py-2 text-right">
+                  <button class="px-2 py-1 text-xs rounded-md" style="color: var(--status-err); border: 1px solid var(--status-err-border); background: var(--surface-0); cursor: pointer;">Remove</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="flex gap-2">
+          <button class="px-3 py-1.5 text-sm font-medium rounded-md" style="background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); cursor: pointer;">+ Add Reader</button>
+          <button class="px-3 py-1.5 text-sm font-medium rounded-md text-white" style="background: var(--accent); border: none; cursor: pointer;">Save</button>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+</main>
+
+<footer style="border-top: 1px solid var(--border); padding: 0.75rem 1.5rem; text-align: center; margin-top: 2rem;">
+  <p class="text-xs" style="color: var(--text-muted);">Rusty Timer &middot; Forwarder &middot; v1.4.2</p>
+</footer>
+
+</body>
+</html>

@@ -5,11 +5,17 @@ on:
     branches: [master]
     paths:
       - "apps/server-ui/**"
+      - "apps/shared-ui/**"
+      - "package-lock.json"
+      - "package.json"
       - ".github/workflows/server-ui.yml"
   pull_request:
     branches: [master]
     paths:
       - "apps/server-ui/**"
+      - "apps/shared-ui/**"
+      - "package-lock.json"
+      - "package.json"
       - ".github/workflows/server-ui.yml"
 
 concurrency:
@@ -20,9 +26,6 @@ jobs:
   test:
     name: Server UI Tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/server-ui
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,16 +35,19 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: apps/server-ui/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
       - name: Prettier check
         run: npm run lint
+        working-directory: apps/server-ui
 
       - name: Svelte type check
         run: npm run check
+        working-directory: apps/server-ui
 
       - name: Vitest
         run: npm test
+        working-directory: apps/server-ui

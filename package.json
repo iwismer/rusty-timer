@@ -10,5 +10,8 @@
     "apps/server-ui",
     "apps/forwarder-ui",
     "apps/receiver-ui"
-  ]
+  ],
+  "overrides": {
+    "svelte": "^5.0.0"
+  }
 }

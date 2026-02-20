@@ -18,8 +18,11 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "svelte": "^4.2.0",
+    "@fontsource-variable/ibm-plex-sans": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "svelte": "^5.0.0",
+    "tailwindcss": "^4.2.0",
     "typescript": "^5.0.0",
-    "vitest": "^1.0.0"
+    "vitest": "^4.0.0"
   }
 }

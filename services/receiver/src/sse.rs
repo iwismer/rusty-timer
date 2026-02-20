@@ -13,7 +13,7 @@ pub async fn receiver_sse(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl futures_util::stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.ui_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+    let updates = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(event) => {
             let event_type = match &event {
                 ReceiverUiEvent::StatusChanged { .. } => "status_changed",
@@ -28,6 +28,8 @@ pub async fn receiver_sse(
         }
         Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
     });
+    let initial = tokio_stream::once(Ok(Event::default().event("connected").data("{}")));
+    let stream = initial.chain(updates);
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()

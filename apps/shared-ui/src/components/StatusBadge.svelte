@@ -1,27 +1,30 @@
 <script lang="ts">
-  export let label: string;
-  export let state: "ok" | "warn" | "err" = "ok";
+  let {
+    label,
+    state = "ok",
+  }: {
+    label: string;
+    state?: "ok" | "warn" | "err";
+  } = $props();
+
+  const styles: Record<string, string> = {
+    ok: "bg-status-ok-bg text-status-ok border-status-ok-border",
+    warn: "bg-status-warn-bg text-status-warn border-status-warn-border",
+    err: "bg-status-err-bg text-status-err border-status-err-border",
+  };
+
+  const dotStyles: Record<string, string> = {
+    ok: "bg-status-ok",
+    warn: "bg-status-warn",
+    err: "bg-status-err",
+  };
 </script>
 
-<span class="badge {state}">{label}</span>
-
-<style>
-  .badge {
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.85em;
-    display: inline-block;
-  }
-  .ok {
-    background: #d4edda;
-    color: #155724;
-  }
-  .warn {
-    background: #fff3cd;
-    color: #856404;
-  }
-  .err {
-    background: #f8d7da;
-    color: #721c24;
-  }
-</style>
+<span
+  class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full border {styles[
+    state
+  ]}"
+>
+  <span class="w-1.5 h-1.5 rounded-full {dotStyles[state]}"></span>
+  {label}
+</span>

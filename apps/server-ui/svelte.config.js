@@ -1,8 +1,6 @@
 import adapter from "@sveltejs/adapter-static";
-import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 
 const config = {
-  preprocess: vitePreprocess(),
   kit: {
     adapter: adapter({
       pages: "build",
@@ -11,7 +9,7 @@ const config = {
       precompress: false,
       strict: true,
     }),
-    prerender: { entries: [] },
+    prerender: { entries: [], handleUnseenRoutes: "ignore" },
   },
 };
 
