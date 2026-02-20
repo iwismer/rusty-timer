@@ -91,7 +91,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         )
         .route(
             "/api/v1/admin/receiver-cursors",
-            delete(http::admin::delete_all_cursors),
+            get(http::admin::list_cursors).delete(http::admin::delete_all_cursors),
         );
 
     let router = match dashboard_dir {

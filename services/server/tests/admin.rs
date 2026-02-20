@@ -821,3 +821,61 @@ async fn test_delete_all_cursors() {
         .unwrap();
     assert_eq!(cursor_count, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Cursor list tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_list_cursors_empty() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let resp = reqwest::get(format!("http://{}/api/v1/admin/receiver-cursors", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["cursors"].is_array());
+    assert_eq!(body["cursors"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_list_cursors_returns_all_rows() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_a = insert_stream(&pool, "fwd-1", "10.0.0.1:10000").await;
+    let stream_b = insert_stream(&pool, "fwd-2", "10.0.0.2:10000").await;
+    insert_cursor_at(&pool, "rcv-1", stream_a, 2, 10).await;
+    insert_cursor_at(&pool, "rcv-1", stream_b, 1, 5).await;
+    insert_cursor_at(&pool, "rcv-2", stream_a, 2, 8).await;
+
+    let addr = make_server(pool).await;
+    let resp = reqwest::get(format!("http://{}/api/v1/admin/receiver-cursors", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let cursors = body["cursors"].as_array().unwrap();
+    assert_eq!(cursors.len(), 3);
+
+    // Verify sorted by receiver_id, then stream_id
+    assert_eq!(cursors[0]["receiver_id"], "rcv-1");
+    assert_eq!(cursors[2]["receiver_id"], "rcv-2");
+
+    // Verify fields present
+    let c = &cursors[0];
+    assert!(c["receiver_id"].is_string());
+    assert!(c["stream_id"].is_string());
+    assert!(c["stream_epoch"].is_number());
+    assert!(c["last_seq"].is_number());
+    assert!(c["updated_at"].is_string());
+}

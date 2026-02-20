@@ -600,3 +600,43 @@ pub async fn delete_all_cursors(State(state): State<AppState>) -> impl IntoRespo
             .into_response(),
     }
 }
+
+pub async fn list_cursors(State(state): State<AppState>) -> impl IntoResponse {
+    let rows = sqlx::query!(
+        r#"SELECT receiver_id, stream_id, stream_epoch, last_seq, updated_at
+           FROM receiver_cursors ORDER BY receiver_id ASC, stream_id ASC"#
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Ok(rows) => {
+            let cursors: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "receiver_id": r.receiver_id,
+                        "stream_id": r.stream_id.to_string(),
+                        "stream_epoch": r.stream_epoch,
+                        "last_seq": r.last_seq,
+                        "updated_at": r.updated_at.to_rfc3339(),
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "cursors": cursors })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
+}
