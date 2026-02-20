@@ -674,6 +674,13 @@ pub async fn apply_section_update(
         "journal" => {
             let sqlite_path = optional_string_field(payload, "sqlite_path")?;
             let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
+            if let Some(pct) = prune_watermark_pct {
+                if pct > 100 {
+                    return Err(bad_request_error(
+                        "prune_watermark_pct must be between 0 and 100",
+                    ));
+                }
+            }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.journal = Some(crate::config::RawJournalConfig {
                     sqlite_path,
@@ -685,6 +692,13 @@ pub async fn apply_section_update(
         }
         "uplink" => {
             let batch_mode = optional_string_field(payload, "batch_mode")?;
+            if let Some(ref mode) = batch_mode {
+                if mode != "immediate" && mode != "batched" {
+                    return Err(bad_request_error(
+                        "batch_mode must be \"immediate\" or \"batched\"",
+                    ));
+                }
+            }
             let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
             let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
             update_config_file(config_state, subsystem, ui_tx, |raw| {
