@@ -236,6 +236,51 @@ describe("server_api client", () => {
     );
   });
 
+  // ----- Admin: createToken -----
+  it("createToken sends POST /api/v1/admin/tokens with device info", async () => {
+    const { createToken } = await import("./api");
+    const created = {
+      token_id: "new-tok-1",
+      device_id: "my-fwd",
+      device_type: "forwarder",
+      token: "xK9mP2vQ7nR4sT5uW8yA1bC3dE6fG9hJ2kL4mN7pQ0r",
+    };
+    mockFetch.mockResolvedValue(makeResponse(201, created));
+    const result = await createToken({
+      device_id: "my-fwd",
+      device_type: "forwarder",
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/tokens"),
+      expect.objectContaining({ method: "POST" }),
+    );
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.device_id).toBe("my-fwd");
+    expect(body.device_type).toBe("forwarder");
+    expect(result.token).toBe("xK9mP2vQ7nR4sT5uW8yA1bC3dE6fG9hJ2kL4mN7pQ0r");
+  });
+
+  it("createToken with custom token string", async () => {
+    const { createToken } = await import("./api");
+    const created = {
+      token_id: "new-tok-2",
+      device_id: "my-rcv",
+      device_type: "receiver",
+      token: "my-custom-token",
+    };
+    mockFetch.mockResolvedValue(makeResponse(201, created));
+    const result = await createToken({
+      device_id: "my-rcv",
+      device_type: "receiver",
+      token: "my-custom-token",
+    });
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.token).toBe("my-custom-token");
+    expect(result.token).toBe("my-custom-token");
+  });
+
   // ----- Admin: deleteStream -----
   it("deleteStream sends DELETE /api/v1/admin/streams/{id}", async () => {
     const { deleteStream } = await import("./api");

@@ -183,6 +183,19 @@ export interface TokensResponse {
   tokens: TokenEntry[];
 }
 
+export interface CreateTokenRequest {
+  device_id: string;
+  device_type: "forwarder" | "receiver";
+  token?: string;
+}
+
+export interface CreateTokenResponse {
+  token_id: string;
+  device_id: string;
+  device_type: string;
+  token: string;
+}
+
 // ----- Admin API -----
 
 /** GET /api/v1/admin/tokens */
@@ -194,6 +207,16 @@ export async function getTokens(): Promise<TokensResponse> {
 export async function revokeToken(tokenId: string): Promise<void> {
   return apiFetch<void>(`/api/v1/admin/tokens/${tokenId}/revoke`, {
     method: "POST",
+  });
+}
+
+/** POST /api/v1/admin/tokens — create a new device token */
+export async function createToken(
+  req: CreateTokenRequest,
+): Promise<CreateTokenResponse> {
+  return apiFetch<CreateTokenResponse>("/api/v1/admin/tokens", {
+    method: "POST",
+    body: JSON.stringify(req),
   });
 }
 
