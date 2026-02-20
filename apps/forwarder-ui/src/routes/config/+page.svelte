@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as api from "$lib/api";
   import { loadConfigPageState } from "$lib/config-load";
+  import { mapSaveSectionResult } from "$lib/config-api-adapter";
   import { ForwarderConfig } from "@rusty-timer/shared-ui";
   import type { ConfigApi } from "@rusty-timer/shared-ui";
 
@@ -16,11 +17,7 @@
     },
     async saveSection(section, data) {
       const result = await api.saveConfigSection(section, data);
-      return {
-        ok: result.ok,
-        error: result.error,
-        restart_needed: true,
-      };
+      return mapSaveSectionResult(result);
     },
     async restart() {
       try {

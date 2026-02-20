@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { resolveHeaderBgClass } from "../lib/card-logic";
+
   export let title: string | undefined = undefined;
   export let headerBg: boolean = false;
   /** Set to "ok", "warn", or "err" to show a colored border */
@@ -10,18 +12,8 @@
     err: "border-status-err-border",
   };
 
-  const headerBgMap: Record<string, string> = {
-    ok: "bg-status-ok-bg",
-    warn: "bg-status-warn-bg",
-    err: "bg-status-err-bg",
-  };
-
   $: borderClass = borderStatus ? borderMap[borderStatus] : "border-border";
-  $: headerBgClass = borderStatus
-    ? headerBgMap[borderStatus]
-    : headerBg
-      ? "bg-surface-2"
-      : "bg-surface-2";
+  $: headerBgClass = resolveHeaderBgClass(borderStatus, headerBg);
 </script>
 
 <section class="rounded-lg overflow-hidden bg-surface-1 border {borderClass}">

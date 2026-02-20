@@ -13,6 +13,7 @@
     type ReaderEntry,
     type ForwarderConfigFormState,
   } from "../lib/forwarder-config-form";
+  import { saveSuccessMessage } from "../lib/forwarder-config-logic";
   import Card from "./Card.svelte";
   import AlertBanner from "./AlertBanner.svelte";
   import StatusBadge from "./StatusBadge.svelte";
@@ -106,7 +107,7 @@
       if (result.ok) {
         sectionMessages[section] = {
           ok: true,
-          text: "Saved. Restart to apply.",
+          text: saveSuccessMessage(result.restart_needed),
         };
         restartNeeded = result.restart_needed;
       } else {
