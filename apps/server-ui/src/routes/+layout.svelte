@@ -5,6 +5,7 @@
   import { initSSE, destroySSE } from "$lib/sse";
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import { NavBar } from "@rusty-timer/shared-ui";
+  import { page } from "$app/state";
 
   let { children }: { children: Snippet } = $props();
 
@@ -22,7 +23,23 @@
   <title>Server · Rusty Timer</title>
 </svelte:head>
 
-<NavBar links={[{ href: "/", label: "Streams", active: true }]} />
+<NavBar
+  links={[
+    {
+      href: "/",
+      label: "Streams",
+      active:
+        page.url.pathname === "/" ||
+        page.url.pathname.startsWith("/streams") ||
+        page.url.pathname.startsWith("/forwarders"),
+    },
+    {
+      href: "/admin",
+      label: "Admin",
+      active: page.url.pathname.startsWith("/admin"),
+    },
+  ]}
+/>
 
 {@render children()}
 
