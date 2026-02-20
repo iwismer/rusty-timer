@@ -265,11 +265,12 @@ class CheckExistingInstanceTests(unittest.TestCase):
     @patch("scripts.dev.close_iterm2_window")
     @patch("scripts.dev.console.print")
     @patch("scripts.dev.console.input", return_value="y")
+    @patch("scripts.dev._kill_listeners")
     @patch("scripts.dev.subprocess.run")
     @patch("scripts.dev._port_listening", return_value=False)
     @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
     def test_tmux_session_detected_and_killed_on_yes(
-        self, _which_mock, _port_mock, run_mock, input_mock, _print_mock, close_mock
+        self, _which_mock, _port_mock, run_mock, _kill_listeners_mock, input_mock, _print_mock, close_mock
     ) -> None:
         def run_side_effect(cmd, **kwargs):
             if cmd == ["tmux", "has-session", "-t", "rusty-dev"]:
@@ -307,19 +308,41 @@ class CheckExistingInstanceTests(unittest.TestCase):
     @patch("scripts.dev.close_iterm2_window")
     @patch("scripts.dev.console.print")
     @patch("scripts.dev.console.input", return_value="y")
+    @patch("scripts.dev._kill_listeners")
     @patch("scripts.dev.subprocess.run")
     @patch("scripts.dev._port_listening", return_value=True)
     @patch("scripts.dev.shutil.which", return_value=None)
     def test_server_port_detected_and_processes_killed(
-        self, _which_mock, _port_mock, run_mock, input_mock, _print_mock, close_mock
+        self, _which_mock, _port_mock, run_mock, kill_listeners_mock, input_mock, _print_mock, close_mock
     ) -> None:
         run_mock.return_value = subprocess.CompletedProcess([], returncode=0)
         dev.check_existing_instance()
 
         input_mock.assert_called_once()
+        kill_listeners_mock.assert_called_once_with(dev.SERVER_PORT)
         pkill_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "pkill"]
         self.assertEqual(len(pkill_calls), len(dev.DEV_BINARIES))
         close_mock.assert_called_once()
+
+    @patch("scripts.dev.close_iterm2_window")
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.console.input", return_value="y")
+    @patch("scripts.dev._kill_listeners")
+    @patch("scripts.dev.subprocess.run")
+    @patch("scripts.dev._port_listening", return_value=True)
+    @patch("scripts.dev.shutil.which", return_value="/usr/bin/docker")
+    def test_kill_stops_docker_container(
+        self, _which_mock, _port_mock, run_mock, _kill_listeners_mock, input_mock, _print_mock, close_mock
+    ) -> None:
+        run_mock.return_value = subprocess.CompletedProcess([], returncode=0)
+        dev.check_existing_instance()
+
+        docker_calls = [
+            c for c in run_mock.call_args_list
+            if c.args[0][:2] == ["docker", "rm"]
+        ]
+        self.assertEqual(len(docker_calls), 1)
+        self.assertIn(dev.PG_CONTAINER, docker_calls[0].args[0])
 
 
 class DetectAndLaunchTests(unittest.TestCase):

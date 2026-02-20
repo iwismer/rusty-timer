@@ -761,6 +761,22 @@ def close_iterm2_window() -> None:
         return
 
     async def _close(connection):
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        _orig = loop.get_exception_handler()
+
+        def _quiet(loop, ctx):
+            exc = ctx.get("exception")
+            if exc and "ConnectionClosed" in type(exc).__name__:
+                return
+            if _orig:
+                _orig(loop, ctx)
+            else:
+                loop.default_exception_handler(ctx)
+
+        loop.set_exception_handler(_quiet)
+
         app = await iterm2.async_get_app(connection)
         for window in app.windows:
             if window.window_id == window_id:
@@ -774,6 +790,18 @@ def close_iterm2_window() -> None:
 
 
 SERVER_PORT = 8080
+
+
+def _kill_listeners(port: int) -> None:
+    """Kill all processes listening on the given TCP port."""
+    result = subprocess.run(
+        ["lsof", "-t", "-i", f":{port}"],
+        capture_output=True,
+        text=True,
+    )
+    for pid in result.stdout.strip().split():
+        if pid:
+            subprocess.run(["kill", pid], capture_output=True)
 
 
 def _port_listening(port: int) -> bool:
@@ -823,9 +851,16 @@ def check_existing_instance() -> None:
 
     close_iterm2_window()
 
+    # Kill the server by port (pkill -f is unreliable on macOS), then mop up
+    # any remaining dev binaries with pkill as a safety net.
+    _kill_listeners(SERVER_PORT)
     for name in DEV_BINARIES:
         subprocess.run(["pkill", "-f", f"target/debug/{name}"], capture_output=True)
     console.print(f"  [green]Killed[/green] dev processes")
+
+    if shutil.which("docker"):
+        subprocess.run(["docker", "rm", "-f", PG_CONTAINER], capture_output=True)
+        console.print(f"  [green]Stopped[/green] Docker container: {PG_CONTAINER}")
 
 
 def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
