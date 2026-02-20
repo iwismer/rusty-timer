@@ -367,6 +367,41 @@ async fn test_create_token_appears_in_list() {
     assert_eq!(tokens[0]["revoked"], false);
 }
 
+#[tokio::test]
+async fn test_create_token_duplicate_rejected() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let payload = serde_json::json!({
+        "device_id": "dup-device",
+        "device_type": "forwarder",
+        "token": "duplicate-token-value"
+    });
+
+    let first = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 201);
+
+    let second = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 409);
+    let body: serde_json::Value = second.json().await.unwrap();
+    assert_eq!(body["code"], "CONFLICT");
+}
+
 // ---------------------------------------------------------------------------
 // Stream deletion tests
 // ---------------------------------------------------------------------------

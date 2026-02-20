@@ -164,6 +164,7 @@
       revealedToken = result;
       copied = false;
       newDeviceId = "";
+      newDeviceType = "forwarder";
       newTokenInput = "";
     } catch (e) {
       feedback = { message: String(e), ok: false };
