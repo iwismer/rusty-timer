@@ -208,6 +208,165 @@ async fn test_revoke_token_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
+#[tokio::test]
+async fn test_create_token_auto_generate() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let client = Client::new();
+    let resp = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&serde_json::json!({
+            "device_id": "my-forwarder",
+            "device_type": "forwarder"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["device_id"], "my-forwarder");
+    assert_eq!(body["device_type"], "forwarder");
+    assert!(body["token_id"].is_string());
+    let raw_token = body["token"].as_str().unwrap();
+    assert_eq!(
+        raw_token.len(),
+        43,
+        "URL-safe base64 of 32 bytes = 43 chars"
+    );
+
+    // Verify token hash is stored in DB
+    let hash = Sha256::digest(raw_token.as_bytes());
+    let row_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM device_tokens WHERE token_hash = $1")
+            .bind(hash.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row_count, 1);
+}
+
+#[tokio::test]
+async fn test_create_token_with_provided_token() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let client = Client::new();
+    let resp = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&serde_json::json!({
+            "device_id": "my-receiver",
+            "device_type": "receiver",
+            "token": "my-custom-token-string"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["token"], "my-custom-token-string");
+    assert_eq!(body["device_type"], "receiver");
+
+    // Verify the custom token's hash is in DB
+    let hash = Sha256::digest(b"my-custom-token-string");
+    let row_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM device_tokens WHERE token_hash = $1")
+            .bind(hash.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row_count, 1);
+}
+
+#[tokio::test]
+async fn test_create_token_invalid_device_type() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let resp = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&serde_json::json!({
+            "device_id": "some-device",
+            "device_type": "invalid"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn test_create_token_empty_device_id() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let resp = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&serde_json::json!({
+            "device_id": "  ",
+            "device_type": "forwarder"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn test_create_token_appears_in_list() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    // Create a token
+    let create_resp = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&serde_json::json!({
+            "device_id": "list-check",
+            "device_type": "forwarder"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 201);
+
+    // Verify it shows in list
+    let list_resp = reqwest::get(format!("http://{}/api/v1/admin/tokens", addr))
+        .await
+        .unwrap();
+    let list_body: serde_json::Value = list_resp.json().await.unwrap();
+    let tokens = list_body["tokens"].as_array().unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0]["device_id"], "list-check");
+    assert_eq!(tokens[0]["revoked"], false);
+}
+
 // ---------------------------------------------------------------------------
 // Stream deletion tests
 // ---------------------------------------------------------------------------
