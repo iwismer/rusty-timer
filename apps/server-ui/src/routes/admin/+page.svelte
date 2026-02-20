@@ -2,11 +2,17 @@
   import { onMount } from "svelte";
   import { Card, ConfirmDialog } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
-  import type { StreamEntry, TokenEntry, CreateTokenResponse } from "$lib/api";
+  import type {
+    StreamEntry,
+    TokenEntry,
+    CreateTokenResponse,
+    CursorEntry,
+  } from "$lib/api";
 
   // ----- Shared state -----
   let streams: StreamEntry[] = $state([]);
   let tokens: TokenEntry[] = $state([]);
+  let cursors: CursorEntry[] = $state([]);
   let busy = $state(false);
   let feedback: { message: string; ok: boolean } | null = $state(null);
 
@@ -38,6 +44,7 @@
   onMount(() => {
     loadStreams();
     loadTokens();
+    loadCursors();
   });
 
   async function loadStreams() {
@@ -55,6 +62,15 @@
       tokens = resp.tokens;
     } catch {
       tokens = [];
+    }
+  }
+
+  async function loadCursors() {
+    try {
+      const resp = await api.getCursors();
+      cursors = resp.cursors;
+    } catch {
+      cursors = [];
     }
   }
 
@@ -82,6 +98,7 @@
       feedback = { message: "Done.", ok: true };
       await loadStreams();
       await loadTokens();
+      await loadCursors();
     } catch (e) {
       feedback = { message: String(e), ok: false };
     } finally {
@@ -202,6 +219,29 @@
       "This will clear all receiver cursor positions. All receivers will re-sync from the beginning on their next connection.",
       "Clear Cursors",
       () => api.deleteAllCursors(),
+    );
+  }
+
+  function confirmDeleteReceiverCursors(receiverId: string) {
+    showConfirm(
+      "Clear Receiver Cursors",
+      `This will clear all cursor positions for receiver "${receiverId}". It will re-sync from the beginning on its next connection.`,
+      "Clear Cursors",
+      () => api.deleteReceiverCursors(receiverId),
+    );
+  }
+
+  function confirmDeleteReceiverStreamCursor(
+    receiverId: string,
+    streamId: string,
+  ) {
+    const s = streams.find((s) => s.stream_id === streamId);
+    const streamName = s?.display_alias || s?.reader_ip || streamId;
+    showConfirm(
+      "Clear Cursor",
+      `This will clear the cursor for receiver "${receiverId}" on stream "${streamName}".`,
+      "Clear Cursor",
+      () => api.deleteReceiverStreamCursor(receiverId, streamId),
     );
   }
 </script>
@@ -516,16 +556,79 @@
   <!-- Receiver Cursors Section -->
   <div class="mb-6">
     <Card title="Receiver Cursors" borderStatus="err">
-      <p class="text-sm text-text-secondary m-0 mb-4">
-        Clear all receiver cursor positions. This forces receivers to re-sync
-        from the beginning on their next connection.
-      </p>
-      <button
-        onclick={confirmClearCursors}
-        class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80"
-      >
-        Clear All Cursors
-      </button>
+      {#if cursors.length === 0}
+        <p class="text-sm text-text-muted m-0">No receiver cursors.</p>
+      {:else}
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-border text-left text-text-muted">
+              <th class="py-2 pr-4 font-medium">Receiver</th>
+              <th class="py-2 pr-4 font-medium">Stream</th>
+              <th class="py-2 pr-4 font-medium">Epoch</th>
+              <th class="py-2 pr-4 font-medium">Last Seq</th>
+              <th class="py-2 pr-4 font-medium">Updated</th>
+              <th class="py-2 font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each cursors as c, i (c.receiver_id + c.stream_id)}
+              <tr class="border-b border-border/50">
+                <td class="py-2 pr-4 text-text-primary">
+                  {c.receiver_id}
+                </td>
+                <td class="py-2 pr-4 text-text-secondary">
+                  {streams.find((s) => s.stream_id === c.stream_id)
+                    ?.display_alias ||
+                    streams.find((s) => s.stream_id === c.stream_id)
+                      ?.reader_ip ||
+                    c.stream_id}
+                </td>
+                <td class="py-2 pr-4 text-text-secondary">{c.stream_epoch}</td>
+                <td class="py-2 pr-4 text-text-secondary">{c.last_seq}</td>
+                <td class="py-2 pr-4 text-text-muted text-xs">
+                  {new Date(c.updated_at).toLocaleString()}
+                </td>
+                <td class="py-2 text-right whitespace-nowrap">
+                  <button
+                    onclick={() =>
+                      confirmDeleteReceiverStreamCursor(
+                        c.receiver_id,
+                        c.stream_id,
+                      )}
+                    class="px-2 py-1 text-xs font-medium rounded bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+              <!-- Show "Delete All for Receiver" after last cursor row for this receiver -->
+              {#if i === cursors.length - 1 || cursors[i + 1].receiver_id !== c.receiver_id}
+                {#if cursors.filter((x) => x.receiver_id === c.receiver_id).length > 1}
+                  <tr class="border-b border-border/30">
+                    <td colspan="6" class="py-2 text-right">
+                      <button
+                        onclick={() =>
+                          confirmDeleteReceiverCursors(c.receiver_id)}
+                        class="px-2 py-1 text-xs font-medium rounded bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80"
+                      >
+                        Delete All for {c.receiver_id}
+                      </button>
+                    </td>
+                  </tr>
+                {/if}
+              {/if}
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+      <div class="mt-4 pt-4 border-t border-border">
+        <button
+          onclick={confirmClearCursors}
+          class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err text-white border-none cursor-pointer hover:opacity-80"
+        >
+          Clear All Cursors
+        </button>
+      </div>
     </Card>
   </div>
 </main>
