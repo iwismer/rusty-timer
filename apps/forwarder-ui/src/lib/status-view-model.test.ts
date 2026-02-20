@@ -34,6 +34,7 @@ describe("readerConnectionSummary", () => {
         reads_session: 0,
         reads_total: 0,
         last_seen_secs: null,
+        local_port: 10001,
       },
       {
         ip: "b",
@@ -41,6 +42,7 @@ describe("readerConnectionSummary", () => {
         reads_session: 0,
         reads_total: 0,
         last_seen_secs: null,
+        local_port: 10002,
       },
       {
         ip: "c",
@@ -48,6 +50,7 @@ describe("readerConnectionSummary", () => {
         reads_session: 0,
         reads_total: 0,
         last_seen_secs: null,
+        local_port: 10003,
       },
     ]);
 

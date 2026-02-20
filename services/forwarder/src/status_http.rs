@@ -70,6 +70,8 @@ pub struct ReaderStatus {
     pub last_seen: Option<Instant>,
     pub reads_since_restart: u64,
     pub reads_total: i64,
+    /// The local port the forwarder listens on to re-expose reads from this reader.
+    pub local_port: u16,
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -279,14 +281,18 @@ impl StatusServer {
     }
 
     /// Pre-populate all configured reader IPs as Disconnected.
-    pub async fn init_readers(&self, reader_ips: &[String]) {
+    ///
+    /// Each entry is `(reader_addr, local_port)` where `reader_addr` is `"ip:port"`
+    /// and `local_port` is the port the forwarder listens on to re-expose reads.
+    pub async fn init_readers(&self, readers: &[(String, u16)]) {
         let mut ss = self.subsystem.lock().await;
-        for ip in reader_ips {
-            ss.readers.entry(ip.clone()).or_insert(ReaderStatus {
+        for (addr, local_port) in readers {
+            ss.readers.entry(addr.clone()).or_insert(ReaderStatus {
                 state: ReaderConnectionState::Disconnected,
                 last_seen: None,
                 reads_since_restart: 0,
                 reads_total: 0,
+                local_port: *local_port,
             });
         }
     }
@@ -317,6 +323,7 @@ impl StatusServer {
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: r.local_port,
                 });
         }
     }
@@ -341,6 +348,7 @@ impl StatusServer {
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: r.local_port,
                 });
         }
     }
@@ -1013,6 +1021,7 @@ struct ReaderStatusJson {
     reads_session: u64,
     reads_total: i64,
     last_seen_secs: Option<u64>,
+    local_port: u16,
 }
 
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
@@ -1034,6 +1043,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 reads_session: r.reads_since_restart,
                 reads_total: r.reads_total,
                 last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                local_port: r.local_port,
             }
         })
         .collect();
@@ -1537,7 +1547,9 @@ mod tests {
         .expect("start status server");
 
         server.set_forwarder_id("fwd-abc123").await;
-        server.init_readers(&["192.168.1.10".to_owned()]).await;
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
         server
             .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
             .await;
