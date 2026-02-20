@@ -210,6 +210,21 @@
         label={stream.online ? "online" : "offline"}
         state={stream.online ? "ok" : "err"}
       />
+      <div class="ml-auto">
+        <select
+          class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+          value={$forwarderRacesStore[stream.forwarder_id] ?? ""}
+          onchange={(e) => {
+            const val = e.currentTarget.value;
+            handleRaceChange(stream.forwarder_id, val || null);
+          }}
+        >
+          <option value="">No race</option>
+          {#each $racesStore as race (race.race_id)}
+            <option value={race.race_id}>{race.name}</option>
+          {/each}
+        </select>
+      </div>
     {/if}
   </div>
 
@@ -224,22 +239,6 @@
           <dd class="font-mono text-text-primary m-0">{stream.stream_id}</dd>
           <dt class="text-text-muted">Forwarder</dt>
           <dd class="text-text-primary m-0">{stream.forwarder_id}</dd>
-          <dt class="text-text-muted">Race</dt>
-          <dd class="m-0">
-            <select
-              class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
-              value={$forwarderRacesStore[stream.forwarder_id] ?? ""}
-              onchange={(e) => {
-                const val = e.currentTarget.value;
-                handleRaceChange(stream.forwarder_id, val || null);
-              }}
-            >
-              <option value="">No race</option>
-              {#each $racesStore as race (race.race_id)}
-                <option value={race.race_id}>{race.name}</option>
-              {/each}
-            </select>
-          </dd>
           <dt class="text-text-muted">Reader IP</dt>
           <dd class="font-mono text-text-primary m-0">{stream.reader_ip}</dd>
           <dt class="text-text-muted">Epoch</dt>
