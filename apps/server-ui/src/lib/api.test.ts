@@ -376,4 +376,77 @@ describe("server_api client", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
   });
+
+  // ----- Admin: getCursors -----
+  it("getCursors calls GET /api/v1/admin/receiver-cursors", async () => {
+    const { getCursors } = await import("./api");
+    const payload = {
+      cursors: [
+        {
+          receiver_id: "rcv-1",
+          stream_id: "abc-123",
+          stream_epoch: 2,
+          last_seq: 10,
+          updated_at: "2026-02-20T12:00:00Z",
+        },
+      ],
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+    const result = await getCursors();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors"),
+      expect.any(Object),
+    );
+    expect(result.cursors).toHaveLength(1);
+    expect(result.cursors[0].receiver_id).toBe("rcv-1");
+  });
+
+  // ----- Admin: deleteReceiverCursors -----
+  it("deleteReceiverCursors sends DELETE /api/v1/admin/receiver-cursors/{id}", async () => {
+    const { deleteReceiverCursors } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteReceiverCursors("rcv-1")).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors/rcv-1"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: deleteReceiverStreamCursor -----
+  it("deleteReceiverStreamCursor sends DELETE /api/v1/admin/receiver-cursors/{receiverId}/{streamId}", async () => {
+    const { deleteReceiverStreamCursor } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(
+      deleteReceiverStreamCursor("rcv-1", "abc-123"),
+    ).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors/rcv-1/abc-123"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("deleteReceiverCursors URL-encodes receiver ID", async () => {
+    const { deleteReceiverCursors } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await deleteReceiverCursors("rcv/special");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors/rcv%2Fspecial"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
 });

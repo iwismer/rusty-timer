@@ -196,6 +196,18 @@ export interface CreateTokenResponse {
   token: string;
 }
 
+export interface CursorEntry {
+  receiver_id: string;
+  stream_id: string;
+  stream_epoch: number;
+  last_seq: number;
+  updated_at: string;
+}
+
+export interface CursorsResponse {
+  cursors: CursorEntry[];
+}
+
 // ----- Admin API -----
 
 /** GET /api/v1/admin/tokens */
@@ -260,4 +272,28 @@ export async function deleteAllCursors(): Promise<void> {
   return apiFetch<void>("/api/v1/admin/receiver-cursors", {
     method: "DELETE",
   });
+}
+
+/** GET /api/v1/admin/receiver-cursors — list all receiver cursors */
+export async function getCursors(): Promise<CursorsResponse> {
+  return apiFetch<CursorsResponse>("/api/v1/admin/receiver-cursors");
+}
+
+/** DELETE /api/v1/admin/receiver-cursors/{receiverId} — clear cursors for one receiver, returns 204 */
+export async function deleteReceiverCursors(receiverId: string): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/admin/receiver-cursors/${encodeURIComponent(receiverId)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** DELETE /api/v1/admin/receiver-cursors/{receiverId}/{streamId} — clear a single cursor, returns 204 */
+export async function deleteReceiverStreamCursor(
+  receiverId: string,
+  streamId: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/admin/receiver-cursors/${encodeURIComponent(receiverId)}/${encodeURIComponent(streamId)}`,
+    { method: "DELETE" },
+  );
 }
