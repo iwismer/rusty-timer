@@ -36,6 +36,8 @@ export interface StreamMetrics {
   /** ISO 8601 timestamp of last event in current epoch, or null. */
   epoch_last_received_at: string | null;
   unique_chips: number;
+  last_tag_id: string | null;
+  last_reader_timestamp: string | null;
 }
 
 export interface ApiError {
@@ -97,6 +99,9 @@ export async function getMetrics(streamId: string): Promise<StreamMetrics> {
     epoch_last_received_at:
       (data.epoch_last_received_at as string | null) ?? null,
     unique_chips: data.unique_chips as number,
+    last_tag_id: (data.last_tag_id as string | null) ?? null,
+    last_reader_timestamp:
+      (data.last_reader_timestamp as string | null) ?? null,
   };
 }
 
@@ -166,6 +171,100 @@ export async function restartForwarder(
   return apiFetch<{ ok: boolean; error?: string }>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/restart`,
     { method: "POST" },
+  );
+}
+
+// ----- Forwarder-race types -----
+
+export interface ForwarderRaceAssignment {
+  forwarder_id: string;
+  race_id: string | null;
+}
+
+export interface ForwarderRacesResponse {
+  assignments: ForwarderRaceAssignment[];
+}
+
+// ----- Forwarder-race API -----
+
+/** GET /api/v1/forwarder-races */
+export async function getForwarderRaces(): Promise<ForwarderRacesResponse> {
+  return apiFetch<ForwarderRacesResponse>("/api/v1/forwarder-races");
+}
+
+/** PUT /api/v1/forwarders/{forwarderId}/race */
+export async function setForwarderRace(
+  forwarderId: string,
+  raceId: string | null,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/race`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ race_id: raceId }),
+    },
+  );
+}
+
+// ----- Reads types -----
+
+export type DedupMode = "none" | "first" | "last";
+
+export interface ReadEntry {
+  stream_id: string;
+  seq: number;
+  reader_timestamp: string | null;
+  tag_id: string | null;
+  received_at: string;
+  bib: number | null;
+  first_name: string | null;
+  last_name: string | null;
+}
+
+export interface ReadsResponse {
+  reads: ReadEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ReadsParams {
+  dedup?: DedupMode;
+  window_secs?: number;
+  limit?: number;
+  offset?: number;
+}
+
+// ----- Reads API -----
+
+function buildReadsQuery(params?: ReadsParams): string {
+  if (!params) return "";
+  const parts: string[] = [];
+  if (params.dedup) parts.push(`dedup=${params.dedup}`);
+  if (params.window_secs != null)
+    parts.push(`window_secs=${params.window_secs}`);
+  if (params.limit != null) parts.push(`limit=${params.limit}`);
+  if (params.offset != null) parts.push(`offset=${params.offset}`);
+  return parts.length ? `?${parts.join("&")}` : "";
+}
+
+/** GET /api/v1/streams/{streamId}/reads */
+export async function getStreamReads(
+  streamId: string,
+  params?: ReadsParams,
+): Promise<ReadsResponse> {
+  return apiFetch<ReadsResponse>(
+    `/api/v1/streams/${encodeURIComponent(streamId)}/reads${buildReadsQuery(params)}`,
+  );
+}
+
+/** GET /api/v1/forwarders/{forwarderId}/reads */
+export async function getForwarderReads(
+  forwarderId: string,
+  params?: ReadsParams,
+): Promise<ReadsResponse> {
+  return apiFetch<ReadsResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/reads${buildReadsQuery(params)}`,
   );
 }
 

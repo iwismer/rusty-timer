@@ -44,9 +44,9 @@ run_js_checks() {
   local app_dir="$1"
   local app_name="${app_dir##$REPO_ROOT/}"
 
-  if [ ! -d "$app_dir/node_modules" ]; then
-    echo "  ERROR: $app_name dependencies are not installed."
-    echo "  Run: (cd $app_name && npm ci)"
+  if [ ! -d "$REPO_ROOT/node_modules" ]; then
+    echo "  ERROR: dependencies are not installed."
+    echo "  Run: npm ci"
     exit 1
   fi
 

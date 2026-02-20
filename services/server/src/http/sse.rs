@@ -18,6 +18,9 @@ pub async fn dashboard_sse(
                 crate::dashboard_events::DashboardEvent::StreamCreated { .. } => "stream_created",
                 crate::dashboard_events::DashboardEvent::StreamUpdated { .. } => "stream_updated",
                 crate::dashboard_events::DashboardEvent::MetricsUpdated { .. } => "metrics_updated",
+                crate::dashboard_events::DashboardEvent::ForwarderRaceAssigned { .. } => {
+                    "forwarder_race_assigned"
+                }
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),

@@ -1,6 +1,8 @@
 pub mod export;
 pub mod forwarder_config;
+pub mod forwarder_races;
 pub mod metrics;
 pub mod races;
+pub mod reads;
 pub mod sse;
 pub mod streams;

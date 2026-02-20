@@ -2,14 +2,25 @@
   import { onDestroy } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
+  import type { ReadEntry, DedupMode } from "$lib/api";
   import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
+  import ReadsTable from "$lib/components/ReadsTable.svelte";
 
   let resetResult: string | null = $state(null);
   let resetBusy = $state(false);
   let requestedMetricStreamIds = $state(new Set<string>());
   let inFlightMetricStreamIds = $state(new Set<string>());
+
+  // Reads state
+  let reads: ReadEntry[] = $state([]);
+  let readsTotal = $state(0);
+  let readsLoading = $state(false);
+  let readsDedup: DedupMode = $state("none");
+  let readsWindowSecs = $state(5);
+  let readsLimit = $state(100);
+  let readsOffset = $state(0);
 
   let streamId = $derived($page.params.streamId!);
   let stream = $derived(
@@ -101,6 +112,34 @@
       clearInterval(handle);
     };
   });
+
+  // Load reads on mount
+  $effect(() => {
+    void loadReads(streamId);
+  });
+
+  async function loadReads(id: string): Promise<void> {
+    readsLoading = true;
+    try {
+      const resp = await api.getStreamReads(id, {
+        dedup: readsDedup,
+        window_secs: readsWindowSecs,
+        limit: readsLimit,
+        offset: readsOffset,
+      });
+      reads = resp.reads;
+      readsTotal = resp.total;
+    } catch {
+      reads = [];
+      readsTotal = 0;
+    } finally {
+      readsLoading = false;
+    }
+  }
+
+  function handleReadsParamsChange() {
+    void loadReads(streamId);
+  }
 </script>
 
 <main class="max-w-[1100px] mx-auto px-6 py-6">
@@ -312,6 +351,21 @@
             {resetResult}
           </p>
         {/if}
+      </Card>
+    </div>
+
+    <div class="mb-6">
+      <Card title="Reads">
+        <ReadsTable
+          {reads}
+          total={readsTotal}
+          loading={readsLoading}
+          bind:dedup={readsDedup}
+          bind:windowSecs={readsWindowSecs}
+          bind:limit={readsLimit}
+          bind:offset={readsOffset}
+          onParamsChange={handleReadsParamsChange}
+        />
       </Card>
     </div>
   {:else}

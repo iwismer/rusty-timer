@@ -55,5 +55,11 @@ pub enum DashboardEvent {
         epoch_lag_ms: Option<u64>,
         epoch_last_received_at: Option<String>,
         unique_chips: i64,
+        last_tag_id: Option<String>,
+        last_reader_timestamp: Option<String>,
+    },
+    ForwarderRaceAssigned {
+        forwarder_id: String,
+        race_id: Option<Uuid>,
     },
 }

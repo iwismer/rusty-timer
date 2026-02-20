@@ -1,8 +1,14 @@
 import { writable } from "svelte/store";
-import type { StreamEntry, StreamMetrics } from "./api";
+import type { StreamEntry, StreamMetrics, RaceEntry } from "./api";
 
 export const streamsStore = writable<StreamEntry[]>([]);
 export const metricsStore = writable<Record<string, StreamMetrics>>({});
+
+/** forwarder_id → race_id (null means unassigned) */
+export const forwarderRacesStore = writable<Record<string, string | null>>({});
+
+/** All races for dropdown selection */
+export const racesStore = writable<RaceEntry[]>([]);
 
 export function addOrUpdateStream(stream: StreamEntry): void {
   streamsStore.update((streams) => {
@@ -33,7 +39,20 @@ export function replaceStreams(streams: StreamEntry[]): void {
   streamsStore.set(streams);
 }
 
+export function setForwarderRace(
+  forwarderId: string,
+  raceId: string | null,
+): void {
+  forwarderRacesStore.update((m) => ({ ...m, [forwarderId]: raceId }));
+}
+
+export function setRaces(races: RaceEntry[]): void {
+  racesStore.set(races);
+}
+
 export function resetStores(): void {
   streamsStore.set([]);
   metricsStore.set({});
+  forwarderRacesStore.set({});
+  racesStore.set([]);
 }

@@ -1,10 +1,18 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import * as api from "$lib/api";
-  import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
+  import {
+    streamsStore,
+    metricsStore,
+    setMetrics,
+    forwarderRacesStore,
+    racesStore,
+  } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { groupStreamsByForwarder } from "$lib/groupStreams";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
+  import { resolveChipRead } from "$lib/chipResolver";
+  import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
 
   // Per-stream rename state (keyed by stream_id)
   let renameValues: Record<string, string> = $state({});
@@ -151,6 +159,37 @@
     if (stats.onlineCount < stats.totalStreams) return "warn";
     return undefined;
   }
+
+  // Load race data whenever forwarder-race assignments change
+  $effect(() => {
+    for (const raceId of Object.values($forwarderRacesStore)) {
+      if (raceId) void ensureRaceDataLoaded(raceId);
+    }
+  });
+
+  async function handleRaceChange(forwarderId: string, raceId: string | null) {
+    try {
+      await api.setForwarderRace(forwarderId, raceId);
+    } catch {
+      // SSE will correct any stale state
+    }
+  }
+
+  function lastReadDisplay(streamId: string): string {
+    const m = $metricsStore[streamId];
+    if (!m) return "\u2014";
+    if (!m.last_tag_id && !m.last_reader_timestamp) return "\u2014";
+    // Find the forwarder for this stream to get its race assignment
+    const stream = $streamsStore.find((s) => s.stream_id === streamId);
+    if (!stream) return "\u2014";
+    const raceId = $forwarderRacesStore[stream.forwarder_id];
+    const raceData = raceId ? $raceDataStore[raceId] : null;
+    return resolveChipRead(
+      m.last_tag_id,
+      m.last_reader_timestamp,
+      raceData?.chipMap ?? null,
+    );
+  }
 </script>
 
 <main class="max-w-[1100px] mx-auto px-6 py-6">
@@ -185,6 +224,25 @@
               {stats.totalRaw.toLocaleString()} reads &middot;
               {stats.totalChips.toLocaleString()} chips
             </span>
+            <select
+              class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+              value={$forwarderRacesStore[group.forwarderId] ?? ""}
+              onchange={(e) => {
+                const val = e.currentTarget.value;
+                handleRaceChange(group.forwarderId, val || null);
+              }}
+            >
+              <option value="">No race</option>
+              {#each $racesStore as race (race.race_id)}
+                <option value={race.race_id}>{race.name}</option>
+              {/each}
+            </select>
+            <a
+              href="/forwarders/{group.forwarderId}/reads"
+              class="text-xs font-medium px-2.5 py-1 rounded-md text-accent no-underline bg-accent-bg hover:underline"
+            >
+              View Reads
+            </a>
             <a
               href="/forwarders/{group.forwarderId}/config"
               class="text-xs font-medium px-2.5 py-1 rounded-md text-accent no-underline bg-accent-bg hover:underline"
@@ -250,8 +308,12 @@
                   <div>
                     <p class="text-xs text-text-muted m-0">Last read</p>
                     <p
-                      class="text-lg font-bold font-mono text-text-primary m-0"
+                      class="text-sm font-mono text-text-primary m-0 truncate"
+                      title={lastReadDisplay(stream.stream_id)}
                     >
+                      {lastReadDisplay(stream.stream_id)}
+                    </p>
+                    <p class="text-xs text-text-muted m-0">
                       {tick !== undefined
                         ? timeSinceLastRead(stream.stream_id)
                         : ""}

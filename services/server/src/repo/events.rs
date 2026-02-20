@@ -45,7 +45,7 @@ pub async fn upsert_event(
             .execute(&mut *tx)
             .await?;
         sqlx::query(
-            "UPDATE stream_metrics SET epoch_raw_count = 0, epoch_dedup_count = 0, epoch_retransmit_count = 0, epoch_last_received_at = NULL WHERE stream_id = $1",
+            "UPDATE stream_metrics SET epoch_raw_count = 0, epoch_dedup_count = 0, epoch_retransmit_count = 0, epoch_last_received_at = NULL, last_tag_id = NULL, last_reader_timestamp = NULL WHERE stream_id = $1",
         )
         .bind(stream_id)
         .execute(&mut *tx)
@@ -100,9 +100,11 @@ pub async fn upsert_event(
         .await?;
         if is_current_epoch {
             sqlx::query(
-                "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now(), epoch_raw_count = epoch_raw_count + 1, epoch_dedup_count = epoch_dedup_count + 1, epoch_last_received_at = now() WHERE stream_id = $1",
+                "UPDATE stream_metrics SET raw_count = raw_count + 1, dedup_count = dedup_count + 1, last_canonical_event_received_at = now(), epoch_raw_count = epoch_raw_count + 1, epoch_dedup_count = epoch_dedup_count + 1, epoch_last_received_at = now(), last_tag_id = $2, last_reader_timestamp = $3 WHERE stream_id = $1",
             )
             .bind(stream_id)
+            .bind(tag_id.as_deref())
+            .bind(reader_timestamp)
             .execute(&mut *tx)
             .await?;
         } else {
@@ -200,6 +202,8 @@ pub struct StreamMetricsRow {
     pub epoch_retransmit_count: i64,
     pub epoch_lag_ms: Option<u64>,
     pub epoch_last_received_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_tag_id: Option<String>,
+    pub last_reader_timestamp: Option<String>,
 }
 
 pub struct StreamSnapshotRow {
@@ -217,33 +221,35 @@ pub async fn fetch_stream_metrics(
     pool: &PgPool,
     stream_id: Uuid,
 ) -> Result<Option<StreamMetricsRow>, sqlx::Error> {
-    let row = sqlx::query!(
+    let row = sqlx::query(
         r#"SELECT raw_count, dedup_count, retransmit_count, last_canonical_event_received_at,
-                  epoch_raw_count, epoch_dedup_count, epoch_retransmit_count, epoch_last_received_at
+                  epoch_raw_count, epoch_dedup_count, epoch_retransmit_count, epoch_last_received_at,
+                  last_tag_id, last_reader_timestamp
            FROM stream_metrics WHERE stream_id = $1"#,
-        stream_id
     )
+    .bind(stream_id)
     .fetch_optional(pool)
     .await?;
 
     let now = chrono::Utc::now();
     Ok(row.map(|r| {
-        let lag_ms = r
-            .last_canonical_event_received_at
-            .map(|ts| (now - ts).num_milliseconds().max(0) as u64);
-        let epoch_lag_ms = r
-            .epoch_last_received_at
-            .map(|ts| (now - ts).num_milliseconds().max(0) as u64);
+        let last_canonical: Option<chrono::DateTime<chrono::Utc>> =
+            r.get("last_canonical_event_received_at");
+        let epoch_last: Option<chrono::DateTime<chrono::Utc>> = r.get("epoch_last_received_at");
+        let lag_ms = last_canonical.map(|ts| (now - ts).num_milliseconds().max(0) as u64);
+        let epoch_lag_ms = epoch_last.map(|ts| (now - ts).num_milliseconds().max(0) as u64);
         StreamMetricsRow {
-            raw_count: r.raw_count,
-            dedup_count: r.dedup_count,
-            retransmit_count: r.retransmit_count,
+            raw_count: r.get("raw_count"),
+            dedup_count: r.get("dedup_count"),
+            retransmit_count: r.get("retransmit_count"),
             lag_ms,
-            epoch_raw_count: r.epoch_raw_count,
-            epoch_dedup_count: r.epoch_dedup_count,
-            epoch_retransmit_count: r.epoch_retransmit_count,
+            epoch_raw_count: r.get("epoch_raw_count"),
+            epoch_dedup_count: r.get("epoch_dedup_count"),
+            epoch_retransmit_count: r.get("epoch_retransmit_count"),
             epoch_lag_ms,
-            epoch_last_received_at: r.epoch_last_received_at,
+            epoch_last_received_at: epoch_last,
+            last_tag_id: r.get("last_tag_id"),
+            last_reader_timestamp: r.get("last_reader_timestamp"),
         }
     }))
 }
