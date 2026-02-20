@@ -164,7 +164,7 @@ FORWARDER_TOML_HEADER = f"""\
 schema_version = 1
 
 [server]
-base_url = "ws://127.0.0.1:8080"
+base_url = "http://127.0.0.1:8080"
 
 [auth]
 token_file = "{FORWARDER_TOKEN_PATH}"
