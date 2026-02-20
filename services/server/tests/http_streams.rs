@@ -19,6 +19,31 @@ async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, r
     .unwrap();
 }
 
+async fn insert_stream(pool: &sqlx::PgPool, forwarder_id: &str, reader_ip: &str) -> uuid::Uuid {
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO streams (forwarder_id, reader_ip) VALUES ($1, $2) RETURNING stream_id",
+    )
+    .bind(forwarder_id)
+    .bind(reader_ip)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn insert_event(pool: &sqlx::PgPool, stream_id: uuid::Uuid, epoch: i64, seq: i64) {
+    sqlx::query(
+        "INSERT INTO events (stream_id, stream_epoch, seq, raw_read_line, read_type) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(stream_id)
+    .bind(epoch)
+    .bind(seq)
+    .bind(format!("LINE_e{}_s{}", epoch, seq))
+    .bind("RAW")
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
     let app_state = server::AppState::new(pool);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -627,4 +652,91 @@ async fn test_dashboard_fallback_ui_paths_reject_post_method() {
 
     assert_eq!(resp.status(), 405);
     std::fs::remove_dir_all(dashboard_dir).ok();
+}
+
+#[tokio::test]
+async fn test_list_epochs_returns_epochs_with_metadata() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epochs", "10.50.0.1:10000").await;
+
+    // Epoch 1: 2 events
+    insert_event(&pool, stream_id, 1, 1).await;
+    insert_event(&pool, stream_id, 1, 2).await;
+    // Epoch 2: 1 event
+    insert_event(&pool, stream_id, 2, 1).await;
+
+    let resp = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/epochs",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let epochs = body.as_array().expect("response must be an array");
+    assert_eq!(epochs.len(), 2, "should have 2 epochs");
+
+    // Find epoch 1 and epoch 2
+    let e1 = epochs.iter().find(|e| e["epoch"] == 1).expect("epoch 1");
+    let e2 = epochs.iter().find(|e| e["epoch"] == 2).expect("epoch 2");
+
+    assert_eq!(e1["event_count"], 2);
+    assert_eq!(
+        e1["is_current"], true,
+        "epoch 1 is the stream default epoch"
+    );
+    assert!(e1["first_event_at"].is_string());
+    assert!(e1["last_event_at"].is_string());
+
+    assert_eq!(e2["event_count"], 1);
+    assert_eq!(e2["is_current"], false);
+    assert!(e2["first_event_at"].is_string());
+    assert!(e2["last_event_at"].is_string());
+}
+
+#[tokio::test]
+async fn test_list_epochs_empty_stream() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epochs-empty", "10.51.0.1:10000").await;
+
+    let resp = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/epochs",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let epochs = body.as_array().expect("response must be an array");
+    assert_eq!(epochs.len(), 0, "no events means no epochs");
+}
+
+#[tokio::test]
+async fn test_list_epochs_not_found() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let fake_id = "00000000-0000-0000-0000-000000000000";
+    let resp = reqwest::get(format!("http://{}/api/v1/streams/{}/epochs", addr, fake_id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "NOT_FOUND");
 }

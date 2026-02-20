@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM stream_metrics WHERE stream_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e908a91e60bca50730cc3ac6e5aaf2f7ad2402bb7329fe406fbb26d06133da71"
+}

@@ -22,6 +22,7 @@ impl Serialize for OptionalStringPatch {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DashboardEvent {
+    Resync,
     StreamCreated {
         stream_id: Uuid,
         forwarder_id: String,

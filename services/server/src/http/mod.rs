@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod export;
 pub mod forwarder_config;
 pub mod forwarder_races;

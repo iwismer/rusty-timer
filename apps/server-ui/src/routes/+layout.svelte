@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { page } from "$app/stores";
   import "@rusty-timer/shared-ui/styles/tokens.css";
   import { onMount, onDestroy } from "svelte";
   import { initSSE, destroySSE } from "$lib/sse";
@@ -8,9 +7,9 @@
   import { NavBar } from "@rusty-timer/shared-ui";
   import { getRaces, getForwarderRaces } from "$lib/api";
   import { setRaces, forwarderRacesStore } from "$lib/stores";
+  import { page } from "$app/state";
 
   let { children }: { children: Snippet } = $props();
-  let currentPath = $derived($page.url.pathname);
 
   onMount(() => {
     initSSE();
@@ -42,11 +41,23 @@
 
 <NavBar
   links={[
-    { href: "/", label: "Streams", active: currentPath === "/" },
+    {
+      href: "/",
+      label: "Streams",
+      active:
+        page.url.pathname === "/" ||
+        page.url.pathname.startsWith("/streams") ||
+        page.url.pathname.startsWith("/forwarders"),
+    },
     {
       href: "/races",
       label: "Races",
-      active: currentPath.startsWith("/races"),
+      active: page.url.pathname.startsWith("/races"),
+    },
+    {
+      href: "/admin",
+      label: "Admin",
+      active: page.url.pathname.startsWith("/admin"),
     },
   ]}
 />

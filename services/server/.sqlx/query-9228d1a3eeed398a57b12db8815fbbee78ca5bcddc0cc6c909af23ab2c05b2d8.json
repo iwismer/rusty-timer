@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM receiver_cursors",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9228d1a3eeed398a57b12db8815fbbee78ca5bcddc0cc6c909af23ab2c05b2d8"
+}

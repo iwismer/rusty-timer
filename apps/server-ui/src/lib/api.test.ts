@@ -195,4 +195,299 @@ describe("server_api client", () => {
     );
     await expect(resetEpoch("abc-123")).rejects.toThrow();
   });
+
+  // ----- Admin: getTokens -----
+  it("getTokens calls GET /api/v1/admin/tokens", async () => {
+    const { getTokens } = await import("./api");
+    const payload = {
+      tokens: [
+        {
+          token_id: "tok-1",
+          device_type: "forwarder",
+          device_id: "fwd-1",
+          created_at: "2026-01-01T00:00:00Z",
+          revoked: false,
+        },
+      ],
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+    const result = await getTokens();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/tokens"),
+      expect.any(Object),
+    );
+    expect(result.tokens).toHaveLength(1);
+    expect(result.tokens[0].device_id).toBe("fwd-1");
+  });
+
+  // ----- Admin: revokeToken -----
+  it("revokeToken sends POST /api/v1/admin/tokens/{id}/revoke", async () => {
+    const { revokeToken } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(revokeToken("tok-1")).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/tokens/tok-1/revoke"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  // ----- Admin: createToken -----
+  it("createToken sends POST /api/v1/admin/tokens with device info", async () => {
+    const { createToken } = await import("./api");
+    const created = {
+      token_id: "new-tok-1",
+      device_id: "my-fwd",
+      device_type: "forwarder",
+      token: "xK9mP2vQ7nR4sT5uW8yA1bC3dE6fG9hJ2kL4mN7pQ0r",
+    };
+    mockFetch.mockResolvedValue(makeResponse(201, created));
+    const result = await createToken({
+      device_id: "my-fwd",
+      device_type: "forwarder",
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/tokens"),
+      expect.objectContaining({ method: "POST" }),
+    );
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.device_id).toBe("my-fwd");
+    expect(body.device_type).toBe("forwarder");
+    expect(result.token).toBe("xK9mP2vQ7nR4sT5uW8yA1bC3dE6fG9hJ2kL4mN7pQ0r");
+  });
+
+  it("createToken with custom token string", async () => {
+    const { createToken } = await import("./api");
+    const created = {
+      token_id: "new-tok-2",
+      device_id: "my-rcv",
+      device_type: "receiver",
+      token: "my-custom-token",
+    };
+    mockFetch.mockResolvedValue(makeResponse(201, created));
+    const result = await createToken({
+      device_id: "my-rcv",
+      device_type: "receiver",
+      token: "my-custom-token",
+    });
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.token).toBe("my-custom-token");
+    expect(result.token).toBe("my-custom-token");
+  });
+
+  // ----- Admin: deleteStream -----
+  it("deleteStream sends DELETE /api/v1/admin/streams/{id}", async () => {
+    const { deleteStream } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteStream("abc-123")).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/streams/abc-123"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: deleteAllStreams -----
+  it("deleteAllStreams sends DELETE /api/v1/admin/streams", async () => {
+    const { deleteAllStreams } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteAllStreams()).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/streams"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: deleteAllEvents -----
+  it("deleteAllEvents sends DELETE /api/v1/admin/events", async () => {
+    const { deleteAllEvents } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteAllEvents()).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/events"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: deleteStreamEvents -----
+  it("deleteStreamEvents sends DELETE /api/v1/admin/streams/{id}/events", async () => {
+    const { deleteStreamEvents } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteStreamEvents("abc-123")).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/streams/abc-123/events"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: deleteEpochEvents -----
+  it("deleteEpochEvents sends DELETE /api/v1/admin/streams/{id}/epochs/{epoch}/events", async () => {
+    const { deleteEpochEvents } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteEpochEvents("abc-123", 2)).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/streams/abc-123/epochs/2/events"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: deleteAllCursors -----
+  it("deleteAllCursors sends DELETE /api/v1/admin/receiver-cursors", async () => {
+    const { deleteAllCursors } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteAllCursors()).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: getCursors -----
+  it("getCursors calls GET /api/v1/admin/receiver-cursors", async () => {
+    const { getCursors } = await import("./api");
+    const payload = {
+      cursors: [
+        {
+          receiver_id: "rcv-1",
+          stream_id: "abc-123",
+          stream_epoch: 2,
+          last_seq: 10,
+          updated_at: "2026-02-20T12:00:00Z",
+        },
+      ],
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+    const result = await getCursors();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors"),
+      expect.any(Object),
+    );
+    expect(result.cursors).toHaveLength(1);
+    expect(result.cursors[0].receiver_id).toBe("rcv-1");
+  });
+
+  // ----- Admin: deleteReceiverCursors -----
+  it("deleteReceiverCursors sends DELETE /api/v1/admin/receiver-cursors/{id}", async () => {
+    const { deleteReceiverCursors } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteReceiverCursors("rcv-1")).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors/rcv-1"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- Admin: deleteReceiverStreamCursor -----
+  it("deleteReceiverStreamCursor sends DELETE /api/v1/admin/receiver-cursors/{receiverId}/{streamId}", async () => {
+    const { deleteReceiverStreamCursor } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(
+      deleteReceiverStreamCursor("rcv-1", "abc-123"),
+    ).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors/rcv-1/abc-123"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("deleteReceiverCursors URL-encodes receiver ID", async () => {
+    const { deleteReceiverCursors } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await deleteReceiverCursors("rcv/special");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/receiver-cursors/rcv%2Fspecial"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // ----- getStreamEpochs -----
+  it("getStreamEpochs calls GET /api/v1/streams/{id}/epochs and returns epoch list", async () => {
+    const { getStreamEpochs } = await import("./api");
+    const payload = [
+      {
+        epoch: 1,
+        event_count: 156,
+        first_event_at: "2026-02-18T10:00:00Z",
+        last_event_at: "2026-02-18T14:30:00Z",
+        is_current: false,
+      },
+      {
+        epoch: 2,
+        event_count: 89,
+        first_event_at: "2026-02-20T08:00:00Z",
+        last_event_at: "2026-02-20T12:00:00Z",
+        is_current: true,
+      },
+    ];
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+    const result = await getStreamEpochs("abc-123");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/streams/abc-123/epochs"),
+      expect.any(Object),
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0].epoch).toBe(1);
+    expect(result[0].event_count).toBe(156);
+    expect(result[0].is_current).toBe(false);
+    expect(result[1].epoch).toBe(2);
+    expect(result[1].is_current).toBe(true);
+  });
+
+  it("getStreamEpochs throws on 404", async () => {
+    const { getStreamEpochs } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(404, { code: "NOT_FOUND", message: "stream not found" }),
+    );
+    await expect(getStreamEpochs("bad-id")).rejects.toThrow();
+  });
 });

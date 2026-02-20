@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM receiver_cursors WHERE receiver_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "879eb5663f85d3b26ef6e11d2aa033b1cf46a8b4a2cdcb717c0423df8dc43950"
+}

@@ -15,7 +15,7 @@ use axum::{
     extract::Request,
     http::{Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use tower::Service;
@@ -48,6 +48,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             "/api/v1/streams/:stream_id/reset-epoch",
             post(http::streams::reset_epoch),
         )
+        .route(
+            "/api/v1/streams/:stream_id/epochs",
+            get(http::streams::list_epochs),
+        )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
         .route(
             "/api/v1/forwarders/:forwarder_id/config",
@@ -77,6 +81,46 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/v1/forwarders/:forwarder_id/reads",
             get(http::reads::get_forwarder_reads),
+        )
+        .route(
+            "/api/v1/admin/tokens",
+            get(http::admin::list_tokens).post(http::admin::create_token),
+        )
+        .route(
+            "/api/v1/admin/tokens/:token_id/revoke",
+            post(http::admin::revoke_token),
+        )
+        .route(
+            "/api/v1/admin/streams",
+            delete(http::admin::delete_all_streams),
+        )
+        .route(
+            "/api/v1/admin/streams/:stream_id",
+            delete(http::admin::delete_stream),
+        )
+        .route(
+            "/api/v1/admin/events",
+            delete(http::admin::delete_all_events),
+        )
+        .route(
+            "/api/v1/admin/streams/:stream_id/events",
+            delete(http::admin::delete_stream_events),
+        )
+        .route(
+            "/api/v1/admin/streams/:stream_id/epochs/:epoch/events",
+            delete(http::admin::delete_epoch_events),
+        )
+        .route(
+            "/api/v1/admin/receiver-cursors",
+            get(http::admin::list_cursors).delete(http::admin::delete_all_cursors),
+        )
+        .route(
+            "/api/v1/admin/receiver-cursors/:receiver_id",
+            delete(http::admin::delete_receiver_cursors),
+        )
+        .route(
+            "/api/v1/admin/receiver-cursors/:receiver_id/:stream_id",
+            delete(http::admin::delete_receiver_stream_cursor),
         )
         .route(
             "/api/v1/races",

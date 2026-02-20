@@ -15,6 +15,7 @@ pub async fn dashboard_sse(
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(event) => {
             let event_type = match &event {
+                crate::dashboard_events::DashboardEvent::Resync => "resync",
                 crate::dashboard_events::DashboardEvent::StreamCreated { .. } => "stream_created",
                 crate::dashboard_events::DashboardEvent::StreamUpdated { .. } => "stream_updated",
                 crate::dashboard_events::DashboardEvent::MetricsUpdated { .. } => "metrics_updated",
