@@ -819,12 +819,30 @@ def _pid_command(pid: int) -> str:
     return result.stdout.strip()
 
 
+def _has_saved_iterm_window_id() -> bool:
+    """Return True when we have a persisted iTerm dev window id."""
+    if not ITERM_WINDOW_ID_PATH.exists():
+        return False
+    try:
+        return bool(ITERM_WINDOW_ID_PATH.read_text().strip())
+    except OSError:
+        return False
+
+
 def _is_dev_server_command(command: str) -> bool:
     """Return True when command line looks like this repo's server binary."""
-    return (
-        "target/debug/server" in command
-        or "target/release/server" in command
-    )
+    if "target/debug/server" in command or "target/release/server" in command:
+        return True
+
+    # On macOS, `ps -o command=` may return only the executable basename.
+    # If we also have a saved iTerm window id from this script, treat `server`
+    # as our dev server.
+    try:
+        argv0 = shlex.split(command)[0]
+    except (ValueError, IndexError):
+        argv0 = command.strip().split(" ", 1)[0] if command.strip() else ""
+
+    return Path(argv0).name == "server" and _has_saved_iterm_window_id()
 
 
 def _kill_pids(pids: list[int]) -> None:

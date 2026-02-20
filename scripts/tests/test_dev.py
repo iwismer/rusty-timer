@@ -396,6 +396,34 @@ class CheckExistingInstanceTests(unittest.TestCase):
     @patch("scripts.dev.console.input", return_value="y")
     @patch("scripts.dev._kill_pids")
     @patch("scripts.dev.subprocess.run")
+    @patch("scripts.dev._has_saved_iterm_window_id", return_value=True)
+    @patch("scripts.dev._pid_command", return_value="server")
+    @patch("scripts.dev._listener_pids", return_value=[5555])
+    @patch("scripts.dev.shutil.which", return_value=None)
+    def test_server_process_name_without_path_is_detected_as_dev(
+        self,
+        _which_mock,
+        _listener_pids_mock,
+        _pid_command_mock,
+        _iterm_id_mock,
+        run_mock,
+        kill_pids_mock,
+        input_mock,
+        _print_mock,
+        close_mock,
+    ) -> None:
+        run_mock.return_value = subprocess.CompletedProcess([], returncode=0)
+        dev.check_existing_instance()
+
+        input_mock.assert_called_once()
+        kill_pids_mock.assert_called_once_with([5555])
+        close_mock.assert_called_once()
+
+    @patch("scripts.dev.close_iterm2_window")
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.console.input", return_value="y")
+    @patch("scripts.dev._kill_pids")
+    @patch("scripts.dev.subprocess.run")
     @patch("scripts.dev._pid_command", return_value="BIND_ADDR=0.0.0.0:8080 ./target/debug/server")
     @patch("scripts.dev._listener_pids", return_value=[4242])
     @patch("scripts.dev.shutil.which")
