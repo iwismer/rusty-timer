@@ -118,6 +118,8 @@ class MainValidationTests(unittest.TestCase):
             no_build=False,
             clear=False,
             emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=10001)],
+            bibchip=None,
+            ppl=None,
         )
         with self.assertRaises(SystemExit):
             dev.main()
@@ -134,6 +136,8 @@ class MainValidationTests(unittest.TestCase):
             no_build=False,
             clear=False,
             emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=11001)],
+            bibchip=None,
+            ppl=None,
         )
         with self.assertRaises(SystemExit):
             dev.main()
@@ -151,6 +155,8 @@ class MainValidationTests(unittest.TestCase):
             no_build=False,
             clear=False,
             emulator=[dev.EmulatorSpec(port=10001)],
+            bibchip=None,
+            ppl=None,
         )
         with self.assertRaises(SystemExit):
             dev.main()
@@ -266,6 +272,29 @@ class DetectAndLaunchTests(unittest.TestCase):
         auto_config_mock.assert_called_once_with()
         launch_iterm2_mock.assert_called_once()
 
+    @patch("scripts.dev.start_race_data_setup")
+    @patch("scripts.dev.launch_tmux")
+    @patch("scripts.dev.start_receiver_auto_config")
+    @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
+    def test_detect_and_launch_starts_race_data_setup_when_paths_provided(
+        self,
+        _which_mock,
+        auto_config_mock,
+        launch_tmux_mock,
+        race_setup_mock,
+    ) -> None:
+        bibchip = Path("/tmp/test.bibchip")
+        ppl = Path("/tmp/test.ppl")
+        dev.detect_and_launch(
+            [dev.EmulatorSpec(port=10001)],
+            bibchip_path=bibchip,
+            ppl_path=ppl,
+        )
+
+        auto_config_mock.assert_called_once_with()
+        launch_tmux_mock.assert_called_once()
+        race_setup_mock.assert_called_once_with(bibchip, ppl)
+
 
 class SetupOrderingTests(unittest.TestCase):
     @patch("scripts.dev.seed_tokens")
@@ -320,7 +349,7 @@ class NpmInstallTests(unittest.TestCase):
 
     @patch("scripts.dev.console.print")
     @patch("scripts.dev.subprocess.run")
-    def test_npm_install_skips_when_workspace_node_modules_exists(
+    def test_npm_install_runs_when_workspace_node_modules_exists(
         self, run_mock, _print_mock
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,7 +358,7 @@ class NpmInstallTests(unittest.TestCase):
             with patch.object(dev, "REPO_ROOT", repo_root):
                 dev.npm_install()
 
-        run_mock.assert_not_called()
+        run_mock.assert_called_once_with(["npm", "install"], check=True, cwd=repo_root)
 
 
 class BuildDashboardTests(unittest.TestCase):
@@ -391,6 +420,74 @@ class StartReceiverAutoConfigTests(unittest.TestCase):
             daemon=True,
         )
         thread_mock.start.assert_called_once_with()
+
+
+class ParseArgsRaceDataFlagTests(unittest.TestCase):
+    def test_parse_args_reads_bibchip_and_ppl_paths(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["dev.py", "--bibchip", "test_assets/bibchip/large.txt", "--ppl", "test_assets/ppl/large.ppl"],
+        ):
+            args = dev.parse_args()
+
+        self.assertEqual(args.bibchip, Path("test_assets/bibchip/large.txt"))
+        self.assertEqual(args.ppl, Path("test_assets/ppl/large.ppl"))
+
+
+class GenerateReadsFromBibchipTests(unittest.TestCase):
+    def test_generate_reads_from_bibchip_writes_ipico_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bibchip = tmp_path / "sample.txt"
+            bibchip.write_text("BIB,CHIP\n1,058003700001\n2,058003700002\n", encoding="utf-8")
+            with patch.object(dev, "TMP_DIR", tmp_path / "out"):
+                reads_path = dev.generate_reads_from_bibchip(bibchip)
+
+            lines = reads_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertTrue(lines[0].startswith("aa00"))
+            self.assertEqual(len(lines[0]), 36)
+
+
+class StartRaceDataSetupTests(unittest.TestCase):
+    @patch("threading.Thread")
+    def test_start_race_data_setup_spawns_daemon_thread(self, thread_cls) -> None:
+        thread_mock = thread_cls.return_value
+        bibchip = Path("/tmp/sample.bibchip")
+        ppl = Path("/tmp/sample.ppl")
+
+        dev.start_race_data_setup(bibchip, ppl)
+
+        thread_cls.assert_called_once_with(
+            target=dev.setup_race_data,
+            args=(bibchip, ppl),
+            name="race-data-setup",
+            daemon=True,
+        )
+        thread_mock.start.assert_called_once_with()
+
+
+class MainRacePathValidationTests(unittest.TestCase):
+    @patch("scripts.dev.detect_and_launch")
+    @patch("scripts.dev.setup")
+    @patch("scripts.dev.parse_args")
+    def test_main_exits_when_bibchip_path_missing(
+        self, parse_args_mock, setup_mock, detect_mock
+    ) -> None:
+        parse_args_mock.return_value = argparse.Namespace(
+            no_build=False,
+            clear=False,
+            emulator=[dev.EmulatorSpec(port=10001)],
+            bibchip=Path("/tmp/does-not-exist.bibchip"),
+            ppl=None,
+        )
+
+        with self.assertRaises(SystemExit):
+            dev.main()
+
+        setup_mock.assert_not_called()
+        detect_mock.assert_not_called()
 
 
 if __name__ == "__main__":

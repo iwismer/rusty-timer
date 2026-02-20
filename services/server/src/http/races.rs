@@ -43,7 +43,21 @@ pub async fn create_race(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let name = match body.get("name").and_then(|v| v.as_str()) {
-        Some(s) => s.to_owned(),
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(HttpErrorEnvelope {
+                        code: "BAD_REQUEST".to_owned(),
+                        message: "name is required".to_owned(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            trimmed.to_owned()
+        }
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -240,7 +254,31 @@ pub async fn upload_participants(
         Err(resp) => return resp,
     };
 
-    let parsed = timer_core::util::io::parse_participant_bytes(&bytes);
+    let parsed = match timer_core::util::io::parse_participant_bytes(&bytes) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HttpErrorEnvelope {
+                    code: "BAD_REQUEST".to_owned(),
+                    message: format!("invalid participant file: {}", e),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+    if parsed.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(HttpErrorEnvelope {
+                code: "BAD_REQUEST".to_owned(),
+                message: "participant file has no valid rows".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
 
     let tuples: Vec<(i32, String, String, String, Option<String>)> = parsed
         .into_iter()
@@ -323,7 +361,31 @@ pub async fn upload_chips(
         Err(resp) => return resp,
     };
 
-    let parsed = timer_core::util::io::parse_bibchip_bytes(&bytes);
+    let parsed = match timer_core::util::io::parse_bibchip_bytes(&bytes) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HttpErrorEnvelope {
+                    code: "BAD_REQUEST".to_owned(),
+                    message: format!("invalid bibchip file: {}", e),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+    if parsed.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(HttpErrorEnvelope {
+                code: "BAD_REQUEST".to_owned(),
+                message: "bibchip file has no valid rows".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
 
     let tuples: Vec<(String, i32)> = parsed.into_iter().map(|c| (c.id, c.bib)).collect();
 

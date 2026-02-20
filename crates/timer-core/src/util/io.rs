@@ -80,50 +80,81 @@ pub fn read_participant_file(ppl_path: &str) -> Result<Vec<Participant>, String>
 }
 
 /// Parse bibchip data from raw bytes (same logic as read_bibchip_file but from memory).
-pub fn parse_bibchip_bytes(data: &[u8]) -> Vec<ChipBib> {
+pub fn parse_bibchip_bytes(data: &[u8]) -> Result<Vec<ChipBib>, String> {
     let content = match std::str::from_utf8(data) {
         Ok(s) => s.to_owned(),
         Err(_) => match WINDOWS_1252.decode(data, DecoderTrap::Replace) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(desc) => return Err(format!("failed to decode bibchip bytes: {}", desc)),
         },
     };
     let mut bib_chip = Vec::new();
-    for line in content.split('\n') {
+    let mut invalid_lines: Vec<usize> = Vec::new();
+    for (idx, line) in content.split('\n').enumerate() {
         let line = line.trim();
         if !line.is_empty() && line.chars().next().unwrap().is_ascii_digit() {
             let parts: Vec<&str> = line.split(',').collect();
             if parts.len() < 2 || parts[1].is_empty() {
+                invalid_lines.push(idx + 1);
                 continue;
             }
+            let bib = match parts[0].parse::<i32>() {
+                Ok(bib) => bib,
+                Err(_) => {
+                    invalid_lines.push(idx + 1);
+                    continue;
+                }
+            };
             bib_chip.push(ChipBib {
-                id: parts[1].to_owned(),
-                bib: parts[0].parse::<i32>().unwrap_or(0),
+                id: parts[1].trim().to_owned(),
+                bib,
             });
         }
     }
-    bib_chip
+    if !invalid_lines.is_empty() {
+        return Err(format!(
+            "invalid bibchip rows at lines: {}",
+            invalid_lines
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<String>>()
+                .join(", ")
+        ));
+    }
+    Ok(bib_chip)
 }
 
 /// Parse participant data from raw bytes (same logic as read_participant_file but from memory).
-pub fn parse_participant_bytes(data: &[u8]) -> Vec<Participant> {
+pub fn parse_participant_bytes(data: &[u8]) -> Result<Vec<Participant>, String> {
     let content = match std::str::from_utf8(data) {
         Ok(s) => s.to_owned(),
         Err(_) => match WINDOWS_1252.decode(data, DecoderTrap::Replace) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(desc) => return Err(format!("failed to decode participant bytes: {}", desc)),
         },
     };
     let mut participants = Vec::new();
-    for line in content.split('\n') {
+    let mut invalid_lines: Vec<usize> = Vec::new();
+    for (idx, line) in content.split('\n').enumerate() {
         let line = line.trim();
         if !line.is_empty() && !line.starts_with(';') {
-            if let Ok(p) = Participant::from_ppl_record(line) {
-                participants.push(p);
+            match Participant::from_ppl_record(line) {
+                Ok(p) => participants.push(p),
+                Err(_) => invalid_lines.push(idx + 1),
             }
         }
     }
-    participants
+    if !invalid_lines.is_empty() {
+        return Err(format!(
+            "invalid participant rows at lines: {}",
+            invalid_lines
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<String>>()
+                .join(", ")
+        ));
+    }
+    Ok(participants)
 }
 
 #[cfg(test)]
@@ -267,7 +298,7 @@ mod bytes_parser_tests {
     #[test]
     fn parse_bibchip_bytes_basic() {
         let data = b"BIB,CHIP\n1,058003700001\n2,058003700002\n";
-        let result = parse_bibchip_bytes(data);
+        let result = parse_bibchip_bytes(data).expect("valid bibchip data");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].bib, 1);
         assert_eq!(result[0].id, "058003700001");
@@ -277,20 +308,27 @@ mod bytes_parser_tests {
     #[test]
     fn parse_bibchip_bytes_skips_header_and_empty() {
         let data = b"BIB,CHIP\n\n1,chip1\n";
-        let result = parse_bibchip_bytes(data);
+        let result = parse_bibchip_bytes(data).expect("valid bibchip data");
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn parse_bibchip_bytes_empty() {
-        let result = parse_bibchip_bytes(b"");
+        let result = parse_bibchip_bytes(b"").expect("empty data should parse");
         assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn parse_bibchip_bytes_invalid_bib_is_rejected() {
+        let data = b"BIB,CHIP\n1x,058003700001\n";
+        let result = parse_bibchip_bytes(data);
+        assert!(result.is_err(), "invalid bib rows should be rejected");
     }
 
     #[test]
     fn parse_participant_bytes_basic() {
         let data = b"1,Smith,John,Team A,,M\n2,Doe,Jane,Team B,,F\n";
-        let result = parse_participant_bytes(data);
+        let result = parse_participant_bytes(data).expect("valid participant data");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].bib, 1);
         assert_eq!(result[0].first_name, "John");
@@ -300,13 +338,23 @@ mod bytes_parser_tests {
     #[test]
     fn parse_participant_bytes_skips_comments() {
         let data = b";This is a comment\n1,Smith,John,,,M\n";
-        let result = parse_participant_bytes(data);
+        let result = parse_participant_bytes(data).expect("valid participant data");
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn parse_participant_bytes_empty() {
-        let result = parse_participant_bytes(b"");
+        let result = parse_participant_bytes(b"").expect("empty data should parse");
         assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn parse_participant_bytes_invalid_row_is_rejected() {
+        let data = b"1\n";
+        let result = parse_participant_bytes(data);
+        assert!(
+            result.is_err(),
+            "invalid participant rows should be rejected"
+        );
     }
 }

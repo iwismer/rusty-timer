@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { page } from "$app/stores";
   import "@rusty-timer/shared-ui/styles/tokens.css";
   import { onMount, onDestroy } from "svelte";
   import { initSSE, destroySSE } from "$lib/sse";
@@ -7,6 +8,7 @@
   import { NavBar } from "@rusty-timer/shared-ui";
 
   let { children }: { children: Snippet } = $props();
+  let currentPath = $derived($page.url.pathname);
 
   onMount(() => {
     initSSE();
@@ -24,8 +26,12 @@
 
 <NavBar
   links={[
-    { href: "/", label: "Streams" },
-    { href: "/races", label: "Races" },
+    { href: "/", label: "Streams", active: currentPath === "/" },
+    {
+      href: "/races",
+      label: "Races",
+      active: currentPath.startsWith("/races"),
+    },
   ]}
 />
 
