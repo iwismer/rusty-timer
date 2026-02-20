@@ -536,6 +536,41 @@ async fn sse_events_endpoint_returns_status_changed() {
 }
 
 #[tokio::test]
+async fn sse_events_endpoint_emits_initial_connected_event() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/events")
+        .header("accept", "text/event-stream")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    use http_body_util::BodyExt;
+    let mut body = resp.into_body();
+    let first_chunk = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(Ok(frame)) = body.frame().await {
+            if let Some(data) = frame.data_ref() {
+                return String::from_utf8_lossy(data).to_string();
+            }
+        }
+        String::new()
+    })
+    .await
+    .expect("expected initial SSE frame within 1s");
+
+    assert!(
+        first_chunk.contains("event: connected"),
+        "Expected initial connected event in SSE stream, got: {first_chunk}"
+    );
+}
+
+#[tokio::test]
 async fn put_subscriptions_emits_status_changed_with_count() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
