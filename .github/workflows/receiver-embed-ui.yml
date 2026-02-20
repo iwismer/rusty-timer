@@ -5,13 +5,19 @@ on:
     branches: [master]
     paths:
       - "apps/receiver-ui/**"
+      - "apps/shared-ui/**"
       - "services/receiver/**"
+      - "package-lock.json"
+      - "package.json"
       - ".github/workflows/receiver-embed-ui.yml"
   pull_request:
     branches: [master]
     paths:
       - "apps/receiver-ui/**"
+      - "apps/shared-ui/**"
       - "services/receiver/**"
+      - "package-lock.json"
+      - "package.json"
       - ".github/workflows/receiver-embed-ui.yml"
 
 concurrency:
