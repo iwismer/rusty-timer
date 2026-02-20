@@ -96,6 +96,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/v1/admin/receiver-cursors/:receiver_id",
             delete(http::admin::delete_receiver_cursors),
+        )
+        .route(
+            "/api/v1/admin/receiver-cursors/:receiver_id/:stream_id",
+            delete(http::admin::delete_receiver_stream_cursor),
         );
 
     let router = match dashboard_dir {

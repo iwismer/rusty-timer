@@ -952,3 +952,59 @@ async fn test_delete_receiver_cursors_idempotent() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 }
+
+#[tokio::test]
+async fn test_delete_receiver_stream_cursor() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_a = insert_stream(&pool, "fwd-1", "10.0.0.1:10000").await;
+    let stream_b = insert_stream(&pool, "fwd-2", "10.0.0.2:10000").await;
+    insert_cursor(&pool, "rcv-1", stream_a).await;
+    insert_cursor(&pool, "rcv-1", stream_b).await;
+    let addr = make_server(pool.clone()).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{}/api/v1/admin/receiver-cursors/rcv-1/{}",
+            addr, stream_a
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // Only the cursor for stream_a should be deleted
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE receiver_id = 'rcv-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn test_delete_receiver_stream_cursor_idempotent() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{}/api/v1/admin/receiver-cursors/rcv-x/{}",
+            addr,
+            uuid::Uuid::new_v4()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+}

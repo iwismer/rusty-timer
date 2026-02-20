@@ -664,3 +664,28 @@ pub async fn delete_receiver_cursors(
             .into_response(),
     }
 }
+
+pub async fn delete_receiver_stream_cursor(
+    State(state): State<AppState>,
+    Path((receiver_id, stream_id)): Path<(String, Uuid)>,
+) -> impl IntoResponse {
+    match sqlx::query!(
+        "DELETE FROM receiver_cursors WHERE receiver_id = $1 AND stream_id = $2",
+        receiver_id,
+        stream_id
+    )
+    .execute(&state.pool)
+    .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
+}
