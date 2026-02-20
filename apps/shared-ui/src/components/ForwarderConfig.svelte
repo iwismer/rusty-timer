@@ -482,7 +482,7 @@
           </Card>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
           <!-- Journal -->
           <Card title="Journal">
             <div class="space-y-3">
