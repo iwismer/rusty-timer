@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE device_tokens SET revoked_at = now() WHERE token_id = $1 AND revoked_at IS NULL RETURNING token_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "device_tokens",
+            "name": "token_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "003a1802215654e65b556aaa62a4033182597f3565386b4d6bf7ad8bbc9d53ab"
+}
