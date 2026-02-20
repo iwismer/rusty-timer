@@ -124,8 +124,22 @@ pub async fn create_token(
 
     // Generate or use provided token
     let raw_token = match &body.token {
-        Some(t) if !t.is_empty() => t.clone(),
-        _ => {
+        Some(t) => {
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(HttpErrorEnvelope {
+                        code: "BAD_REQUEST".to_owned(),
+                        message: "token must not be empty or whitespace".to_owned(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+            trimmed.to_owned()
+        }
+        None => {
             let mut bytes = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut bytes);
             URL_SAFE_NO_PAD.encode(bytes)

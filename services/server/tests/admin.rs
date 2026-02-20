@@ -287,6 +287,56 @@ async fn test_create_token_with_provided_token() {
 }
 
 #[tokio::test]
+async fn test_create_token_rejects_whitespace_only_custom_token() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let resp = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&serde_json::json!({
+            "device_id": "my-forwarder",
+            "device_type": "forwarder",
+            "token": "   "
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn test_create_token_rejects_tab_newline_only_custom_token() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let resp = client
+        .post(format!("http://{}/api/v1/admin/tokens", addr))
+        .json(&serde_json::json!({
+            "device_id": "my-forwarder",
+            "device_type": "forwarder",
+            "token": "\t\n"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
 async fn test_create_token_invalid_device_type() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
