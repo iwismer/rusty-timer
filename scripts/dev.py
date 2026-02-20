@@ -45,6 +45,7 @@ FORWARDER_TOKEN_PATH = TMP_DIR / "forwarder-token.txt"
 RECEIVER_TOKEN_PATH = TMP_DIR / "receiver-token.txt"
 RECEIVER_CONFIG_SCRIPT_PATH = TMP_DIR / "configure-receiver.sh"
 FORWARDER_JOURNAL_PATH = TMP_DIR / "forwarder.sqlite3"
+ITERM_WINDOW_ID_PATH = TMP_DIR / "iterm-window-id.txt"
 
 FORWARDER_TOKEN_TEXT = "rusty-dev-forwarder"
 RECEIVER_TOKEN_TEXT = "rusty-dev-receiver"
@@ -609,9 +610,31 @@ async def _split_n(session, n: int, *, vertical: bool) -> list:
 
 
 async def _iterm2_async(connection, panes: list[tuple[str, str]]) -> None:
+    import asyncio
     import iterm2
+
+    # async_get_app subscribes to iTerm2 layout/focus notifications.  When
+    # run_until_complete finishes and closes the websocket those handlers fire
+    # on a dead connection, producing noisy "Task exception was never retrieved"
+    # ConnectionClosedError tracebacks.  Suppress them here.
+    loop = asyncio.get_event_loop()
+    _orig = loop.get_exception_handler()
+
+    def _quiet(loop, ctx):
+        exc = ctx.get("exception")
+        if exc and "ConnectionClosed" in type(exc).__name__:
+            return
+        if _orig:
+            _orig(loop, ctx)
+        else:
+            loop.default_exception_handler(ctx)
+
+    loop.set_exception_handler(_quiet)
+
     await iterm2.async_get_app(connection)
     window = await iterm2.Window.async_create(connection)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    ITERM_WINDOW_ID_PATH.write_text(window.window_id)
     tab = window.tabs[0]
     root = tab.sessions[0]
 
@@ -719,6 +742,191 @@ def start_receiver_auto_config() -> None:
     thread.start()
 
 
+DEV_BINARIES = ("server", "forwarder", "receiver", "emulator")
+
+
+def close_iterm2_window() -> None:
+    """Close the iTerm2 dev window using the saved window ID."""
+    if not ITERM_WINDOW_ID_PATH.exists():
+        return
+    window_id = ITERM_WINDOW_ID_PATH.read_text().strip()
+    ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
+    if not window_id:
+        return
+
+    try:
+        import iterm2
+    except ImportError:
+        return
+
+    async def _close(connection):
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        _orig = loop.get_exception_handler()
+
+        def _quiet(loop, ctx):
+            exc = ctx.get("exception")
+            if exc and "ConnectionClosed" in type(exc).__name__:
+                return
+            if _orig:
+                _orig(loop, ctx)
+            else:
+                loop.default_exception_handler(ctx)
+
+        loop.set_exception_handler(_quiet)
+
+        app = await iterm2.async_get_app(connection)
+        for window in app.windows:
+            if window.window_id == window_id:
+                await window.async_close(force=True)
+                break
+
+    try:
+        iterm2.run_until_complete(_close)
+    except Exception:
+        pass
+
+
+SERVER_PORT = 8080
+
+
+def _listener_pids(port: int) -> list[int]:
+    """Return PIDs currently listening on the given TCP port."""
+    result = subprocess.run(
+        ["lsof", "-t", "-sTCP:LISTEN", "-i", f":{port}"],
+        capture_output=True,
+        text=True,
+    )
+    pids: list[int] = []
+    for raw_pid in result.stdout.strip().split():
+        try:
+            pids.append(int(raw_pid))
+        except ValueError:
+            continue
+    return pids
+
+
+def _pid_command(pid: int) -> str:
+    """Return the full command line for a process, or empty string on failure."""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _has_saved_iterm_window_id() -> bool:
+    """Return True when we have a persisted iTerm dev window id."""
+    if not ITERM_WINDOW_ID_PATH.exists():
+        return False
+    try:
+        return bool(ITERM_WINDOW_ID_PATH.read_text().strip())
+    except OSError:
+        return False
+
+
+def _is_dev_server_command(command: str) -> bool:
+    """Return True when command line looks like this repo's server binary."""
+    if "target/debug/server" in command or "target/release/server" in command:
+        return True
+
+    # On macOS, `ps -o command=` may return only the executable basename.
+    # If we also have a saved iTerm window id from this script, treat `server`
+    # as our dev server.
+    try:
+        argv0 = shlex.split(command)[0]
+    except (ValueError, IndexError):
+        argv0 = command.strip().split(" ", 1)[0] if command.strip() else ""
+
+    return Path(argv0).name == "server" and _has_saved_iterm_window_id()
+
+
+def _kill_pids(pids: list[int]) -> None:
+    """Kill specific process IDs."""
+    for pid in pids:
+        subprocess.run(["kill", str(pid)], capture_output=True)
+
+
+def check_existing_instance() -> None:
+    """Detect a running dev environment and optionally tear it down."""
+    tmux_running = False
+    if shutil.which("tmux"):
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", "rusty-dev"],
+            capture_output=True,
+        )
+        tmux_running = result.returncode == 0
+
+    listener_pids = _listener_pids(SERVER_PORT)
+    dev_listener_pids = [
+        pid for pid in listener_pids
+        if _is_dev_server_command(_pid_command(pid))
+    ]
+    foreign_listener_pids = [
+        pid for pid in listener_pids
+        if pid not in dev_listener_pids
+    ]
+
+    if not tmux_running and not listener_pids:
+        ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
+        return
+
+    if foreign_listener_pids and not dev_listener_pids:
+        console.print(
+            f"[yellow]Port :{SERVER_PORT} is in use by a non-dev process. "
+            f"Refusing to stop it automatically.[/yellow]"
+        )
+        console.print("[bold]  \\[n] Continue anyway  \\[c] Cancel[/bold]")
+        answer = console.input("[bold]> [/bold]").strip().lower()
+        if answer in ("c", "cancel"):
+            console.print("[dim]Aborted.[/dim]")
+            sys.exit(0)
+        console.print("[dim]Proceeding without stopping non-dev process.[/dim]")
+        return
+
+    parts = []
+    if tmux_running:
+        parts.append("tmux session 'rusty-dev'")
+    if dev_listener_pids:
+        parts.append(f"dev server listening on :{SERVER_PORT}")
+    elif listener_pids:
+        parts.append(f"listener on :{SERVER_PORT}")
+
+    console.print(
+        f"[yellow]Existing dev environment detected:[/yellow] {'; '.join(parts)}"
+    )
+    console.print("[bold]  \\[Y] Kill and restart  \\[n] Continue anyway  \\[c] Cancel[/bold]")
+    answer = console.input("[bold]> [/bold]").strip().lower()
+    if answer in ("c", "cancel"):
+        console.print("[dim]Aborted.[/dim]")
+        sys.exit(0)
+    if answer not in ("", "y", "yes"):
+        console.print("[dim]Proceeding without stopping existing instance.[/dim]")
+        return
+
+    if tmux_running:
+        subprocess.run(["tmux", "kill-session", "-t", "rusty-dev"], capture_output=True)
+        console.print("  [green]Killed[/green] tmux session: rusty-dev")
+
+    close_iterm2_window()
+
+    # Kill the server by port (pkill -f is unreliable on macOS), then mop up
+    # any remaining dev binaries with pkill as a safety net.
+    if dev_listener_pids:
+        _kill_pids(dev_listener_pids)
+    for name in DEV_BINARIES:
+        subprocess.run(["pkill", "-f", f"target/debug/{name}"], capture_output=True)
+    console.print(f"  [green]Killed[/green] dev processes")
+
+    if shutil.which("docker"):
+        subprocess.run(["docker", "rm", "-f", PG_CONTAINER], capture_output=True)
+        console.print(f"  [green]Stopped[/green] Docker container: {PG_CONTAINER}")
+
+
 def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
     panes = build_panes(emulators)
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
@@ -786,6 +994,8 @@ def main() -> None:
             "[red]Error: emulator/fallback/receiver default port collision[/red]"
         )
         sys.exit(1)
+
+    check_existing_instance()
 
     console.print(Panel.fit(
         "[bold cyan]Rusty Timer Dev Launcher[/bold cyan]\n"
