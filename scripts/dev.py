@@ -875,7 +875,7 @@ def check_existing_instance() -> None:
         ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
         return
 
-    if not tmux_running and foreign_listener_pids and not dev_listener_pids:
+    if foreign_listener_pids and not dev_listener_pids:
         console.print(
             f"[yellow]Port :{SERVER_PORT} is in use by a non-dev process. "
             f"Refusing to stop it automatically.[/yellow]"

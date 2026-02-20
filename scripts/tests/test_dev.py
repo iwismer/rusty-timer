@@ -477,6 +477,44 @@ class CheckExistingInstanceTests(unittest.TestCase):
         self.assertEqual(len(pkill_calls), 0)
         close_mock.assert_not_called()
 
+    @patch("scripts.dev.close_iterm2_window")
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.console.input", return_value="y")
+    @patch("scripts.dev._kill_pids")
+    @patch("scripts.dev.subprocess.run")
+    @patch("scripts.dev._pid_command", return_value="python -m http.server 8080")
+    @patch("scripts.dev._listener_pids", return_value=[7777])
+    @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
+    def test_tmux_plus_foreign_listener_is_not_killed(
+        self,
+        _which_mock,
+        _listener_pids_mock,
+        _pid_command_mock,
+        run_mock,
+        kill_pids_mock,
+        input_mock,
+        _print_mock,
+        close_mock,
+    ) -> None:
+        def run_side_effect(cmd, **kwargs):
+            if cmd == ["tmux", "has-session", "-t", "rusty-dev"]:
+                return subprocess.CompletedProcess(cmd, returncode=0)
+            return subprocess.CompletedProcess(cmd, returncode=0)
+
+        run_mock.side_effect = run_side_effect
+        dev.check_existing_instance()
+
+        input_mock.assert_called_once()
+        tmux_kill_calls = [
+            c for c in run_mock.call_args_list
+            if c.args[0] == ["tmux", "kill-session", "-t", "rusty-dev"]
+        ]
+        self.assertEqual(len(tmux_kill_calls), 0)
+        kill_pids_mock.assert_not_called()
+        pkill_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "pkill"]
+        self.assertEqual(len(pkill_calls), 0)
+        close_mock.assert_not_called()
+
 
 class DetectAndLaunchTests(unittest.TestCase):
     @patch("scripts.dev.launch_tmux")
