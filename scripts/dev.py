@@ -25,6 +25,7 @@ import json
 import math
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -45,6 +46,7 @@ FORWARDER_TOKEN_PATH = TMP_DIR / "forwarder-token.txt"
 RECEIVER_TOKEN_PATH = TMP_DIR / "receiver-token.txt"
 RECEIVER_CONFIG_SCRIPT_PATH = TMP_DIR / "configure-receiver.sh"
 FORWARDER_JOURNAL_PATH = TMP_DIR / "forwarder.sqlite3"
+ITERM_WINDOW_ID_PATH = TMP_DIR / "iterm-window-id.txt"
 
 FORWARDER_TOKEN_TEXT = "rusty-dev-forwarder"
 RECEIVER_TOKEN_TEXT = "rusty-dev-receiver"
@@ -609,9 +611,31 @@ async def _split_n(session, n: int, *, vertical: bool) -> list:
 
 
 async def _iterm2_async(connection, panes: list[tuple[str, str]]) -> None:
+    import asyncio
     import iterm2
+
+    # async_get_app subscribes to iTerm2 layout/focus notifications.  When
+    # run_until_complete finishes and closes the websocket those handlers fire
+    # on a dead connection, producing noisy "Task exception was never retrieved"
+    # ConnectionClosedError tracebacks.  Suppress them here.
+    loop = asyncio.get_event_loop()
+    _orig = loop.get_exception_handler()
+
+    def _quiet(loop, ctx):
+        exc = ctx.get("exception")
+        if exc and "ConnectionClosed" in type(exc).__name__:
+            return
+        if _orig:
+            _orig(loop, ctx)
+        else:
+            loop.default_exception_handler(ctx)
+
+    loop.set_exception_handler(_quiet)
+
     await iterm2.async_get_app(connection)
     window = await iterm2.Window.async_create(connection)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    ITERM_WINDOW_ID_PATH.write_text(window.window_id)
     tab = window.tabs[0]
     root = tab.sessions[0]
 
@@ -719,6 +743,91 @@ def start_receiver_auto_config() -> None:
     thread.start()
 
 
+DEV_BINARIES = ("server", "forwarder", "receiver", "emulator")
+
+
+def close_iterm2_window() -> None:
+    """Close the iTerm2 dev window using the saved window ID."""
+    if not ITERM_WINDOW_ID_PATH.exists():
+        return
+    window_id = ITERM_WINDOW_ID_PATH.read_text().strip()
+    ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
+    if not window_id:
+        return
+
+    try:
+        import iterm2
+    except ImportError:
+        return
+
+    async def _close(connection):
+        app = await iterm2.async_get_app(connection)
+        for window in app.windows:
+            if window.window_id == window_id:
+                await window.async_close(force=True)
+                break
+
+    try:
+        iterm2.run_until_complete(_close)
+    except Exception:
+        pass
+
+
+SERVER_PORT = 8080
+
+
+def _port_listening(port: int) -> bool:
+    """Return True if something is accepting TCP connections on localhost:port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def check_existing_instance() -> None:
+    """Detect a running dev environment and optionally tear it down."""
+    tmux_running = False
+    if shutil.which("tmux"):
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", "rusty-dev"],
+            capture_output=True,
+        )
+        tmux_running = result.returncode == 0
+
+    server_up = _port_listening(SERVER_PORT)
+
+    if not tmux_running and not server_up:
+        ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
+        return
+
+    parts = []
+    if tmux_running:
+        parts.append("tmux session 'rusty-dev'")
+    if server_up:
+        parts.append(f"server listening on :{SERVER_PORT}")
+
+    console.print(
+        f"[yellow]Existing dev environment detected:[/yellow] {'; '.join(parts)}"
+    )
+    console.print("[bold]  \\[Y] Kill and restart  \\[n] Continue anyway  \\[c] Cancel[/bold]")
+    answer = console.input("[bold]> [/bold]").strip().lower()
+    if answer in ("c", "cancel"):
+        console.print("[dim]Aborted.[/dim]")
+        sys.exit(0)
+    if answer not in ("", "y", "yes"):
+        console.print("[dim]Proceeding without stopping existing instance.[/dim]")
+        return
+
+    if tmux_running:
+        subprocess.run(["tmux", "kill-session", "-t", "rusty-dev"], capture_output=True)
+        console.print("  [green]Killed[/green] tmux session: rusty-dev")
+
+    close_iterm2_window()
+
+    for name in DEV_BINARIES:
+        subprocess.run(["pkill", "-f", f"target/debug/{name}"], capture_output=True)
+    console.print(f"  [green]Killed[/green] dev processes")
+
+
 def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
     panes = build_panes(emulators)
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
@@ -765,6 +874,8 @@ def main() -> None:
     if args.clear:
         clear()
         return
+
+    check_existing_instance()
 
     emulators: list[EmulatorSpec] = args.emulator or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)]
 

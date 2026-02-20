@@ -1,5 +1,6 @@
 import argparse
 import shlex
+import subprocess
 import tempfile
 import sys
 import unittest
@@ -240,6 +241,85 @@ class ConfigureReceiverDevTests(unittest.TestCase):
         dev.configure_receiver_dev()
 
         self.assertEqual(urlopen_mock.call_count, 2)
+
+
+class CheckExistingInstanceTests(unittest.TestCase):
+    @patch("scripts.dev.ITERM_WINDOW_ID_PATH")
+    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev.shutil.which", return_value=None)
+    def test_no_tmux_no_server_returns_silently(
+        self, _which_mock, _port_mock, iterm_path_mock
+    ) -> None:
+        dev.check_existing_instance()
+        # Should not prompt — no console.input call needed
+
+    @patch("scripts.dev.ITERM_WINDOW_ID_PATH")
+    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev.shutil.which", return_value=None)
+    def test_stale_iterm_file_cleaned_when_nothing_running(
+        self, _which_mock, _port_mock, iterm_path_mock
+    ) -> None:
+        dev.check_existing_instance()
+        iterm_path_mock.unlink.assert_called_once_with(missing_ok=True)
+
+    @patch("scripts.dev.close_iterm2_window")
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.console.input", return_value="y")
+    @patch("scripts.dev.subprocess.run")
+    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
+    def test_tmux_session_detected_and_killed_on_yes(
+        self, _which_mock, _port_mock, run_mock, input_mock, _print_mock, close_mock
+    ) -> None:
+        def run_side_effect(cmd, **kwargs):
+            if cmd == ["tmux", "has-session", "-t", "rusty-dev"]:
+                return subprocess.CompletedProcess(cmd, returncode=0)
+            return subprocess.CompletedProcess(cmd, returncode=0)
+
+        run_mock.side_effect = run_side_effect
+        dev.check_existing_instance()
+
+        input_mock.assert_called_once()
+        kill_calls = [c for c in run_mock.call_args_list if c.args[0] == ["tmux", "kill-session", "-t", "rusty-dev"]]
+        self.assertEqual(len(kill_calls), 1)
+
+    @patch("scripts.dev.close_iterm2_window")
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.console.input", return_value="n")
+    @patch("scripts.dev.subprocess.run")
+    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
+    def test_tmux_session_detected_but_skipped_on_no(
+        self, _which_mock, _port_mock, run_mock, input_mock, _print_mock, close_mock
+    ) -> None:
+        def run_side_effect(cmd, **kwargs):
+            if cmd == ["tmux", "has-session", "-t", "rusty-dev"]:
+                return subprocess.CompletedProcess(cmd, returncode=0)
+            return subprocess.CompletedProcess(cmd, returncode=0)
+
+        run_mock.side_effect = run_side_effect
+        dev.check_existing_instance()
+
+        input_mock.assert_called_once()
+        kill_calls = [c for c in run_mock.call_args_list if c.args[0] == ["tmux", "kill-session", "-t", "rusty-dev"]]
+        self.assertEqual(len(kill_calls), 0)
+
+    @patch("scripts.dev.close_iterm2_window")
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.console.input", return_value="y")
+    @patch("scripts.dev.subprocess.run")
+    @patch("scripts.dev._port_listening", return_value=True)
+    @patch("scripts.dev.shutil.which", return_value=None)
+    def test_server_port_detected_and_processes_killed(
+        self, _which_mock, _port_mock, run_mock, input_mock, _print_mock, close_mock
+    ) -> None:
+        run_mock.return_value = subprocess.CompletedProcess([], returncode=0)
+        dev.check_existing_instance()
+
+        input_mock.assert_called_once()
+        pkill_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "pkill"]
+        self.assertEqual(len(pkill_calls), len(dev.DEV_BINARIES))
+        close_mock.assert_called_once()
 
 
 class DetectAndLaunchTests(unittest.TestCase):
