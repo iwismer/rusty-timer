@@ -109,7 +109,8 @@ pub async fn create_token(
     }
 
     // Validate device_id
-    if body.device_id.trim().is_empty() {
+    let device_id = body.device_id.trim().to_owned();
+    if device_id.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(HttpErrorEnvelope {
@@ -139,7 +140,7 @@ pub async fn create_token(
         r#"INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3) RETURNING token_id"#,
         hash.as_slice(),
         body.device_type,
-        body.device_id.trim(),
+        &device_id,
     )
     .fetch_one(&state.pool)
     .await
@@ -148,21 +149,36 @@ pub async fn create_token(
             StatusCode::CREATED,
             Json(serde_json::json!({
                 "token_id": row.token_id.to_string(),
-                "device_id": body.device_id.trim(),
+                "device_id": device_id,
                 "device_type": body.device_type,
                 "token": raw_token,
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => {
+            if let Some(db_err) = e.as_database_error() {
+                if db_err.is_unique_violation() {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(HttpErrorEnvelope {
+                            code: "CONFLICT".to_owned(),
+                            message: "a token with this value already exists".to_owned(),
+                            details: None,
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
     }
 }
 
