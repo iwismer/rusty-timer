@@ -11,6 +11,18 @@ from unittest.mock import patch
 import scripts.dev as dev
 
 
+def make_args(**overrides: object) -> argparse.Namespace:
+    base: dict[str, object] = {
+        "no_build": False,
+        "clear": False,
+        "emulator": [dev.EmulatorSpec(port=10001)],
+        "bibchip": None,
+        "ppl": None,
+    }
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
 class EmulatorSpecToCmdTests(unittest.TestCase):
     def test_to_cmd_quotes_file_path_with_spaces(self) -> None:
         spec = dev.EmulatorSpec(port=10001, delay=500, file="data/my reads.txt")
@@ -123,14 +135,10 @@ class MainValidationTests(unittest.TestCase):
         detect_mock,
     ) -> None:
         events: list[str] = []
-        parse_args_mock.return_value = argparse.Namespace(
-            no_build=False,
-            clear=False,
-            emulator=[dev.EmulatorSpec(port=10001)],
-        )
+        parse_args_mock.return_value = make_args()
         check_existing_instance_mock.side_effect = lambda: events.append("check")
         setup_mock.side_effect = lambda **_kwargs: events.append("setup")
-        detect_mock.side_effect = lambda _emulators: events.append("launch")
+        detect_mock.side_effect = lambda *_args, **_kwargs: events.append("launch")
 
         dev.main()
 
@@ -152,12 +160,8 @@ class MainValidationTests(unittest.TestCase):
         check_existing_instance_mock,
         input_mock,
     ) -> None:
-        parse_args_mock.return_value = argparse.Namespace(
-            no_build=False,
-            clear=False,
+        parse_args_mock.return_value = make_args(
             emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=10001)],
-            bibchip=None,
-            ppl=None,
         )
         with self.assertRaises(SystemExit):
             dev.main()
@@ -173,12 +177,8 @@ class MainValidationTests(unittest.TestCase):
     def test_main_exits_on_port_fallback_collision(
         self, parse_args_mock, setup_mock, detect_mock, check_existing_instance_mock
     ) -> None:
-        parse_args_mock.return_value = argparse.Namespace(
-            no_build=False,
-            clear=False,
+        parse_args_mock.return_value = make_args(
             emulator=[dev.EmulatorSpec(port=10001), dev.EmulatorSpec(port=11001)],
-            bibchip=None,
-            ppl=None,
         )
         with self.assertRaises(SystemExit):
             dev.main()
@@ -199,13 +199,7 @@ class MainValidationTests(unittest.TestCase):
         detect_mock,
         check_existing_instance_mock,
     ) -> None:
-        parse_args_mock.return_value = argparse.Namespace(
-            no_build=False,
-            clear=False,
-            emulator=[dev.EmulatorSpec(port=10001)],
-            bibchip=None,
-            ppl=None,
-        )
+        parse_args_mock.return_value = make_args()
         with self.assertRaises(SystemExit):
             dev.main()
         setup_mock.assert_not_called()
@@ -749,12 +743,8 @@ class MainRacePathValidationTests(unittest.TestCase):
     def test_main_exits_when_bibchip_path_missing(
         self, parse_args_mock, setup_mock, detect_mock
     ) -> None:
-        parse_args_mock.return_value = argparse.Namespace(
-            no_build=False,
-            clear=False,
-            emulator=[dev.EmulatorSpec(port=10001)],
+        parse_args_mock.return_value = make_args(
             bibchip=Path("/tmp/does-not-exist.bibchip"),
-            ppl=None,
         )
 
         with self.assertRaises(SystemExit):
