@@ -1,6 +1,18 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { ConfigApi } from "../lib/config-types";
+  import {
+    fromConfig,
+    toGeneralPayload,
+    toServerPayload,
+    toAuthPayload,
+    toJournalPayload,
+    toUplinkPayload,
+    toStatusHttpPayload,
+    toReadersPayload,
+    type ReaderEntry,
+    type ForwarderConfigFormState,
+  } from "../lib/forwarder-config-form";
   import Card from "./Card.svelte";
   import AlertBanner from "./AlertBanner.svelte";
   import StatusBadge from "./StatusBadge.svelte";
@@ -29,12 +41,6 @@
   let uplinkBatchFlushMs = "";
   let uplinkBatchMaxEvents = "";
   let statusHttpBind = "";
-
-  interface ReaderEntry {
-    target: string;
-    enabled: boolean;
-    local_fallback_port: string;
-  }
   let readers: ReaderEntry[] = [];
 
   onMount(async () => {
@@ -50,7 +56,7 @@
         throw new Error(result.error ?? "Failed to load config");
       }
       restartNeeded = result.restart_needed;
-      populateFields(result.config);
+      applyFormState(fromConfig(result.config));
       configLoaded = true;
     } catch (e) {
       loadError = String(e);
@@ -59,40 +65,34 @@
     }
   }
 
-  function populateFields(cfg: Record<string, unknown>) {
-    generalDisplayName = (cfg.display_name as string) ?? "";
+  function applyFormState(form: ForwarderConfigFormState): void {
+    generalDisplayName = form.generalDisplayName;
+    serverBaseUrl = form.serverBaseUrl;
+    serverForwardersWsPath = form.serverForwardersWsPath;
+    authTokenFile = form.authTokenFile;
+    journalSqlitePath = form.journalSqlitePath;
+    journalPruneWatermarkPct = form.journalPruneWatermarkPct;
+    uplinkBatchMode = form.uplinkBatchMode;
+    uplinkBatchFlushMs = form.uplinkBatchFlushMs;
+    uplinkBatchMaxEvents = form.uplinkBatchMaxEvents;
+    statusHttpBind = form.statusHttpBind;
+    readers = form.readers.map((reader) => ({ ...reader }));
+  }
 
-    const server = (cfg.server as Record<string, unknown>) ?? {};
-    serverBaseUrl = (server.base_url as string) ?? "";
-    serverForwardersWsPath = (server.forwarders_ws_path as string) ?? "";
-
-    const auth = (cfg.auth as Record<string, unknown>) ?? {};
-    authTokenFile = (auth.token_file as string) ?? "";
-
-    const journal = (cfg.journal as Record<string, unknown>) ?? {};
-    journalSqlitePath = (journal.sqlite_path as string) ?? "";
-    journalPruneWatermarkPct =
-      journal.prune_watermark_pct != null
-        ? String(journal.prune_watermark_pct)
-        : "";
-
-    const uplink = (cfg.uplink as Record<string, unknown>) ?? {};
-    uplinkBatchMode = (uplink.batch_mode as string) ?? "";
-    uplinkBatchFlushMs =
-      uplink.batch_flush_ms != null ? String(uplink.batch_flush_ms) : "";
-    uplinkBatchMaxEvents =
-      uplink.batch_max_events != null ? String(uplink.batch_max_events) : "";
-
-    const statusHttp = (cfg.status_http as Record<string, unknown>) ?? {};
-    statusHttpBind = (statusHttp.bind as string) ?? "";
-
-    const rawReaders = (cfg.readers as Record<string, unknown>[]) ?? [];
-    readers = rawReaders.map((r) => ({
-      target: (r.target as string) ?? "",
-      enabled: (r.enabled as boolean) ?? true,
-      local_fallback_port:
-        r.local_fallback_port != null ? String(r.local_fallback_port) : "",
-    }));
+  function currentFormState(): ForwarderConfigFormState {
+    return {
+      generalDisplayName,
+      serverBaseUrl,
+      serverForwardersWsPath,
+      authTokenFile,
+      journalSqlitePath,
+      journalPruneWatermarkPct,
+      uplinkBatchMode,
+      uplinkBatchFlushMs,
+      uplinkBatchMaxEvents,
+      statusHttpBind,
+      readers: readers.map((reader) => ({ ...reader })),
+    };
   }
 
   async function saveSection(
@@ -123,47 +123,25 @@
   }
 
   function saveGeneral() {
-    saveSection("general", { display_name: generalDisplayName || null });
+    saveSection("general", toGeneralPayload(currentFormState()));
   }
   function saveServer() {
-    saveSection("server", {
-      base_url: serverBaseUrl,
-      forwarders_ws_path: serverForwardersWsPath || null,
-    });
+    saveSection("server", toServerPayload(currentFormState()));
   }
   function saveAuth() {
-    saveSection("auth", { token_file: authTokenFile });
+    saveSection("auth", toAuthPayload(currentFormState()));
   }
   function saveJournal() {
-    saveSection("journal", {
-      sqlite_path: journalSqlitePath || null,
-      prune_watermark_pct: journalPruneWatermarkPct
-        ? Number(journalPruneWatermarkPct)
-        : null,
-    });
+    saveSection("journal", toJournalPayload(currentFormState()));
   }
   function saveUplink() {
-    saveSection("uplink", {
-      batch_mode: uplinkBatchMode || null,
-      batch_flush_ms: uplinkBatchFlushMs ? Number(uplinkBatchFlushMs) : null,
-      batch_max_events: uplinkBatchMaxEvents
-        ? Number(uplinkBatchMaxEvents)
-        : null,
-    });
+    saveSection("uplink", toUplinkPayload(currentFormState()));
   }
   function saveStatusHttp() {
-    saveSection("status_http", { bind: statusHttpBind || null });
+    saveSection("status_http", toStatusHttpPayload(currentFormState()));
   }
   function saveReaders() {
-    saveSection("readers", {
-      readers: readers.map((r) => ({
-        target: r.target || null,
-        enabled: r.enabled,
-        local_fallback_port: r.local_fallback_port
-          ? Number(r.local_fallback_port)
-          : null,
-      })),
-    });
+    saveSection("readers", toReadersPayload(currentFormState()));
   }
 
   function addReader() {
@@ -248,171 +226,177 @@
     </div>
   {:else if configLoaded}
     <div class="space-y-4">
-      <!-- General -->
-      <Card title="General">
-        <label class="block text-sm font-medium text-text-secondary mb-1">
-          Display Name
-          <input type="text" bind:value={generalDisplayName} class="mt-1 {inputClass}" />
-        </label>
-        <button
-          class={saveBtnClass}
-          on:click={saveGeneral}
-          disabled={savingSection["general"]}
-        >
-          {savingSection["general"] ? "Saving..." : "Save General"}
-        </button>
-        {#if sectionMessages["general"]}
-          <p
-            class="text-xs mt-1 m-0 {sectionMessages['general'].ok
-              ? 'text-status-ok'
-              : 'text-status-err'}"
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- General -->
+        <Card title="General">
+          <label class="block text-sm font-medium text-text-secondary mb-1">
+            Display Name
+            <input type="text" bind:value={generalDisplayName} class="mt-1 {inputClass}" />
+          </label>
+          <button
+            class={saveBtnClass}
+            on:click={saveGeneral}
+            disabled={savingSection["general"]}
           >
-            {sectionMessages["general"].text}
-          </p>
-        {/if}
-      </Card>
+            {savingSection["general"] ? "Saving..." : "Save General"}
+          </button>
+          {#if sectionMessages["general"]}
+            <p
+              class="text-xs mt-1 m-0 {sectionMessages['general'].ok
+                ? 'text-status-ok'
+                : 'text-status-err'}"
+            >
+              {sectionMessages["general"].text}
+            </p>
+          {/if}
+        </Card>
 
-      <!-- Server -->
-      <Card title="Server">
-        <div class="space-y-3">
-          <label class="block text-sm font-medium text-text-secondary">
-            Base URL *
-            <input type="text" bind:value={serverBaseUrl} required class="mt-1 {inputClass}" />
-          </label>
-          <label class="block text-sm font-medium text-text-secondary">
-            Forwarders WS Path
-            <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
-          </label>
-        </div>
-        <button
-          class={saveBtnClass}
-          on:click={saveServer}
-          disabled={savingSection["server"]}
-        >
-          {savingSection["server"] ? "Saving..." : "Save Server"}
-        </button>
-        {#if sectionMessages["server"]}
-          <p
-            class="text-xs mt-1 m-0 {sectionMessages['server'].ok
-              ? 'text-status-ok'
-              : 'text-status-err'}"
+        <!-- Server -->
+        <Card title="Server">
+          <div class="space-y-3">
+            <label class="block text-sm font-medium text-text-secondary">
+              Base URL *
+              <input type="text" bind:value={serverBaseUrl} required class="mt-1 {inputClass}" />
+            </label>
+            <label class="block text-sm font-medium text-text-secondary">
+              Forwarders WS Path
+              <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
+            </label>
+          </div>
+          <button
+            class={saveBtnClass}
+            on:click={saveServer}
+            disabled={savingSection["server"]}
           >
-            {sectionMessages["server"].text}
-          </p>
-        {/if}
-      </Card>
+            {savingSection["server"] ? "Saving..." : "Save Server"}
+          </button>
+          {#if sectionMessages["server"]}
+            <p
+              class="text-xs mt-1 m-0 {sectionMessages['server'].ok
+                ? 'text-status-ok'
+                : 'text-status-err'}"
+            >
+              {sectionMessages["server"].text}
+            </p>
+          {/if}
+        </Card>
+      </div>
 
-      <!-- Auth -->
-      <Card title="Auth">
-        <label class="block text-sm font-medium text-text-secondary mb-1">
-          Token File Path *
-          <input type="text" bind:value={authTokenFile} required class="mt-1 {inputClass}" />
-        </label>
-        <button
-          class={saveBtnClass}
-          on:click={saveAuth}
-          disabled={savingSection["auth"]}
-        >
-          {savingSection["auth"] ? "Saving..." : "Save Auth"}
-        </button>
-        {#if sectionMessages["auth"]}
-          <p
-            class="text-xs mt-1 m-0 {sectionMessages['auth'].ok
-              ? 'text-status-ok'
-              : 'text-status-err'}"
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Auth -->
+        <Card title="Auth">
+          <label class="block text-sm font-medium text-text-secondary mb-1">
+            Token File Path *
+            <input type="text" bind:value={authTokenFile} required class="mt-1 {inputClass}" />
+          </label>
+          <button
+            class={saveBtnClass}
+            on:click={saveAuth}
+            disabled={savingSection["auth"]}
           >
-            {sectionMessages["auth"].text}
-          </p>
-        {/if}
-      </Card>
+            {savingSection["auth"] ? "Saving..." : "Save Auth"}
+          </button>
+          {#if sectionMessages["auth"]}
+            <p
+              class="text-xs mt-1 m-0 {sectionMessages['auth'].ok
+                ? 'text-status-ok'
+                : 'text-status-err'}"
+            >
+              {sectionMessages["auth"].text}
+            </p>
+          {/if}
+        </Card>
 
-      <!-- Journal -->
-      <Card title="Journal">
-        <div class="space-y-3">
-          <label class="block text-sm font-medium text-text-secondary">
-            SQLite Path
-            <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
-          </label>
-          <label class="block text-sm font-medium text-text-secondary">
-            Prune Watermark %
-            <input type="number" bind:value={journalPruneWatermarkPct} min="0" max="100" class="mt-1 {inputClass}" />
-          </label>
-        </div>
-        <button
-          class={saveBtnClass}
-          on:click={saveJournal}
-          disabled={savingSection["journal"]}
-        >
-          {savingSection["journal"] ? "Saving..." : "Save Journal"}
-        </button>
-        {#if sectionMessages["journal"]}
-          <p
-            class="text-xs mt-1 m-0 {sectionMessages['journal'].ok
-              ? 'text-status-ok'
-              : 'text-status-err'}"
+        <!-- Journal -->
+        <Card title="Journal">
+          <div class="space-y-3">
+            <label class="block text-sm font-medium text-text-secondary">
+              SQLite Path
+              <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
+            </label>
+            <label class="block text-sm font-medium text-text-secondary">
+              Prune Watermark %
+              <input type="number" bind:value={journalPruneWatermarkPct} min="0" max="100" class="mt-1 {inputClass}" />
+            </label>
+          </div>
+          <button
+            class={saveBtnClass}
+            on:click={saveJournal}
+            disabled={savingSection["journal"]}
           >
-            {sectionMessages["journal"].text}
-          </p>
-        {/if}
-      </Card>
+            {savingSection["journal"] ? "Saving..." : "Save Journal"}
+          </button>
+          {#if sectionMessages["journal"]}
+            <p
+              class="text-xs mt-1 m-0 {sectionMessages['journal'].ok
+                ? 'text-status-ok'
+                : 'text-status-err'}"
+            >
+              {sectionMessages["journal"].text}
+            </p>
+          {/if}
+        </Card>
+      </div>
 
-      <!-- Uplink -->
-      <Card title="Uplink">
-        <div class="space-y-3">
-          <label class="block text-sm font-medium text-text-secondary">
-            Batch Mode
-            <input type="text" bind:value={uplinkBatchMode} class="mt-1 {inputClass}" />
-          </label>
-          <label class="block text-sm font-medium text-text-secondary">
-            Batch Flush (ms)
-            <input type="number" bind:value={uplinkBatchFlushMs} min="0" class="mt-1 {inputClass}" />
-          </label>
-          <label class="block text-sm font-medium text-text-secondary">
-            Batch Max Events
-            <input type="number" bind:value={uplinkBatchMaxEvents} min="0" class="mt-1 {inputClass}" />
-          </label>
-        </div>
-        <button
-          class={saveBtnClass}
-          on:click={saveUplink}
-          disabled={savingSection["uplink"]}
-        >
-          {savingSection["uplink"] ? "Saving..." : "Save Uplink"}
-        </button>
-        {#if sectionMessages["uplink"]}
-          <p
-            class="text-xs mt-1 m-0 {sectionMessages['uplink'].ok
-              ? 'text-status-ok'
-              : 'text-status-err'}"
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Uplink -->
+        <Card title="Uplink">
+          <div class="space-y-3">
+            <label class="block text-sm font-medium text-text-secondary">
+              Batch Mode
+              <input type="text" bind:value={uplinkBatchMode} class="mt-1 {inputClass}" />
+            </label>
+            <label class="block text-sm font-medium text-text-secondary">
+              Batch Flush (ms)
+              <input type="number" bind:value={uplinkBatchFlushMs} min="0" class="mt-1 {inputClass}" />
+            </label>
+            <label class="block text-sm font-medium text-text-secondary">
+              Batch Max Events
+              <input type="number" bind:value={uplinkBatchMaxEvents} min="0" class="mt-1 {inputClass}" />
+            </label>
+          </div>
+          <button
+            class={saveBtnClass}
+            on:click={saveUplink}
+            disabled={savingSection["uplink"]}
           >
-            {sectionMessages["uplink"].text}
-          </p>
-        {/if}
-      </Card>
+            {savingSection["uplink"] ? "Saving..." : "Save Uplink"}
+          </button>
+          {#if sectionMessages["uplink"]}
+            <p
+              class="text-xs mt-1 m-0 {sectionMessages['uplink'].ok
+                ? 'text-status-ok'
+                : 'text-status-err'}"
+            >
+              {sectionMessages["uplink"].text}
+            </p>
+          {/if}
+        </Card>
 
-      <!-- Status HTTP -->
-      <Card title="Status HTTP">
-        <label class="block text-sm font-medium text-text-secondary mb-1">
-          Bind Address
-          <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
-        </label>
-        <button
-          class={saveBtnClass}
-          on:click={saveStatusHttp}
-          disabled={savingSection["status_http"]}
-        >
-          {savingSection["status_http"] ? "Saving..." : "Save Status HTTP"}
-        </button>
-        {#if sectionMessages["status_http"]}
-          <p
-            class="text-xs mt-1 m-0 {sectionMessages['status_http'].ok
-              ? 'text-status-ok'
-              : 'text-status-err'}"
+        <!-- Status HTTP -->
+        <Card title="Status HTTP">
+          <label class="block text-sm font-medium text-text-secondary mb-1">
+            Bind Address
+            <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
+          </label>
+          <button
+            class={saveBtnClass}
+            on:click={saveStatusHttp}
+            disabled={savingSection["status_http"]}
           >
-            {sectionMessages["status_http"].text}
-          </p>
-        {/if}
-      </Card>
+            {savingSection["status_http"] ? "Saving..." : "Save Status HTTP"}
+          </button>
+          {#if sectionMessages["status_http"]}
+            <p
+              class="text-xs mt-1 m-0 {sectionMessages['status_http'].ok
+                ? 'text-status-ok'
+                : 'text-status-err'}"
+            >
+              {sectionMessages["status_http"].text}
+            </p>
+          {/if}
+        </Card>
+      </div>
 
       <!-- Readers -->
       <Card title="Readers">

@@ -8,14 +8,29 @@
     StatusBadge,
     Card,
     AlertBanner,
+    LogViewer,
   } from "@rusty-timer/shared-ui";
-  import type { ForwarderStatus, ReaderStatus } from "$lib/api";
+  import type { ForwarderStatus } from "$lib/api";
+  import {
+    formatLastSeen,
+    readerBadgeState,
+    readerConnectionSummary,
+  } from "$lib/status-view-model";
+  import { pushLogEntry } from "$lib/log-buffer";
 
   let status: ForwarderStatus | null = null;
   let error: string | null = null;
   let updateVersion: string | null = null;
   let updateBusy = false;
   let sseConnected = false;
+  let logs: string[] = [];
+
+  const btnPrimary =
+    "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+
+  $: readersSummary = status
+    ? readerConnectionSummary(status.readers)
+    : { connected: 0, configured: 0, label: "0 connected / 0 configured" };
 
   async function loadAll() {
     error = null;
@@ -68,19 +83,6 @@
     }
   }
 
-  function formatLastSeen(secs: number | null): string {
-    if (secs === null) return "never";
-    if (secs < 60) return `${secs}s ago`;
-    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
-    return `${Math.floor(secs / 3600)}h ago`;
-  }
-
-  function readerBadgeState(state: string): "ok" | "warn" | "err" {
-    if (state === "connected") return "ok";
-    if (state === "connecting") return "warn";
-    return "err";
-  }
-
   onMount(() => {
     loadAll();
     initSSE({
@@ -102,7 +104,9 @@
           status = { ...status, readers };
         }
       },
-      onLogEntry: () => {},
+      onLogEntry: (entry) => {
+        logs = pushLogEntry(logs, entry);
+      },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {
         sseConnected = connected;
@@ -147,38 +151,58 @@
     </div>
   {/if}
 
-  <h1 class="text-xl font-bold text-text-primary mb-6">Forwarder Status</h1>
+  <h1 class="text-xl font-bold text-text-primary mb-6">Forwarder</h1>
 
   {#if status}
-    <div class="grid grid-cols-3 gap-4 mb-6">
-      <Card>
-        <p class="text-xs text-text-muted m-0">Forwarder ID</p>
-        <p class="text-sm font-mono font-medium text-text-primary m-0 mt-1">
-          {status.forwarder_id}
-        </p>
-        <p class="text-xs text-text-muted mt-2 m-0">v{status.version}</p>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+      <Card title="Status">
+        <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
+          <dt class="text-text-muted">Forwarder ID</dt>
+          <dd class="font-mono text-text-primary">{status.forwarder_id}</dd>
+          <dt class="text-text-muted">Version</dt>
+          <dd class="font-mono text-text-primary">{status.version}</dd>
+          <dt class="text-text-muted">Readiness</dt>
+          <dd class="flex items-center gap-2">
+            <StatusBadge
+              label={status.ready ? "ready" : "not ready"}
+              state={status.ready ? "ok" : "err"}
+            />
+            {#if status.ready_reason}
+              <span class="text-xs text-text-muted">
+                ({status.ready_reason})
+              </span>
+            {/if}
+          </dd>
+        </dl>
       </Card>
-      <Card>
-        <p class="text-xs text-text-muted m-0">Readiness</p>
-        <div class="mt-1 flex items-center gap-2">
-          <StatusBadge
-            label={status.ready ? "ready" : "not ready"}
-            state={status.ready ? "ok" : "err"}
-          />
-          {#if status.ready_reason}
-            <span class="text-xs text-text-muted">
-              ({status.ready_reason})
-            </span>
-          {/if}
-        </div>
-      </Card>
-      <Card>
-        <p class="text-xs text-text-muted m-0">Uplink</p>
-        <div class="mt-1">
-          <StatusBadge
-            label={status.uplink_connected ? "connected" : "disconnected"}
-            state={status.uplink_connected ? "ok" : "err"}
-          />
+      <Card title="Service">
+        <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
+          <dt class="text-text-muted">Uplink</dt>
+          <dd>
+            <StatusBadge
+              label={status.uplink_connected ? "connected" : "disconnected"}
+              state={status.uplink_connected ? "ok" : "err"}
+            />
+          </dd>
+          <dt class="text-text-muted">Restart Needed</dt>
+          <dd>
+            <StatusBadge
+              label={status.restart_needed ? "pending" : "none"}
+              state={status.restart_needed ? "warn" : "ok"}
+            />
+          </dd>
+        </dl>
+        <div class="flex gap-2 mt-3 pt-3 border-t border-border">
+          <button
+            class={btnPrimary}
+            on:click={handleRestart}
+            disabled={!status.restart_needed}
+          >
+            Restart Now
+          </button>
+          <span class="text-xs text-text-muted self-center">
+            Applies recent configuration changes.
+          </span>
         </div>
       </Card>
     </div>
@@ -187,7 +211,7 @@
       <svelte:fragment slot="header">
         <h2 class="text-sm font-semibold text-text-primary m-0">Readers</h2>
         <span class="ml-auto text-xs text-text-muted">
-          {status.readers.length} configured
+          {readersSummary.label}
         </span>
       </svelte:fragment>
 
@@ -266,6 +290,14 @@
         </div>
       {/if}
     </Card>
+
+    <div class="mt-6">
+      <Card>
+        <div class="-m-4">
+          <LogViewer entries={logs} />
+        </div>
+      </Card>
+    </div>
   {:else if !sseConnected}
     <AlertBanner variant="err" message="Disconnected from forwarder." />
   {:else if !error}
