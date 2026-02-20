@@ -32,7 +32,7 @@ use rt_updater::UpdateStatus;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -70,6 +70,8 @@ pub struct ReaderStatus {
     pub last_seen: Option<Instant>,
     pub reads_since_restart: u64,
     pub reads_total: i64,
+    /// The local port the forwarder listens on to re-expose reads from this reader.
+    pub local_port: u16,
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -279,14 +281,18 @@ impl StatusServer {
     }
 
     /// Pre-populate all configured reader IPs as Disconnected.
-    pub async fn init_readers(&self, reader_ips: &[String]) {
+    ///
+    /// Each entry is `(reader_addr, local_port)` where `reader_addr` is `"ip:port"`
+    /// and `local_port` is the port the forwarder listens on to re-expose reads.
+    pub async fn init_readers(&self, readers: &[(String, u16)]) {
         let mut ss = self.subsystem.lock().await;
-        for ip in reader_ips {
-            ss.readers.entry(ip.clone()).or_insert(ReaderStatus {
+        for (addr, local_port) in readers {
+            ss.readers.entry(addr.clone()).or_insert(ReaderStatus {
                 state: ReaderConnectionState::Disconnected,
                 last_seen: None,
                 reads_since_restart: 0,
                 reads_total: 0,
+                local_port: *local_port,
             });
         }
     }
@@ -317,6 +323,7 @@ impl StatusServer {
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: r.local_port,
                 });
         }
     }
@@ -341,6 +348,7 @@ impl StatusServer {
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: r.local_port,
                 });
         }
     }
@@ -674,6 +682,13 @@ pub async fn apply_section_update(
         "journal" => {
             let sqlite_path = optional_string_field(payload, "sqlite_path")?;
             let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
+            if let Some(pct) = prune_watermark_pct {
+                if pct > 100 {
+                    return Err(bad_request_error(
+                        "prune_watermark_pct must be between 0 and 100",
+                    ));
+                }
+            }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.journal = Some(crate::config::RawJournalConfig {
                     sqlite_path,
@@ -685,6 +700,13 @@ pub async fn apply_section_update(
         }
         "uplink" => {
             let batch_mode = optional_string_field(payload, "batch_mode")?;
+            if let Some(ref mode) = batch_mode {
+                if mode != "immediate" && mode != "batched" {
+                    return Err(bad_request_error(
+                        "batch_mode must be \"immediate\" or \"batched\"",
+                    ));
+                }
+            }
             let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
             let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
             update_config_file(config_state, subsystem, ui_tx, |raw| {
@@ -698,7 +720,17 @@ pub async fn apply_section_update(
             .await
         }
         "status_http" => {
-            let bind = optional_string_field(payload, "bind")?;
+            let bind = optional_string_field(payload, "bind")?.and_then(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            });
+            if let Some(ref bind_addr) = bind {
+                validate_status_bind(bind_addr).map_err(bad_request_error)?;
+            }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
                 Ok(())
@@ -948,6 +980,12 @@ fn validate_token_file(token_file: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_status_bind(bind: &str) -> Result<(), String> {
+    bind.parse::<SocketAddrV4>()
+        .map(|_| ())
+        .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 0.0.0.0:8080)".to_owned())
+}
+
 fn config_not_available() -> Response {
     text_response(StatusCode::NOT_FOUND, "Config editing not available")
 }
@@ -999,6 +1037,7 @@ struct ReaderStatusJson {
     reads_session: u64,
     reads_total: i64,
     last_seen_secs: Option<u64>,
+    local_port: u16,
 }
 
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
@@ -1020,6 +1059,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 reads_session: r.reads_since_restart,
                 reads_total: r.reads_total,
                 last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                local_port: r.local_port,
             }
         })
         .collect();
@@ -1523,7 +1563,9 @@ mod tests {
         .expect("start status server");
 
         server.set_forwarder_id("fwd-abc123").await;
-        server.init_readers(&["192.168.1.10".to_owned()]).await;
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
         server
             .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
             .await;

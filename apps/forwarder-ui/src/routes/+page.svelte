@@ -245,6 +245,11 @@
                   Reads (total)
                 </th>
                 <th
+                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
+                >
+                  Local Port
+                </th>
+                <th
                   class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
                 >
                   Last seen
@@ -273,6 +278,11 @@
                     class="px-4 py-2.5 text-right font-mono text-text-primary"
                   >
                     {reader.reads_total.toLocaleString()}
+                  </td>
+                  <td
+                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                  >
+                    {reader.local_port}
                   </td>
                   <td class="px-4 py-2.5 text-xs text-text-secondary">
                     {formatLastSeen(reader.last_seen_secs)}

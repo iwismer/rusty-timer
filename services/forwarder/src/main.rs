@@ -886,7 +886,7 @@ async fn main() {
         }
     };
     // Collect enabled reader endpoints
-    let mut all_reader_ips: Vec<String> = Vec::new();
+    let mut all_readers: Vec<(String, u16)> = Vec::new(); // (addr, local_port)
     let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)
 
     for reader_cfg in &cfg.readers {
@@ -935,39 +935,39 @@ async fn main() {
                 fanout.run().await;
             });
 
-            all_reader_ips.push(ep.addr());
+            all_readers.push((ep.addr(), local_port));
             fanout_addrs.push((ep.ip, ep.port, fanout_addr));
         }
     }
 
     // Initialize reader status tracking
-    status_server.init_readers(&all_reader_ips).await;
+    status_server.init_readers(&all_readers).await;
 
-    if all_reader_ips.is_empty() {
+    if all_readers.is_empty() {
         eprintln!("FATAL: no enabled readers configured");
         std::process::exit(1);
     }
 
     // Seed historical totals once at startup to avoid per-request DB counting.
-    for reader_ip in &all_reader_ips {
+    for (reader_addr, _) in &all_readers {
         let total = {
             let j = journal.lock().await;
-            match j.event_count(reader_ip) {
+            match j.event_count(reader_addr) {
                 Ok(count) => count,
                 Err(e) => {
-                    warn!(reader_ip = %reader_ip, error = %e, "failed to load reader total");
+                    warn!(reader_ip = %reader_addr, error = %e, "failed to load reader total");
                     0
                 }
             }
         };
-        status_server.set_reader_total(reader_ip, total).await;
+        status_server.set_reader_total(reader_addr, total).await;
     }
 
     // Set forwarder identity on status page
     status_server.set_forwarder_id(&forwarder_id).await;
 
     // Detect local IP from first reader
-    let local_ip = all_reader_ips.first().and_then(|addr| {
+    let local_ip = all_readers.first().and_then(|(addr, _)| {
         let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(addr);
         detect_local_ip(ip)
     });
@@ -992,7 +992,7 @@ async fn main() {
         let rx = shutdown_rx.clone();
         let fwd_cfg = cfg.clone();
         let fwd_id = forwarder_id.clone();
-        let ips = all_reader_ips.clone();
+        let ips: Vec<String> = all_readers.iter().map(|(addr, _)| addr.clone()).collect();
         let ss = status_server.clone();
         let cs = config_state.clone();
         let sub = status_server.subsystem_arc();
@@ -1081,7 +1081,7 @@ async fn main() {
     }
 
     info!(
-        readers = all_reader_ips.len(),
+        readers = all_readers.len(),
         forwarder_id = %forwarder_id,
         "forwarder initialized — all worker tasks started"
     );
@@ -1456,7 +1456,9 @@ mod tests {
         .await
         .expect("start status server");
 
-        status.init_readers(&["10.0.0.42".to_owned()]).await;
+        status
+            .init_readers(&[("10.0.0.42".to_owned(), 10042)])
+            .await;
         status
             .update_reader_state("10.0.0.42", ReaderConnectionState::Connected)
             .await;
@@ -1487,7 +1489,7 @@ mod tests {
         )
         .await
         .expect("start status server");
-        status.init_readers(std::slice::from_ref(&stream_key)).await;
+        status.init_readers(&[(stream_key.clone(), 10001)]).await;
 
         let temp_dir = tempdir().expect("create tempdir");
         let db_path = temp_dir.path().join("forwarder.sqlite3");
@@ -1550,7 +1552,7 @@ mod tests {
         )
         .await
         .expect("start status server");
-        status.init_readers(std::slice::from_ref(&stream_key)).await;
+        status.init_readers(&[(stream_key.clone(), 10001)]).await;
 
         let temp_dir = tempdir().expect("create tempdir");
         let db_path = temp_dir.path().join("forwarder.sqlite3");
