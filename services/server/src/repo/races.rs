@@ -90,7 +90,7 @@ pub async fn replace_participants(
         .await?;
     let mut count = 0u64;
     for (bib, first_name, last_name, gender, affiliation) in participants {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO participants (race_id, bib, first_name, last_name, gender, affiliation) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
         )
         .bind(race_id)
@@ -101,7 +101,7 @@ pub async fn replace_participants(
         .bind(*affiliation)
         .execute(&mut *tx)
         .await?;
-        count += 1;
+        count += result.rows_affected();
     }
     tx.commit().await?;
     Ok(count)
@@ -119,7 +119,7 @@ pub async fn replace_chips(
         .await?;
     let mut count = 0u64;
     for (chip_id, bib) in chips {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO chips (race_id, chip_id, bib) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
         )
         .bind(race_id)
@@ -127,7 +127,7 @@ pub async fn replace_chips(
         .bind(bib)
         .execute(&mut *tx)
         .await?;
-        count += 1;
+        count += result.rows_affected();
     }
     tx.commit().await?;
     Ok(count)

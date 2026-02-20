@@ -223,14 +223,18 @@ export async function createRace(name: string): Promise<RaceEntry> {
 
 /** DELETE /api/v1/races/{raceId} */
 export async function deleteRace(raceId: string): Promise<void> {
-  return apiFetch<void>(`/api/v1/races/${raceId}`, { method: "DELETE" });
+  return apiFetch<void>(`/api/v1/races/${encodeURIComponent(raceId)}`, {
+    method: "DELETE",
+  });
 }
 
 /** GET /api/v1/races/{raceId}/participants */
 export async function getParticipants(
   raceId: string,
 ): Promise<ParticipantsResponse> {
-  return apiFetch<ParticipantsResponse>(`/api/v1/races/${raceId}/participants`);
+  return apiFetch<ParticipantsResponse>(
+    `/api/v1/races/${encodeURIComponent(raceId)}/participants`,
+  );
 }
 
 /** POST /api/v1/races/{raceId}/participants/upload (multipart file) */
@@ -241,7 +245,7 @@ export async function uploadParticipants(
   const form = new FormData();
   form.append("file", file);
   const resp = await fetch(
-    `${BASE}/api/v1/races/${raceId}/participants/upload`,
+    `${BASE}/api/v1/races/${encodeURIComponent(raceId)}/participants/upload`,
     { method: "POST", body: form },
   );
   if (!resp.ok) {
@@ -258,10 +262,13 @@ export async function uploadChips(
 ): Promise<UploadResult> {
   const form = new FormData();
   form.append("file", file);
-  const resp = await fetch(`${BASE}/api/v1/races/${raceId}/chips/upload`, {
-    method: "POST",
-    body: form,
-  });
+  const resp = await fetch(
+    `${BASE}/api/v1/races/${encodeURIComponent(raceId)}/chips/upload`,
+    {
+      method: "POST",
+      body: form,
+    },
+  );
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`Upload failed: ${resp.status}: ${text}`);

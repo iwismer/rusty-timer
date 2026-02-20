@@ -162,7 +162,7 @@
   <h1 class="text-xl font-bold text-text-primary m-0 mb-6">Race Detail</h1>
 
   <!-- Upload section -->
-  <div class="grid grid-cols-2 gap-4 mb-6">
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
     <Card title="Upload Participants (.ppl)">
       <div class="flex flex-col gap-3">
         <input
