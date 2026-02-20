@@ -2,6 +2,7 @@
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import type { ReadEntry, DedupMode } from "$lib/api";
+  import { metricsStore } from "$lib/stores";
   import { Card } from "@rusty-timer/shared-ui";
   import ReadsTable from "$lib/components/ReadsTable.svelte";
 
@@ -15,12 +16,16 @@
   let readsLimit = $state(100);
   let readsOffset = $state(0);
 
+  // Load reads on mount and re-fetch when new data arrives (metrics update via SSE)
+  let readsInitialized = false;
   $effect(() => {
-    void loadReads(forwarderId);
+    $metricsStore; // re-run when any stream's metrics change (signals new reads arrived)
+    void loadReads(forwarderId, readsInitialized);
+    readsInitialized = true;
   });
 
-  async function loadReads(fwdId: string): Promise<void> {
-    readsLoading = true;
+  async function loadReads(fwdId: string, silent = false): Promise<void> {
+    if (!silent) readsLoading = true;
     try {
       const resp = await api.getForwarderReads(fwdId, {
         dedup: readsDedup,

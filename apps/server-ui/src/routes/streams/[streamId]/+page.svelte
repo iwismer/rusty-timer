@@ -3,7 +3,13 @@
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import type { ReadEntry, DedupMode } from "$lib/api";
-  import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
+  import {
+    streamsStore,
+    metricsStore,
+    setMetrics,
+    forwarderRacesStore,
+    racesStore,
+  } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
   import ReadsTable from "$lib/components/ReadsTable.svelte";
@@ -113,13 +119,16 @@
     };
   });
 
-  // Load reads on mount
+  // Load reads on mount and re-fetch when new data arrives (metrics update via SSE)
+  let readsInitialized = false;
   $effect(() => {
-    void loadReads(streamId);
+    metrics; // re-run when metrics change (signals new reads arrived)
+    void loadReads(streamId, readsInitialized);
+    readsInitialized = true;
   });
 
-  async function loadReads(id: string): Promise<void> {
-    readsLoading = true;
+  async function loadReads(id: string, silent = false): Promise<void> {
+    if (!silent) readsLoading = true;
     try {
       const resp = await api.getStreamReads(id, {
         dedup: readsDedup,
@@ -134,6 +143,14 @@
       readsTotal = 0;
     } finally {
       readsLoading = false;
+    }
+  }
+
+  async function handleRaceChange(forwarderId: string, raceId: string | null) {
+    try {
+      await api.setForwarderRace(forwarderId, raceId);
+    } catch {
+      // SSE will correct any stale state
     }
   }
 
@@ -183,6 +200,22 @@
           <dd class="font-mono text-text-primary m-0">{stream.stream_id}</dd>
           <dt class="text-text-muted">Forwarder</dt>
           <dd class="text-text-primary m-0">{stream.forwarder_id}</dd>
+          <dt class="text-text-muted">Race</dt>
+          <dd class="m-0">
+            <select
+              class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+              value={$forwarderRacesStore[stream.forwarder_id] ?? ""}
+              onchange={(e) => {
+                const val = e.currentTarget.value;
+                handleRaceChange(stream.forwarder_id, val || null);
+              }}
+            >
+              <option value="">No race</option>
+              {#each $racesStore as race (race.race_id)}
+                <option value={race.race_id}>{race.name}</option>
+              {/each}
+            </select>
+          </dd>
           <dt class="text-text-muted">Reader IP</dt>
           <dd class="font-mono text-text-primary m-0">{stream.reader_ip}</dd>
           <dt class="text-text-muted">Epoch</dt>
