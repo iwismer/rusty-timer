@@ -7,6 +7,7 @@
     TokenEntry,
     CreateTokenResponse,
     CursorEntry,
+    EpochInfo,
   } from "$lib/api";
 
   // ----- Shared state -----
@@ -34,12 +35,11 @@
   let confirmAction: (() => Promise<void>) | null = $state(null);
 
   // ----- Event scope state -----
-  let eventScope: "all" | "stream" | "epoch" = $state("all");
   let selectedStreamId = $state("");
-  let selectedEpoch = $state(1);
-  let epochValid = $derived(
-    Number.isInteger(selectedEpoch) && selectedEpoch >= 1,
-  );
+  let selectedEpochValue = $state("");
+  let epochs: EpochInfo[] = $state([]);
+  let epochsLoading = $state(false);
+  let epochsError = $state(false);
 
   onMount(() => {
     loadStreams();
@@ -74,6 +74,28 @@
     }
   }
 
+  async function loadEpochs(streamId: string) {
+    if (!streamId) {
+      epochs = [];
+      return;
+    }
+    epochsLoading = true;
+    epochsError = false;
+    try {
+      epochs = await api.getStreamEpochs(streamId);
+    } catch {
+      epochs = [];
+      epochsError = true;
+    } finally {
+      epochsLoading = false;
+    }
+  }
+
+  function handleStreamChange() {
+    selectedEpochValue = "";
+    loadEpochs(selectedStreamId);
+  }
+
   function showConfirm(
     title: string,
     message: string,
@@ -99,6 +121,7 @@
       await loadStreams();
       await loadTokens();
       await loadCursors();
+      if (selectedStreamId) await loadEpochs(selectedStreamId);
     } catch (e) {
       feedback = { message: String(e), ok: false };
     } finally {
@@ -132,28 +155,31 @@
 
   // ----- Event actions -----
   function confirmClearEvents() {
-    if (eventScope === "all") {
+    if (!selectedStreamId) {
       showConfirm(
-        "Clear All Events",
-        "This will permanently delete ALL events across all streams.",
+        "Clear all events?",
+        "This will permanently delete all events across every stream.",
         "Clear All Events",
         () => api.deleteAllEvents(),
       );
-    } else if (eventScope === "stream" && selectedStreamId) {
+    } else if (!selectedEpochValue) {
       const s = streams.find((s) => s.stream_id === selectedStreamId);
       showConfirm(
+        "Clear stream events?",
+        `This will permanently delete all events for "${s?.display_alias || s?.reader_ip || selectedStreamId}".`,
         "Clear Stream Events",
-        `This will delete all events for stream "${s?.display_alias || s?.reader_ip || selectedStreamId}".`,
-        "Clear Events",
         () => api.deleteStreamEvents(selectedStreamId),
       );
-    } else if (eventScope === "epoch" && selectedStreamId && epochValid) {
+    } else {
+      const epochNum = Number(selectedEpochValue);
       const s = streams.find((s) => s.stream_id === selectedStreamId);
+      const epochInfo = epochs.find((e) => e.epoch === epochNum);
+      const countStr = epochInfo ? ` (${epochInfo.event_count} events)` : "";
       showConfirm(
-        "Clear Epoch Events",
-        `This will delete events for epoch ${selectedEpoch} of stream "${s?.display_alias || s?.reader_ip || selectedStreamId}".`,
-        "Clear Events",
-        () => api.deleteEpochEvents(selectedStreamId, selectedEpoch),
+        "Clear epoch events?",
+        `This will permanently delete all events for "${s?.display_alias || s?.reader_ip || selectedStreamId}", epoch ${epochNum}${countStr}.`,
+        `Clear Epoch ${epochNum} Events`,
+        () => api.deleteEpochEvents(selectedStreamId, epochNum),
       );
     }
   }
@@ -326,80 +352,73 @@
   <div class="mb-6">
     <Card title="Events" borderStatus="err">
       <div class="flex flex-col gap-4">
-        <fieldset class="flex gap-4 border-none p-0 m-0">
+        <div class="flex flex-col gap-1">
           <label
-            class="flex items-center gap-1.5 text-sm text-text-secondary cursor-pointer"
+            for="event-stream-select"
+            class="text-xs font-medium text-text-muted"
           >
-            <input
-              type="radio"
-              bind:group={eventScope}
-              value="all"
-              class="accent-accent"
-            />
-            All Events
+            Stream
           </label>
-          <label
-            class="flex items-center gap-1.5 text-sm text-text-secondary cursor-pointer"
-          >
-            <input
-              type="radio"
-              bind:group={eventScope}
-              value="stream"
-              class="accent-accent"
-            />
-            By Stream
-          </label>
-          <label
-            class="flex items-center gap-1.5 text-sm text-text-secondary cursor-pointer"
-          >
-            <input
-              type="radio"
-              bind:group={eventScope}
-              value="epoch"
-              class="accent-accent"
-            />
-            By Stream + Epoch
-          </label>
-        </fieldset>
-
-        {#if eventScope === "stream" || eventScope === "epoch"}
           <select
+            id="event-stream-select"
             bind:value={selectedStreamId}
+            onchange={handleStreamChange}
             class="w-full max-w-sm px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-primary"
           >
-            <option value="">Select a stream...</option>
+            <option value="">All Streams</option>
             {#each streams as s (s.stream_id)}
               <option value={s.stream_id}
                 >{s.display_alias || s.reader_ip}</option
               >
             {/each}
           </select>
-        {/if}
+        </div>
 
-        {#if eventScope === "epoch"}
-          <input
-            type="number"
-            bind:value={selectedEpoch}
-            min="1"
-            class="w-full max-w-[8rem] px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-primary"
-            placeholder="Epoch"
-          />
-          {#if !epochValid}
-            <p class="text-xs text-status-err m-0">
-              Epoch must be 1 or greater.
-            </p>
-          {/if}
+        {#if selectedStreamId}
+          <div class="flex flex-col gap-1">
+            <label
+              for="event-epoch-select"
+              class="text-xs font-medium text-text-muted"
+            >
+              Epoch
+            </label>
+            {#if epochsLoading}
+              <p class="text-xs text-text-muted m-0">Loading epochs...</p>
+            {:else if epochsError}
+              <p class="text-xs text-status-err m-0">Failed to load epochs.</p>
+            {:else}
+              <select
+                id="event-epoch-select"
+                bind:value={selectedEpochValue}
+                class="w-full max-w-sm px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-primary"
+              >
+                <option value="">All Epochs</option>
+                {#each epochs as ep (ep.epoch)}
+                  <option value={String(ep.epoch)}>
+                    Epoch {ep.epoch}{ep.is_current ? " (current)" : ""} — {ep.event_count}
+                    event{ep.event_count !== 1 ? "s" : ""}{ep.last_event_at
+                      ? ` (${new Date(ep.last_event_at).toLocaleDateString()})`
+                      : ""}
+                  </option>
+                {/each}
+              </select>
+            {/if}
+          </div>
         {/if}
 
         <div>
           <button
             onclick={confirmClearEvents}
-            disabled={((eventScope === "stream" || eventScope === "epoch") &&
-              !selectedStreamId) ||
-              (eventScope === "epoch" && !epochValid)}
+            disabled={epochsLoading}
             class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Clear Events
+            {#if !selectedStreamId}
+              Clear All Events
+            {:else if !selectedEpochValue}
+              Clear Stream Events
+            {:else}
+              Clear Epoch {selectedEpochValue} Events
+            {/if}
           </button>
         </div>
       </div>
