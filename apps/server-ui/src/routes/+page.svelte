@@ -165,7 +165,7 @@
   }
 </script>
 
-<main class="max-w-[1100px] mx-auto px-6 py-6">
+<main class="mx-auto px-6 py-6">
   <div class="flex items-center justify-between mb-6">
     <h1
       data-testid="streams-heading"
