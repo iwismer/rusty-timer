@@ -25,7 +25,6 @@ import json
 import math
 import shlex
 import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -792,23 +791,46 @@ def close_iterm2_window() -> None:
 SERVER_PORT = 8080
 
 
-def _kill_listeners(port: int) -> None:
-    """Kill all processes listening on the given TCP port."""
+def _listener_pids(port: int) -> list[int]:
+    """Return PIDs currently listening on the given TCP port."""
     result = subprocess.run(
         ["lsof", "-t", "-sTCP:LISTEN", "-i", f":{port}"],
         capture_output=True,
         text=True,
     )
-    for pid in result.stdout.strip().split():
-        if pid:
-            subprocess.run(["kill", pid], capture_output=True)
+    pids: list[int] = []
+    for raw_pid in result.stdout.strip().split():
+        try:
+            pids.append(int(raw_pid))
+        except ValueError:
+            continue
+    return pids
 
 
-def _port_listening(port: int) -> bool:
-    """Return True if something is accepting TCP connections on localhost:port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.5)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+def _pid_command(pid: int) -> str:
+    """Return the full command line for a process, or empty string on failure."""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _is_dev_server_command(command: str) -> bool:
+    """Return True when command line looks like this repo's server binary."""
+    return (
+        "target/debug/server" in command
+        or "target/release/server" in command
+    )
+
+
+def _kill_pids(pids: list[int]) -> None:
+    """Kill specific process IDs."""
+    for pid in pids:
+        subprocess.run(["kill", str(pid)], capture_output=True)
 
 
 def check_existing_instance() -> None:
@@ -821,17 +843,40 @@ def check_existing_instance() -> None:
         )
         tmux_running = result.returncode == 0
 
-    server_up = _port_listening(SERVER_PORT)
+    listener_pids = _listener_pids(SERVER_PORT)
+    dev_listener_pids = [
+        pid for pid in listener_pids
+        if _is_dev_server_command(_pid_command(pid))
+    ]
+    foreign_listener_pids = [
+        pid for pid in listener_pids
+        if pid not in dev_listener_pids
+    ]
 
-    if not tmux_running and not server_up:
+    if not tmux_running and not listener_pids:
         ITERM_WINDOW_ID_PATH.unlink(missing_ok=True)
+        return
+
+    if not tmux_running and foreign_listener_pids and not dev_listener_pids:
+        console.print(
+            f"[yellow]Port :{SERVER_PORT} is in use by a non-dev process. "
+            f"Refusing to stop it automatically.[/yellow]"
+        )
+        console.print("[bold]  \\[n] Continue anyway  \\[c] Cancel[/bold]")
+        answer = console.input("[bold]> [/bold]").strip().lower()
+        if answer in ("c", "cancel"):
+            console.print("[dim]Aborted.[/dim]")
+            sys.exit(0)
+        console.print("[dim]Proceeding without stopping non-dev process.[/dim]")
         return
 
     parts = []
     if tmux_running:
         parts.append("tmux session 'rusty-dev'")
-    if server_up:
-        parts.append(f"server listening on :{SERVER_PORT}")
+    if dev_listener_pids:
+        parts.append(f"dev server listening on :{SERVER_PORT}")
+    elif listener_pids:
+        parts.append(f"listener on :{SERVER_PORT}")
 
     console.print(
         f"[yellow]Existing dev environment detected:[/yellow] {'; '.join(parts)}"
@@ -853,7 +898,8 @@ def check_existing_instance() -> None:
 
     # Kill the server by port (pkill -f is unreliable on macOS), then mop up
     # any remaining dev binaries with pkill as a safety net.
-    _kill_listeners(SERVER_PORT)
+    if dev_listener_pids:
+        _kill_pids(dev_listener_pids)
     for name in DEV_BINARIES:
         subprocess.run(["pkill", "-f", f"target/debug/{name}"], capture_output=True)
     console.print(f"  [green]Killed[/green] dev processes")
@@ -910,8 +956,6 @@ def main() -> None:
         clear()
         return
 
-    check_existing_instance()
-
     emulators: list[EmulatorSpec] = args.emulator or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)]
 
     # Validate no duplicate ports across emulator, fallback, and receiver defaults.
@@ -932,6 +976,8 @@ def main() -> None:
             "[red]Error: emulator/fallback/receiver default port collision[/red]"
         )
         sys.exit(1)
+
+    check_existing_instance()
 
     console.print(Panel.fit(
         "[bold cyan]Rusty Timer Dev Launcher[/bold cyan]\n"

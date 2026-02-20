@@ -111,9 +111,46 @@ class BuildForwarderTomlTests(unittest.TestCase):
 class MainValidationTests(unittest.TestCase):
     @patch("scripts.dev.detect_and_launch")
     @patch("scripts.dev.setup")
+    @patch("scripts.dev.check_existing_instance")
     @patch("scripts.dev.parse_args")
+    @patch("scripts.dev.receiver_default_local_port", return_value=12001)
+    def test_main_checks_existing_instance_after_validation_for_valid_args(
+        self,
+        _receiver_port_mock,
+        parse_args_mock,
+        check_existing_instance_mock,
+        setup_mock,
+        detect_mock,
+    ) -> None:
+        events: list[str] = []
+        parse_args_mock.return_value = argparse.Namespace(
+            no_build=False,
+            clear=False,
+            emulator=[dev.EmulatorSpec(port=10001)],
+        )
+        check_existing_instance_mock.side_effect = lambda: events.append("check")
+        setup_mock.side_effect = lambda **_kwargs: events.append("setup")
+        detect_mock.side_effect = lambda _emulators: events.append("launch")
+
+        dev.main()
+
+        self.assertEqual(events, ["check", "setup", "launch"])
+        check_existing_instance_mock.assert_called_once_with()
+
+    @patch("scripts.dev.console.input")
+    @patch("scripts.dev.check_existing_instance")
+    @patch("scripts.dev.detect_and_launch")
+    @patch("scripts.dev.setup")
+    @patch("scripts.dev.parse_args")
+    @patch("scripts.dev.receiver_default_local_port", return_value=12001)
     def test_main_exits_on_emulator_port_collision(
-        self, parse_args_mock, setup_mock, detect_mock
+        self,
+        _receiver_port_mock,
+        parse_args_mock,
+        setup_mock,
+        detect_mock,
+        check_existing_instance_mock,
+        input_mock,
     ) -> None:
         parse_args_mock.return_value = argparse.Namespace(
             no_build=False,
@@ -124,12 +161,15 @@ class MainValidationTests(unittest.TestCase):
             dev.main()
         setup_mock.assert_not_called()
         detect_mock.assert_not_called()
+        check_existing_instance_mock.assert_not_called()
+        input_mock.assert_not_called()
 
+    @patch("scripts.dev.check_existing_instance")
     @patch("scripts.dev.detect_and_launch")
     @patch("scripts.dev.setup")
     @patch("scripts.dev.parse_args")
     def test_main_exits_on_port_fallback_collision(
-        self, parse_args_mock, setup_mock, detect_mock
+        self, parse_args_mock, setup_mock, detect_mock, check_existing_instance_mock
     ) -> None:
         parse_args_mock.return_value = argparse.Namespace(
             no_build=False,
@@ -140,13 +180,20 @@ class MainValidationTests(unittest.TestCase):
             dev.main()
         setup_mock.assert_not_called()
         detect_mock.assert_not_called()
+        check_existing_instance_mock.assert_not_called()
 
+    @patch("scripts.dev.check_existing_instance")
     @patch("scripts.dev.detect_and_launch")
     @patch("scripts.dev.setup")
     @patch("scripts.dev.parse_args")
     @patch("scripts.dev.receiver_default_local_port", return_value=10001)
     def test_main_exits_on_receiver_default_port_collision(
-        self, _receiver_port_mock, parse_args_mock, setup_mock, detect_mock
+        self,
+        _receiver_port_mock,
+        parse_args_mock,
+        setup_mock,
+        detect_mock,
+        check_existing_instance_mock,
     ) -> None:
         parse_args_mock.return_value = argparse.Namespace(
             no_build=False,
@@ -157,6 +204,7 @@ class MainValidationTests(unittest.TestCase):
             dev.main()
         setup_mock.assert_not_called()
         detect_mock.assert_not_called()
+        check_existing_instance_mock.assert_not_called()
 
 
 class ReceiverDefaultPortTests(unittest.TestCase):
@@ -245,19 +293,20 @@ class ConfigureReceiverDevTests(unittest.TestCase):
 
 class CheckExistingInstanceTests(unittest.TestCase):
     @patch("scripts.dev.ITERM_WINDOW_ID_PATH")
-    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev.console.input")
+    @patch("scripts.dev._listener_pids", return_value=[])
     @patch("scripts.dev.shutil.which", return_value=None)
     def test_no_tmux_no_server_returns_silently(
-        self, _which_mock, _port_mock, iterm_path_mock
+        self, _which_mock, _listener_pids_mock, input_mock, iterm_path_mock
     ) -> None:
         dev.check_existing_instance()
-        # Should not prompt — no console.input call needed
+        input_mock.assert_not_called()
 
     @patch("scripts.dev.ITERM_WINDOW_ID_PATH")
-    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev._listener_pids", return_value=[])
     @patch("scripts.dev.shutil.which", return_value=None)
     def test_stale_iterm_file_cleaned_when_nothing_running(
-        self, _which_mock, _port_mock, iterm_path_mock
+        self, _which_mock, _listener_pids_mock, iterm_path_mock
     ) -> None:
         dev.check_existing_instance()
         iterm_path_mock.unlink.assert_called_once_with(missing_ok=True)
@@ -265,12 +314,19 @@ class CheckExistingInstanceTests(unittest.TestCase):
     @patch("scripts.dev.close_iterm2_window")
     @patch("scripts.dev.console.print")
     @patch("scripts.dev.console.input", return_value="y")
-    @patch("scripts.dev._kill_listeners")
+    @patch("scripts.dev._kill_pids")
     @patch("scripts.dev.subprocess.run")
-    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev._listener_pids", return_value=[])
     @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
     def test_tmux_session_detected_and_killed_on_yes(
-        self, _which_mock, _port_mock, run_mock, _kill_listeners_mock, input_mock, _print_mock, close_mock
+        self,
+        _which_mock,
+        _listener_pids_mock,
+        run_mock,
+        kill_pids_mock,
+        input_mock,
+        _print_mock,
+        close_mock,
     ) -> None:
         def run_side_effect(cmd, **kwargs):
             if cmd == ["tmux", "has-session", "-t", "rusty-dev"]:
@@ -283,15 +339,16 @@ class CheckExistingInstanceTests(unittest.TestCase):
         input_mock.assert_called_once()
         kill_calls = [c for c in run_mock.call_args_list if c.args[0] == ["tmux", "kill-session", "-t", "rusty-dev"]]
         self.assertEqual(len(kill_calls), 1)
+        kill_pids_mock.assert_not_called()
 
     @patch("scripts.dev.close_iterm2_window")
     @patch("scripts.dev.console.print")
     @patch("scripts.dev.console.input", return_value="n")
     @patch("scripts.dev.subprocess.run")
-    @patch("scripts.dev._port_listening", return_value=False)
+    @patch("scripts.dev._listener_pids", return_value=[])
     @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
     def test_tmux_session_detected_but_skipped_on_no(
-        self, _which_mock, _port_mock, run_mock, input_mock, _print_mock, close_mock
+        self, _which_mock, _listener_pids_mock, run_mock, input_mock, _print_mock, close_mock
     ) -> None:
         def run_side_effect(cmd, **kwargs):
             if cmd == ["tmux", "has-session", "-t", "rusty-dev"]:
@@ -304,22 +361,32 @@ class CheckExistingInstanceTests(unittest.TestCase):
         input_mock.assert_called_once()
         kill_calls = [c for c in run_mock.call_args_list if c.args[0] == ["tmux", "kill-session", "-t", "rusty-dev"]]
         self.assertEqual(len(kill_calls), 0)
+        close_mock.assert_not_called()
 
     @patch("scripts.dev.close_iterm2_window")
     @patch("scripts.dev.console.print")
     @patch("scripts.dev.console.input", return_value="y")
-    @patch("scripts.dev._kill_listeners")
+    @patch("scripts.dev._kill_pids")
     @patch("scripts.dev.subprocess.run")
-    @patch("scripts.dev._port_listening", return_value=True)
+    @patch("scripts.dev._pid_command", return_value="BIND_ADDR=0.0.0.0:8080 ./target/debug/server")
+    @patch("scripts.dev._listener_pids", return_value=[4242])
     @patch("scripts.dev.shutil.which", return_value=None)
     def test_server_port_detected_and_processes_killed(
-        self, _which_mock, _port_mock, run_mock, kill_listeners_mock, input_mock, _print_mock, close_mock
+        self,
+        _which_mock,
+        _listener_pids_mock,
+        _pid_command_mock,
+        run_mock,
+        kill_pids_mock,
+        input_mock,
+        _print_mock,
+        close_mock,
     ) -> None:
         run_mock.return_value = subprocess.CompletedProcess([], returncode=0)
         dev.check_existing_instance()
 
         input_mock.assert_called_once()
-        kill_listeners_mock.assert_called_once_with(dev.SERVER_PORT)
+        kill_pids_mock.assert_called_once_with([4242])
         pkill_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "pkill"]
         self.assertEqual(len(pkill_calls), len(dev.DEV_BINARIES))
         close_mock.assert_called_once()
@@ -327,13 +394,23 @@ class CheckExistingInstanceTests(unittest.TestCase):
     @patch("scripts.dev.close_iterm2_window")
     @patch("scripts.dev.console.print")
     @patch("scripts.dev.console.input", return_value="y")
-    @patch("scripts.dev._kill_listeners")
+    @patch("scripts.dev._kill_pids")
     @patch("scripts.dev.subprocess.run")
-    @patch("scripts.dev._port_listening", return_value=True)
-    @patch("scripts.dev.shutil.which", return_value="/usr/bin/docker")
+    @patch("scripts.dev._pid_command", return_value="BIND_ADDR=0.0.0.0:8080 ./target/debug/server")
+    @patch("scripts.dev._listener_pids", return_value=[4242])
+    @patch("scripts.dev.shutil.which")
     def test_kill_stops_docker_container(
-        self, _which_mock, _port_mock, run_mock, _kill_listeners_mock, input_mock, _print_mock, close_mock
+        self,
+        which_mock,
+        _listener_pids_mock,
+        _pid_command_mock,
+        run_mock,
+        _kill_pids_mock,
+        input_mock,
+        _print_mock,
+        close_mock,
     ) -> None:
+        which_mock.side_effect = lambda tool: "/usr/bin/docker" if tool == "docker" else None
         run_mock.return_value = subprocess.CompletedProcess([], returncode=0)
         dev.check_existing_instance()
 
@@ -343,6 +420,34 @@ class CheckExistingInstanceTests(unittest.TestCase):
         ]
         self.assertEqual(len(docker_calls), 1)
         self.assertIn(dev.PG_CONTAINER, docker_calls[0].args[0])
+
+    @patch("scripts.dev.close_iterm2_window")
+    @patch("scripts.dev.console.print")
+    @patch("scripts.dev.console.input", return_value="n")
+    @patch("scripts.dev._kill_pids")
+    @patch("scripts.dev.subprocess.run")
+    @patch("scripts.dev._pid_command", return_value="python -m http.server 8080")
+    @patch("scripts.dev._listener_pids", return_value=[7777])
+    @patch("scripts.dev.shutil.which", return_value=None)
+    def test_foreign_server_listener_is_not_killed(
+        self,
+        _which_mock,
+        _listener_pids_mock,
+        _pid_command_mock,
+        run_mock,
+        kill_pids_mock,
+        input_mock,
+        _print_mock,
+        close_mock,
+    ) -> None:
+        run_mock.return_value = subprocess.CompletedProcess([], returncode=0)
+        dev.check_existing_instance()
+
+        input_mock.assert_called_once()
+        kill_pids_mock.assert_not_called()
+        pkill_calls = [c for c in run_mock.call_args_list if c.args[0][0] == "pkill"]
+        self.assertEqual(len(pkill_calls), 0)
+        close_mock.assert_not_called()
 
 
 class DetectAndLaunchTests(unittest.TestCase):
