@@ -449,4 +449,45 @@ describe("server_api client", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
   });
+
+  // ----- getStreamEpochs -----
+  it("getStreamEpochs calls GET /api/v1/streams/{id}/epochs and returns epoch list", async () => {
+    const { getStreamEpochs } = await import("./api");
+    const payload = [
+      {
+        epoch: 1,
+        event_count: 156,
+        first_event_at: "2026-02-18T10:00:00Z",
+        last_event_at: "2026-02-18T14:30:00Z",
+        is_current: false,
+      },
+      {
+        epoch: 2,
+        event_count: 89,
+        first_event_at: "2026-02-20T08:00:00Z",
+        last_event_at: "2026-02-20T12:00:00Z",
+        is_current: true,
+      },
+    ];
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+    const result = await getStreamEpochs("abc-123");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/streams/abc-123/epochs"),
+      expect.any(Object),
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0].epoch).toBe(1);
+    expect(result[0].event_count).toBe(156);
+    expect(result[0].is_current).toBe(false);
+    expect(result[1].epoch).toBe(2);
+    expect(result[1].is_current).toBe(true);
+  });
+
+  it("getStreamEpochs throws on 404", async () => {
+    const { getStreamEpochs } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(404, { code: "NOT_FOUND", message: "stream not found" }),
+    );
+    await expect(getStreamEpochs("bad-id")).rejects.toThrow();
+  });
 });

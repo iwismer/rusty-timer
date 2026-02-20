@@ -38,6 +38,14 @@ export interface StreamMetrics {
   unique_chips: number;
 }
 
+export interface EpochInfo {
+  epoch: number;
+  event_count: number;
+  first_event_at: string | null;
+  last_event_at: string | null;
+  is_current: boolean;
+}
+
 export interface ApiError {
   code: string;
   message: string;
@@ -116,6 +124,11 @@ export async function resetEpoch(streamId: string): Promise<void> {
   return apiFetch<void>(`/api/v1/streams/${streamId}/reset-epoch`, {
     method: "POST",
   });
+}
+
+/** GET /api/v1/streams/{stream_id}/epochs — list epochs with metadata */
+export async function getStreamEpochs(streamId: string): Promise<EpochInfo[]> {
+  return apiFetch<EpochInfo[]>(`/api/v1/streams/${streamId}/epochs`);
 }
 
 // ----- Forwarder config types -----
