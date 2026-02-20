@@ -21,6 +21,9 @@
   let eventScope: "all" | "stream" | "epoch" = $state("all");
   let selectedStreamId = $state("");
   let selectedEpoch = $state(1);
+  let epochValid = $derived(
+    Number.isInteger(selectedEpoch) && selectedEpoch >= 1,
+  );
 
   onMount(() => {
     loadStreams();
@@ -117,7 +120,7 @@
         "Clear Events",
         () => api.deleteStreamEvents(selectedStreamId),
       );
-    } else if (eventScope === "epoch" && selectedStreamId) {
+    } else if (eventScope === "epoch" && selectedStreamId && epochValid) {
       const s = streams.find((s) => s.stream_id === selectedStreamId);
       showConfirm(
         "Clear Epoch Events",
@@ -287,13 +290,19 @@
             class="w-full max-w-[8rem] px-3 py-2 text-sm rounded-md border border-border bg-surface-0 text-text-primary"
             placeholder="Epoch"
           />
+          {#if !epochValid}
+            <p class="text-xs text-status-err m-0">
+              Epoch must be 1 or greater.
+            </p>
+          {/if}
         {/if}
 
         <div>
           <button
             onclick={confirmClearEvents}
-            disabled={(eventScope === "stream" || eventScope === "epoch") &&
-              !selectedStreamId}
+            disabled={((eventScope === "stream" || eventScope === "epoch") &&
+              !selectedStreamId) ||
+              (eventScope === "epoch" && !epochValid)}
             class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Clear Events

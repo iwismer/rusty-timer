@@ -274,12 +274,23 @@ pub async fn delete_all_streams(State(state): State<AppState>) -> impl IntoRespo
 }
 
 pub async fn delete_all_events(State(state): State<AppState>) -> impl IntoResponse {
-    match sqlx::query!("DELETE FROM events")
-        .execute(&state.pool)
-        .await
-    {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    if let Err(e) = sqlx::query!("DELETE FROM events").execute(&mut *tx).await {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HttpErrorEnvelope {
                 code: "INTERNAL_ERROR".to_owned(),
@@ -287,20 +298,63 @@ pub async fn delete_all_events(State(state): State<AppState>) -> impl IntoRespon
                 details: None,
             }),
         )
-            .into_response(),
+            .into_response();
     }
+
+    if let Err(e) = sqlx::query!("DELETE FROM receiver_cursors")
+        .execute(&mut *tx)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = tx.commit().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn delete_stream_events(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    match sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
-        .execute(&state.pool)
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    if let Err(e) = sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
+        .execute(&mut *tx)
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HttpErrorEnvelope {
                 code: "INTERNAL_ERROR".to_owned(),
@@ -308,24 +362,82 @@ pub async fn delete_stream_events(
                 details: None,
             }),
         )
-            .into_response(),
+            .into_response();
     }
+
+    if let Err(e) = sqlx::query!(
+        "DELETE FROM receiver_cursors WHERE stream_id = $1",
+        stream_id
+    )
+    .execute(&mut *tx)
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = tx.commit().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn delete_epoch_events(
     State(state): State<AppState>,
     Path((stream_id, epoch)): Path<(Uuid, i64)>,
 ) -> impl IntoResponse {
-    match sqlx::query!(
+    if epoch < 1 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(HttpErrorEnvelope {
+                code: "BAD_REQUEST".to_owned(),
+                message: "epoch must be >= 1".to_owned(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    if let Err(e) = sqlx::query!(
         "DELETE FROM events WHERE stream_id = $1 AND stream_epoch = $2",
         stream_id,
         epoch
     )
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HttpErrorEnvelope {
                 code: "INTERNAL_ERROR".to_owned(),
@@ -333,8 +445,40 @@ pub async fn delete_epoch_events(
                 details: None,
             }),
         )
-            .into_response(),
+            .into_response();
     }
+
+    if let Err(e) = sqlx::query!(
+        "DELETE FROM receiver_cursors WHERE stream_id = $1",
+        stream_id
+    )
+    .execute(&mut *tx)
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = tx.commit().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn delete_all_cursors(State(state): State<AppState>) -> impl IntoResponse {

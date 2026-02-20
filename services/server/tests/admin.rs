@@ -63,6 +63,25 @@ async fn insert_cursor(pool: &sqlx::PgPool, receiver_id: &str, stream_id: uuid::
     .unwrap();
 }
 
+async fn insert_cursor_at(
+    pool: &sqlx::PgPool,
+    receiver_id: &str,
+    stream_id: uuid::Uuid,
+    stream_epoch: i64,
+    last_seq: i64,
+) {
+    sqlx::query(
+        "INSERT INTO receiver_cursors (receiver_id, stream_id, stream_epoch, last_seq) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(receiver_id)
+    .bind(stream_id)
+    .bind(stream_epoch)
+    .bind(last_seq)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
     let app_state = server::AppState::new(pool);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -339,6 +358,43 @@ async fn test_delete_all_events() {
 }
 
 #[tokio::test]
+async fn test_delete_all_events_clears_all_cursors() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let s1 = insert_stream(&pool, "fwd-evt-a", "10.0.0.1:10000").await;
+    let s2 = insert_stream(&pool, "fwd-evt-b", "10.0.0.2:10000").await;
+    insert_event(&pool, s1, 1, 1).await;
+    insert_event(&pool, s2, 1, 1).await;
+    insert_cursor_at(&pool, "rcv-a", s1, 1, 1).await;
+    insert_cursor_at(&pool, "rcv-b", s2, 1, 1).await;
+    let addr = make_server(pool.clone()).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!("http://{}/api/v1/admin/events", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(event_count, 0);
+
+    let cursor_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cursor_count, 0);
+}
+
+#[tokio::test]
 async fn test_delete_stream_events() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
@@ -376,6 +432,50 @@ async fn test_delete_stream_events() {
         .await
         .unwrap();
     assert_eq!(s2_count, 1, "s2 events should remain");
+}
+
+#[tokio::test]
+async fn test_delete_stream_events_clears_stream_cursors() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let s1 = insert_stream(&pool, "fwd-se-c1", "10.0.0.1:10000").await;
+    let s2 = insert_stream(&pool, "fwd-se-c2", "10.0.0.2:10000").await;
+    insert_event(&pool, s1, 1, 1).await;
+    insert_event(&pool, s2, 1, 1).await;
+    insert_cursor_at(&pool, "rcv-a", s1, 1, 1).await;
+    insert_cursor_at(&pool, "rcv-b", s2, 1, 1).await;
+    let addr = make_server(pool.clone()).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{}/api/v1/admin/streams/{}/events",
+            addr, s1
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let s1_cursor_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE stream_id = $1")
+            .bind(s1)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(s1_cursor_count, 0, "s1 cursors should be deleted");
+
+    let s2_cursor_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE stream_id = $1")
+            .bind(s2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(s2_cursor_count, 1, "s2 cursors should remain");
 }
 
 #[tokio::test]
@@ -421,6 +521,79 @@ async fn test_delete_epoch_events() {
     .await
     .unwrap();
     assert_eq!(epoch2_count, 1, "epoch 2 events should remain");
+}
+
+#[tokio::test]
+async fn test_delete_epoch_events_clears_stream_cursors() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let s1 = insert_stream(&pool, "fwd-epoch-c1", "10.0.0.1:10000").await;
+    let s2 = insert_stream(&pool, "fwd-epoch-c2", "10.0.0.2:10000").await;
+    insert_event(&pool, s1, 1, 1).await;
+    insert_event(&pool, s1, 2, 1).await;
+    insert_event(&pool, s2, 1, 1).await;
+    insert_cursor_at(&pool, "rcv-a", s1, 1, 1).await;
+    insert_cursor_at(&pool, "rcv-b", s1, 2, 1).await;
+    insert_cursor_at(&pool, "rcv-c", s2, 1, 1).await;
+    let addr = make_server(pool.clone()).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{}/api/v1/admin/streams/{}/epochs/1/events",
+            addr, s1
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let s1_cursor_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE stream_id = $1")
+            .bind(s1)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(s1_cursor_count, 0, "all s1 cursors should be deleted");
+
+    let s2_cursor_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE stream_id = $1")
+            .bind(s2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(s2_cursor_count, 1, "other stream cursors should remain");
+}
+
+#[tokio::test]
+async fn test_delete_epoch_events_rejects_epoch_below_one() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epoch-bad", "10.0.0.1:10000").await;
+    insert_event(&pool, stream_id, 1, 1).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{}/api/v1/admin/streams/{}/epochs/0/events",
+            addr, stream_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "BAD_REQUEST");
 }
 
 // ---------------------------------------------------------------------------
