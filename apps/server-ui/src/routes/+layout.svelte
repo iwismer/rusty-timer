@@ -22,7 +22,12 @@
   <title>Server · Rusty Timer</title>
 </svelte:head>
 
-<NavBar links={[{ href: "/", label: "Streams", active: true }]} />
+<NavBar
+  links={[
+    { href: "/", label: "Streams" },
+    { href: "/races", label: "Races" },
+  ]}
+/>
 
 {@render children()}
 
