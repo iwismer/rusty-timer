@@ -127,7 +127,7 @@ pub async fn run(config: EmulatorConfig) {
         .map(|f| {
             BufReader::new(f)
                 .lines()
-                .filter_map(|line| line.ok())
+                .map_while(Result::ok)
                 .map(|line| line.trim().to_owned())
                 .filter(|line| !line.is_empty())
                 .collect()
