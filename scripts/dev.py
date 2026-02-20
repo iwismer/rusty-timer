@@ -17,6 +17,7 @@ Usage:
     uv run scripts/dev.py --clear
     uv run scripts/dev.py --emulator port=10001,delay=500,file=start.txt
     uv run scripts/dev.py --emulator port=10001 --emulator port=10002,delay=500
+    uv run scripts/dev.py --bibchip test_assets/bibchip/large.txt --ppl test_assets/ppl/large.ppl
 """
 
 import argparse
@@ -31,6 +32,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -262,6 +264,164 @@ def receiver_default_local_port(reader_ip: str) -> int | None:
 
     span = MAX_PORT - RECEIVER_DYNAMIC_MIN_PORT + 1
     return RECEIVER_DYNAMIC_MIN_PORT + (fnv1a_64(reader_ip) % span)
+
+
+def generate_reads_from_bibchip(bibchip_path: Path) -> Path:
+    """Generate an emulator-compatible reads file from a bibchip CSV.
+
+    Produces one valid IPICO RAW read per chip, spread across a simulated
+    race finish window (starting at 10:32:00 on 2025-06-15, ~14s apart).
+    Returns the path to the generated file in TMP_DIR.
+    """
+    chips: list[str] = []
+    text = bibchip_path.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line[0].isdigit():
+            continue
+        parts = line.split(",")
+        if len(parts) >= 2 and parts[1].strip():
+            chips.append(parts[1].strip())
+
+    if not chips:
+        console.print(f"[yellow]Warning:[/yellow] No chips found in {bibchip_path}")
+        return bibchip_path  # fallback — won't be valid reads, but won't crash
+
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = TMP_DIR / "generated-reads.txt"
+    reads: list[str] = []
+    base_min, base_sec = 32, 0
+
+    for i, chip_id in enumerate(chips):
+        total_seconds = base_sec + i * 14
+        minutes = base_min + total_seconds // 60
+        seconds = total_seconds % 60
+        hours = 10 + minutes // 60
+        minutes = minutes % 60
+        centiseconds = (i * 7) % 100
+
+        read = (
+            f"aa00{chip_id}0001"
+            f"{25:02d}{6:02d}{15:02d}"
+            f"{hours:02d}{minutes:02d}{seconds:02d}{centiseconds:02x}"
+        )
+        checksum = sum(ord(c) for c in read[2:34]) % 256
+        read += f"{checksum:02x}"
+        reads.append(read)
+
+    out_path.write_text("\n".join(reads) + "\n")
+    console.print(f"  [green]Generated[/green] {len(reads)} reads → {out_path}")
+    return out_path
+
+
+def _multipart_upload(url: str, file_bytes: bytes, filename: str) -> bytes:
+    """POST a file as multipart/form-data using only stdlib."""
+    boundary = uuid.uuid4().hex
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: application/octet-stream\r\n"
+        f"\r\n"
+    ).encode() + file_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read()
+
+
+def setup_race_data(bibchip_path: Path | None, ppl_path: Path | None) -> None:
+    """Wait for the server, then create a race and upload bibchip/ppl files.
+
+    Writes a diagnostic log to TMP_DIR/race-setup.log so results are visible
+    even when tmux has taken over the terminal.
+    """
+    log_path = TMP_DIR / "race-setup.log"
+    log_lines: list[str] = []
+
+    def log(msg: str) -> None:
+        log_lines.append(msg)
+        stderr_console.print(msg)
+
+    try:
+        _do_setup_race_data(bibchip_path, ppl_path, log)
+    except Exception as exc:
+        log(f"[red]Race data setup crashed:[/red] {type(exc).__name__}: {exc}")
+    finally:
+        TMP_DIR.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("\n".join(log_lines) + "\n")
+
+
+def _do_setup_race_data(
+    bibchip_path: Path | None,
+    ppl_path: Path | None,
+    log: callable,
+) -> None:
+    base = "http://127.0.0.1:8080"
+
+    # Wait for server health
+    for attempt in range(60):
+        try:
+            urllib.request.urlopen(f"{base}/healthz", timeout=2)
+            break
+        except (urllib.error.URLError, OSError):
+            if attempt == 59:
+                log(
+                    "[yellow]Warning:[/yellow] Server not ready after 60s — "
+                    "skipping race data setup."
+                )
+            time.sleep(1)
+    else:
+        return
+
+    log(f"  Server ready, setting up race data…")
+
+    # Create race
+    race_name = "Dev Race"
+    payload = json.dumps({"name": race_name}).encode()
+    req = urllib.request.Request(
+        f"{base}/api/v1/races",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            race = json.loads(resp.read())
+        race_id = race["race_id"]
+    except (urllib.error.URLError, OSError, KeyError, json.JSONDecodeError) as exc:
+        log(f"[yellow]Warning:[/yellow] Failed to create race: {exc}")
+        return
+
+    log(f"  [green]Created race:[/green] {race_name} ({race_id})")
+
+    # Upload bibchip
+    if bibchip_path:
+        try:
+            resp_body = _multipart_upload(
+                f"{base}/api/v1/races/{race_id}/chips/upload",
+                bibchip_path.read_bytes(),
+                bibchip_path.name,
+            )
+            log(f"  [green]Uploaded bibchip:[/green] {bibchip_path.name} → {resp_body.decode()}")
+        except (urllib.error.URLError, OSError) as exc:
+            log(f"[yellow]Warning:[/yellow] Bibchip upload failed: {exc}")
+
+    # Upload PPL
+    if ppl_path:
+        try:
+            resp_body = _multipart_upload(
+                f"{base}/api/v1/races/{race_id}/participants/upload",
+                ppl_path.read_bytes(),
+                ppl_path.name,
+            )
+            log(f"  [green]Uploaded PPL:[/green] {ppl_path.name} → {resp_body.decode()}")
+        except (urllib.error.URLError, OSError) as exc:
+            log(f"[yellow]Warning:[/yellow] PPL upload failed: {exc}")
 
 
 def clear() -> None:
@@ -719,10 +879,18 @@ def start_receiver_auto_config() -> None:
     thread.start()
 
 
-def detect_and_launch(emulators: list[EmulatorSpec]) -> None:
+def detect_and_launch(
+    emulators: list[EmulatorSpec],
+    *,
+    bibchip_path: Path | None = None,
+    ppl_path: Path | None = None,
+) -> None:
     panes = build_panes(emulators)
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
     start_receiver_auto_config()
+    if bibchip_path or ppl_path:
+        console.print("[dim]Race data will be uploaded to server when ready.[/dim]")
+        start_race_data_setup(bibchip_path, ppl_path)
     if shutil.which("tmux"):
         console.print("[blue]Multiplexer:[/blue] tmux")
         launch_tmux(panes)
@@ -756,7 +924,31 @@ def parse_args() -> argparse.Namespace:
             "Repeatable for multiple emulators. Default: single emulator on port 10001."
         ),
     )
+    parser.add_argument(
+        "--bibchip", type=Path, metavar="PATH",
+        help=(
+            "Path to a bibchip CSV file. Generates emulator reads matching these chips "
+            "and uploads the file to a new race after server startup."
+        ),
+    )
+    parser.add_argument(
+        "--ppl", type=Path, metavar="PATH",
+        help="Path to a PPL participant file. Uploaded to a new race after server startup.",
+    )
     return parser.parse_args()
+
+
+def start_race_data_setup(
+    bibchip_path: Path | None, ppl_path: Path | None,
+) -> None:
+    """Run race data setup in a background daemon thread."""
+    thread = threading.Thread(
+        target=setup_race_data,
+        args=(bibchip_path, ppl_path),
+        name="race-data-setup",
+        daemon=True,
+    )
+    thread.start()
 
 
 def main() -> None:
@@ -766,7 +958,24 @@ def main() -> None:
         clear()
         return
 
+    # Validate file paths early.
+    bibchip_path: Path | None = args.bibchip
+    ppl_path: Path | None = args.ppl
+    if bibchip_path and not bibchip_path.is_file():
+        console.print(f"[red]Error: bibchip file not found: {bibchip_path}[/red]")
+        sys.exit(1)
+    if ppl_path and not ppl_path.is_file():
+        console.print(f"[red]Error: PPL file not found: {ppl_path}[/red]")
+        sys.exit(1)
+
     emulators: list[EmulatorSpec] = args.emulator or [EmulatorSpec(port=EMULATOR_DEFAULT_PORT)]
+
+    # When a bibchip file is provided and the first emulator has no explicit
+    # file, generate a reads file from the bibchip and attach it.
+    if bibchip_path and emulators[0].file is None:
+        console.print("[bold]Generating emulator reads from bibchip…[/bold]")
+        reads_path = generate_reads_from_bibchip(bibchip_path)
+        emulators[0].file = str(reads_path)
 
     # Validate no duplicate ports across emulator, fallback, and receiver defaults.
     ports = [e.port for e in emulators]
@@ -794,7 +1003,7 @@ def main() -> None:
     ))
     setup(skip_build=args.no_build, emulators=emulators)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
-    detect_and_launch(emulators)
+    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path)
 
 
 if __name__ == "__main__":
