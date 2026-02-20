@@ -14,25 +14,11 @@
   import { resolveChipRead } from "$lib/chipResolver";
   import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
 
-  // Per-stream rename state (keyed by stream_id)
-  let renameValues: Record<string, string> = $state({});
-  let renameBusy: Record<string, boolean> = $state({});
-  let renameError: Record<string, string | null> = $state({});
-
   // Metrics fetching state
   let requestedMetricStreamIds = $state(new Set<string>());
   let inFlightMetricStreamIds = $state(new Set<string>());
   const METRICS_RETRY_DELAY_MS = 1000;
   let metricsRetryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-
-  // Keep rename inputs in sync as streams arrive via SSE
-  $effect(() => {
-    for (const s of $streamsStore) {
-      if (!(s.stream_id in renameValues)) {
-        renameValues[s.stream_id] = s.display_alias ?? "";
-      }
-    }
-  });
 
   // Fetch initial metrics for all streams
   $effect(() => {
@@ -136,19 +122,6 @@
       if (s.online) onlineCount++;
     }
     return { totalRaw, totalChips, onlineCount, totalStreams: streams.length };
-  }
-
-  async function handleRename(streamId: string) {
-    renameBusy[streamId] = true;
-    renameError[streamId] = null;
-    try {
-      await api.renameStream(streamId, renameValues[streamId]);
-      // SSE stream_updated event will update the store
-    } catch (e) {
-      renameError[streamId] = String(e);
-    } finally {
-      renameBusy[streamId] = false;
-    }
   }
 
   function groupBorderStatus(
@@ -328,37 +301,11 @@
                 {/if}
               </div>
 
-              <div class="flex items-center gap-3 text-xs text-text-muted mb-3">
+              <div class="flex items-center gap-3 text-xs text-text-muted">
                 <span class="font-mono">{stream.reader_ip}</span>
                 <span>&middot;</span>
                 <span>epoch {stream.stream_epoch}</span>
               </div>
-
-              <!-- Rename form -->
-              <div class="flex gap-2 items-center">
-                <input
-                  data-testid="rename-input"
-                  type="text"
-                  bind:value={renameValues[stream.stream_id]}
-                  placeholder="Display alias"
-                  aria-label="Rename stream {stream.stream_id}"
-                  class="flex-1 px-2 py-1 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-                />
-                <button
-                  data-testid="rename-btn"
-                  onclick={() => handleRename(stream.stream_id)}
-                  disabled={renameBusy[stream.stream_id]}
-                  class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {renameBusy[stream.stream_id] ? "Saving…" : "Rename"}
-                </button>
-              </div>
-
-              {#if renameError[stream.stream_id]}
-                <p class="text-xs text-status-err mt-1 m-0">
-                  {renameError[stream.stream_id]}
-                </p>
-              {/if}
             </div>
           {/each}
         </div>

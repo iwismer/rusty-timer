@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import * as api from "$lib/api";
-  import type { ReadEntry, DedupMode } from "$lib/api";
+  import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
   import { metricsStore } from "$lib/stores";
   import { Card } from "@rusty-timer/shared-ui";
   import ReadsTable from "$lib/components/ReadsTable.svelte";
@@ -15,6 +15,7 @@
   let readsWindowSecs = $state(5);
   let readsLimit = $state(100);
   let readsOffset = $state(0);
+  let readsOrder: SortOrder = $state("desc");
 
   // Load reads on mount and re-fetch when new data arrives (metrics update via SSE)
   let readsInitialized = false;
@@ -32,6 +33,7 @@
         window_secs: readsWindowSecs,
         limit: readsLimit,
         offset: readsOffset,
+        order: readsOrder,
       });
       reads = resp.reads;
       readsTotal = resp.total;
@@ -69,6 +71,7 @@
       bind:windowSecs={readsWindowSecs}
       bind:limit={readsLimit}
       bind:offset={readsOffset}
+      bind:order={readsOrder}
       onParamsChange={handleReadsParamsChange}
     />
   </Card>

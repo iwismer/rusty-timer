@@ -209,6 +209,7 @@ export async function setForwarderRace(
 // ----- Reads types -----
 
 export type DedupMode = "none" | "first" | "last";
+export type SortOrder = "asc" | "desc";
 
 export interface ReadEntry {
   stream_id: string;
@@ -233,6 +234,7 @@ export interface ReadsParams {
   window_secs?: number;
   limit?: number;
   offset?: number;
+  order?: SortOrder;
 }
 
 // ----- Reads API -----
@@ -245,6 +247,7 @@ function buildReadsQuery(params?: ReadsParams): string {
     parts.push(`window_secs=${params.window_secs}`);
   if (params.limit != null) parts.push(`limit=${params.limit}`);
   if (params.offset != null) parts.push(`offset=${params.offset}`);
+  if (params.order) parts.push(`order=${params.order}`);
   return parts.length ? `?${parts.join("&")}` : "";
 }
 

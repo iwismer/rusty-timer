@@ -156,67 +156,6 @@ test.describe("stream list page", () => {
   });
 });
 
-test.describe("stream list rename flow", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route("**/api/v1/events", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body: "event: keepalive\ndata: ok\n\n",
-      });
-    });
-    await page.route("**/api/v1/streams", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ streams: MOCK_STREAMS }),
-      });
-    });
-    await page.route("**/api/v1/streams/stream-uuid-1", async (route) => {
-      if (route.request().method() === "PATCH") {
-        const postData = route.request().postDataJSON();
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            ...MOCK_STREAMS[0],
-            display_alias: postData.display_alias,
-          }),
-        });
-      } else {
-        await route.continue();
-      }
-    });
-  });
-
-  test("rename input is present for each stream", async ({ page }) => {
-    await page.goto("/");
-    const renameInputs = page.locator('[data-testid="rename-input"]');
-    await expect(renameInputs).toHaveCount(2);
-  });
-
-  test("rename button is present for each stream", async ({ page }) => {
-    await page.goto("/");
-    const renameBtns = page.locator('[data-testid="rename-btn"]');
-    await expect(renameBtns).toHaveCount(2);
-  });
-
-  test("can fill in rename input and submit", async ({ page }) => {
-    await page.goto("/");
-    const patchRequest = page.waitForRequest(
-      (request) =>
-        request.method() === "PATCH" &&
-        request.url().endsWith("/api/v1/streams/stream-uuid-1"),
-    );
-    const firstInput = page.locator('[data-testid="rename-input"]').first();
-    await firstInput.fill("Updated Alpha");
-    const firstBtn = page.locator('[data-testid="rename-btn"]').first();
-    await firstBtn.click();
-    const request = await patchRequest;
-    expect(request.postDataJSON()).toEqual({ display_alias: "Updated Alpha" });
-  });
-});
-
 test.describe("per-stream detail page", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/v1/events", async (route) => {
@@ -352,5 +291,45 @@ test.describe("per-stream detail page", () => {
     await expect(
       page.locator('[data-testid="reset-epoch-result"]'),
     ).toBeVisible();
+  });
+
+  test("rename input is present", async ({ page }) => {
+    await page.goto("/streams/stream-uuid-1");
+    await expect(page.locator('[data-testid="rename-input"]')).toBeVisible();
+  });
+
+  test("rename button is present", async ({ page }) => {
+    await page.goto("/streams/stream-uuid-1");
+    await expect(page.locator('[data-testid="rename-btn"]')).toBeVisible();
+  });
+
+  test("can fill in rename input and submit", async ({ page }) => {
+    await page.route("**/api/v1/streams/stream-uuid-1", async (route) => {
+      if (route.request().method() === "PATCH") {
+        const postData = route.request().postDataJSON();
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...MOCK_STREAMS[0],
+            display_alias: postData.display_alias,
+          }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto("/streams/stream-uuid-1");
+    const patchRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        request.url().endsWith("/api/v1/streams/stream-uuid-1"),
+    );
+    const input = page.locator('[data-testid="rename-input"]');
+    await input.fill("Updated Alpha");
+    const btn = page.locator('[data-testid="rename-btn"]');
+    await btn.click();
+    const request = await patchRequest;
+    expect(request.postDataJSON()).toEqual({ display_alias: "Updated Alpha" });
   });
 });

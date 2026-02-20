@@ -2,7 +2,7 @@
   import { onDestroy } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
-  import type { ReadEntry, DedupMode } from "$lib/api";
+  import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
   import {
     streamsStore,
     metricsStore,
@@ -16,6 +16,9 @@
 
   let resetResult: string | null = $state(null);
   let resetBusy = $state(false);
+  let renameValue = $state("");
+  let renameBusy = $state(false);
+  let renameError: string | null = $state(null);
   let requestedMetricStreamIds = $state(new Set<string>());
   let inFlightMetricStreamIds = $state(new Set<string>());
 
@@ -27,12 +30,20 @@
   let readsWindowSecs = $state(5);
   let readsLimit = $state(100);
   let readsOffset = $state(0);
+  let readsOrder: SortOrder = $state("desc");
 
   let streamId = $derived($page.params.streamId!);
   let stream = $derived(
     $streamsStore.find((s) => s.stream_id === streamId) ?? null,
   );
   let metrics = $derived($metricsStore[streamId] ?? null);
+
+  // Keep rename input in sync when stream data arrives
+  $effect(() => {
+    if (stream && renameValue === "") {
+      renameValue = stream.display_alias ?? "";
+    }
+  });
 
   $effect(() => {
     void maybeFetchMetrics(streamId);
@@ -135,6 +146,7 @@
         window_secs: readsWindowSecs,
         limit: readsLimit,
         offset: readsOffset,
+        order: readsOrder,
       });
       reads = resp.reads;
       readsTotal = resp.total;
@@ -143,6 +155,18 @@
       readsTotal = 0;
     } finally {
       readsLoading = false;
+    }
+  }
+
+  async function handleRename() {
+    renameBusy = true;
+    renameError = null;
+    try {
+      await api.renameStream(streamId, renameValue);
+    } catch (e) {
+      renameError = String(e);
+    } finally {
+      renameBusy = false;
     }
   }
 
@@ -227,6 +251,35 @@
             {new Date(stream.created_at).toLocaleString()}
           </dd>
         </dl>
+
+        <div class="mt-3 pt-3 border-t border-border">
+          <p class="text-xs font-medium text-text-muted mb-2 m-0">
+            Display Alias
+          </p>
+          <div class="flex gap-2 items-center">
+            <input
+              data-testid="rename-input"
+              type="text"
+              bind:value={renameValue}
+              placeholder="Display alias"
+              aria-label="Rename stream {streamId}"
+              class="flex-1 px-2 py-1 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+            />
+            <button
+              data-testid="rename-btn"
+              onclick={handleRename}
+              disabled={renameBusy}
+              class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {renameBusy ? "Saving…" : "Rename"}
+            </button>
+          </div>
+          {#if renameError}
+            <p class="text-xs text-status-err mt-1 m-0">
+              {renameError}
+            </p>
+          {/if}
+        </div>
       </Card>
 
       <Card title="Metrics">
@@ -397,6 +450,7 @@
           bind:windowSecs={readsWindowSecs}
           bind:limit={readsLimit}
           bind:offset={readsOffset}
+          bind:order={readsOrder}
           onParamsChange={handleReadsParamsChange}
         />
       </Card>

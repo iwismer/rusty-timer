@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ReadEntry, DedupMode } from "$lib/api";
+  import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
 
   interface Props {
     reads: ReadEntry[];
@@ -10,6 +10,7 @@
     windowSecs: number;
     limit: number;
     offset: number;
+    order: SortOrder;
     onParamsChange: () => void;
   }
 
@@ -22,6 +23,7 @@
     windowSecs = $bindable(),
     limit = $bindable(),
     offset = $bindable(),
+    order = $bindable(),
     onParamsChange,
   }: Props = $props();
 
@@ -45,6 +47,12 @@
 
   function setWindow(secs: number) {
     windowSecs = secs;
+    offset = 0;
+    onParamsChange();
+  }
+
+  function toggleOrder() {
+    order = order === "desc" ? "asc" : "desc";
     offset = 0;
     onParamsChange();
   }
@@ -124,7 +132,14 @@
       </div>
     {/if}
 
-    <span class="text-xs text-text-muted ml-auto">
+    <button
+      class="ml-auto px-3 py-1 text-xs font-medium rounded-md border border-border bg-surface-0 text-text-secondary hover:bg-surface-2"
+      onclick={toggleOrder}
+    >
+      {order === "desc" ? "Newest first" : "Oldest first"}
+    </button>
+
+    <span class="text-xs text-text-muted">
       {total.toLocaleString()} reads
     </span>
   </div>

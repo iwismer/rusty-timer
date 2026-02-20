@@ -22,6 +22,12 @@ pub struct ReadsQuery {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
+    #[serde(default = "default_order")]
+    pub order: String,
+}
+
+fn default_order() -> String {
+    "desc".to_owned()
 }
 
 fn default_dedup() -> String {
@@ -105,7 +111,10 @@ pub async fn get_stream_reads(
         }
     };
 
-    let deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
+    let mut deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
+    if params.order == "desc" {
+        deduped.reverse();
+    }
     let (page, total) = reads::paginate(deduped, params.limit, params.offset);
 
     build_reads_response(page, total, params.limit, params.offset)
@@ -151,7 +160,10 @@ pub async fn get_forwarder_reads(
         }
     };
 
-    let deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
+    let mut deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
+    if params.order == "desc" {
+        deduped.reverse();
+    }
     let (page, total) = reads::paginate(deduped, params.limit, params.offset);
 
     build_reads_response(page, total, params.limit, params.offset)
