@@ -197,7 +197,7 @@ export function validateStatusHttp(
 ): string | null {
   const bind = form.statusHttpBind.trim();
   if (bind && !isValidIpv4Bind(bind)) {
-    return "Bind address must be a valid IP address with port (e.g. 0.0.0.0:8080).";
+    return "Bind address must be a valid IPv4 address with port (e.g. 0.0.0.0:8080).";
   }
   return null;
 }
@@ -238,9 +238,9 @@ export function validateReaders(
 export function defaultFallbackPort(target: string): string {
   const match = target.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(:\d+)?$/);
   if (match) {
-    const lastOctet = Number(match[4]);
-    if (lastOctet >= 0 && lastOctet <= 255) {
-      return String(10000 + lastOctet);
+    const octets = match.slice(1, 5).map(Number);
+    if (octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255)) {
+      return String(10000 + octets[3]);
     }
   }
   return "";

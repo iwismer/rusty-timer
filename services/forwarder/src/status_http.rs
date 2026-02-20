@@ -32,7 +32,7 @@ use rt_updater::UpdateStatus;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -981,7 +981,7 @@ fn validate_token_file(token_file: &str) -> Result<(), String> {
 }
 
 fn validate_status_bind(bind: &str) -> Result<(), String> {
-    bind.parse::<SocketAddr>()
+    bind.parse::<SocketAddrV4>()
         .map(|_| ())
         .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 0.0.0.0:8080)".to_owned())
 }

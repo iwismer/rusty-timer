@@ -461,6 +461,10 @@ async fn status_json_shows_reader_status() {
         body.contains("connected"),
         "status JSON must show connection state"
     );
+    assert!(
+        body.contains("\"local_port\":10001"),
+        "status JSON must show local port"
+    );
 }
 
 #[tokio::test]

@@ -202,6 +202,10 @@ describe("validateStatusHttp", () => {
     expect(validateStatusHttp(makeForm({ statusHttpBind: "localhost:8080" }))).toBeTruthy();
   });
 
+  it("rejects ipv6 bind", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "[::1]:8080" }))).toBeTruthy();
+  });
+
   it("rejects octet out of range", () => {
     expect(validateStatusHttp(makeForm({ statusHttpBind: "999.0.0.1:8080" }))).toBeTruthy();
   });
@@ -244,6 +248,18 @@ describe("defaultFallbackPort", () => {
 
   it("returns empty for non-IP target", () => {
     expect(defaultFallbackPort("reader1.local:10000")).toBe("");
+  });
+
+  it("returns empty for invalid first octet", () => {
+    expect(defaultFallbackPort("999.168.0.42:10000")).toBe("");
+  });
+
+  it("returns empty for invalid second octet", () => {
+    expect(defaultFallbackPort("10.999.0.42:10000")).toBe("");
+  });
+
+  it("returns empty for invalid third octet", () => {
+    expect(defaultFallbackPort("10.0.999.42:10000")).toBe("");
   });
 
   it("returns empty for empty string", () => {

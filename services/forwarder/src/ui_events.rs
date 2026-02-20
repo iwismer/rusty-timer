@@ -54,6 +54,7 @@ mod tests {
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "reader_updated");
         assert_eq!(json["ip"], "192.168.1.10");
+        assert_eq!(json["local_port"], 10010);
     }
 
     #[test]
