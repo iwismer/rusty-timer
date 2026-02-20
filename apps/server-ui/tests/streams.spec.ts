@@ -45,6 +45,28 @@ const MOCK_LIST_METRICS_RESPONSE = {
   unique_chips: 75,
 };
 
+const RACE_ID = "11111111-1111-1111-1111-111111111111";
+const MOCK_RACES_RESPONSE = {
+  races: [
+    {
+      race_id: RACE_ID,
+      name: "Des Moines 10k",
+      date: "2026-05-01",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    },
+  ],
+};
+
+const MOCK_FORWARDER_RACES_RESPONSE = {
+  assignments: [
+    {
+      forwarder_id: "fwd-alpha",
+      race_id: null,
+    },
+  ],
+};
+
 test.describe("stream list page", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/v1/events", async (route) => {
@@ -60,6 +82,20 @@ test.describe("stream list page", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ streams: MOCK_STREAMS }),
+      });
+    });
+    await page.route("**/api/v1/races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_RACES_RESPONSE),
+      });
+    });
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_FORWARDER_RACES_RESPONSE),
       });
     });
   });
@@ -154,66 +190,40 @@ test.describe("stream list page", () => {
       .toBeGreaterThan(1);
     await expect(page.getByText("Reads: 120").first()).toBeVisible();
   });
-});
 
-test.describe("stream list rename flow", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route("**/api/v1/events", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body: "event: keepalive\ndata: ok\n\n",
-      });
-    });
-    await page.route("**/api/v1/streams", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ streams: MOCK_STREAMS }),
-      });
-    });
-    await page.route("**/api/v1/streams/stream-uuid-1", async (route) => {
-      if (route.request().method() === "PATCH") {
-        const postData = route.request().postDataJSON();
+  test("overview race selection is reflected on stream detail without SSE", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/forwarders/fwd-alpha/race", async (route) => {
+      if (route.request().method() === "PUT") {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
-            ...MOCK_STREAMS[0],
-            display_alias: postData.display_alias,
+            forwarder_id: "fwd-alpha",
+            race_id: RACE_ID,
           }),
         });
-      } else {
-        await route.continue();
+        return;
       }
+      await route.continue();
     });
-  });
 
-  test("rename input is present for each stream", async ({ page }) => {
     await page.goto("/");
-    const renameInputs = page.locator('[data-testid="rename-input"]');
-    await expect(renameInputs).toHaveCount(2);
-  });
-
-  test("rename button is present for each stream", async ({ page }) => {
-    await page.goto("/");
-    const renameBtns = page.locator('[data-testid="rename-btn"]');
-    await expect(renameBtns).toHaveCount(2);
-  });
-
-  test("can fill in rename input and submit", async ({ page }) => {
-    await page.goto("/");
-    const patchRequest = page.waitForRequest(
+    const putRequest = page.waitForRequest(
       (request) =>
-        request.method() === "PATCH" &&
-        request.url().endsWith("/api/v1/streams/stream-uuid-1"),
+        request.method() === "PUT" &&
+        request.url().endsWith("/api/v1/forwarders/fwd-alpha/race"),
     );
-    const firstInput = page.locator('[data-testid="rename-input"]').first();
-    await firstInput.fill("Updated Alpha");
-    const firstBtn = page.locator('[data-testid="rename-btn"]').first();
-    await firstBtn.click();
-    const request = await patchRequest;
-    expect(request.postDataJSON()).toEqual({ display_alias: "Updated Alpha" });
+
+    const raceSelect = page.getByRole("combobox").first();
+    await raceSelect.selectOption(RACE_ID);
+    const request = await putRequest;
+    expect(request.postDataJSON()).toEqual({ race_id: RACE_ID });
+
+    await page.locator('[data-testid="stream-detail-link"]').first().click();
+    await expect(page).toHaveURL("/streams/stream-uuid-1");
+    await expect(page.getByRole("combobox").first()).toHaveValue(RACE_ID);
   });
 });
 
@@ -231,6 +241,20 @@ test.describe("per-stream detail page", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ streams: MOCK_STREAMS }),
+      });
+    });
+    await page.route("**/api/v1/races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_RACES_RESPONSE),
+      });
+    });
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_FORWARDER_RACES_RESPONSE),
       });
     });
     await page.route(
@@ -352,5 +376,174 @@ test.describe("per-stream detail page", () => {
     await expect(
       page.locator('[data-testid="reset-epoch-result"]'),
     ).toBeVisible();
+  });
+
+  test("rename input is present", async ({ page }) => {
+    await page.goto("/streams/stream-uuid-1");
+    await expect(page.locator('[data-testid="rename-input"]')).toBeVisible();
+  });
+
+  test("rename button is present", async ({ page }) => {
+    await page.goto("/streams/stream-uuid-1");
+    await expect(page.locator('[data-testid="rename-btn"]')).toBeVisible();
+  });
+
+  test("can fill in rename input and submit", async ({ page }) => {
+    await page.route("**/api/v1/streams/stream-uuid-1", async (route) => {
+      if (route.request().method() === "PATCH") {
+        const postData = route.request().postDataJSON();
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...MOCK_STREAMS[0],
+            display_alias: postData.display_alias,
+          }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto("/streams/stream-uuid-1");
+    const patchRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        request.url().endsWith("/api/v1/streams/stream-uuid-1"),
+    );
+    const input = page.locator('[data-testid="rename-input"]');
+    await input.fill("Updated Alpha");
+    const btn = page.locator('[data-testid="rename-btn"]');
+    await btn.click();
+    const request = await patchRequest;
+    expect(request.postDataJSON()).toEqual({ display_alias: "Updated Alpha" });
+  });
+
+  test("stream detail race selection is reflected on overview without SSE", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/forwarders/fwd-alpha/race", async (route) => {
+      if (route.request().method() === "PUT") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            forwarder_id: "fwd-alpha",
+            race_id: RACE_ID,
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/streams/stream-uuid-1");
+    const putRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "PUT" &&
+        request.url().endsWith("/api/v1/forwarders/fwd-alpha/race"),
+    );
+
+    const raceSelect = page.getByRole("combobox").first();
+    await raceSelect.selectOption(RACE_ID);
+    const request = await putRequest;
+    expect(request.postDataJSON()).toEqual({ race_id: RACE_ID });
+
+    await page.locator('[data-testid="back-link"]').click();
+    await expect(page).toHaveURL("/");
+    await expect(page.getByRole("combobox").first()).toHaveValue(RACE_ID);
+  });
+});
+
+test.describe("forwarder reads page", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
+    await page.route("**/api/v1/races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_RACES_RESPONSE),
+      });
+    });
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_FORWARDER_RACES_RESPONSE),
+      });
+    });
+  });
+
+  test("ignores stale response when sort is toggled quickly", async ({
+    page,
+  }) => {
+    await page.route(
+      "**/api/v1/forwarders/fwd-alpha/reads**",
+      async (route) => {
+        const url = new URL(route.request().url());
+        const order = url.searchParams.get("order");
+        if (order === "asc") {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              reads: [
+                {
+                  stream_id: "stream-uuid-1",
+                  seq: 10,
+                  reader_timestamp: "2026-01-01T00:00:10Z",
+                  tag_id: "chip-asc",
+                  received_at: "2026-01-01T00:00:10Z",
+                  bib: 11,
+                  first_name: "Asc",
+                  last_name: "Winner",
+                },
+              ],
+              total: 1,
+              limit: 100,
+              offset: 0,
+            }),
+          });
+          return;
+        }
+
+        await page.waitForTimeout(300);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            reads: [
+              {
+                stream_id: "stream-uuid-1",
+                seq: 20,
+                reader_timestamp: "2026-01-01T00:00:20Z",
+                tag_id: "chip-desc",
+                received_at: "2026-01-01T00:00:20Z",
+                bib: 22,
+                first_name: "Desc",
+                last_name: "Stale",
+              },
+            ],
+            total: 1,
+            limit: 100,
+            offset: 0,
+          }),
+        });
+      },
+    );
+
+    await page.goto("/forwarders/fwd-alpha/reads");
+    const orderBtn = page.getByRole("button", { name: "Newest first" });
+    await expect(orderBtn).toBeVisible();
+    await orderBtn.click();
+
+    await page.waitForTimeout(450);
+    await expect(page.getByText("Asc Winner (#11)")).toBeVisible();
+    await expect(page.getByText("Desc Stale (#22)")).toHaveCount(0);
   });
 });

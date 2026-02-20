@@ -34,6 +34,8 @@ const METRICS_A: StreamMetrics = {
   epoch_lag: 200,
   epoch_last_received_at: "2026-02-18T12:00:00Z",
   unique_chips: 3,
+  last_tag_id: null,
+  last_reader_timestamp: null,
 };
 
 describe("stores", () => {

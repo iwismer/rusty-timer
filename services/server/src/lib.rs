@@ -66,6 +66,23 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             post(http::forwarder_config::restart_forwarder),
         )
         .route(
+            "/api/v1/forwarder-races",
+            get(http::forwarder_races::list_forwarder_races),
+        )
+        .route(
+            "/api/v1/forwarders/:forwarder_id/race",
+            get(http::forwarder_races::get_forwarder_race)
+                .put(http::forwarder_races::set_forwarder_race),
+        )
+        .route(
+            "/api/v1/streams/:stream_id/reads",
+            get(http::reads::get_stream_reads),
+        )
+        .route(
+            "/api/v1/forwarders/:forwarder_id/reads",
+            get(http::reads::get_forwarder_reads),
+        )
+        .route(
             "/api/v1/admin/tokens",
             get(http::admin::list_tokens).post(http::admin::create_token),
         )

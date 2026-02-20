@@ -101,6 +101,8 @@ pub async fn get_metrics(
             "epoch_lag_ms": metrics.epoch_lag_ms,
             "epoch_last_received_at": metrics.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
             "unique_chips": unique_chips,
+            "last_tag_id": metrics.last_tag_id,
+            "last_reader_timestamp": metrics.last_reader_timestamp,
         })),
     )
         .into_response()

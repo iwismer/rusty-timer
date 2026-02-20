@@ -1,5 +1,7 @@
 pub mod events;
+pub mod forwarder_races;
 pub mod races;
+pub mod reads;
 pub mod receiver_cursors;
 
 pub struct EventRow {

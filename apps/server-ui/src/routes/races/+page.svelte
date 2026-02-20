@@ -161,7 +161,7 @@
               {:else}
                 <button
                   onclick={() => (confirmingDeleteId = race.race_id)}
-                  class="px-2 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3"
+                  class="px-2 py-1 text-xs font-medium rounded-md bg-status-err-bg border border-status-err-border text-status-err cursor-pointer hover:opacity-80"
                 >
                   Delete
                 </button>

@@ -202,6 +202,8 @@ describe("sse", () => {
         epoch_lag_ms: 50,
         epoch_last_received_at: "2026-02-18T12:00:00Z",
         unique_chips: 5,
+        last_tag_id: null,
+        last_reader_timestamp: null,
       }),
     );
 
@@ -230,6 +232,8 @@ describe("sse", () => {
       epoch_lag: 20,
       epoch_last_received_at: "2026-02-18T12:00:00Z",
       unique_chips: 2,
+      last_tag_id: null,
+      last_reader_timestamp: null,
     });
 
     initSSE();

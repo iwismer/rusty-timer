@@ -14,6 +14,8 @@ const SAMPLE_METRICS: StreamMetrics = {
   epoch_lag: null,
   epoch_last_received_at: null,
   unique_chips: 0,
+  last_tag_id: null,
+  last_reader_timestamp: null,
 };
 
 describe("shouldFetchMetrics", () => {

@@ -5,6 +5,8 @@
   import { initSSE, destroySSE } from "$lib/sse";
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import { NavBar } from "@rusty-timer/shared-ui";
+  import { getRaces, getForwarderRaces } from "$lib/api";
+  import { setRaces, forwarderRacesStore } from "$lib/stores";
   import { page } from "$app/state";
 
   let { children }: { children: Snippet } = $props();
@@ -12,6 +14,20 @@
   onMount(() => {
     initSSE();
     initDarkMode();
+
+    // Load races and forwarder-race assignments in parallel
+    Promise.all([getRaces(), getForwarderRaces()])
+      .then(([racesResp, frResp]) => {
+        setRaces(racesResp.races);
+        const map: Record<string, string | null> = {};
+        for (const a of frResp.assignments) {
+          map[a.forwarder_id] = a.race_id;
+        }
+        forwarderRacesStore.set(map);
+      })
+      .catch(() => {
+        // Silent — SSE will keep things in sync
+      });
   });
 
   onDestroy(() => {

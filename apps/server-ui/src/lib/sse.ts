@@ -3,6 +3,7 @@ import {
   patchStream,
   replaceStreams,
   setMetrics,
+  setForwarderRace,
 } from "./stores";
 import { getStreams } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
@@ -41,8 +42,15 @@ export function initSSE(): void {
       epoch_lag: data.epoch_lag_ms ?? null,
       epoch_last_received_at: data.epoch_last_received_at ?? null,
       unique_chips: data.unique_chips,
+      last_tag_id: data.last_tag_id ?? null,
+      last_reader_timestamp: data.last_reader_timestamp ?? null,
     };
     setMetrics(data.stream_id, metrics);
+  });
+
+  eventSource.addEventListener("forwarder_race_assigned", (e: MessageEvent) => {
+    const data = JSON.parse(e.data);
+    setForwarderRace(data.forwarder_id, data.race_id ?? null);
   });
 
   eventSource.addEventListener("resync", async () => {

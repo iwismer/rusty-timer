@@ -1,30 +1,25 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import * as api from "$lib/api";
-  import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
+  import {
+    streamsStore,
+    metricsStore,
+    setMetrics,
+    forwarderRacesStore,
+    racesStore,
+    setForwarderRace,
+  } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { groupStreamsByForwarder } from "$lib/groupStreams";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
-
-  // Per-stream rename state (keyed by stream_id)
-  let renameValues: Record<string, string> = $state({});
-  let renameBusy: Record<string, boolean> = $state({});
-  let renameError: Record<string, string | null> = $state({});
+  import { resolveChipRead } from "$lib/chipResolver";
+  import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
 
   // Metrics fetching state
   let requestedMetricStreamIds = $state(new Set<string>());
   let inFlightMetricStreamIds = $state(new Set<string>());
   const METRICS_RETRY_DELAY_MS = 1000;
   let metricsRetryTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-
-  // Keep rename inputs in sync as streams arrive via SSE
-  $effect(() => {
-    for (const s of $streamsStore) {
-      if (!(s.stream_id in renameValues)) {
-        renameValues[s.stream_id] = s.display_alias ?? "";
-      }
-    }
-  });
 
   // Fetch initial metrics for all streams
   $effect(() => {
@@ -130,19 +125,6 @@
     return { totalRaw, totalChips, onlineCount, totalStreams: streams.length };
   }
 
-  async function handleRename(streamId: string) {
-    renameBusy[streamId] = true;
-    renameError[streamId] = null;
-    try {
-      await api.renameStream(streamId, renameValues[streamId]);
-      // SSE stream_updated event will update the store
-    } catch (e) {
-      renameError[streamId] = String(e);
-    } finally {
-      renameBusy[streamId] = false;
-    }
-  }
-
   function groupBorderStatus(
     stats: ReturnType<typeof groupStats>,
   ): "ok" | "warn" | "err" | undefined {
@@ -150,6 +132,39 @@
     if (stats.onlineCount === 0) return "err";
     if (stats.onlineCount < stats.totalStreams) return "warn";
     return undefined;
+  }
+
+  // Load race data whenever forwarder-race assignments change
+  $effect(() => {
+    for (const raceId of Object.values($forwarderRacesStore)) {
+      if (raceId) void ensureRaceDataLoaded(raceId);
+    }
+  });
+
+  async function handleRaceChange(forwarderId: string, raceId: string | null) {
+    const previousRaceId = $forwarderRacesStore[forwarderId] ?? null;
+    setForwarderRace(forwarderId, raceId);
+    try {
+      await api.setForwarderRace(forwarderId, raceId);
+    } catch {
+      setForwarderRace(forwarderId, previousRaceId);
+    }
+  }
+
+  function lastReadDisplay(streamId: string): string {
+    const m = $metricsStore[streamId];
+    if (!m) return "\u2014";
+    if (!m.last_tag_id && !m.last_reader_timestamp) return "\u2014";
+    // Find the forwarder for this stream to get its race assignment
+    const stream = $streamsStore.find((s) => s.stream_id === streamId);
+    if (!stream) return "\u2014";
+    const raceId = $forwarderRacesStore[stream.forwarder_id];
+    const raceData = raceId ? $raceDataStore[raceId] : null;
+    return resolveChipRead(
+      m.last_tag_id,
+      m.last_reader_timestamp,
+      raceData?.chipMap ?? null,
+    );
   }
 </script>
 
@@ -185,6 +200,25 @@
               {stats.totalRaw.toLocaleString()} reads &middot;
               {stats.totalChips.toLocaleString()} chips
             </span>
+            <select
+              class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+              value={$forwarderRacesStore[group.forwarderId] ?? ""}
+              onchange={(e) => {
+                const val = e.currentTarget.value;
+                handleRaceChange(group.forwarderId, val || null);
+              }}
+            >
+              <option value="">No race</option>
+              {#each $racesStore as race (race.race_id)}
+                <option value={race.race_id}>{race.name}</option>
+              {/each}
+            </select>
+            <a
+              href="/forwarders/{group.forwarderId}/reads"
+              class="text-xs font-medium px-2.5 py-1 rounded-md text-accent no-underline bg-accent-bg hover:underline"
+            >
+              View Reads
+            </a>
             <a
               href="/forwarders/{group.forwarderId}/config"
               class="text-xs font-medium px-2.5 py-1 rounded-md text-accent no-underline bg-accent-bg hover:underline"
@@ -194,11 +228,7 @@
           </div>
         {/snippet}
 
-        <div
-          data-testid="stream-list"
-          class="grid gap-3"
-          style="grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));"
-        >
+        <div data-testid="stream-list" class="grid gap-3">
           {#each group.streams as stream (stream.stream_id)}
             <div
               data-testid="stream-item"
@@ -225,9 +255,9 @@
                 {/if}
               </div>
 
-              <div class="grid grid-cols-3 gap-3 mb-3">
+              <div class="flex gap-6 mb-3">
                 {#if $metricsStore[stream.stream_id]}
-                  <div>
+                  <div class="shrink-0">
                     <p class="text-xs text-text-muted m-0">Reads</p>
                     <p
                       class="text-lg font-bold font-mono text-text-primary m-0"
@@ -237,7 +267,7 @@
                       ].epoch_raw_count.toLocaleString()}
                     </p>
                   </div>
-                  <div>
+                  <div class="shrink-0">
                     <p class="text-xs text-text-muted m-0">Chips</p>
                     <p
                       class="text-lg font-bold font-mono text-text-primary m-0"
@@ -247,18 +277,22 @@
                       ].unique_chips.toLocaleString()}
                     </p>
                   </div>
-                  <div>
+                  <div class="min-w-0 flex-1">
                     <p class="text-xs text-text-muted m-0">Last read</p>
                     <p
-                      class="text-lg font-bold font-mono text-text-primary m-0"
+                      class="text-sm font-mono text-text-primary m-0 truncate"
+                      title={lastReadDisplay(stream.stream_id)}
                     >
+                      {lastReadDisplay(stream.stream_id)}
+                    </p>
+                    <p class="text-xs text-text-muted m-0">
                       {tick !== undefined
                         ? timeSinceLastRead(stream.stream_id)
                         : ""}
                     </p>
                   </div>
                 {:else}
-                  <div class="col-span-3">
+                  <div>
                     <p class="text-sm text-text-muted italic m-0">
                       Loading metrics…
                     </p>
@@ -266,37 +300,11 @@
                 {/if}
               </div>
 
-              <div class="flex items-center gap-3 text-xs text-text-muted mb-3">
+              <div class="flex items-center gap-3 text-xs text-text-muted">
                 <span class="font-mono">{stream.reader_ip}</span>
                 <span>&middot;</span>
                 <span>epoch {stream.stream_epoch}</span>
               </div>
-
-              <!-- Rename form -->
-              <div class="flex gap-2 items-center">
-                <input
-                  data-testid="rename-input"
-                  type="text"
-                  bind:value={renameValues[stream.stream_id]}
-                  placeholder="Display alias"
-                  aria-label="Rename stream {stream.stream_id}"
-                  class="flex-1 px-2 py-1 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
-                />
-                <button
-                  data-testid="rename-btn"
-                  onclick={() => handleRename(stream.stream_id)}
-                  disabled={renameBusy[stream.stream_id]}
-                  class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {renameBusy[stream.stream_id] ? "Saving…" : "Rename"}
-                </button>
-              </div>
-
-              {#if renameError[stream.stream_id]}
-                <p class="text-xs text-status-err mt-1 m-0">
-                  {renameError[stream.stream_id]}
-                </p>
-              {/if}
             </div>
           {/each}
         </div>

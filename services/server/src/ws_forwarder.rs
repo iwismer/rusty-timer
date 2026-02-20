@@ -676,6 +676,8 @@ async fn handle_event_batch(
             epoch_lag_ms: m.epoch_lag_ms,
             epoch_last_received_at: m.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
             unique_chips,
+            last_tag_id: m.last_tag_id.clone(),
+            last_reader_timestamp: m.last_reader_timestamp.clone(),
         });
     }
 

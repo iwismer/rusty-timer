@@ -892,14 +892,17 @@ def configure_receiver_dev() -> None:
         return
 
 
-def start_receiver_auto_config() -> None:
-    """Run receiver auto-config in a background daemon thread."""
+def start_receiver_auto_config() -> threading.Thread:
+    """Run receiver auto-config in a background thread.
+
+    Returns the thread so the caller can join it before exit.
+    """
     thread = threading.Thread(
         target=configure_receiver_dev,
         name="receiver-auto-config",
-        daemon=True,
     )
     thread.start()
+    return thread
 
 
 DEV_BINARIES = ("server", "forwarder", "receiver", "emulator")
@@ -1094,11 +1097,12 @@ def detect_and_launch(
     ppl_path: Path | None = None,
 ) -> None:
     panes = build_panes(emulators)
+    bg_threads: list[threading.Thread] = []
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
-    start_receiver_auto_config()
+    bg_threads.append(start_receiver_auto_config())
     if bibchip_path or ppl_path:
         console.print("[dim]Race data will be uploaded to server when ready.[/dim]")
-        start_race_data_setup(bibchip_path, ppl_path)
+        bg_threads.append(start_race_data_setup(bibchip_path, ppl_path))
     if shutil.which("tmux"):
         console.print("[blue]Multiplexer:[/blue] tmux")
         launch_tmux(panes)
@@ -1111,6 +1115,12 @@ def detect_and_launch(
         console.print("Install tmux:  brew install tmux")
         console.print("Or install iTerm2: https://iterm2.com")
         sys.exit(1)
+    # Wait for background setup tasks (race data upload, receiver config) to
+    # finish before the process exits.  With tmux, the attach call above blocks
+    # so these threads will typically have completed already.  With iTerm2 the
+    # launcher returns immediately, so we must join explicitly.
+    for t in bg_threads:
+        t.join()
 
 
 # ---------------------------------------------------------------------------
@@ -1148,15 +1158,18 @@ def parse_args() -> argparse.Namespace:
 
 def start_race_data_setup(
     bibchip_path: Path | None, ppl_path: Path | None,
-) -> None:
-    """Run race data setup in a background daemon thread."""
+) -> threading.Thread:
+    """Run race data setup in a background thread.
+
+    Returns the thread so the caller can join it before exit.
+    """
     thread = threading.Thread(
         target=setup_race_data,
         args=(bibchip_path, ppl_path),
         name="race-data-setup",
-        daemon=True,
     )
     thread.start()
+    return thread
 
 
 def main() -> None:

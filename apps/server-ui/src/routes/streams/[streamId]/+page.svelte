@@ -2,20 +2,51 @@
   import { onDestroy } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
-  import { streamsStore, metricsStore, setMetrics } from "$lib/stores";
+  import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
+  import {
+    streamsStore,
+    metricsStore,
+    setMetrics,
+    forwarderRacesStore,
+    racesStore,
+    setForwarderRace,
+  } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
+  import ReadsTable from "$lib/components/ReadsTable.svelte";
+  import { createLatestRequestGate } from "$lib/latestRequestGate";
 
   let resetResult: string | null = $state(null);
   let resetBusy = $state(false);
+  let renameValue = $state("");
+  let renameBusy = $state(false);
+  let renameError: string | null = $state(null);
   let requestedMetricStreamIds = $state(new Set<string>());
   let inFlightMetricStreamIds = $state(new Set<string>());
+
+  // Reads state
+  let reads: ReadEntry[] = $state([]);
+  let readsTotal = $state(0);
+  let readsLoading = $state(false);
+  let readsDedup: DedupMode = $state("none");
+  let readsWindowSecs = $state(5);
+  let readsLimit = $state(100);
+  let readsOffset = $state(0);
+  let readsOrder: SortOrder = $state("desc");
+  const readsRequestGate = createLatestRequestGate();
 
   let streamId = $derived($page.params.streamId!);
   let stream = $derived(
     $streamsStore.find((s) => s.stream_id === streamId) ?? null,
   );
   let metrics = $derived($metricsStore[streamId] ?? null);
+
+  // Keep rename input in sync when stream data arrives
+  $effect(() => {
+    if (stream && renameValue === "") {
+      renameValue = stream.display_alias ?? "";
+    }
+  });
 
   $effect(() => {
     void maybeFetchMetrics(streamId);
@@ -101,6 +132,64 @@
       clearInterval(handle);
     };
   });
+
+  // Load reads on mount and re-fetch when new data arrives (metrics update via SSE)
+  let readsInitialized = false;
+  $effect(() => {
+    metrics; // re-run when metrics change (signals new reads arrived)
+    void loadReads(streamId, readsInitialized);
+    readsInitialized = true;
+  });
+
+  async function loadReads(id: string, silent = false): Promise<void> {
+    const token = readsRequestGate.next();
+    if (!silent) readsLoading = true;
+    try {
+      const resp = await api.getStreamReads(id, {
+        dedup: readsDedup,
+        window_secs: readsWindowSecs,
+        limit: readsLimit,
+        offset: readsOffset,
+        order: readsOrder,
+      });
+      if (!readsRequestGate.isLatest(token)) return;
+      reads = resp.reads;
+      readsTotal = resp.total;
+    } catch {
+      if (!readsRequestGate.isLatest(token)) return;
+      reads = [];
+      readsTotal = 0;
+    } finally {
+      if (!readsRequestGate.isLatest(token)) return;
+      readsLoading = false;
+    }
+  }
+
+  async function handleRename() {
+    renameBusy = true;
+    renameError = null;
+    try {
+      await api.renameStream(streamId, renameValue);
+    } catch (e) {
+      renameError = String(e);
+    } finally {
+      renameBusy = false;
+    }
+  }
+
+  async function handleRaceChange(forwarderId: string, raceId: string | null) {
+    const previousRaceId = $forwarderRacesStore[forwarderId] ?? null;
+    setForwarderRace(forwarderId, raceId);
+    try {
+      await api.setForwarderRace(forwarderId, raceId);
+    } catch {
+      setForwarderRace(forwarderId, previousRaceId);
+    }
+  }
+
+  function handleReadsParamsChange() {
+    void loadReads(streamId, true);
+  }
 </script>
 
 <main class="max-w-[1100px] mx-auto px-6 py-6">
@@ -130,6 +219,21 @@
         label={stream.online ? "online" : "offline"}
         state={stream.online ? "ok" : "err"}
       />
+      <div class="ml-auto">
+        <select
+          class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+          value={$forwarderRacesStore[stream.forwarder_id] ?? ""}
+          onchange={(e) => {
+            const val = e.currentTarget.value;
+            handleRaceChange(stream.forwarder_id, val || null);
+          }}
+        >
+          <option value="">No race</option>
+          {#each $racesStore as race (race.race_id)}
+            <option value={race.race_id}>{race.name}</option>
+          {/each}
+        </select>
+      </div>
     {/if}
   </div>
 
@@ -155,6 +259,35 @@
             {new Date(stream.created_at).toLocaleString()}
           </dd>
         </dl>
+
+        <div class="mt-3 pt-3 border-t border-border">
+          <p class="text-xs font-medium text-text-muted mb-2 m-0">
+            Display Alias
+          </p>
+          <div class="flex gap-2 items-center">
+            <input
+              data-testid="rename-input"
+              type="text"
+              bind:value={renameValue}
+              placeholder="Display alias"
+              aria-label="Rename stream {streamId}"
+              class="flex-1 px-2 py-1 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
+            />
+            <button
+              data-testid="rename-btn"
+              onclick={handleRename}
+              disabled={renameBusy}
+              class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {renameBusy ? "Saving…" : "Rename"}
+            </button>
+          </div>
+          {#if renameError}
+            <p class="text-xs text-status-err mt-1 m-0">
+              {renameError}
+            </p>
+          {/if}
+        </div>
       </Card>
 
       <Card title="Metrics">
@@ -259,6 +392,22 @@
             </div>
           {/if}
         </div>
+      </Card>
+    </div>
+
+    <div class="mb-6">
+      <Card title="Reads">
+        <ReadsTable
+          {reads}
+          total={readsTotal}
+          loading={readsLoading}
+          bind:dedup={readsDedup}
+          bind:windowSecs={readsWindowSecs}
+          bind:limit={readsLimit}
+          bind:offset={readsOffset}
+          bind:order={readsOrder}
+          onParamsChange={handleReadsParamsChange}
+        />
       </Card>
     </div>
 
