@@ -1,4 +1,5 @@
 pub mod events;
+pub mod races;
 pub mod receiver_cursors;
 
 pub struct EventRow {
