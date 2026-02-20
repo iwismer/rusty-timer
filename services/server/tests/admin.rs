@@ -887,3 +887,68 @@ async fn test_list_cursors_returns_all_rows() {
     assert!(c["last_seq"].is_number());
     assert!(c["updated_at"].is_string());
 }
+
+// ---------------------------------------------------------------------------
+// Delete receiver cursors tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_delete_receiver_cursors() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = insert_stream(&pool, "fwd-1", "10.0.0.1:10000").await;
+    insert_cursor(&pool, "rcv-a", stream_id).await;
+    insert_cursor(&pool, "rcv-b", stream_id).await;
+    let addr = make_server(pool.clone()).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{}/api/v1/admin/receiver-cursors/rcv-a",
+            addr
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // rcv-a cursors deleted, rcv-b still exists
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE receiver_id = 'rcv-a'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE receiver_id = 'rcv-b'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn test_delete_receiver_cursors_idempotent() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let resp = client
+        .delete(format!(
+            "http://{}/api/v1/admin/receiver-cursors/nonexistent",
+            addr
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+}
