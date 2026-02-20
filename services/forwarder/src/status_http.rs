@@ -720,7 +720,17 @@ pub async fn apply_section_update(
             .await
         }
         "status_http" => {
-            let bind = optional_string_field(payload, "bind")?;
+            let bind = optional_string_field(payload, "bind")?.and_then(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            });
+            if let Some(ref bind_addr) = bind {
+                validate_status_bind(bind_addr).map_err(bad_request_error)?;
+            }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
                 Ok(())
@@ -968,6 +978,12 @@ fn validate_token_file(token_file: &str) -> Result<(), String> {
         return Err("token_file must be a single-line path".to_owned());
     }
     Ok(())
+}
+
+fn validate_status_bind(bind: &str) -> Result<(), String> {
+    bind.parse::<SocketAddr>()
+        .map(|_| ())
+        .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 0.0.0.0:8080)".to_owned())
 }
 
 fn config_not_available() -> Response {

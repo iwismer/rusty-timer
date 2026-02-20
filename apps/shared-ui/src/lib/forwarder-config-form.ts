@@ -169,8 +169,8 @@ export function validateAuth(form: ForwarderConfigFormState): string | null {
 export function validateJournal(form: ForwarderConfigFormState): string | null {
   if (form.journalPruneWatermarkPct) {
     const pct = Number(form.journalPruneWatermarkPct);
-    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
-      return "Prune watermark must be between 0 and 100.";
+    if (!Number.isFinite(pct) || !Number.isInteger(pct) || pct < 0 || pct > 100) {
+      return "Prune watermark must be an integer between 0 and 100.";
     }
   }
   return null;
@@ -196,10 +196,25 @@ export function validateStatusHttp(
   form: ForwarderConfigFormState,
 ): string | null {
   const bind = form.statusHttpBind.trim();
-  if (bind && !/^\d{1,3}(\.\d{1,3}){3}:\d{1,5}$/.test(bind)) {
+  if (bind && !isValidIpv4Bind(bind)) {
     return "Bind address must be a valid IP address with port (e.g. 0.0.0.0:8080).";
   }
   return null;
+}
+
+function isValidIpv4Bind(bind: string): boolean {
+  const match = bind.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/);
+  if (!match) return false;
+
+  const octets = match.slice(1, 5).map(Number);
+  const port = Number(match[5]);
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return false;
+  }
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    return false;
+  }
+  return true;
 }
 
 export function validateReaders(

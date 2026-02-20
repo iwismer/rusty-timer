@@ -161,6 +161,10 @@ describe("validateJournal", () => {
   it("rejects negative percentage", () => {
     expect(validateJournal(makeForm({ journalPruneWatermarkPct: "-1" }))).toBeTruthy();
   });
+
+  it("rejects non-integer percentage", () => {
+    expect(validateJournal(makeForm({ journalPruneWatermarkPct: "80.5" }))).toBeTruthy();
+  });
 });
 
 describe("validateUplink", () => {
@@ -196,6 +200,14 @@ describe("validateStatusHttp", () => {
 
   it("rejects hostname instead of IP", () => {
     expect(validateStatusHttp(makeForm({ statusHttpBind: "localhost:8080" }))).toBeTruthy();
+  });
+
+  it("rejects octet out of range", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "999.0.0.1:8080" }))).toBeTruthy();
+  });
+
+  it("rejects port out of range", () => {
+    expect(validateStatusHttp(makeForm({ statusHttpBind: "127.0.0.1:99999" }))).toBeTruthy();
   });
 });
 

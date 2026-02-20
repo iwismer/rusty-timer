@@ -561,7 +561,7 @@
             <label class="block text-sm font-medium text-text-secondary">
               Bind Address
               <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
-              <p class={hintClass}>IP:port to listen on for status HTTP server. Example: 0.0.0.0:8080. Default if unset: 127.0.0.1:8080.</p>
+              <p class={hintClass}>IP:port to listen on for status HTTP server. Example: 0.0.0.0:8080. Default if unset: 0.0.0.0:8080.</p>
             </label>
             <button
               class={saveBtnClass}
