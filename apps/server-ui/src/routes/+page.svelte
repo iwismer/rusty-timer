@@ -165,7 +165,7 @@
   }
 </script>
 
-<main class="mx-auto px-6 py-6">
+<main class="max-w-[1100px] mx-auto px-6 py-6">
   <div class="flex items-center justify-between mb-6">
     <h1
       data-testid="streams-heading"
@@ -225,11 +225,7 @@
           </div>
         {/snippet}
 
-        <div
-          data-testid="stream-list"
-          class="grid gap-3"
-          style="grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));"
-        >
+        <div data-testid="stream-list" class="grid gap-3">
           {#each group.streams as stream (stream.stream_id)}
             <div
               data-testid="stream-item"
@@ -256,9 +252,9 @@
                 {/if}
               </div>
 
-              <div class="grid grid-cols-3 gap-3 mb-3">
+              <div class="flex gap-6 mb-3">
                 {#if $metricsStore[stream.stream_id]}
-                  <div>
+                  <div class="shrink-0">
                     <p class="text-xs text-text-muted m-0">Reads</p>
                     <p
                       class="text-lg font-bold font-mono text-text-primary m-0"
@@ -268,7 +264,7 @@
                       ].epoch_raw_count.toLocaleString()}
                     </p>
                   </div>
-                  <div>
+                  <div class="shrink-0">
                     <p class="text-xs text-text-muted m-0">Chips</p>
                     <p
                       class="text-lg font-bold font-mono text-text-primary m-0"
@@ -278,7 +274,7 @@
                       ].unique_chips.toLocaleString()}
                     </p>
                   </div>
-                  <div>
+                  <div class="min-w-0 flex-1">
                     <p class="text-xs text-text-muted m-0">Last read</p>
                     <p
                       class="text-sm font-mono text-text-primary m-0 truncate"
@@ -293,7 +289,7 @@
                     </p>
                   </div>
                 {:else}
-                  <div class="col-span-3">
+                  <div>
                     <p class="text-sm text-text-muted italic m-0">
                       Loading metrics…
                     </p>
