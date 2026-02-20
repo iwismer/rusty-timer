@@ -168,3 +168,73 @@ export async function restartForwarder(
     { method: "POST" },
   );
 }
+
+// ----- Admin types -----
+
+export interface TokenEntry {
+  token_id: string;
+  device_type: string;
+  device_id: string;
+  created_at: string;
+  revoked: boolean;
+}
+
+export interface TokensResponse {
+  tokens: TokenEntry[];
+}
+
+// ----- Admin API -----
+
+/** GET /api/v1/admin/tokens */
+export async function getTokens(): Promise<TokensResponse> {
+  return apiFetch<TokensResponse>("/api/v1/admin/tokens");
+}
+
+/** POST /api/v1/admin/tokens/{tokenId}/revoke — returns 204 */
+export async function revokeToken(tokenId: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/admin/tokens/${tokenId}/revoke`, {
+    method: "POST",
+  });
+}
+
+/** DELETE /api/v1/admin/streams/{streamId} — cascade delete, returns 204 */
+export async function deleteStream(streamId: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/admin/streams/${streamId}`, {
+    method: "DELETE",
+  });
+}
+
+/** DELETE /api/v1/admin/streams — delete ALL streams, returns 204 */
+export async function deleteAllStreams(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/streams", { method: "DELETE" });
+}
+
+/** DELETE /api/v1/admin/events — clear ALL events, returns 204 */
+export async function deleteAllEvents(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/events", { method: "DELETE" });
+}
+
+/** DELETE /api/v1/admin/streams/{streamId}/events — clear events for a stream, returns 204 */
+export async function deleteStreamEvents(streamId: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/admin/streams/${streamId}/events`, {
+    method: "DELETE",
+  });
+}
+
+/** DELETE /api/v1/admin/streams/{streamId}/epochs/{epoch}/events — clear events for an epoch, returns 204 */
+export async function deleteEpochEvents(
+  streamId: string,
+  epoch: number,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/admin/streams/${streamId}/epochs/${epoch}/events`,
+    { method: "DELETE" },
+  );
+}
+
+/** DELETE /api/v1/admin/receiver-cursors — clear ALL receiver cursors, returns 204 */
+export async function deleteAllCursors(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/receiver-cursors", {
+    method: "DELETE",
+  });
+}
