@@ -386,6 +386,22 @@
       </Card>
     </div>
 
+    <div class="mb-6">
+      <Card title="Reads">
+        <ReadsTable
+          {reads}
+          total={readsTotal}
+          loading={readsLoading}
+          bind:dedup={readsDedup}
+          bind:windowSecs={readsWindowSecs}
+          bind:limit={readsLimit}
+          bind:offset={readsOffset}
+          bind:order={readsOrder}
+          onParamsChange={handleReadsParamsChange}
+        />
+      </Card>
+    </div>
+
     <div class="grid grid-cols-2 gap-4 mb-6">
       <Card title="Export">
         <div data-testid="export-section">
@@ -436,22 +452,6 @@
             {resetResult}
           </p>
         {/if}
-      </Card>
-    </div>
-
-    <div class="mb-6">
-      <Card title="Reads">
-        <ReadsTable
-          {reads}
-          total={readsTotal}
-          loading={readsLoading}
-          bind:dedup={readsDedup}
-          bind:windowSecs={readsWindowSecs}
-          bind:limit={readsLimit}
-          bind:offset={readsOffset}
-          bind:order={readsOrder}
-          onParamsChange={handleReadsParamsChange}
-        />
       </Card>
     </div>
   {:else}
