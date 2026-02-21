@@ -8,7 +8,7 @@
 #
 # How to use:
 #   1. Flash Raspberry Pi OS (64-bit, Lite) with Raspberry Pi Imager
-#   2. Edit this file (hostname + SSH key)
+#   2. Edit this file (hostname + SSH admin username + SSH key)
 #   3. Edit network-config (static IP, gateway, DNS)
 #   4. Copy both files to the SD card boot partition:
 #        - this file as "user-data"
@@ -24,9 +24,20 @@ manage_etc_hosts: true
 enable_ssh: true
 ssh_pwauth: false
 
-# System user for the forwarder service (non-login, dedicated).
+# Users:
+# - SSH admin user for remote access and sudo
+# - rt-forwarder service user (non-login, dedicated)
 users:
-  - default
+  # CHANGEME: SSH login user (for example, rt-admin)
+  - name: rt-admin
+    groups: sudo
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      # CHANGEME: Replace with your SSH public key.
+      - ssh-ed25519 AAAA_YOUR_KEY_HERE user@host
+
   - name: rt-forwarder
     system: true
     shell: /bin/false
@@ -43,7 +54,3 @@ runcmd:
   - mkdir -p /etc/rusty-timer
   - mkdir -p /var/lib/rusty-timer
   - chown rt-forwarder:rt-forwarder /var/lib/rusty-timer
-
-# CHANGEME: Replace with your SSH public key.
-ssh_authorized_keys:
-  - ssh-ed25519 AAAA_YOUR_KEY_HERE user@host

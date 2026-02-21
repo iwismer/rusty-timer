@@ -42,3 +42,7 @@ __pycache__/
 
 # Generated SBC cloud-init artifacts
 deploy/sbc/generated/
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store

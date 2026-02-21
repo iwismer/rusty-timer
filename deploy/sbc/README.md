@@ -37,9 +37,15 @@ From the repository root:
 uv run scripts/sbc_cloud_init.py
 ```
 
-The script asks for hostname, SSH key, static IP settings, DNS servers, and
-optional Wi-Fi settings, then writes ready-to-copy `user-data` and
-`network-config` files.
+The script asks for hostname, SSH admin username, SSH key, static IP settings,
+DNS servers, and optional Wi-Fi settings, then writes ready-to-copy
+`user-data` and `network-config` files.
+
+> **Why this matters:** Raspberry Pi OS no longer guarantees a default `pi`
+> login user. This wizard writes an explicit SSH admin user so SSH access is
+> deterministic.
+> See: [Raspberry Pi April 2022 update](https://www.raspberrypi.com/news/raspberry-pi-bullseye-update-april-2022/)
+> and [Raspberry Pi OS customization docs](https://www.raspberrypi.com/documentation/computers/configuration.html#configuring-a-user).
 
 To enable fully automatic first boot (no SSH setup commands), use:
 
@@ -59,12 +65,14 @@ The setup writes `display_name` to match the configured hostname.
 
 1. Open `deploy/sbc/user-data.yaml` from this repository in a text editor.
 
-2. Change the two lines marked **CHANGEME**:
+2. Change the values marked **CHANGEME**:
 
    - **`hostname`** -- set a unique name for this device (e.g. `rt-fwd-01`,
      `rt-fwd-02`).
-   - **`ssh_authorized_keys`** -- replace the placeholder with your SSH public
-     key. You can find it with:
+   - **SSH admin `users[].name`** -- set the login username you will SSH as
+     (for example `rt-admin`).
+   - **SSH admin `users[].ssh_authorized_keys`** -- replace the placeholder
+     key. You can find your key with:
 
      ```bash
      cat ~/.ssh/id_ed25519.pub
@@ -96,22 +104,23 @@ SSH is optional for troubleshooting only.
 
 1. Insert the SD card into the Pi and power it on.
 2. Wait approximately **2 minutes** for the first boot and cloud-init to finish.
-3. Connect via SSH using the static IP you configured in `network-config`:
+3. Connect via SSH using the static IP you configured in `network-config` and
+   the SSH admin username from `user-data`:
 
    ```bash
-   ssh pi@<static-ip-from-network-config>
+   ssh <ssh-admin-username>@<static-ip-from-network-config>
    ```
 
-   For example, if you kept the default address:
+   For example, if you kept the default username `rt-admin` and default IP:
 
    ```bash
-   ssh pi@192.168.1.50
+   ssh rt-admin@192.168.1.50
    ```
 
    You can also try mDNS if your network supports it:
 
    ```bash
-   ssh pi@<hostname>.local
+   ssh <ssh-admin-username>@<hostname>.local
    ```
 
 ## Step 4 -- Run the Setup Script
@@ -201,7 +210,7 @@ for full configuration options and operational procedures.
 
 | Problem | Cause | Solution |
 |---|---|---|
-| Can't SSH into Pi | cloud-init still running, or wrong hostname | Wait 2--3 minutes after boot. Try the IP address instead of the hostname. |
+| Can't SSH into Pi | cloud-init still running, wrong SSH username, or wrong hostname | Wait 2--3 minutes after boot. Use the SSH admin username configured in `user-data` (wizard default: `rt-admin`). Try the IP address instead of the hostname. |
 | Setup script fails: "missing required commands" | One or more required tools are missing (`curl`, `jq`, `tar`, `sha256sum`) | Run `sudo apt-get install -y curl jq tar coreutils` |
 | Setup script fails to download binary | No internet access on Pi | Check the network connection. Ensure the Pi can reach the internet. |
 | Forwarder won't start | Bad config or unreachable readers | Check logs: `journalctl -u rt-forwarder -n 50` |

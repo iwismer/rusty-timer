@@ -21,11 +21,19 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sbc_cloud_init.parse_dns_servers("8.8.8.8,not-an-ip")
 
+    def test_validate_username_accepts_expected_format(self) -> None:
+        self.assertEqual("rt-admin", sbc_cloud_init.validate_username("rt-admin"))
+
+    def test_validate_username_rejects_invalid_characters(self) -> None:
+        with self.assertRaises(ValueError):
+            sbc_cloud_init.validate_username("RT Admin")
+
 
 class RenderTests(unittest.TestCase):
     def test_render_user_data_contains_hostname_and_ssh_key(self) -> None:
         config = sbc_cloud_init.SbcCloudInitConfig(
             hostname="rt-fwd-77",
+            admin_username="ops",
             ssh_public_key="ssh-ed25519 AAAATEST user@test",
             static_ipv4_cidr="192.168.1.77/24",
             gateway_ipv4="192.168.1.1",
@@ -38,6 +46,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("manage_etc_hosts: true", text)
         self.assertIn("enable_ssh: true", text)
         self.assertIn("ssh_pwauth: false", text)
+        self.assertIn("name: ops", text)
+        self.assertIn("sudo: ALL=(ALL) NOPASSWD:ALL", text)
         self.assertIn("ssh_authorized_keys:", text)
         self.assertIn("ssh-ed25519 AAAATEST user@test", text)
 

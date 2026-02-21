@@ -24,6 +24,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "deploy" / "sbc" / "generated"
 DEFAULT_HOSTNAME = "rt-fwd-01"
+DEFAULT_ADMIN_USERNAME = "rt-admin"
 DEFAULT_STATIC_IPV4_CIDR = "192.168.1.50/24"
 DEFAULT_GATEWAY = "192.168.1.1"
 DEFAULT_DNS = "8.8.8.8,8.8.4.4"
@@ -34,6 +35,7 @@ DEFAULT_SETUP_SCRIPT_URL = (
 )
 DEFAULT_DONE_MARKER = "/var/lib/rusty-timer/.first-boot-setup-done"
 HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62})$")
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 READER_TARGET_RE = re.compile(
     r"^(?:\d{1,3}\.){3}\d{1,3}(?:-\d{1,3})?:\d{1,5}$"
 )
@@ -46,6 +48,7 @@ class SbcCloudInitConfig:
     static_ipv4_cidr: str
     gateway_ipv4: str
     dns_servers: tuple[str, ...]
+    admin_username: str = DEFAULT_ADMIN_USERNAME
     wifi_ssid: str | None = None
     wifi_password: str | None = None
     wifi_country: str | None = None
@@ -76,6 +79,17 @@ def validate_hostname(value: str) -> str:
             "hostname must use lowercase letters, numbers, and hyphens only"
         )
     return hostname
+
+
+def validate_username(value: str) -> str:
+    username = value.strip()
+    if not username:
+        raise ValueError("username is required")
+    if not USERNAME_RE.fullmatch(username):
+        raise ValueError(
+            "username must start with a lowercase letter/underscore and use lowercase letters, numbers, '_' or '-'"
+        )
+    return username
 
 
 def validate_ssh_key(value: str) -> str:
@@ -204,6 +218,11 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
         validate_hostname,
         "hostname",
     )
+    admin_username = prompt_until_valid(
+        lambda: ask_with_default("SSH admin username", DEFAULT_ADMIN_USERNAME),
+        validate_username,
+        "SSH admin username",
+    )
     ssh_public_key = prompt_until_valid(
         lambda: ask_required("SSH public key"),
         validate_ssh_key,
@@ -244,6 +263,7 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
     if not auto_first_boot:
         return SbcCloudInitConfig(
             hostname=hostname,
+            admin_username=admin_username,
             ssh_public_key=ssh_public_key,
             static_ipv4_cidr=static_ipv4_cidr,
             gateway_ipv4=gateway_ipv4,
@@ -279,6 +299,7 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
 
     return SbcCloudInitConfig(
         hostname=hostname,
+        admin_username=admin_username,
         ssh_public_key=ssh_public_key,
         static_ipv4_cidr=static_ipv4_cidr,
         gateway_ipv4=gateway_ipv4,
@@ -329,7 +350,13 @@ def render_user_data(config: SbcCloudInitConfig) -> str:
         "ssh_pwauth: false\n"
         "\n"
         "users:\n"
-        "  - default\n"
+        f"  - name: {config.admin_username}\n"
+        "    groups: sudo\n"
+        "    shell: /bin/bash\n"
+        "    lock_passwd: true\n"
+        "    sudo: ALL=(ALL) NOPASSWD:ALL\n"
+        "    ssh_authorized_keys:\n"
+        f"      - {yaml_quote(config.ssh_public_key)}\n"
         "  - name: rt-forwarder\n"
         "    system: true\n"
         "    shell: /bin/false\n"
@@ -338,9 +365,6 @@ def render_user_data(config: SbcCloudInitConfig) -> str:
         "\n"
         "packages:\n"
         f"{package_lines}\n"
-        "\n"
-        "ssh_authorized_keys:\n"
-        f"  - {yaml_quote(config.ssh_public_key)}\n"
         "\n"
     )
 

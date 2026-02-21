@@ -285,8 +285,9 @@ the configured hostname.
 The script prompts for:
 
 - Hostname
+- SSH admin username
 - SSH public key
-- Static IPv4/CIDR
+- Static IPv4/CIDR for eth0
 - Default gateway
 - DNS servers
 - Optional Wi-Fi settings (SSID/password/regulatory domain for `wlan0`)
