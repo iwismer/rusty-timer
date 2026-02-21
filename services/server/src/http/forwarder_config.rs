@@ -124,8 +124,41 @@ pub async fn set_forwarder_config(
     Path((forwarder_id, section)): Path<(String, String)>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    send_config_set_command(&state, &forwarder_id, section, payload).await
+}
+
+pub async fn control_forwarder(
+    State(state): State<AppState>,
+    Path((forwarder_id, action)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let action_value = match action.as_str() {
+        "restart-service" => "restart_service",
+        "restart-device" => "restart_device",
+        "shutdown-device" => "shutdown_device",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HttpErrorEnvelope {
+                    code: "BAD_REQUEST".to_owned(),
+                    message: "unknown control action".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+    let payload = serde_json::json!({ "action": action_value });
+    send_config_set_command(&state, &forwarder_id, "control".to_owned(), payload).await
+}
+
+async fn send_config_set_command(
+    state: &AppState,
+    forwarder_id: &str,
+    section: String,
+    payload: serde_json::Value,
+) -> axum::response::Response {
     let senders = state.forwarder_command_senders.read().await;
-    let tx = match senders.get(&forwarder_id) {
+    let tx = match senders.get(forwarder_id) {
         Some(tx) => tx.clone(),
         None => {
             return (
