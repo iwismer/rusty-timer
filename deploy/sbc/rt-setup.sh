@@ -205,7 +205,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/rusty-timer
-ReadOnlyPaths=/etc/rusty-timer
+ReadWritePaths=/etc/rusty-timer
 TimeoutStopSec=30s
 
 [Install]
@@ -257,6 +257,8 @@ ensure_prerequisites() {
 
   # Create directories
   mkdir -p "${CONFIG_DIR}" "${DATA_DIR}"
+  chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
+  chmod 0750 "${CONFIG_DIR}"
   chown "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}"
 }
 

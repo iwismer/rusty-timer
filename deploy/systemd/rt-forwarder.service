@@ -56,7 +56,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/rusty-timer
-ReadOnlyPaths=/etc/rusty-timer
+ReadWritePaths=/etc/rusty-timer
 
 # Give the forwarder time to flush the SQLite WAL before SIGKILL.
 TimeoutStopSec=30s
