@@ -12,7 +12,7 @@
 # Build:
 #   docker build -t rt-server -f services/server/Dockerfile .
 #
-# Run (see deploy/docker-compose.prod.yml for full stack):
+# Run (see deploy/server/docker-compose.prod.yml for full stack):
 #   docker run --rm \
 #     -e DATABASE_URL="postgres://user:pass@db:5432/rtserver" \
 #     -e BIND_ADDR="0.0.0.0:8080" \
@@ -24,13 +24,19 @@
 # ---------------------------------------------------------------------------
 FROM node:20-bookworm-slim AS dashboard-builder
 
-WORKDIR /dashboard
+WORKDIR /workspace
 
-# Copy the dashboard application source.
-COPY apps/server-ui/ ./
+# Copy npm workspace manifests.
+COPY package.json package-lock.json ./
+COPY .npmrc ./
 
-# Install dependencies and build static output.
-RUN npm ci && npm run build
+# Copy only the workspaces required to build server-ui.
+COPY apps/shared-ui/ apps/shared-ui/
+COPY apps/server-ui/ apps/server-ui/
+
+# Install from the root lockfile, then build server-ui output.
+RUN npm ci --workspace apps/shared-ui --workspace apps/server-ui \
+    && npm run build --workspace apps/server-ui
 
 # ---------------------------------------------------------------------------
 # Stage 2: Rust builder
@@ -50,11 +56,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY rust-toolchain.toml ./
 COPY services/server/.sqlx/ services/server/.sqlx/
 
-# Copy all workspace crates.
+# Copy all workspace crates/services required by the workspace manifest.
 COPY crates/ crates/
-COPY services/forwarder/ services/forwarder/
-COPY services/server/ services/server/
-COPY services/receiver/ services/receiver/
+COPY services/ services/
 COPY src/ src/
 
 # Build the server binary in release mode.
@@ -68,6 +72,7 @@ FROM debian:bookworm-slim AS runtime
 # Install runtime dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -77,7 +82,7 @@ RUN useradd -r -s /bin/false rt-server
 # Dashboard static files go into /srv/dashboard.
 # The server binary serves them via the configured static file path.
 RUN mkdir -p /srv/dashboard
-COPY --from=dashboard-builder /dashboard/build /srv/dashboard
+COPY --from=dashboard-builder /workspace/apps/server-ui/build /srv/dashboard
 RUN chown -R rt-server:rt-server /srv/dashboard
 
 # Copy the server binary.
