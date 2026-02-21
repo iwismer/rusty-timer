@@ -484,6 +484,7 @@ async fn run_uplink(
             cursors = resume_cursors.len(),
             "connecting uplink WebSocket"
         );
+        ui_log(&ui_tx, format!("uplink connecting to {}", ws_url));
 
         let mut session = match UplinkSession::connect_with_resume(
             uplink_cfg.clone(),
@@ -498,17 +499,22 @@ async fn run_uplink(
                     device_id = %s.device_id(),
                     "uplink connected"
                 );
+                ui_log(
+                    &ui_tx,
+                    format!("uplink connected (session {})", s.session_id()),
+                );
                 status.set_uplink_connected(true).await;
                 backoff_secs = 1;
                 s
             }
             Err(e) => {
-                let _ = ui_tx.send(forwarder::ui_events::ForwarderUiEvent::LogEntry {
-                    entry: format!(
-                        "uplink connect failed: {}; url={}; retrying in {}s",
-                        e, ws_url, backoff_secs
+                ui_log(
+                    &ui_tx,
+                    format!(
+                        "uplink connect failed: {}; retrying in {}s",
+                        e, backoff_secs
                     ),
-                });
+                );
                 warn!(
                     error = %e,
                     backoff_secs = backoff_secs,
@@ -574,6 +580,14 @@ async fn run_uplink(
                 count = read_events.len(),
                 "replaying unacked events"
             );
+            ui_log(
+                &ui_tx,
+                format!(
+                    "replaying {} unacked events for {}",
+                    read_events.len(),
+                    stream_key
+                ),
+            );
 
             let send_result = session.send_batch(read_events).await;
             reconnect_after_replay = should_reconnect_after_replay_send(&send_result);
@@ -596,6 +610,13 @@ async fn run_uplink(
                         reader_ip = %cmd.reader_ip,
                         new_epoch = cmd.new_stream_epoch,
                         "epoch reset during replay, bumping journal and reconnecting"
+                    );
+                    ui_log(
+                        &ui_tx,
+                        format!(
+                            "epoch reset for {}; bumping journal and reconnecting",
+                            cmd.reader_ip
+                        ),
                     );
                     let mut j = journal.lock().await;
                     if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
@@ -667,6 +688,11 @@ async fn run_uplink(
                 result = session.recv_message() => {
                     match result {
                         Ok(msg @ WsMessage::ConfigGetRequest(_)) | Ok(msg @ WsMessage::ConfigSetRequest(_)) => {
+                            match &msg {
+                                WsMessage::ConfigGetRequest(_) => ui_log(&ui_tx, "server requested config"),
+                                WsMessage::ConfigSetRequest(req) => ui_log(&ui_tx, format!("server updated config section '{}'", req.section)),
+                                _ => {}
+                            }
                             if let Err(e) = handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx).await {
                                 warn!(error = %e, "config handler failed during idle");
                                 break 'uplink;
@@ -674,6 +700,7 @@ async fn run_uplink(
                             continue 'uplink;
                         }
                         Ok(WsMessage::RestartRequest(req)) => {
+                            ui_log(&ui_tx, "restart requested by server");
                             if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await {
                                 warn!(error = %e, "restart handler failed during idle");
                                 break 'uplink;
@@ -743,6 +770,7 @@ async fn run_uplink(
             }
 
             info!(count = pending.len(), "sending event batch");
+            ui_log(&ui_tx, format!("sent batch of {} events", pending.len()));
 
             match session.send_batch(pending).await {
                 Ok(SendBatchResult::Ack(ack)) => {
@@ -763,6 +791,10 @@ async fn run_uplink(
                         new_epoch = cmd.new_stream_epoch,
                         "epoch reset received, bumping journal and reconnecting"
                     );
+                    ui_log(
+                        &ui_tx,
+                        format!("epoch reset for {}; bumping journal", cmd.reader_ip),
+                    );
                     let mut j = journal.lock().await;
                     if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
                         warn!(error = %e, "failed to bump epoch in journal");
@@ -770,6 +802,7 @@ async fn run_uplink(
                     break 'uplink;
                 }
                 Ok(SendBatchResult::ConfigGet(req)) => {
+                    ui_log(&ui_tx, "server requested config");
                     let msg = WsMessage::ConfigGetRequest(req);
                     if let Err(e) =
                         handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
@@ -780,6 +813,10 @@ async fn run_uplink(
                     }
                 }
                 Ok(SendBatchResult::ConfigSet(req)) => {
+                    ui_log(
+                        &ui_tx,
+                        format!("server updated config section '{}'", req.section),
+                    );
                     let msg = WsMessage::ConfigSetRequest(req);
                     if let Err(e) =
                         handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
@@ -809,6 +846,10 @@ async fn run_uplink(
         warn!(
             backoff_secs = backoff_secs,
             "uplink disconnected, reconnecting"
+        );
+        ui_log(
+            &ui_tx,
+            format!("uplink disconnected; reconnecting in {}s", backoff_secs),
         );
         tokio::select! {
             _ = sleep(delay) => {}
@@ -2169,7 +2210,11 @@ token_file = "/tmp/test-token"
         let log_entry = timeout(std::time::Duration::from_secs(2), async {
             loop {
                 match ui_rx.recv().await.expect("recv ui event") {
-                    forwarder::ui_events::ForwarderUiEvent::LogEntry { entry } => break entry,
+                    forwarder::ui_events::ForwarderUiEvent::LogEntry { entry }
+                        if entry.contains("uplink connect failed") =>
+                    {
+                        break entry
+                    }
                     _ => continue,
                 }
             }
