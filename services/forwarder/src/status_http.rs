@@ -624,7 +624,7 @@ async fn mark_restart_needed_and_emit(
 /// payload, and calls `update_config_file` to persist the change.
 ///
 /// Recognised sections: `"general"`, `"server"`, `"auth"`, `"journal"`,
-/// `"uplink"`, `"status_http"`, `"readers"`.
+/// `"uplink"`, `"status_http"`, `"control"`, `"readers"`.
 pub async fn apply_section_update(
     section: &str,
     payload: &serde_json::Value,
@@ -733,6 +733,16 @@ pub async fn apply_section_update(
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
+                Ok(())
+            })
+            .await
+        }
+        "control" => {
+            let allow_power_actions = optional_bool_field(payload, "allow_power_actions")?;
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                raw.control = Some(crate::config::RawControlConfig {
+                    allow_power_actions,
+                });
                 Ok(())
             })
             .await
@@ -1148,6 +1158,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(post_config_status_http_handler::<J>),
         )
         .route(
+            "/api/v1/config/control",
+            post(post_config_control_handler::<J>),
+        )
+        .route(
             "/api/v1/config/readers",
             post(post_config_readers_handler::<J>),
         )
@@ -1460,6 +1474,33 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
     };
 
     match apply_section_update("readers", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn post_config_control_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    match apply_section_update("control", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
