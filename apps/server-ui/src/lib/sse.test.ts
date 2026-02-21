@@ -8,6 +8,7 @@ vi.stubGlobal("fetch", mockFetch);
 // Mock EventSource
 class MockEventSource {
   static instances: MockEventSource[] = [];
+  static openDelayMs = 0;
   url: string;
   listeners: Record<string, ((e: MessageEvent) => void)[]> = {};
   onopen: (() => void) | null = null;
@@ -22,7 +23,7 @@ class MockEventSource {
     setTimeout(() => {
       this.readyState = 1;
       if (this.onopen) this.onopen();
-    }, 0);
+    }, MockEventSource.openDelayMs);
   }
 
   addEventListener(type: string, listener: (e: MessageEvent) => void) {
@@ -64,6 +65,7 @@ describe("sse", () => {
   beforeEach(() => {
     resetStores();
     MockEventSource.instances = [];
+    MockEventSource.openDelayMs = 0;
     mockFetch.mockReset();
     // Default: getStreams returns empty
     mockFetch.mockResolvedValue(makeResponse({ streams: [] }));
@@ -240,6 +242,25 @@ describe("sse", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(get(metricsStore).s1.raw_count).toBe(7);
+  });
+
+  it("fetches streams eagerly before open, then once again on open", async () => {
+    MockEventSource.openDelayMs = 30;
+    mockFetch.mockResolvedValue(makeResponse({ streams: [] }));
+
+    const { initSSE } = await import("./sse");
+    initSSE();
+
+    // Eager startup sync should run immediately.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    // onopen should trigger exactly one follow-up sync.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    // No additional fetches without explicit resync triggers.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
   it("runs a follow-up resync when resync events arrive during an in-flight resync", async () => {
