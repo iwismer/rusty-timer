@@ -46,9 +46,9 @@ endpoints are JSON unless otherwise noted.
 | `PUT`  | `/api/v1/subscriptions` | Replace the full subscription list (atomic). |
 | `GET`  | `/api/v1/status` | Runtime status: connection state, stream count, DB health. |
 | `GET`  | `/api/v1/logs` | Recent log entries (up to 500, in-memory ring buffer). |
-| `POST` | `/api/v1/connect` | Initiate a WebSocket connection to the server. Returns `202 Accepted`. |
-| `POST` | `/api/v1/disconnect` | Close the active WebSocket connection. Returns `202 Accepted`. |
-| `GET`  | `/api/v1/events` | SSE stream of real-time UI events (`connected`, `status_changed`, `streams_snapshot`, `log_entry`, `update_available`, `resync`). |
+| `POST` | `/api/v1/connect` | Initiate a WebSocket connection to the server (asynchronous). |
+| `POST` | `/api/v1/disconnect` | Close the active WebSocket connection (asynchronous). |
+| `GET`  | `/api/v1/events` | SSE stream of real-time UI events (`status_changed`, `streams_snapshot`, `log_entry`, `update_available`). |
 | `GET`  | `/api/v1/update/status` | Check for available software updates. |
 | `POST` | `/api/v1/update/apply` | Apply a previously downloaded update. Returns `404` if no update is staged. |
 

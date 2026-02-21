@@ -70,7 +70,7 @@ At least one `[[readers]]` entry is required.
 
 | Field                | Type     | Required | Default                          | Description                                                |
 | -------------------- | -------- | -------- | -------------------------------- | ---------------------------------------------------------- |
-| `target`             | `String` | Yes      | --                               | Reader IP or address (supports CIDR expansion).            |
+| `target`             | `String` | Yes      | --                               | Reader endpoint target: single `A.B.C.D:PORT` or last-octet range `A.B.C.START-END:PORT` (CIDR is not supported). |
 | `enabled`            | `bool`   | No       | `true`                           | Set to `false` to skip this reader.                        |
 | `local_fallback_port`| `u16`    | No       | `10000 + last_octet` of reader IP | Local TCP port for the fanout listener for this reader.   |
 
