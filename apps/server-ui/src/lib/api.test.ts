@@ -541,4 +541,20 @@ describe("server_api client", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  // ----- Admin: deleteAllRaces -----
+  it("deleteAllRaces sends DELETE /api/v1/admin/races", async () => {
+    const { deleteAllRaces } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+    await expect(deleteAllRaces()).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/admin/races"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
 });
