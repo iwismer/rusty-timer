@@ -667,6 +667,60 @@ async fn run_update_check_with_checker(
     }
 }
 
+async fn run_update_download_with_checker(
+    state: &Arc<AppState>,
+    checker: &dyn UpdateCheckClient,
+) -> Result<UpdateStatus, UpdateStatus> {
+    let current = state.update_status.read().await.clone();
+    match current {
+        UpdateStatus::Available { ref version } => match checker.download(version).await {
+            Ok(path) => {
+                let status = UpdateStatus::Downloaded {
+                    version: version.clone(),
+                };
+                *state.update_status.write().await = status.clone();
+                *state.staged_update_path.write().await = Some(path);
+                let _ = state
+                    .ui_tx
+                    .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                        status: status.clone(),
+                    });
+                Ok(status)
+            }
+            Err(error) => {
+                let status = UpdateStatus::Failed { error };
+                *state.update_status.write().await = status.clone();
+                Err(status)
+            }
+        },
+        s @ UpdateStatus::Downloaded { .. } => Ok(s),
+        other => Err(other),
+    }
+}
+
+async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let checker = match rt_updater::UpdateChecker::new(
+        "iwismer",
+        "rusty-timer",
+        "receiver",
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Ok(c) => RealUpdateChecker { inner: c },
+        Err(e) => {
+            let status = rt_updater::UpdateStatus::Failed {
+                error: e.to_string(),
+            };
+            *state.update_status.write().await = status.clone();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(status)).into_response();
+        }
+    };
+
+    match run_update_download_with_checker(&state, &checker).await {
+        Ok(status) => Json(status).into_response(),
+        Err(status) => (StatusCode::CONFLICT, Json(status)).into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -684,6 +738,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/update/status", get(get_update_status))
         .route("/api/v1/update/apply", post(post_update_apply))
         .route("/api/v1/update/check", post(post_update_check))
+        .route("/api/v1/update/download", post(post_update_download))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
@@ -1003,6 +1058,76 @@ mod tests {
         assert_eq!(
             *state.staged_update_path.read().await,
             Some(std::path::PathBuf::from("/tmp/staged-receiver"))
+        );
+    }
+
+    #[tokio::test]
+    async fn update_download_downloads_when_available() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        *state.update_status.write().await = UpdateStatus::Available {
+            version: "2.0.0".to_owned(),
+        };
+        let download_calls = Arc::new(AtomicUsize::new(0));
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(std::path::PathBuf::from("/tmp/staged-receiver")),
+            download_calls: Arc::clone(&download_calls),
+        };
+
+        let status = run_update_download_with_checker(&state, &checker).await;
+
+        assert_eq!(
+            status,
+            Ok(UpdateStatus::Downloaded {
+                version: "2.0.0".to_owned()
+            })
+        );
+        assert_eq!(download_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *state.staged_update_path.read().await,
+            Some(std::path::PathBuf::from("/tmp/staged-receiver"))
+        );
+    }
+
+    #[tokio::test]
+    async fn update_download_returns_conflict_when_up_to_date() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
+            download_calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let status = run_update_download_with_checker(&state, &checker).await;
+        assert!(status.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_download_is_idempotent_when_already_downloaded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        *state.update_status.write().await = UpdateStatus::Downloaded {
+            version: "2.0.0".to_owned(),
+        };
+
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
+            download_calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let status = run_update_download_with_checker(&state, &checker).await;
+        assert_eq!(
+            status,
+            Ok(UpdateStatus::Downloaded {
+                version: "2.0.0".to_owned()
+            })
         );
     }
 }
