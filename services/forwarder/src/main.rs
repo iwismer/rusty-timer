@@ -1023,7 +1023,13 @@ async fn main() {
     // Spawn background update check
     {
         let ss = status_server.clone();
+        let update_mode = cfg.update.mode;
         tokio::spawn(async move {
+            if update_mode == rt_updater::UpdateMode::Disabled {
+                info!("auto-update disabled by configuration");
+                return;
+            }
+
             let checker = match rt_updater::UpdateChecker::new(
                 "iwismer",
                 "rusty-timer",
@@ -1050,25 +1056,27 @@ async fn main() {
                     })
                     .await;
 
-                    match checker.download(version).await {
-                        Ok(path) => {
-                            warn!(
-                                version = %version,
-                                path = %path.display(),
-                                "update downloaded and staged"
-                            );
-                            ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
-                                version: version.clone(),
-                            })
-                            .await;
-                            ss.set_staged_update_path(path).await;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "update download failed");
-                            ss.set_update_status(rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            })
-                            .await;
+                    if update_mode == rt_updater::UpdateMode::CheckAndDownload {
+                        match checker.download(version).await {
+                            Ok(path) => {
+                                warn!(
+                                    version = %version,
+                                    path = %path.display(),
+                                    "update downloaded and staged"
+                                );
+                                ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
+                                    version: version.clone(),
+                                })
+                                .await;
+                                ss.set_staged_update_path(path).await;
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "update download failed");
+                                ss.set_update_status(rt_updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                })
+                                .await;
+                            }
                         }
                     }
                 }
