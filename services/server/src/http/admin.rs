@@ -706,3 +706,62 @@ pub async fn delete_receiver_stream_cursor(
             .into_response(),
     }
 }
+
+pub async fn delete_all_races(State(state): State<AppState>) -> impl IntoResponse {
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    if let Err(e) = sqlx::query!("DELETE FROM forwarder_races")
+        .execute(&mut *tx)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = sqlx::query!("DELETE FROM races").execute(&mut *tx).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = tx.commit().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+    StatusCode::NO_CONTENT.into_response()
+}
