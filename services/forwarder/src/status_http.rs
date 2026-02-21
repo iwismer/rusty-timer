@@ -10,6 +10,9 @@
 //! - `POST /api/v1/config/{section}` — update a config section
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
 //!   501 on non-Unix platforms
+//! - `POST /api/v1/control/restart-service` — trigger graceful service restart
+//! - `POST /api/v1/control/restart-device` — trigger host reboot (gated by config)
+//! - `POST /api/v1/control/shutdown-device` — trigger host shutdown (gated by config)
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
 //! - All other routes fall back to the embedded SvelteKit UI
@@ -1023,6 +1026,139 @@ async fn restart_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+async fn load_allow_power_actions<J: JournalAccess + Send + 'static>(
+    state: &AppState<J>,
+) -> Result<bool, Response> {
+    let cs = match get_config_state(state) {
+        Some(cs) => cs,
+        None => return Err(config_not_available()),
+    };
+
+    let _lock = cs.write_lock.lock().await;
+    let toml_str = match std::fs::read_to_string(&cs.path) {
+        Ok(t) => t,
+        Err(e) => {
+            return Err(json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                    .to_string(),
+            ))
+        }
+    };
+    let raw: crate::config::RawConfig = match toml::from_str(&toml_str) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                    .to_string(),
+            ))
+        }
+    };
+    Ok(raw
+        .control
+        .and_then(|c| c.allow_power_actions)
+        .unwrap_or(false))
+}
+
+#[cfg(unix)]
+fn schedule_device_power_action(systemctl_action: &'static str) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        match tokio::task::spawn_blocking(move || {
+            std::process::Command::new("systemctl")
+                .arg(systemctl_action)
+                .status()
+        })
+        .await
+        {
+            Ok(Ok(status)) if !status.success() => {
+                tracing::error!(
+                    action = systemctl_action,
+                    exit_status = ?status.code(),
+                    "control action command exited with failure"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::error!(action = systemctl_action, error = %e, "control action command failed");
+            }
+            Err(e) => {
+                tracing::error!(action = systemctl_action, error = %e, "control action task failed");
+            }
+            Ok(Ok(_)) => {}
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn schedule_device_power_action(_systemctl_action: &'static str) {}
+
+async fn control_restart_service_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    restart_handler(State(state)).await
+}
+
+async fn control_restart_device_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let allow_power_actions = match load_allow_power_actions(&state).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if !allow_power_actions {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
+        );
+    }
+    if !cfg!(unix) {
+        return json_response(
+            StatusCode::NOT_IMPLEMENTED,
+            serde_json::json!({
+                "ok": false,
+                "error": "restart device not supported on non-unix platforms"
+            })
+            .to_string(),
+        );
+    }
+    schedule_device_power_action("reboot");
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"ok": true, "status": "restart_device_scheduled"}).to_string(),
+    )
+}
+
+async fn control_shutdown_device_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let allow_power_actions = match load_allow_power_actions(&state).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if !allow_power_actions {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
+        );
+    }
+    if !cfg!(unix) {
+        return json_response(
+            StatusCode::NOT_IMPLEMENTED,
+            serde_json::json!({
+                "ok": false,
+                "error": "shutdown device not supported on non-unix platforms"
+            })
+            .to_string(),
+        );
+    }
+    schedule_device_power_action("poweroff");
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"ok": true, "status": "shutdown_device_scheduled"}).to_string(),
+    )
+}
+
 fn get_config_state<J: JournalAccess + Send + 'static>(
     state: &AppState<J>,
 ) -> Option<Arc<ConfigState>> {
@@ -1166,6 +1302,18 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(post_config_readers_handler::<J>),
         )
         .route("/api/v1/restart", post(restart_handler::<J>))
+        .route(
+            "/api/v1/control/restart-service",
+            post(control_restart_service_handler::<J>),
+        )
+        .route(
+            "/api/v1/control/restart-device",
+            post(control_restart_device_handler::<J>),
+        )
+        .route(
+            "/api/v1/control/shutdown-device",
+            post(control_shutdown_device_handler::<J>),
+        )
         .route("/api/v1/status", get(status_json_handler::<J>))
         .route("/api/v1/events", get(events_handler::<J>))
         .fallback(crate::ui_server::serve_ui)

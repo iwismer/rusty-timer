@@ -1741,3 +1741,165 @@ async fn restart_endpoint_returns_404_without_config() {
     let (status, _) = http_post(addr, "/api/v1/restart", "{}").await;
     assert_eq!(status, 404);
 }
+
+#[tokio::test]
+async fn control_restart_service_endpoint_returns_ok() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal.clone(),
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(addr, "/api/v1/control/restart-service", "{}").await;
+    let body = response_body(&response);
+    let json: serde_json::Value = serde_json::from_str(body).expect("parse JSON");
+
+    #[cfg(unix)]
+    {
+        assert_eq!(status, 200);
+        assert_eq!(json["ok"], true);
+        tokio::time::timeout(Duration::from_millis(200), restart_signal.notified())
+            .await
+            .expect("restart service endpoint must notify restart signal");
+    }
+
+    #[cfg(not(unix))]
+    {
+        assert_eq!(status, 501);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error"], "restart not supported on non-unix platforms");
+    }
+}
+
+#[tokio::test]
+async fn control_restart_device_requires_allow_power_actions_true() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[control]
+allow_power_actions = false
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(addr, "/api/v1/control/restart-device", "{}").await;
+    assert_eq!(status, 403);
+    let body = response_body(&response);
+    assert!(
+        body.contains("power actions disabled"),
+        "response must explain gating, got: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn control_shutdown_device_requires_allow_power_actions_true() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[control]
+allow_power_actions = false
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, response) = http_post(addr, "/api/v1/control/shutdown-device", "{}").await;
+    assert_eq!(status, 403);
+    let body = response_body(&response);
+    assert!(
+        body.contains("power actions disabled"),
+        "response must explain gating, got: {}",
+        body
+    );
+}
