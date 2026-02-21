@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -25,6 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # Server is excluded — it's deployed via Docker, not as a standalone binary.
 VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator")
+EMBED_UI_SERVICES = ("forwarder", "receiver")
 VERSION_FORMAT_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
@@ -70,6 +72,14 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     defaults = {"check": True, "capture_output": True, "text": True, "cwd": REPO_ROOT}
     defaults.update(kwargs)
     return subprocess.run(cmd, **defaults)
+
+
+def log_command(cmd: list[str], *, execute: bool) -> None:
+    print(f"    $ {shlex.join(cmd)}")
+    if execute:
+        run(cmd, capture_output=False)
+    else:
+        print("    (dry-run) skipped")
 
 
 def git_is_dirty() -> bool:
@@ -150,6 +160,41 @@ def parse_semver(v: str) -> tuple[int, int, int]:
     return int(parts[0]), int(parts[1]), int(parts[2])
 
 
+def service_uses_embed_ui(service: str) -> bool:
+    return service in EMBED_UI_SERVICES
+
+
+def run_release_workflow_checks(service: str, *, start_step: int) -> int:
+    step = start_step
+    if service_uses_embed_ui(service):
+        ui_workspace = f"apps/{service}-ui"
+        print(f"  [{step}] Run UI checks for {ui_workspace}")
+        step += 1
+        log_command(["npm", "ci"], execute=True)
+        log_command(["npm", "run", "lint", "--workspace", ui_workspace], execute=True)
+        log_command(["npm", "run", "check", "--workspace", ui_workspace], execute=True)
+        log_command(["npm", "test", "--workspace", ui_workspace], execute=True)
+        print("    UI checks passed")
+
+    build_cmd = [
+        "cargo",
+        "build",
+        "--release",
+        "--package",
+        service,
+        "--bin",
+        service,
+    ]
+    if service_uses_embed_ui(service):
+        build_cmd.extend(["--features", "embed-ui"])
+
+    print(f"  [{step}] Run release build")
+    step += 1
+    log_command(build_cmd, execute=True)
+    print("    Release build passed")
+    return step
+
+
 def git_head_sha() -> str:
     result = run(["git", "rev-parse", "HEAD"])
     return result.stdout.strip()
@@ -204,10 +249,9 @@ def main() -> None:
         return
 
     if args.dry_run:
-        print("Dry run — no changes made.")
-        return
-
-    start_head = git_head_sha()
+        print("Dry run mode: checks/builds will run, mutating steps are printed only.")
+    else:
+        start_head = git_head_sha()
 
     # --- Confirm ---
     if not args.yes:
@@ -222,36 +266,70 @@ def main() -> None:
         for service, current, new in plan:
             print(f"\n--- {service}: {current} -> {new} ---")
             cargo_path = f"services/{service}/Cargo.toml"
+            step = 1
 
             # Update Cargo.toml
-            write_version(service, new)
-            print(f"  Updated {cargo_path}")
+            print(f"  [{step}] Update {cargo_path} version to {new}")
+            step += 1
+            if args.dry_run:
+                print(f"    (dry-run) would update {cargo_path}")
+            else:
+                write_version(service, new)
+                print(f"    Updated {cargo_path}")
 
-            # Validate with cargo check
-            print(f"  Running cargo check -p {service}...")
-            run(["cargo", "check", "-p", service], capture_output=False)
-            print(f"  cargo check passed")
+            # Validate with the same checks/build used by release workflow.
+            step = run_release_workflow_checks(service, start_step=step)
 
             # Stage, commit, tag
-            run(["git", "add", cargo_path, "Cargo.lock"])
+            print(f"  [{step}] Stage release files")
+            step += 1
+            log_command(
+                ["git", "add", cargo_path, "Cargo.lock"],
+                execute=not args.dry_run,
+            )
+
             commit_msg = f"chore({service}): bump version to {new}"
-            run(["git", "commit", "-m", commit_msg])
-            print(f"  Committed: {commit_msg}")
+            print(f"  [{step}] Create release commit")
+            step += 1
+            log_command(
+                ["git", "commit", "-m", commit_msg],
+                execute=not args.dry_run,
+            )
+            if args.dry_run:
+                print(f"    (dry-run) would commit: {commit_msg}")
+            else:
+                print(f"    Committed: {commit_msg}")
 
             tag = f"{service}-v{new}"
-            run(["git", "tag", tag])
-            print(f"  Tagged: {tag}")
-            tags.append(tag)
+            print(f"  [{step}] Create release tag")
+            step += 1
+            log_command(["git", "tag", tag], execute=not args.dry_run)
+            if args.dry_run:
+                print(f"    (dry-run) would tag: {tag}")
+            else:
+                print(f"    Tagged: {tag}")
+                tags.append(tag)
 
         # --- Push ---
-        print("\nPushing commits and tags...")
-        run(["git", "push", "--atomic", "origin", "master", *tags])
-        print("Done!")
+        print("\n[Final Step] Push commits and tags")
+        push_cmd = ["git", "push", "--atomic", "origin", "master", *tags]
+        if args.dry_run and plan:
+            dry_tags = [f"{service}-v{new}" for service, _, new in plan]
+            push_cmd = ["git", "push", "--atomic", "origin", "master", *dry_tags]
+        log_command(push_cmd, execute=not args.dry_run)
+        if args.dry_run:
+            print("Dry run complete.")
+        else:
+            print("Done!")
     except subprocess.CalledProcessError as e:
-        print("Error: release failed, rolling back transaction.", file=sys.stderr)
+        if args.dry_run:
+            print("Error: dry-run checks failed.", file=sys.stderr)
+        else:
+            print("Error: release failed, rolling back transaction.", file=sys.stderr)
         if e.stderr:
             print(e.stderr, file=sys.stderr)
-        rollback_transaction(start_head, tags)
+        if not args.dry_run:
+            rollback_transaction(start_head, tags)
         sys.exit(1)
 
 

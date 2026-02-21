@@ -165,7 +165,8 @@ It is intended for these services only:
 - Run from a clean git working tree.
 - Be on the `master` branch.
 - Have push access to `origin/master`.
-- Have Rust toolchain available (`cargo check` is run per service).
+- Have Rust toolchain available (`cargo build --release` is run per service).
+- For `forwarder`/`receiver` releases, have Node.js + npm available (UI lint/check/test run).
 - Use `uv` to run the script in this repository.
 
 ## Usage
@@ -196,7 +197,7 @@ uv run scripts/release.py forwarder --patch --dry-run
 - `--minor`: bump `X.Y.Z` to `X.Y+1.0`
 - `--patch`: bump `X.Y.Z` to `X.Y.Z+1`
 - `--version X.Y.Z`: set an exact semantic version (must match `^\d+\.\d+\.\d+$`)
-- `--dry-run`: print release plan and exit without making changes
+- `--dry-run`: run checks/builds, print mutating commands, and skip file/git mutations
 - `--yes`, `-y`: skip interactive confirmation prompt
 
 ## What the Script Does
@@ -206,10 +207,17 @@ For each requested service, the script:
 2. Computes target version.
 3. Skips services already at target.
 4. Updates `services/<service>/Cargo.toml`.
-5. Runs `cargo check -p <service>`.
+5. Runs release-workflow parity checks/build:
+   - `forwarder`/`receiver`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/<service>-ui`
+   - all services: `cargo build --release --package <service> --bin <service>` (`--features embed-ui` for `forwarder`/`receiver`)
 6. Stages `services/<service>/Cargo.toml` and `Cargo.lock`.
 7. Creates commit: `chore(<service>): bump version to <new_version>`.
 8. Creates tag: `<service>-v<new_version>`.
+
+The script prints each step and the exact command before execution.
+In `--dry-run`, it still runs the checks/build commands, but prints and skips
+mutating commands (version file write, `git add`, `git commit`, `git tag`,
+`git push`).
 
 After all services succeed, it pushes branch + tags in a single atomic command:
 
