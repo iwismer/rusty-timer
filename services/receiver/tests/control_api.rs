@@ -78,7 +78,7 @@ async fn put_profile_stores_and_get_returns_it() {
         put_json(
             app.clone(),
             "/api/v1/profile",
-            json!({"server_url":"wss://s.com","token":"tok","log_level":"info"})
+            json!({"server_url":"wss://s.com","token":"tok"})
         )
         .await,
         StatusCode::NO_CONTENT
@@ -96,13 +96,13 @@ async fn put_profile_updates_existing() {
     put_json(
         app.clone(),
         "/api/v1/profile",
-        json!({"server_url":"wss://old","token":"t1","log_level":"debug"}),
+        json!({"server_url":"wss://old","token":"t1"}),
     )
     .await;
     put_json(
         app.clone(),
         "/api/v1/profile",
-        json!({"server_url":"wss://new","token":"t2","log_level":"warn"}),
+        json!({"server_url":"wss://new","token":"t2"}),
     )
     .await;
     let (_, val) = get_json(app, "/api/v1/profile").await;
@@ -128,7 +128,7 @@ async fn get_streams_degraded_when_disconnected_with_profile() {
         .db
         .lock()
         .await
-        .save_profile("wss://s.com", "tok", "info")
+        .save_profile("wss://s.com", "tok")
         .unwrap();
     *state.upstream_url.write().await = Some("wss://s.com".to_owned());
     let (_, val) = get_json(build_router(state), "/api/v1/streams").await;

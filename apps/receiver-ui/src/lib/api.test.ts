@@ -24,7 +24,6 @@ describe("api client", () => {
       makeResponse(200, {
         server_url: "wss://s.com",
         token: "tok",
-        log_level: "info",
       }),
     );
     const p = await getProfile();
@@ -41,7 +40,6 @@ describe("api client", () => {
     await putProfile({
       server_url: "wss://s.com",
       token: "t",
-      log_level: "info",
     });
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/profile",

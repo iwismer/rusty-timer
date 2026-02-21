@@ -43,7 +43,6 @@ async function mockReceiverApi(
         body: JSON.stringify({
           server_url: "wss://example.com/ws/v1/receivers",
           token: "token",
-          log_level: "info",
         }),
       });
       return;
@@ -94,9 +93,6 @@ test.describe("profile page", () => {
       .locator('[data-testid="server-url-input"]')
       .fill("wss://test.example.com");
     await page.locator('[data-testid="token-input"]').fill("test-token");
-    await page
-      .locator('[data-testid="log-level-select"]')
-      .selectOption("debug");
     // The save button should be present and enabled
     const saveBtn = page.locator('[data-testid="save-profile-btn"]');
     await expect(saveBtn).toBeEnabled();

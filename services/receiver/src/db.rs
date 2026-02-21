@@ -18,7 +18,6 @@ pub type DbResult<T> = Result<T, DbError>;
 pub struct Profile {
     pub server_url: String,
     pub token: String,
-    pub log_level: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
@@ -63,21 +62,20 @@ impl Db {
     pub fn load_profile(&self) -> DbResult<Option<Profile>> {
         let mut s = self
             .conn
-            .prepare("SELECT server_url, token, log_level FROM profile LIMIT 1")?;
+            .prepare("SELECT server_url, token FROM profile LIMIT 1")?;
         let mut rows = s.query_map([], |r| {
             Ok(Profile {
                 server_url: r.get(0)?,
                 token: r.get(1)?,
-                log_level: r.get(2)?,
             })
         })?;
         Ok(rows.next().transpose()?)
     }
-    pub fn save_profile(&self, url: &str, tok: &str, ll: &str) -> DbResult<()> {
+    pub fn save_profile(&self, url: &str, tok: &str) -> DbResult<()> {
         self.conn.execute_batch("DELETE FROM profile")?;
         self.conn.execute(
-            "INSERT INTO profile (server_url, token, log_level) VALUES (?1, ?2, ?3)",
-            rusqlite::params![url, tok, ll],
+            "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
+            rusqlite::params![url, tok],
         )?;
         Ok(())
     }

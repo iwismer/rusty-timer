@@ -194,14 +194,12 @@ impl AppState {
 pub struct ProfileRequest {
     pub server_url: String,
     pub token: String,
-    pub log_level: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
     pub server_url: String,
     pub token: String,
-    pub log_level: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -323,7 +321,6 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Ok(Some(p)) => Json(ProfileResponse {
             server_url: p.server_url,
             token: p.token,
-            log_level: p.log_level,
         })
         .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no profile").into_response(),
@@ -337,7 +334,7 @@ async fn put_profile(
 ) -> impl IntoResponse {
     let url = normalize_server_url(&body.server_url);
     let db = state.db.lock().await;
-    match db.save_profile(&url, &body.token, &body.log_level) {
+    match db.save_profile(&url, &body.token) {
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
