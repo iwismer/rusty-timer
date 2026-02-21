@@ -166,7 +166,7 @@ It supports these services:
 - Have push access to `origin/master`.
 - Have Rust toolchain available (`cargo build --release` is run per service).
 - For `forwarder`/`receiver` releases, have Node.js + npm available (UI lint/check/test run).
-- For `server` releases, have Docker available and be logged in to Docker Hub (for image push).
+- For optional local server Docker build checks, have Docker available.
 - Use `uv` to run the script in this repository.
 
 ## Usage
@@ -190,11 +190,11 @@ uv run scripts/release.py receiver --version 2.0.0
 # Preview only (no file or git changes)
 uv run scripts/release.py forwarder --patch --dry-run
 
-# Server release + Docker image build/push
+# Server release (Docker build/push handled by GitHub Actions on server tag)
 uv run scripts/release.py server --patch
 
-# Server release to a custom Docker image repository
-uv run scripts/release.py server --version 2.0.0 --server-docker-image iwismer/rt-server
+# Server release with optional local Docker build check
+uv run scripts/release.py server --version 2.0.0 --server-local-docker-build
 ```
 
 ## Flags
@@ -205,7 +205,8 @@ uv run scripts/release.py server --version 2.0.0 --server-docker-image iwismer/r
 - `--version X.Y.Z`: set an exact semantic version (must match `^\d+\.\d+\.\d+$`)
 - `--dry-run`: run checks/builds, print mutating commands, and skip file/git mutations
 - `--yes`, `-y`: skip interactive confirmation prompt
-- `--server-docker-image IMAGE`: Docker image repository for server releases (default: `iwismer/rt-server`)
+- `--server-local-docker-build`: for `server` releases, run a local Docker build check before commit/tag
+- `--server-docker-image IMAGE`: image repository used for the optional local server Docker build tags (default: `iwismer/rt-server`)
 
 ## What the Script Does
 
@@ -216,8 +217,9 @@ For each requested service, the script:
 4. Updates `services/<service>/Cargo.toml`.
 5. Runs release-workflow parity checks/build:
    - `forwarder`/`receiver`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/<service>-ui`
-   - `server`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/server-ui`, then Docker build:
-     `docker build -t <image>:v<version> -t <image>:latest -f services/server/Dockerfile .`
+   - `server`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/server-ui`, then:
+     - default: `cargo build --release --package server --bin server`
+     - optional: `docker build -t <image>:v<version> -t <image>:latest -f services/server/Dockerfile .` (with `--server-local-docker-build`)
    - `forwarder`/`receiver`/`streamer`/`emulator`: `cargo build --release --package <service> --bin <service>` (`--features embed-ui` for `forwarder`/`receiver`)
 6. Stages `services/<service>/Cargo.toml` and `Cargo.lock`.
 7. Creates commit: `chore(<service>): bump version to <new_version>`.
@@ -236,12 +238,9 @@ After all services succeed, it pushes branch + tags in a single atomic command:
 git push --atomic origin master <tag1> <tag2> ...
 ```
 
-For `server` releases, it then pushes Docker image tags:
-
-```bash
-docker push <image>:v<version>
-docker push <image>:latest
-```
+For `server` releases, Docker image build/push is handled by GitHub Actions on
+`server-v<version>` tags.
+That workflow requires repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
 
 ## Safety and Failure Behavior
 

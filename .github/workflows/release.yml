@@ -7,12 +7,14 @@ on:
       - "receiver-v*"
       - "streamer-v*"
       - "emulator-v*"
+      - "server-v*"
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  SERVER_DOCKER_IMAGE: iwismer/rt-server
 
 jobs:
   resolve-matrix:
@@ -27,12 +29,12 @@ jobs:
         id: parse
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          if [[ "$TAG" =~ ^(forwarder|receiver|streamer|emulator)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          if [[ "$TAG" =~ ^(forwarder|receiver|streamer|emulator|server)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             SERVICE="${BASH_REMATCH[1]}"
             VERSION="${BASH_REMATCH[2]}"
           else
             echo "::error::Invalid tag format: ${TAG}"
-            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|receiver|streamer|emulator"
+            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|receiver|streamer|emulator|server"
             exit 1
           fi
           echo "service=${SERVICE}" >> "$GITHUB_OUTPUT"
@@ -74,6 +76,10 @@ jobs:
             receiver|streamer)
               MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
               ;;
+            server)
+              # Keep a valid matrix output, but skip binary build/package jobs.
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]}'
+              ;;
             *)
               echo "::error::Unknown service: $SERVICE"
               exit 1
@@ -85,6 +91,7 @@ jobs:
   build:
     name: Build ${{ needs.resolve-matrix.outputs.service }} (${{ matrix.os }}-${{ matrix.arch }})
     needs: resolve-matrix
+    if: needs.resolve-matrix.outputs.service != 'server'
     runs-on: ${{ matrix.runner }}
     env:
       SERVICE: ${{ needs.resolve-matrix.outputs.service }}
@@ -179,24 +186,74 @@ jobs:
             ${{ env.ARCHIVE }}.sha256
           retention-days: 1
 
+  server-docker:
+    name: Build and Push Server Docker Image
+    needs: resolve-matrix
+    if: needs.resolve-matrix.outputs.service == 'server'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/server/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.SERVER_DOCKER_IMAGE }}:v${{ needs.resolve-matrix.outputs.version }}
+            ${{ env.SERVER_DOCKER_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     name: Create GitHub Release
-    needs: [resolve-matrix, build]
+    needs: [resolve-matrix, build, server-docker]
+    if: >
+      always() &&
+      needs.resolve-matrix.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs['server-docker'].result == 'success' || needs['server-docker'].result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
+        if: needs.resolve-matrix.outputs.service != 'server'
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
       - name: List artifacts
+        if: needs.resolve-matrix.outputs.service != 'server'
         run: ls -lhR artifacts/
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (service binaries)
+        if: needs.resolve-matrix.outputs.service != 'server'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: "${{ needs.resolve-matrix.outputs.service }} v${{ needs.resolve-matrix.outputs.version }}"
           generate_release_notes: true
           files: artifacts/*
+
+      - name: Create GitHub Release (server metadata only)
+        if: needs.resolve-matrix.outputs.service == 'server'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "${{ needs.resolve-matrix.outputs.service }} v${{ needs.resolve-matrix.outputs.version }}"
+          generate_release_notes: true

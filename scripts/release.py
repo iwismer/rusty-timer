@@ -12,7 +12,8 @@ Usage:
     uv run scripts/release.py forwarder --patch
     uv run scripts/release.py server --patch
     uv run scripts/release.py forwarder emulator --minor
-    uv run scripts/release.py server --version 2.0.0 --server-docker-image iwismer/rt-server
+    uv run scripts/release.py server --version 2.0.0 --server-local-docker-build
+    uv run scripts/release.py server --version 2.0.0 --server-local-docker-build --server-docker-image iwismer/rt-server
     uv run scripts/release.py receiver --version 2.0.0
     uv run scripts/release.py forwarder --patch --dry-run
 """
@@ -81,9 +82,14 @@ def parse_args() -> argparse.Namespace:
         "--server-docker-image",
         default=DEFAULT_SERVER_DOCKER_IMAGE,
         help=(
-            "Docker image repository for server releases "
+            "Docker image repository for optional local server Docker build "
             f"(default: {DEFAULT_SERVER_DOCKER_IMAGE})"
         ),
+    )
+    parser.add_argument(
+        "--server-local-docker-build",
+        action="store_true",
+        help="For server releases, run a local Docker build check before commit/tag",
     )
 
     args = parser.parse_args()
@@ -223,6 +229,7 @@ def run_release_workflow_checks(
     *,
     new_version: str,
     server_docker_image: str,
+    server_local_docker_build: bool,
     start_step: int,
 ) -> int:
     step = start_step
@@ -236,7 +243,7 @@ def run_release_workflow_checks(
         log_command(["npm", "test", "--workspace", ui_workspace], execute=True)
         print(style("    UI checks passed", role="success"))
 
-    if service == "server":
+    if service == "server" and server_local_docker_build:
         image_version_tag, image_latest_tag = server_image_tags(server_docker_image, new_version)
         print(style(f"  [{step}] Build server Docker image", role="step"))
         step += 1
@@ -261,6 +268,14 @@ def run_release_workflow_checks(
             )
         )
         return step
+
+    if service == "server":
+        print(
+            style(
+                "    Skipping local server Docker build (enable with --server-local-docker-build)",
+                role="warning",
+            )
+        )
 
     build_cmd = [
         "cargo",
@@ -358,7 +373,6 @@ def main() -> None:
 
     # --- Execute ---
     tags: list[str] = []
-    git_pushed = False
     try:
         for service, current, new in plan:
             print(f"\n--- {service}: {current} -> {new} ---")
@@ -379,6 +393,7 @@ def main() -> None:
                 service,
                 new_version=new,
                 server_docker_image=args.server_docker_image,
+                server_local_docker_build=args.server_local_docker_build,
                 start_step=step,
             )
 
@@ -419,18 +434,6 @@ def main() -> None:
             dry_tags = [f"{service}-v{new}" for service, _, new in plan]
             push_cmd = ["git", "push", "--atomic", "origin", "master", *dry_tags]
         log_command(push_cmd, execute=not args.dry_run)
-        if not args.dry_run:
-            git_pushed = True
-
-        server_releases = [new for service, _, new in plan if service == "server"]
-        if server_releases:
-            print(style("\n[Final Step] Push server Docker images", role="step"))
-            for version in server_releases:
-                image_version_tag, image_latest_tag = server_image_tags(
-                    args.server_docker_image, version
-                )
-                log_command(["docker", "push", image_version_tag], execute=not args.dry_run)
-                log_command(["docker", "push", image_latest_tag], execute=not args.dry_run)
 
         if args.dry_run:
             print(style("Dry run complete.", role="dry_run"))
@@ -443,28 +446,14 @@ def main() -> None:
                 file=sys.stderr,
             )
         else:
-            error_msg = (
-                "Error: release failed after git push."
-                if git_pushed
-                else "Error: release failed, rolling back transaction."
-            )
             print(
-                style(error_msg, role="error"),
+                style("Error: release failed, rolling back transaction.", role="error"),
                 file=sys.stderr,
             )
         if e.stderr:
             print(e.stderr, file=sys.stderr)
         if not args.dry_run:
-            if git_pushed:
-                print(
-                    style(
-                        "Release failed after git push; skipping automatic rollback.",
-                        role="warning",
-                    ),
-                    file=sys.stderr,
-                )
-            else:
-                rollback_transaction(start_head, tags)
+            rollback_transaction(start_head, tags)
         sys.exit(1)
 
 
