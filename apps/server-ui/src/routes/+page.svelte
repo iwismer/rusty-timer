@@ -72,6 +72,25 @@
   // Group streams by forwarder_id.
   let groupedStreams = $derived(groupStreamsByForwarder($streamsStore));
 
+  // Hide-offline toggle (persisted to localStorage)
+  let hideOffline = $state(
+    typeof localStorage !== "undefined" &&
+      localStorage.getItem("hideOffline") === "true",
+  );
+  $effect(() => {
+    localStorage.setItem("hideOffline", String(hideOffline));
+  });
+  let visibleGroups = $derived(
+    hideOffline
+      ? groupedStreams
+          .map((g) => ({
+            ...g,
+            streams: g.streams.filter((s) => s.online),
+          }))
+          .filter((g) => g.streams.length > 0)
+      : groupedStreams,
+  );
+
   // Time-since-last-read helpers
   function formatDuration(ms: number): string {
     if (ms < 1000) return "< 1s";
@@ -176,10 +195,26 @@
     >
       Streams
     </h1>
+    <label
+      class="flex items-center gap-2 text-sm text-text-muted cursor-pointer select-none"
+    >
+      <input
+        type="checkbox"
+        bind:checked={hideOffline}
+        class="cursor-pointer"
+      />
+      Hide offline
+    </label>
   </div>
 
-  {#each groupedStreams as group, groupIdx (group.forwarderId)}
-    {@const stats = groupStats(group.streams, $metricsStore)}
+  {#each visibleGroups as group, groupIdx (group.forwarderId)}
+    {@const fullGroup = groupedStreams.find(
+      (g) => g.forwarderId === group.forwarderId,
+    )}
+    {@const stats = groupStats(
+      fullGroup?.streams ?? group.streams,
+      $metricsStore,
+    )}
     {@const border = groupBorderStatus(stats)}
     <div class="mb-6">
       <Card borderStatus={border} headerBg>
