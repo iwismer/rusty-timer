@@ -159,7 +159,7 @@ The wizard will prompt you for:
 | Server base URL | `https://timing.example.com` | Must start with `http://` or `https://` |
 | Auth token | *(hidden input)* | Provided by the server operator |
 | Reader target(s) | `192.168.1.100:10000` | IP:PORT of each IPICO reader; enter one per line, blank line to finish |
-| Status HTTP bind address | `0.0.0.0:8080` | Press Enter to accept the default |
+| Status HTTP bind address | `0.0.0.0:80` | Press Enter to accept the default |
 
 SBC setup writes this control block by default:
 
@@ -188,7 +188,7 @@ You can also check manually at any time:
 sudo systemctl status rt-forwarder
 
 # Hit the health endpoint
-curl http://localhost:8080/healthz
+curl http://localhost/healthz
 
 # Follow logs in real time
 journalctl -u rt-forwarder -f

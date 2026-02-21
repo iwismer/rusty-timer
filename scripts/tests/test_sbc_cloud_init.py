@@ -121,7 +121,7 @@ class RenderTests(unittest.TestCase):
             server_base_url="https://timing.example.com",
             auth_token="secret-token",
             reader_targets=("192.168.1.101:10000", "192.168.1.102:10000"),
-            status_bind="0.0.0.0:8080",
+            status_bind="0.0.0.0:80",
         )
 
         text = sbc_cloud_init.render_user_data(config)
