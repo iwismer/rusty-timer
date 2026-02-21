@@ -150,15 +150,14 @@ This attempts to:
 
 ## `release.py` (Rusty Timer Release Helper)
 
-`release.py` automates binary-service releases by bumping service versions, validating builds, creating commits/tags, and pushing everything atomically.
+`release.py` automates service releases by bumping versions, validating release artifacts, creating commits/tags, and pushing everything atomically.
 
-It is intended for these services only:
+It supports these services:
 - `forwarder`
 - `receiver`
 - `streamer`
 - `emulator`
-
-`server` is intentionally excluded (it is deployed via Docker).
+- `server`
 
 ## Prerequisites
 
@@ -167,6 +166,7 @@ It is intended for these services only:
 - Have push access to `origin/master`.
 - Have Rust toolchain available (`cargo build --release` is run per service).
 - For `forwarder`/`receiver` releases, have Node.js + npm available (UI lint/check/test run).
+- For `server` releases, have Docker available and be logged in to Docker Hub (for image push).
 - Use `uv` to run the script in this repository.
 
 ## Usage
@@ -189,6 +189,12 @@ uv run scripts/release.py receiver --version 2.0.0
 
 # Preview only (no file or git changes)
 uv run scripts/release.py forwarder --patch --dry-run
+
+# Server release + Docker image build/push
+uv run scripts/release.py server --patch
+
+# Server release to a custom Docker image repository
+uv run scripts/release.py server --version 2.0.0 --server-docker-image iwismer/rt-server
 ```
 
 ## Flags
@@ -199,6 +205,7 @@ uv run scripts/release.py forwarder --patch --dry-run
 - `--version X.Y.Z`: set an exact semantic version (must match `^\d+\.\d+\.\d+$`)
 - `--dry-run`: run checks/builds, print mutating commands, and skip file/git mutations
 - `--yes`, `-y`: skip interactive confirmation prompt
+- `--server-docker-image IMAGE`: Docker image repository for server releases (default: `iwismer/rt-server`)
 
 ## What the Script Does
 
@@ -209,7 +216,9 @@ For each requested service, the script:
 4. Updates `services/<service>/Cargo.toml`.
 5. Runs release-workflow parity checks/build:
    - `forwarder`/`receiver`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/<service>-ui`
-   - all services: `cargo build --release --package <service> --bin <service>` (`--features embed-ui` for `forwarder`/`receiver`)
+   - `server`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/server-ui`, then Docker build:
+     `docker build -t <image>:v<version> -t <image>:latest -f services/server/Dockerfile .`
+   - `forwarder`/`receiver`/`streamer`/`emulator`: `cargo build --release --package <service> --bin <service>` (`--features embed-ui` for `forwarder`/`receiver`)
 6. Stages `services/<service>/Cargo.toml` and `Cargo.lock`.
 7. Creates commit: `chore(<service>): bump version to <new_version>`.
 8. Creates tag: `<service>-v<new_version>`.
@@ -225,6 +234,13 @@ After all services succeed, it pushes branch + tags in a single atomic command:
 
 ```bash
 git push --atomic origin master <tag1> <tag2> ...
+```
+
+For `server` releases, it then pushes Docker image tags:
+
+```bash
+docker push <image>:v<version>
+docker push <image>:latest
 ```
 
 ## Safety and Failure Behavior

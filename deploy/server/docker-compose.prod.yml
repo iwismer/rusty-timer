@@ -1,4 +1,4 @@
-# deploy/docker-compose.prod.yml
+# deploy/server/docker-compose.prod.yml
 #
 # Production Docker Compose for the Remote Timing Server + PostgreSQL.
 #
@@ -7,12 +7,12 @@
 #
 # Usage:
 #   # Copy and edit the env file first:
-#   cp deploy/.env.example deploy/.env
-#   # Edit deploy/.env with your DATABASE_URL, etc.
+#   cp deploy/server/.env.example deploy/server/.env
+#   # Edit deploy/server/.env with POSTGRES_PASSWORD and image settings.
 #
-#   docker compose -f deploy/docker-compose.prod.yml up -d
+#   docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml up -d
 #
-# See docs/runbooks/server-operations.md for full operational guidance.
+# See deploy/server/README.md for deployment and reverse-proxy examples.
 
 services:
 
@@ -20,7 +20,7 @@ services:
   # PostgreSQL — authoritative event store.
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:16-bookworm
+    image: postgres:18-trixie
     container_name: rt-postgres
     restart: unless-stopped
     environment:
@@ -28,7 +28,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-rtserver}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # PostgreSQL 18+ uses /var/lib/postgresql as the image volume root.
+      - postgres_data:/var/lib/postgresql
     networks:
       - rt-internal
     healthcheck:
@@ -44,7 +45,7 @@ services:
   # rt-server — WebSocket ingest, receiver delivery, REST API, dashboard.
   # ---------------------------------------------------------------------------
   server:
-    image: rt-server:${SERVER_VERSION:-latest}
+    image: ${SERVER_IMAGE:-rt-server}:${SERVER_VERSION:-latest}
     container_name: rt-server
     restart: unless-stopped
     depends_on:

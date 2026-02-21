@@ -36,16 +36,18 @@ the server process does not lose any data.
 
 ```bash
 # Copy and edit the environment file.
-cp deploy/.env.example deploy/.env
-# Edit deploy/.env: set POSTGRES_PASSWORD, SERVER_VERSION, etc.
+cp deploy/server/.env.example deploy/server/.env
+# Edit deploy/server/.env: set POSTGRES_PASSWORD and image/tag values.
 
 # Start the stack.
-docker compose -f deploy/docker-compose.prod.yml up -d
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml up -d
 
 # Check status.
-docker compose -f deploy/docker-compose.prod.yml ps
-docker compose -f deploy/docker-compose.prod.yml logs server --tail=50
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml ps
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml logs server --tail=50
 ```
+
+See `deploy/server/README.md` for image build/publish and reverse-proxy examples.
 
 ### First-time startup
 
@@ -61,14 +63,20 @@ This creates the required tables: `device_tokens`, `streams`, `events`,
 
 After migration, provision forwarder and receiver tokens:
 
-```sql
--- Connect to the Postgres DB.
--- Insert a forwarder token (SHA-256 of the raw token bytes).
--- Use the server's auth module to hash tokens properly.
+```bash
+# Create a forwarder token
+curl -sS -X POST http://localhost:8080/api/v1/admin/tokens \
+  -H "Content-Type: application/json" \
+  -d '{"device_type":"forwarder","device_id":"fwd-001"}'
+
+# Create a receiver token
+curl -sS -X POST http://localhost:8080/api/v1/admin/tokens \
+  -H "Content-Type: application/json" \
+  -d '{"device_type":"receiver","device_id":"receiver-001"}'
 ```
 
-Or use the admin API (if implemented). Contact the system operator
-for token provisioning procedures.
+The response includes the raw token once. Store it in your secret manager and
+distribute it to the corresponding device.
 
 ### Verify startup
 
@@ -103,13 +111,13 @@ No TOML config file — all config from environment.
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Server is alive. |
-| `GET /readyz` | Server is connected to DB and ready to serve. |
+| `GET /readyz` | Readiness endpoint (currently same behavior as `/healthz`). |
 
 ### Log monitoring (Docker)
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml logs -f server
-docker compose -f deploy/docker-compose.prod.yml logs -f postgres
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml logs -f server
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml logs -f postgres
 ```
 
 ### Stream status API
@@ -131,11 +139,11 @@ curl http://localhost:8080/api/v1/streams/{stream_id}/metrics | jq .
 Since the server is stateless, a restart is safe:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml restart server
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml restart server
 
 # Or for a full stack restart:
-docker compose -f deploy/docker-compose.prod.yml down && \
-docker compose -f deploy/docker-compose.prod.yml up -d
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml down && \
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml up -d
 ```
 
 After restart, connected forwarders and receivers will reconnect automatically.
@@ -147,13 +155,13 @@ If Postgres fails:
 
 ```bash
 # Check Postgres health.
-docker compose -f deploy/docker-compose.prod.yml logs postgres --tail=50
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml logs postgres --tail=50
 
 # Restart Postgres.
-docker compose -f deploy/docker-compose.prod.yml restart postgres
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml restart postgres
 
 # Wait for Postgres to become healthy before restarting server.
-docker compose -f deploy/docker-compose.prod.yml up -d server
+docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.prod.yml up -d server
 ```
 
 ### Postgres data directory backup
@@ -178,8 +186,7 @@ Used when race epoch boundaries change (e.g. chip list rollover).
 curl http://localhost:8080/api/v1/streams | jq '.streams[] | {stream_id, forwarder_id, reader_ip}'
 
 # Trigger epoch reset (requires the forwarder to be connected).
-curl -X POST http://localhost:8080/api/v1/streams/{stream_id}/reset-epoch \
-  -H "Authorization: Bearer <admin-token>"
+curl -X POST http://localhost:8080/api/v1/streams/{stream_id}/reset-epoch
 
 # If forwarder is not connected, returns HTTP 409.
 # Connect the forwarder first, then retry.

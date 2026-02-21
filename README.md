@@ -37,7 +37,7 @@ JavaScript toolchain pinning:
 - `package.json` pins the expected Node/npm via `engines` and `packageManager`
 - `.nvmrc` is set to `20` for `nvm use`
 
-See [docs/local-testing.md](docs/local-testing.md) for local development setup and [docs/docker-deployment.md](docs/docker-deployment.md) for production deployment.
+See [docs/local-testing.md](docs/local-testing.md) for local development setup and [deploy/server/README.md](deploy/server/README.md) for production deployment.
 
 ## Read Streamer
 

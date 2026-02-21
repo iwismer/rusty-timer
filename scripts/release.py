@@ -6,11 +6,13 @@
 """
 Rusty Timer Release Helper
 ===========================
-Bumps versions in service Cargo.toml files, commits, tags, and pushes.
+Bumps service versions, validates release artifacts, commits/tags, and pushes.
 
 Usage:
     uv run scripts/release.py forwarder --patch
+    uv run scripts/release.py server --patch
     uv run scripts/release.py forwarder emulator --minor
+    uv run scripts/release.py server --version 2.0.0 --server-docker-image iwismer/rt-server
     uv run scripts/release.py receiver --version 2.0.0
     uv run scripts/release.py forwarder --patch --dry-run
 """
@@ -25,9 +27,15 @@ import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# Server is excluded — it's deployed via Docker, not as a standalone binary.
-VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator")
+VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server")
 EMBED_UI_SERVICES = ("forwarder", "receiver")
+UI_WORKSPACES = {
+    "forwarder": "apps/forwarder-ui",
+    "receiver": "apps/receiver-ui",
+    "server": "apps/server-ui",
+}
+SERVER_DOCKERFILE = "services/server/Dockerfile"
+DEFAULT_SERVER_DOCKER_IMAGE = "iwismer/rt-server"
 VERSION_FORMAT_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RESET = "\x1b[0m"
 STYLE_CODES = {
@@ -68,6 +76,14 @@ def parse_args() -> argparse.Namespace:
         "--yes", "-y",
         action="store_true",
         help="Skip confirmation prompt",
+    )
+    parser.add_argument(
+        "--server-docker-image",
+        default=DEFAULT_SERVER_DOCKER_IMAGE,
+        help=(
+            "Docker image repository for server releases "
+            f"(default: {DEFAULT_SERVER_DOCKER_IMAGE})"
+        ),
     )
 
     args = parser.parse_args()
@@ -194,10 +210,24 @@ def service_uses_embed_ui(service: str) -> bool:
     return service in EMBED_UI_SERVICES
 
 
-def run_release_workflow_checks(service: str, *, start_step: int) -> int:
+def service_ui_workspace(service: str) -> str | None:
+    return UI_WORKSPACES.get(service)
+
+
+def server_image_tags(image_repo: str, version: str) -> tuple[str, str]:
+    return f"{image_repo}:v{version}", f"{image_repo}:latest"
+
+
+def run_release_workflow_checks(
+    service: str,
+    *,
+    new_version: str,
+    server_docker_image: str,
+    start_step: int,
+) -> int:
     step = start_step
-    if service_uses_embed_ui(service):
-        ui_workspace = f"apps/{service}-ui"
+    ui_workspace = service_ui_workspace(service)
+    if ui_workspace is not None:
         print(style(f"  [{step}] Run UI checks for {ui_workspace}", role="step"))
         step += 1
         log_command(["npm", "ci"], execute=True)
@@ -205,6 +235,32 @@ def run_release_workflow_checks(service: str, *, start_step: int) -> int:
         log_command(["npm", "run", "check", "--workspace", ui_workspace], execute=True)
         log_command(["npm", "test", "--workspace", ui_workspace], execute=True)
         print(style("    UI checks passed", role="success"))
+
+    if service == "server":
+        image_version_tag, image_latest_tag = server_image_tags(server_docker_image, new_version)
+        print(style(f"  [{step}] Build server Docker image", role="step"))
+        step += 1
+        log_command(
+            [
+                "docker",
+                "build",
+                "-t",
+                image_version_tag,
+                "-t",
+                image_latest_tag,
+                "-f",
+                SERVER_DOCKERFILE,
+                ".",
+            ],
+            execute=True,
+        )
+        print(
+            style(
+                f"    Docker build passed ({image_version_tag}, {image_latest_tag})",
+                role="success",
+            )
+        )
+        return step
 
     build_cmd = [
         "cargo",
@@ -302,6 +358,7 @@ def main() -> None:
 
     # --- Execute ---
     tags: list[str] = []
+    git_pushed = False
     try:
         for service, current, new in plan:
             print(f"\n--- {service}: {current} -> {new} ---")
@@ -318,7 +375,12 @@ def main() -> None:
                 print(style(f"    Updated {cargo_path}", role="success"))
 
             # Validate with the same checks/build used by release workflow.
-            step = run_release_workflow_checks(service, start_step=step)
+            step = run_release_workflow_checks(
+                service,
+                new_version=new,
+                server_docker_image=args.server_docker_image,
+                start_step=step,
+            )
 
             # Stage, commit, tag
             print(style(f"  [{step}] Stage release files", role="step"))
@@ -357,6 +419,19 @@ def main() -> None:
             dry_tags = [f"{service}-v{new}" for service, _, new in plan]
             push_cmd = ["git", "push", "--atomic", "origin", "master", *dry_tags]
         log_command(push_cmd, execute=not args.dry_run)
+        if not args.dry_run:
+            git_pushed = True
+
+        server_releases = [new for service, _, new in plan if service == "server"]
+        if server_releases:
+            print(style("\n[Final Step] Push server Docker images", role="step"))
+            for version in server_releases:
+                image_version_tag, image_latest_tag = server_image_tags(
+                    args.server_docker_image, version
+                )
+                log_command(["docker", "push", image_version_tag], execute=not args.dry_run)
+                log_command(["docker", "push", image_latest_tag], execute=not args.dry_run)
+
         if args.dry_run:
             print(style("Dry run complete.", role="dry_run"))
         else:
@@ -368,14 +443,28 @@ def main() -> None:
                 file=sys.stderr,
             )
         else:
+            error_msg = (
+                "Error: release failed after git push."
+                if git_pushed
+                else "Error: release failed, rolling back transaction."
+            )
             print(
-                style("Error: release failed, rolling back transaction.", role="error"),
+                style(error_msg, role="error"),
                 file=sys.stderr,
             )
         if e.stderr:
             print(e.stderr, file=sys.stderr)
         if not args.dry_run:
-            rollback_transaction(start_head, tags)
+            if git_pushed:
+                print(
+                    style(
+                        "Release failed after git push; skipping automatic rollback.",
+                        role="warning",
+                    ),
+                    file=sys.stderr,
+                )
+            else:
+                rollback_transaction(start_head, tags)
         sys.exit(1)
 
 

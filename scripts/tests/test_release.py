@@ -59,6 +59,7 @@ class TransactionTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
+            server_docker_image="iwismer/rt-server",
         )
 
         read_version_mock.side_effect = ["0.1.0", "0.1.0"]
@@ -116,6 +117,7 @@ class PushTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
+            server_docker_image="iwismer/rt-server",
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -166,6 +168,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
+            server_docker_image="iwismer/rt-server",
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -233,6 +236,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             version=None,
             dry_run=False,
             yes=True,
+            server_docker_image="iwismer/rt-server",
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -265,6 +269,80 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             calls,
         )
 
+    @patch("scripts.release.write_version")
+    @patch("scripts.release.compute_new_version")
+    @patch("scripts.release.read_version")
+    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_is_dirty", return_value=False)
+    def test_server_runs_ui_checks_docker_build_and_push(
+        self,
+        _dirty_mock,
+        _branch_mock,
+        read_version_mock,
+        compute_new_version_mock,
+        _write_version_mock,
+    ) -> None:
+        args = argparse.Namespace(
+            services=["server"],
+            major=False,
+            minor=False,
+            patch=True,
+            version=None,
+            dry_run=False,
+            yes=True,
+            server_docker_image="iwismer/rt-server",
+        )
+
+        read_version_mock.return_value = "0.1.0"
+        compute_new_version_mock.return_value = "0.1.1"
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs):  # noqa: ANN003
+            calls.append(cmd)
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch("scripts.release.parse_args", return_value=args), patch(
+            "scripts.release.run", side_effect=fake_run
+        ):
+            release.main()
+
+        self.assertIn(["npm", "ci"], calls)
+        self.assertIn(
+            ["npm", "run", "lint", "--workspace", "apps/server-ui"],
+            calls,
+        )
+        self.assertIn(
+            ["npm", "run", "check", "--workspace", "apps/server-ui"],
+            calls,
+        )
+        self.assertIn(
+            ["npm", "test", "--workspace", "apps/server-ui"],
+            calls,
+        )
+        self.assertIn(
+            [
+                "docker",
+                "build",
+                "-t",
+                "iwismer/rt-server:v0.1.1",
+                "-t",
+                "iwismer/rt-server:latest",
+                "-f",
+                "services/server/Dockerfile",
+                ".",
+            ],
+            calls,
+        )
+        self.assertIn(
+            ["git", "push", "--atomic", "origin", "master", "server-v0.1.1"],
+            calls,
+        )
+        self.assertIn(["docker", "push", "iwismer/rt-server:v0.1.1"], calls)
+        self.assertIn(["docker", "push", "iwismer/rt-server:latest"], calls)
+
 
 class DryRunBehaviorTests(unittest.TestCase):
     @patch("scripts.release.write_version")
@@ -288,6 +366,7 @@ class DryRunBehaviorTests(unittest.TestCase):
             version=None,
             dry_run=True,
             yes=True,
+            server_docker_image="iwismer/rt-server",
         )
 
         read_version_mock.return_value = "0.1.0"
@@ -347,6 +426,58 @@ class DryRunBehaviorTests(unittest.TestCase):
             ["git", "push", "--atomic", "origin", "master", "forwarder-v0.1.1"],
             calls,
         )
+
+
+class PostGitPushFailureBehaviorTests(unittest.TestCase):
+    @patch("scripts.release.write_version")
+    @patch("scripts.release.compute_new_version")
+    @patch("scripts.release.read_version")
+    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_is_dirty", return_value=False)
+    def test_server_docker_push_failure_after_git_push_skips_git_rollback(
+        self,
+        _dirty_mock,
+        _branch_mock,
+        read_version_mock,
+        compute_new_version_mock,
+        _write_version_mock,
+    ) -> None:
+        args = argparse.Namespace(
+            services=["server"],
+            major=False,
+            minor=False,
+            patch=True,
+            version=None,
+            dry_run=False,
+            yes=True,
+            server_docker_image="iwismer/rt-server",
+        )
+
+        read_version_mock.return_value = "0.1.0"
+        compute_new_version_mock.return_value = "0.1.1"
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs):  # noqa: ANN003
+            calls.append(cmd)
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+            if cmd == ["docker", "push", "iwismer/rt-server:latest"]:
+                raise subprocess.CalledProcessError(1, cmd, stderr="docker push failed")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch("scripts.release.parse_args", return_value=args), patch(
+            "scripts.release.run", side_effect=fake_run
+        ):
+            with self.assertRaises(SystemExit):
+                release.main()
+
+        self.assertIn(
+            ["git", "push", "--atomic", "origin", "master", "server-v0.1.1"],
+            calls,
+        )
+        self.assertNotIn(["git", "reset", "--hard", "abc123"], calls)
+        self.assertNotIn(["git", "tag", "-d", "server-v0.1.1"], calls)
 
 
 if __name__ == "__main__":
