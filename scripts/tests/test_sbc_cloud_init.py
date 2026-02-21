@@ -129,6 +129,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("write_files:", text)
         self.assertIn("/etc/rusty-timer/rt-setup.env", text)
         self.assertIn("RT_SETUP_NONINTERACTIVE=1", text)
+        self.assertIn("RT_SETUP_ALLOW_POWER_ACTIONS=1", text)
         self.assertIn("RT_SETUP_DISPLAY_NAME=rt-fwd-90", text)
         self.assertIn("RT_SETUP_SERVER_BASE_URL=https://timing.example.com", text)
         self.assertIn("RT_SETUP_AUTH_TOKEN=secret-token", text)

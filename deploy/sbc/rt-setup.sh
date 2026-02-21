@@ -29,7 +29,8 @@ APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 
 bool_env_is_true() {
   local raw="${1:-}"
-  local lower="${raw,,}"
+  local lower
+  lower="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
   case "${lower}" in
     1|true|yes|y|on)
       printf '1\n'
@@ -38,6 +39,15 @@ bool_env_is_true() {
       printf '0\n'
       ;;
   esac
+}
+
+allow_power_actions_toml_value() {
+  local raw="${RT_SETUP_ALLOW_POWER_ACTIONS:-1}"
+  if [[ "$(bool_env_is_true "${raw}")" == "1" ]]; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
 }
 
 is_noninteractive_mode() {
@@ -481,6 +491,8 @@ configure() {
   fi
   local escaped_forwarder_display_name
   escaped_forwarder_display_name="$(toml_escape_string "${forwarder_display_name}")"
+  local control_allow_power_actions
+  control_allow_power_actions="$(allow_power_actions_toml_value)"
 
   # Generate config file
   cat > "${CONFIG_DIR}/forwarder.toml" <<EOF
@@ -499,6 +511,9 @@ prune_watermark_pct = 80
 
 [status_http]
 bind = "${STATUS_BIND}"
+
+[control]
+allow_power_actions = ${control_allow_power_actions}
 
 [uplink]
 batch_mode = "immediate"

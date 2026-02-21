@@ -99,6 +99,20 @@ enabled = true
 The `auth.token_file` must contain a single line with the Bearer token
 issued by the server operator. This token is never logged.
 
+### Device power-action controls
+
+The forwarder config supports an optional control section:
+
+```toml
+[control]
+allow_power_actions = false
+```
+
+- `allow_power_actions = false` (default): device restart/shutdown API/UI actions are blocked.
+- `allow_power_actions = true`: enables `restart-device` and `shutdown-device` control actions.
+
+SBC provisioning via `deploy/sbc/rt-setup.sh` sets this to `true` by default.
+
 ---
 
 ## Monitoring and Health
@@ -152,6 +166,12 @@ No manual intervention required. Check logs after restart:
 ```bash
 journalctl -u rt-forwarder -n 100 | grep -i "reopen\|integrity\|replay\|unacked"
 ```
+
+### Safe shutdown before unplugging
+
+Before unplugging an SBC forwarder, issue a clean shutdown first (UI action
+or `sudo systemctl poweroff`). This avoids journal corruption and reduces risk
+of losing locally buffered events.
 
 ### SQLite integrity check failed at startup
 

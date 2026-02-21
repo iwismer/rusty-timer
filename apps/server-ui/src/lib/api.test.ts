@@ -490,4 +490,55 @@ describe("server_api client", () => {
     );
     await expect(getStreamEpochs("bad-id")).rejects.toThrow();
   });
+
+  it("restartForwarderService sends control restart-service action", async () => {
+    const { restartForwarderService } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    const result = await restartForwarderService("fwd-1");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/forwarders/fwd-1/control/restart-service",
+      ),
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("restartForwarderDevice sends control restart-device action", async () => {
+    const { restartForwarderDevice } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    const result = await restartForwarderDevice("fwd-1");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/forwarders/fwd-1/control/restart-device",
+      ),
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("shutdownForwarderDevice sends control shutdown-device action", async () => {
+    const { shutdownForwarderDevice } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    const result = await shutdownForwarderDevice("fwd-1");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/forwarders/fwd-1/control/shutdown-device",
+      ),
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("controlForwarderAction URL-encodes forwarder ID and action", async () => {
+    const { controlForwarderAction } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await controlForwarderAction("fwd/abc", "restart-service");
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/forwarders/fwd%2Fabc/control/restart-service",
+      ),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 });
