@@ -24,7 +24,6 @@ describe("api client", () => {
       makeResponse(200, {
         server_url: "wss://s.com",
         token: "tok",
-        log_level: "info",
         update_mode: "check-and-download",
       }),
     );
@@ -42,7 +41,6 @@ describe("api client", () => {
     await putProfile({
       server_url: "wss://s.com",
       token: "t",
-      log_level: "info",
       update_mode: "check-and-download",
     });
     expect(mockFetch).toHaveBeenCalledWith(

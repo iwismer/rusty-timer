@@ -43,7 +43,6 @@ async function mockReceiverApi(
         body: JSON.stringify({
           server_url: "wss://example.com/ws/v1/receivers",
           token: "token",
-          log_level: "info",
           update_mode: "check-and-download",
         }),
       });
@@ -102,7 +101,7 @@ test.describe("profile page", () => {
 
   test("renders profile section", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator('[data-testid="profile-section"]')).toBeVisible();
+    await expect(page.locator('[data-testid="config-section"]')).toBeVisible();
   });
 
   test("can fill in and save profile form", async ({ page }) => {
@@ -111,11 +110,8 @@ test.describe("profile page", () => {
       .locator('[data-testid="server-url-input"]')
       .fill("wss://test.example.com");
     await page.locator('[data-testid="token-input"]').fill("test-token");
-    await page
-      .locator('[data-testid="log-level-select"]')
-      .selectOption("debug");
     // The save button should be present and enabled
-    const saveBtn = page.locator('[data-testid="save-profile-btn"]');
+    const saveBtn = page.locator('[data-testid="save-config-btn"]');
     await expect(saveBtn).toBeEnabled();
   });
 

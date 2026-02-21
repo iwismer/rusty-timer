@@ -1,6 +1,6 @@
 [package]
 name = "server"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -20,6 +20,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 rt-protocol = { path = "../../crates/rt-protocol" }
+rt-ui-log = { path = "../../crates/rt-ui-log" }
 ipico-core = { path = "../../crates/ipico-core" }
 timer-core = { path = "../../crates/timer-core" }
 futures-util = "0.3"

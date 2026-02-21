@@ -4,6 +4,7 @@ use receiver::db::Db;
 use receiver::local_proxy::LocalProxy;
 use receiver::ports::{resolve_ports, stream_key, PortAssignment};
 use receiver::Subscription;
+use rt_ui_log::UiLogLevel;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -41,8 +42,7 @@ async fn main() {
     // 2. Create AppState
     // -------------------------------------------------------------------------
     let (state, mut shutdown_rx) = AppState::new(db);
-    info!("receiver started");
-    state.emit_log("Receiver started".to_owned()).await;
+    state.logger.log("Receiver started");
 
     // -------------------------------------------------------------------------
     // 4. Load profile and restore subscriptions
@@ -89,10 +89,7 @@ async fn main() {
             eprintln!("FATAL: failed to bind control API on 127.0.0.1:9090: {e}");
             std::process::exit(1);
         });
-    info!("control API listening on 127.0.0.1:9090");
-    state
-        .emit_log("Control API listening on 127.0.0.1:9090".to_owned())
-        .await;
+    state.logger.log("Control API listening on 127.0.0.1:9090");
 
     let api_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -160,7 +157,7 @@ async fn main() {
                                         },
                                     },
                                 );
-                                state.emit_log(format!("Update v{version} available")).await;
+                                state.logger.log(format!("Update v{version} available"));
                             }
                             Err(e) => {
                                 warn!(error = %e, "update download failed");
@@ -247,9 +244,8 @@ async fn main() {
                     db.load_subscriptions().unwrap_or_default()
                 };
                 if current_subs != last_subs {
-                    info!(n = current_subs.len(), "subscriptions changed, reconciling proxies");
                     reconcile_proxies(&current_subs, &mut proxies, &event_bus).await;
-                    state.emit_log(format!("Subscriptions changed ({} streams)", current_subs.len())).await;
+                    state.logger.log(format!("Subscriptions changed ({} streams)", current_subs.len()));
                     state.emit_streams_snapshot().await;
                     last_subs = current_subs;
                 }
@@ -267,8 +263,7 @@ async fn main() {
                         let url_opt = state.upstream_url.read().await.clone();
                         match url_opt {
                             None => {
-                                warn!("connect requested but no upstream URL configured");
-                                state.emit_log("No upstream URL configured".to_owned()).await;
+                                state.logger.log_at(UiLogLevel::Warn, "No upstream URL configured");
                                 state.set_connection_state(ConnectionState::Disconnected).await;
                             }
                             Some(base_url) => {
@@ -285,8 +280,7 @@ async fn main() {
                                 };
                                 match token_opt {
                                   None => {
-                                    warn!("connect requested but no auth token in profile");
-                                    state.emit_log("No auth token in profile".to_owned()).await;
+                                    state.logger.log_at(UiLogLevel::Warn, "No auth token in profile");
                                     state.set_connection_state(ConnectionState::Disconnected).await;
                                   }
                                   Some(token) => {
@@ -294,16 +288,13 @@ async fn main() {
                                     receiver::build_authenticated_request(ws_url.as_str(), &token);
                                 match ws_request {
                                   Err(e) => {
-                                    error!(error = %e, "failed to build WS request");
-                                    state.emit_log(format!("Failed to build WS request: {e}")).await;
+                                    state.logger.log_at(UiLogLevel::Error, format!("Failed to build WS request: {e}"));
                                     state.set_connection_state(ConnectionState::Disconnected).await;
                                   }
                                   Ok(ws_request) => {
-                                info!(url = %ws_url, "initiating WS session");
                                 match connect_async(ws_request).await {
                                     Err(e) => {
-                                        error!(error = %e, "WS connect failed");
-                                        state.emit_log(format!("Connection failed: {e}")).await;
+                                        state.logger.log_at(UiLogLevel::Error, format!("Connection failed: {e}"));
                                         state.set_connection_state(ConnectionState::Disconnected).await;
                                     }
                                     Ok((ws, _)) => {
@@ -314,13 +305,11 @@ async fn main() {
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
-                                                error!(error = %e, "WS handshake failed");
-                                                state.emit_log(format!("Handshake failed: {e}")).await;
+                                                state.logger.log_at(UiLogLevel::Error, format!("Handshake failed: {e}"));
                                                 state.set_connection_state(ConnectionState::Disconnected).await;
                                             }
                                             (Ok(session_id), Some(ws)) => {
-                                                info!(session_id = %session_id, "WS session established");
-                                                state.emit_log(format!("Connected (session {session_id})")).await;
+                                                state.logger.log(format!("Connected (session {session_id})"));
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
 
@@ -361,9 +350,7 @@ async fn main() {
                                                 session_cancel_tx = Some(cancel_tx);
                                             }
                                             (Ok(_), None) => {
-                                                // Should not happen
-                                                error!("handshake succeeded but ws was None");
-                                                state.emit_log("Handshake succeeded but connection lost".to_owned()).await;
+                                                state.logger.log_at(UiLogLevel::Error, "Handshake succeeded but connection lost");
                                                 state.set_connection_state(ConnectionState::Disconnected).await;
                                             }
                                         }
@@ -396,7 +383,7 @@ async fn main() {
     // -------------------------------------------------------------------------
     // 8. Graceful shutdown — close WS session and release TCP ports
     // -------------------------------------------------------------------------
-    info!("shutting down receiver");
+    state.logger.log("shutdown signal received");
     cancel_session(&mut session_task, &mut session_cancel_tx).await;
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");

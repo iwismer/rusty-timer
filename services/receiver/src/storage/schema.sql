@@ -10,7 +10,6 @@
 CREATE TABLE IF NOT EXISTS profile (
     server_url  TEXT NOT NULL,
     token       TEXT NOT NULL,
-    log_level   TEXT NOT NULL DEFAULT 'info',
     update_mode TEXT NOT NULL DEFAULT 'check-and-download'
 );
 

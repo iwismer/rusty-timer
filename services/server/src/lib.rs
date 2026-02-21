@@ -53,6 +53,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::streams::list_epochs),
         )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
+        .route("/api/v1/logs", get(http::logs::get_logs))
         .route(
             "/api/v1/forwarders/:forwarder_id/config",
             get(http::forwarder_config::get_forwarder_config),
@@ -126,6 +127,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             "/api/v1/admin/receiver-cursors/:receiver_id/:stream_id",
             delete(http::admin::delete_receiver_stream_cursor),
         )
+        .route("/api/v1/admin/races", delete(http::admin::delete_all_races))
         .route(
             "/api/v1/races",
             get(http::races::list_races).post(http::races::create_race),

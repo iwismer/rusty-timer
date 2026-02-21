@@ -7,10 +7,19 @@
     setMetrics,
     forwarderRacesStore,
     racesStore,
+    racesLoadedStore,
     setForwarderRace,
   } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { groupStreamsByForwarder } from "$lib/groupStreams";
+  import {
+    readHideOfflinePreference,
+    writeHideOfflinePreference,
+  } from "$lib/hideOfflinePreference";
+  import {
+    readRaceFilterPreference,
+    writeRaceFilterPreference,
+  } from "$lib/raceFilterPreference";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
   import { resolveChipRead } from "$lib/chipResolver";
   import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
@@ -71,6 +80,61 @@
 
   // Group streams by forwarder_id.
   let groupedStreams = $derived(groupStreamsByForwarder($streamsStore));
+  let groupedStreamsById = $derived(
+    new Map(groupedStreams.map((g) => [g.forwarderId, g])),
+  );
+
+  // Hide-offline toggle (persisted to localStorage)
+  let hideOffline = $state(readHideOfflinePreference());
+  $effect(() => {
+    writeHideOfflinePreference(hideOffline);
+  });
+
+  // Race filter (persisted to localStorage)
+  let selectedRaceId = $state<string | null>(readRaceFilterPreference());
+
+  $effect(() => {
+    writeRaceFilterPreference(selectedRaceId);
+  });
+
+  // Reset if the persisted race no longer exists (only after races load)
+  $effect(() => {
+    if (
+      $racesLoadedStore &&
+      selectedRaceId &&
+      !$racesStore.some((r) => r.race_id === selectedRaceId)
+    ) {
+      selectedRaceId = null;
+    }
+  });
+
+  // Fail-open behavior: if races are unavailable or the selected race is missing,
+  // treat it as "All races" instead of filtering everything out.
+  let effectiveSelectedRaceId = $derived(
+    selectedRaceId &&
+      $racesStore.some((race) => race.race_id === selectedRaceId)
+      ? selectedRaceId
+      : null,
+  );
+
+  let visibleGroups = $derived.by(() => {
+    let groups = groupedStreams;
+    if (effectiveSelectedRaceId) {
+      groups = groups.filter((g) => {
+        const forwarderRaceId = $forwarderRacesStore[g.forwarderId];
+        return forwarderRaceId === effectiveSelectedRaceId;
+      });
+    }
+    if (hideOffline) {
+      groups = groups
+        .map((g) => ({
+          ...g,
+          streams: g.streams.filter((s) => s.online),
+        }))
+        .filter((g) => g.streams.length > 0);
+    }
+    return groups;
+  });
 
   // Time-since-last-read helpers
   function formatDuration(ms: number): string {
@@ -176,10 +240,40 @@
     >
       Streams
     </h1>
+    <div class="flex items-center gap-4">
+      <select
+        data-testid="race-filter-select"
+        aria-label="Filter streams by race"
+        class="text-sm px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+        value={effectiveSelectedRaceId ?? ""}
+        onchange={(e) => {
+          selectedRaceId = e.currentTarget.value || null;
+        }}
+      >
+        <option value="">All races</option>
+        {#each $racesStore as race (race.race_id)}
+          <option value={race.race_id}>{race.name}</option>
+        {/each}
+      </select>
+      <label
+        class="flex items-center gap-2 text-sm text-text-muted cursor-pointer select-none"
+      >
+        <input
+          type="checkbox"
+          bind:checked={hideOffline}
+          class="cursor-pointer"
+        />
+        Hide offline
+      </label>
+    </div>
   </div>
 
-  {#each groupedStreams as group, groupIdx (group.forwarderId)}
-    {@const stats = groupStats(group.streams, $metricsStore)}
+  {#each visibleGroups as group (group.forwarderId)}
+    {@const fullGroup = groupedStreamsById.get(group.forwarderId)}
+    {@const stats = groupStats(
+      fullGroup?.streams ?? group.streams,
+      $metricsStore,
+    )}
     {@const border = groupBorderStatus(stats)}
     <div class="mb-6">
       <Card borderStatus={border} headerBg>
@@ -201,6 +295,8 @@
               {stats.totalChips.toLocaleString()} chips
             </span>
             <select
+              data-testid={`forwarder-race-select-${group.forwarderId}`}
+              aria-label={`Assign race for ${group.displayName}`}
               class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
               value={$forwarderRacesStore[group.forwarderId] ?? ""}
               onchange={(e) => {
@@ -312,7 +408,19 @@
     </div>
   {/each}
 
-  {#if $streamsStore.length === 0}
-    <p class="text-sm text-text-muted">No streams found.</p>
+  {#if visibleGroups.length === 0}
+    {#if $streamsStore.length === 0}
+      <p class="text-sm text-text-muted">No streams found.</p>
+    {:else if effectiveSelectedRaceId && hideOffline}
+      <p class="text-sm text-text-muted">
+        No online streams match the selected race.
+      </p>
+    {:else if effectiveSelectedRaceId}
+      <p class="text-sm text-text-muted">No streams match the selected race.</p>
+    {:else if hideOffline}
+      <p data-testid="no-online-streams" class="text-sm text-text-muted">
+        No online streams found.
+      </p>
+    {/if}
   {/if}
 </main>

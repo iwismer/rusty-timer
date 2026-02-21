@@ -123,11 +123,16 @@ SSH is optional for troubleshooting only.
    ssh rt-admin@192.168.1.50
    ```
 
-   You can also try mDNS if your network supports it:
+   The Pi advertises its hostname via mDNS (avahi-daemon), so you can also
+   connect by name:
 
    ```bash
    ssh <ssh-admin-username>@<hostname>.local
    ```
+
+   After the forwarder is installed/configured (`--auto-first-boot` or Step 4),
+   the dashboard is available at `http://<hostname>.local` (include `:<port>`
+   if you configured a non-default status bind).
 
 ## Step 4 -- Run the Setup Script
 
@@ -159,7 +164,7 @@ The wizard will prompt you for:
 | Server base URL | `https://timing.example.com` | Must start with `http://` or `https://` |
 | Auth token | *(hidden input)* | Provided by the server operator |
 | Reader target(s) | `192.168.1.100:10000` | IP:PORT of each IPICO reader; enter one per line, blank line to finish |
-| Status HTTP bind address | `0.0.0.0:8080` | Press Enter to accept the default |
+| Status HTTP bind address | `0.0.0.0:80` | Press Enter to accept the default |
 
 SBC setup writes this control block by default:
 
@@ -188,7 +193,7 @@ You can also check manually at any time:
 sudo systemctl status rt-forwarder
 
 # Hit the health endpoint
-curl http://localhost:8080/healthz
+curl http://localhost/healthz
 
 # Follow logs in real time
 journalctl -u rt-forwarder -f

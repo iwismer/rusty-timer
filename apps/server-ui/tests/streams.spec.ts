@@ -24,6 +24,27 @@ const MOCK_STREAMS = [
   },
 ];
 
+const MOCK_ALL_OFFLINE_STREAMS = [
+  {
+    stream_id: "stream-offline-1",
+    forwarder_id: "fwd-offline",
+    reader_ip: "172.16.0.10:10000",
+    display_alias: "Offline Reader A",
+    online: false,
+    stream_epoch: 5,
+    created_at: "2024-01-03T00:00:00Z",
+  },
+  {
+    stream_id: "stream-offline-2",
+    forwarder_id: "fwd-offline",
+    reader_ip: "172.16.0.11:10000",
+    display_alias: "Offline Reader B",
+    online: false,
+    stream_epoch: 6,
+    created_at: "2024-01-04T00:00:00Z",
+  },
+];
+
 const MOCK_METRICS = {
   raw_count: 500,
   dedup_count: 480,
@@ -114,6 +135,185 @@ test.describe("stream list page", () => {
     await expect(items).toHaveCount(2);
   });
 
+  test("hide offline toggle filters offline stream rows", async ({ page }) => {
+    await page.goto("/");
+
+    const items = page.locator('[data-testid="stream-item"]');
+    await expect(items).toHaveCount(2);
+
+    await page.getByLabel("Hide offline").check();
+
+    await expect(items).toHaveCount(1);
+    await expect(
+      page.locator('[data-testid="stream-offline-badge"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="stream-online-badge"]'),
+    ).toHaveCount(1);
+  });
+
+  test("hide offline preference persists after reload", async ({ page }) => {
+    await page.goto("/");
+
+    await page.getByLabel("Hide offline").check();
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+
+    await page.reload();
+
+    await expect(page.getByLabel("Hide offline")).toBeChecked();
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+  });
+
+  test("race filter preference persists after reload", async ({ page }) => {
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          assignments: [
+            { forwarder_id: "fwd-alpha", race_id: RACE_ID },
+            { forwarder_id: "fwd-beta", race_id: null },
+          ],
+        }),
+      });
+    });
+
+    await page.addInitScript((raceId: string) => {
+      localStorage.setItem("raceFilter", raceId);
+    }, RACE_ID);
+
+    await page.goto("/");
+    await expect(
+      page.locator('[data-testid="race-filter-select"]'),
+    ).toHaveValue(RACE_ID);
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+
+    await page.reload();
+
+    await expect(
+      page.locator('[data-testid="race-filter-select"]'),
+    ).toHaveValue(RACE_ID);
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+  });
+
+  test("stale race filter preference resets to all races", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("raceFilter", "missing-race-id");
+    });
+
+    await page.goto("/");
+
+    await expect(
+      page.locator('[data-testid="race-filter-select"]'),
+    ).toHaveValue("");
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(2);
+  });
+
+  test("fails open to all races when races API is unavailable", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/races", async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "INTERNAL_ERROR",
+          message: "temporary failure",
+        }),
+      });
+    });
+
+    await page.addInitScript((raceId: string) => {
+      localStorage.setItem("raceFilter", raceId);
+    }, RACE_ID);
+
+    await page.goto("/");
+
+    await expect(
+      page.locator('[data-testid="race-filter-select"]'),
+    ).toHaveValue("");
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(2);
+  });
+
+  test("shows empty state when selected race has no matching forwarders", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          assignments: [
+            { forwarder_id: "fwd-alpha", race_id: null },
+            { forwarder_id: "fwd-beta", race_id: null },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page
+      .locator('[data-testid="race-filter-select"]')
+      .selectOption(RACE_ID);
+
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(0);
+    await expect(
+      page.getByText("No streams match the selected race."),
+    ).toBeVisible();
+  });
+
+  test("shows race-specific empty state when hide offline removes all matching streams", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          assignments: [
+            { forwarder_id: "fwd-alpha", race_id: null },
+            { forwarder_id: "fwd-beta", race_id: RACE_ID },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page
+      .locator('[data-testid="race-filter-select"]')
+      .selectOption(RACE_ID);
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+
+    await page.getByLabel("Hide offline").check();
+
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(0);
+    await expect(
+      page.getByText("No online streams match the selected race."),
+    ).toBeVisible();
+  });
+
+  test("shows empty-state message when hiding offline streams with no online streams", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/streams", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ streams: MOCK_ALL_OFFLINE_STREAMS }),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(2);
+
+    await page.getByLabel("Hide offline").check();
+
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="no-online-streams"]'),
+    ).toBeVisible();
+  });
+
   test("shows stream display alias when present", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByText("Alpha Reader")).toBeVisible();
@@ -194,8 +394,29 @@ test.describe("stream list page", () => {
   test("overview race selection is reflected on stream detail without SSE", async ({
     page,
   }) => {
+    let assignedRaceId: string | null = null;
+
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          assignments: [
+            {
+              forwarder_id: "fwd-alpha",
+              race_id: assignedRaceId,
+            },
+          ],
+        }),
+      });
+    });
+
     await page.route("**/api/v1/forwarders/fwd-alpha/race", async (route) => {
       if (route.request().method() === "PUT") {
+        const payload = route.request().postDataJSON() as {
+          race_id?: string | null;
+        };
+        assignedRaceId = payload.race_id ?? null;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -216,7 +437,9 @@ test.describe("stream list page", () => {
         request.url().endsWith("/api/v1/forwarders/fwd-alpha/race"),
     );
 
-    const raceSelect = page.getByRole("combobox").first();
+    const raceSelect = page.locator(
+      '[data-testid="forwarder-race-select-fwd-alpha"]',
+    );
     await raceSelect.selectOption(RACE_ID);
     const request = await putRequest;
     expect(request.postDataJSON()).toEqual({ race_id: RACE_ID });
@@ -421,8 +644,29 @@ test.describe("per-stream detail page", () => {
   test("stream detail race selection is reflected on overview without SSE", async ({
     page,
   }) => {
+    let assignedRaceId: string | null = null;
+
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          assignments: [
+            {
+              forwarder_id: "fwd-alpha",
+              race_id: assignedRaceId,
+            },
+          ],
+        }),
+      });
+    });
+
     await page.route("**/api/v1/forwarders/fwd-alpha/race", async (route) => {
       if (route.request().method() === "PUT") {
+        const payload = route.request().postDataJSON() as {
+          race_id?: string | null;
+        };
+        assignedRaceId = payload.race_id ?? null;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -448,9 +692,11 @@ test.describe("per-stream detail page", () => {
     const request = await putRequest;
     expect(request.postDataJSON()).toEqual({ race_id: RACE_ID });
 
-    await page.locator('[data-testid="back-link"]').click();
-    await expect(page).toHaveURL("/");
-    await expect(page.getByRole("combobox").first()).toHaveValue(RACE_ID);
+    await page.goto("/");
+    await expect(page.locator('[data-testid="streams-heading"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="forwarder-race-select-fwd-alpha"]'),
+    ).toHaveValue(RACE_ID);
   });
 });
 

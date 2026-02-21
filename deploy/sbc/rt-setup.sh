@@ -19,7 +19,7 @@ HELPER_DIR="/usr/local/lib"
 CONFIG_DIR="/etc/rusty-timer"
 DATA_DIR="/var/lib/rusty-timer"
 SERVICE_USER="rt-forwarder"
-STATUS_BIND="0.0.0.0:8080"
+STATUS_BIND="0.0.0.0:80"
 VERIFY_POLICY="run_verify"
 FORWARDER_BIN_PATH="${INSTALL_DIR}/rt-forwarder"
 STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
@@ -126,7 +126,7 @@ select_latest_forwarder_asset_from_pages() {
 status_probe_url_from_bind() {
   local bind="$1"
   local host="localhost"
-  local port="8080"
+  local port="80"
 
   if [[ "${bind}" =~ ^\[([0-9A-Fa-f:]+)\]:([0-9]+)$ ]]; then
     local ipv6_host="${BASH_REMATCH[1]}"
@@ -211,6 +211,7 @@ StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rt-forwarder
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

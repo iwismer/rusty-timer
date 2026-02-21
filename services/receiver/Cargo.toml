@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 rt-protocol = { path = "../../crates/rt-protocol" }
+rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-updater = { path = "../../crates/rt-updater" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }

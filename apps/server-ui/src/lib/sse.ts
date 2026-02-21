@@ -1,16 +1,33 @@
 import {
   addOrUpdateStream,
+  forwarderRacesStore,
   patchStream,
   replaceStreams,
+  setRaces,
   setMetrics,
   setForwarderRace,
+  pushLog,
+  logsStore,
 } from "./stores";
-import { getStreams } from "./api";
+import { getForwarderRaces, getLogs, getRaces, getStreams } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
+import { mergeLogsWithPendingLive } from "./logs-merge";
 
 let eventSource: EventSource | null = null;
 let resyncInFlight = false;
 let resyncQueued = false;
+let logsResyncInFlight = false;
+let pendingLiveLogs: string[] = [];
+
+function replaceForwarderAssignments(
+  assignments: Array<{ forwarder_id: string; race_id: string | null }>,
+): void {
+  const next: Record<string, string | null> = {};
+  for (const assignment of assignments) {
+    next[assignment.forwarder_id] = assignment.race_id;
+  }
+  forwarderRacesStore.set(next);
+}
 
 export function initSSE(): void {
   if (eventSource) return;
@@ -53,6 +70,15 @@ export function initSSE(): void {
     setForwarderRace(data.forwarder_id, data.race_id ?? null);
   });
 
+  eventSource.addEventListener("log_entry", (e: MessageEvent) => {
+    const data = JSON.parse(e.data);
+    pushLog(data.entry);
+    if (logsResyncInFlight) {
+      const entry = String(data.entry ?? "").trim();
+      if (entry) pendingLiveLogs.push(entry);
+    }
+  });
+
   eventSource.addEventListener("resync", async () => {
     await resync();
   });
@@ -61,7 +87,7 @@ export function initSSE(): void {
     await resync();
   };
 
-  // Eagerly fetch streams without waiting for the SSE connection to open.
+  // Eagerly fetch dashboard state without waiting for the SSE connection to open.
   // When no forwarders are connected, the SSE response body has no data
   // until the first keep-alive (15 s), which can delay the onopen callback.
   void resync();
@@ -74,20 +100,43 @@ async function resync(): Promise<void> {
   }
 
   resyncInFlight = true;
+  logsResyncInFlight = true;
   try {
     // Coalesce multiple resync triggers into a single follow-up fetch.
     while (true) {
       resyncQueued = false;
-      try {
-        const resp = await getStreams();
-        replaceStreams(resp.streams);
-      } catch {
-        // Resync failed — SSE will keep trying via auto-reconnect
+      const [streamsResp, racesResp, assignmentsResp, logsResp] =
+        await Promise.allSettled([
+          getStreams(),
+          getRaces(),
+          getForwarderRaces(),
+          getLogs(),
+        ]);
+
+      if (streamsResp.status === "fulfilled") {
+        replaceStreams(streamsResp.value.streams);
+      }
+      if (racesResp.status === "fulfilled") {
+        setRaces(racesResp.value.races);
+      }
+      if (assignmentsResp.status === "fulfilled") {
+        replaceForwarderAssignments(assignmentsResp.value.assignments);
+      }
+      if (logsResp.status === "fulfilled") {
+        logsStore.set(
+          mergeLogsWithPendingLive(
+            logsResp.value.entries,
+            pendingLiveLogs,
+            500,
+          ),
+        );
+        pendingLiveLogs = [];
       }
       if (!resyncQueued) break;
     }
   } finally {
     resyncInFlight = false;
+    logsResyncInFlight = false;
   }
 }
 
@@ -98,4 +147,6 @@ export function destroySSE(): void {
   }
   resyncInFlight = false;
   resyncQueued = false;
+  logsResyncInFlight = false;
+  pendingLiveLogs = [];
 }

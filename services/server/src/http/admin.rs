@@ -63,7 +63,10 @@ pub async fn revoke_token(
     .fetch_optional(&state.pool)
     .await
     {
-        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Some(_)) => {
+            state.logger.log(format!("token {token_id} revoked"));
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(HttpErrorEnvelope {
@@ -160,16 +163,19 @@ pub async fn create_token(
     .fetch_one(&state.pool)
     .await
     {
-        Ok(row) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({
-                "token_id": row.token_id.to_string(),
-                "device_id": device_id,
-                "device_type": body.device_type,
-                "token": raw_token,
-            })),
-        )
-            .into_response(),
+        Ok(row) => {
+            state.logger.log(format!("token created for {} {}", body.device_type, device_id));
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "token_id": row.token_id.to_string(),
+                    "device_id": device_id,
+                    "device_type": body.device_type,
+                    "token": raw_token,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             if let Some(db_err) = e.as_database_error() {
                 if db_err.is_unique_violation() {
@@ -292,6 +298,7 @@ pub async fn delete_stream(
                     .into_response();
             }
             let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+            state.logger.log(format!("stream {stream_id} deleted"));
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (
@@ -389,6 +396,7 @@ pub async fn delete_all_streams(State(state): State<AppState>) -> impl IntoRespo
     }
 
     let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+    state.logger.log("all streams deleted");
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -447,6 +455,7 @@ pub async fn delete_all_events(State(state): State<AppState>) -> impl IntoRespon
             .into_response();
     }
 
+    state.logger.log("all events deleted");
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -514,6 +523,9 @@ pub async fn delete_stream_events(
             .into_response();
     }
 
+    state
+        .logger
+        .log(format!("events deleted for stream {stream_id}"));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -597,6 +609,9 @@ pub async fn delete_epoch_events(
             .into_response();
     }
 
+    state.logger.log(format!(
+        "events deleted for stream {stream_id} epoch {epoch}"
+    ));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -605,7 +620,10 @@ pub async fn delete_all_cursors(State(state): State<AppState>) -> impl IntoRespo
         .execute(&state.pool)
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            state.logger.log("all receiver cursors cleared");
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HttpErrorEnvelope {
@@ -669,7 +687,12 @@ pub async fn delete_receiver_cursors(
     .execute(&state.pool)
     .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            state
+                .logger
+                .log(format!("cursors cleared for receiver {receiver_id}"));
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HttpErrorEnvelope {
@@ -694,7 +717,12 @@ pub async fn delete_receiver_stream_cursor(
     .execute(&state.pool)
     .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            state.logger.log(format!(
+                "cursor cleared for receiver {receiver_id} stream {stream_id}"
+            ));
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HttpErrorEnvelope {
@@ -705,4 +733,63 @@ pub async fn delete_receiver_stream_cursor(
         )
             .into_response(),
     }
+}
+
+pub async fn delete_all_races(State(state): State<AppState>) -> impl IntoResponse {
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HttpErrorEnvelope {
+                    code: "INTERNAL_ERROR".to_owned(),
+                    message: e.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    if let Err(e) = sqlx::query!("DELETE FROM forwarder_races")
+        .execute(&mut *tx)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = sqlx::query!("DELETE FROM races").execute(&mut *tx).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = tx.commit().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+    StatusCode::NO_CONTENT.into_response()
 }

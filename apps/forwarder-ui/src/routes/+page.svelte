@@ -39,16 +39,25 @@
     error = null;
     try {
       status = await api.getStatus();
-      const us = await api.getUpdateStatus().catch(() => null);
-      if (
-        (us?.status === "downloaded" || us?.status === "available") &&
-        us.version
-      ) {
-        updateVersion = us.version;
-        updateStatus = us.status;
-      } else {
-        updateVersion = null;
-        updateStatus = null;
+      const [usResult, logsResp] = await Promise.allSettled([
+        api.getUpdateStatus(),
+        api.getLogs(),
+      ]);
+      if (usResult.status === "fulfilled") {
+        const us = usResult.value;
+        if (
+          (us.status === "downloaded" || us.status === "available") &&
+          us.version
+        ) {
+          updateVersion = us.version;
+          updateStatus = us.status;
+        } else {
+          updateVersion = null;
+          updateStatus = null;
+        }
+      }
+      if (logsResp.status === "fulfilled") {
+        logs = logsResp.value.entries;
       }
     } catch (e) {
       error = String(e);

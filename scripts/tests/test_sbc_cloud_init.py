@@ -51,6 +51,20 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ssh_authorized_keys:", text)
         self.assertIn("ssh-ed25519 AAAATEST user@test", text)
 
+    def test_render_user_data_includes_avahi_daemon_package(self) -> None:
+        config = sbc_cloud_init.SbcCloudInitConfig(
+            hostname="rt-fwd-77",
+            admin_username="ops",
+            ssh_public_key="ssh-ed25519 AAAATEST user@test",
+            static_ipv4_cidr="192.168.1.77/24",
+            gateway_ipv4="192.168.1.1",
+            dns_servers=("8.8.8.8",),
+        )
+
+        text = sbc_cloud_init.render_user_data(config)
+
+        self.assertIn("- avahi-daemon", text)
+
     def test_render_network_config_contains_all_network_fields(self) -> None:
         config = sbc_cloud_init.SbcCloudInitConfig(
             hostname="rt-fwd-77",
@@ -121,7 +135,7 @@ class RenderTests(unittest.TestCase):
             server_base_url="https://timing.example.com",
             auth_token="secret-token",
             reader_targets=("192.168.1.101:10000", "192.168.1.102:10000"),
-            status_bind="0.0.0.0:8080",
+            status_bind="0.0.0.0:80",
         )
 
         text = sbc_cloud_init.render_user_data(config)

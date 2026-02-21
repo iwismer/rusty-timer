@@ -54,6 +54,10 @@ export interface ForwarderConfig {
   }>;
 }
 
+export interface LogsResponse {
+  entries: string[];
+}
+
 export interface UpdateStatusResponse {
   status: "up_to_date" | "available" | "downloaded" | "failed";
   version?: string;
@@ -62,6 +66,10 @@ export interface UpdateStatusResponse {
 
 export async function getStatus(): Promise<ForwarderStatus> {
   return apiFetch<ForwarderStatus>("/api/v1/status");
+}
+
+export async function getLogs(): Promise<LogsResponse> {
+  return apiFetch<LogsResponse>("/api/v1/logs");
 }
 
 export async function getConfig(): Promise<ForwarderConfig> {

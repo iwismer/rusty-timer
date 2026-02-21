@@ -29,7 +29,7 @@ DEFAULT_STATIC_IPV4_CIDR = "192.168.1.50/24"
 DEFAULT_GATEWAY = "192.168.1.1"
 DEFAULT_DNS = "8.8.8.8,8.8.4.4"
 DEFAULT_WIFI_COUNTRY = "US"
-DEFAULT_STATUS_BIND = "0.0.0.0:8080"
+DEFAULT_STATUS_BIND = "0.0.0.0:80"
 DEFAULT_SETUP_SCRIPT_URL = (
     "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh"
 )
@@ -338,7 +338,7 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
 
 
 def render_user_data(config: SbcCloudInitConfig) -> str:
-    packages = ["ca-certificates", "jq"]
+    packages = ["avahi-daemon", "ca-certificates", "jq"]
     if config.auto_first_boot:
         packages.extend(["curl", "tar", "coreutils"])
 

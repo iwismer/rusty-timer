@@ -11,19 +11,18 @@ fn db_integrity_check_passes_on_fresh_db() {
 #[test]
 fn profile_save_and_load() {
     let db = Db::open_in_memory().unwrap();
-    db.save_profile("wss://e.com", "t", "info", "check-and-download")
+    db.save_profile("wss://e.com", "t", "check-and-download")
         .unwrap();
     let p = db.load_profile().unwrap().unwrap();
     assert_eq!(p.server_url, "wss://e.com");
     assert_eq!(p.token, "t");
-    assert_eq!(p.log_level, "info");
 }
 #[test]
 fn profile_update_replaces_existing() {
     let db = Db::open_in_memory().unwrap();
-    db.save_profile("wss://old", "old", "debug", "check-and-download")
+    db.save_profile("wss://old", "old", "check-and-download")
         .unwrap();
-    db.save_profile("wss://new", "new", "warn", "check-and-download")
+    db.save_profile("wss://new", "new", "check-and-download")
         .unwrap();
     assert_eq!(db.load_profile().unwrap().unwrap().server_url, "wss://new");
 }
@@ -140,7 +139,7 @@ fn db_profile_persists_to_file() {
     let p = dir.path().join("r.sqlite3");
     {
         let db = Db::open(&p).unwrap();
-        db.save_profile("wss://p.com", "t", "info", "check-and-download")
+        db.save_profile("wss://p.com", "t", "check-and-download")
             .unwrap();
         db.save_cursor("f", "i", 5, 200).unwrap();
     }

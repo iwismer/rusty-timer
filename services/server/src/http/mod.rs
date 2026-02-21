@@ -2,6 +2,7 @@ pub mod admin;
 pub mod export;
 pub mod forwarder_config;
 pub mod forwarder_races;
+pub mod logs;
 pub mod metrics;
 pub mod races;
 pub mod reads;

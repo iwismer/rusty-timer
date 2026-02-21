@@ -27,7 +27,6 @@
   // Edit state
   let editServerUrl = $state("");
   let editToken = $state("");
-  let editLogLevel = $state("info");
   let editUpdateMode = $state("check-and-download");
   let checkingUpdate = $state(false);
   let checkMessage = $state<string | null>(null);
@@ -99,7 +98,6 @@
         profile = p;
         editServerUrl = p.server_url;
         editToken = p.token;
-        editLogLevel = p.log_level;
         editUpdateMode = p.update_mode || "check-and-download";
       }
       const us = await api.getUpdateStatus().catch(() => null);
@@ -124,7 +122,6 @@
       await api.putProfile({
         server_url: editServerUrl,
         token: editToken,
-        log_level: editLogLevel,
         update_mode: editUpdateMode,
       });
     } catch (e) {
@@ -318,8 +315,13 @@
                 state={connectionBadgeState}
               />
             </dd>
-            <dt class="text-text-muted">Local OK</dt>
-            <dd class="text-text-primary">{status.local_ok}</dd>
+            <dt class="text-text-muted">Local DB</dt>
+            <dd>
+              <StatusBadge
+                label={status.local_ok ? "ok" : "error"}
+                state={status.local_ok ? "ok" : "err"}
+              />
+            </dd>
             <dt class="text-text-muted">Streams</dt>
             <dd class="font-mono text-text-primary">{status.streams_count}</dd>
           </dl>
@@ -343,9 +345,9 @@
       </section>
     </Card>
 
-    <!-- Profile Card -->
-    <Card title="Profile">
-      <section data-testid="profile-section">
+    <!-- Config Card -->
+    <Card title="Config">
+      <section data-testid="config-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
             Server URL
@@ -367,20 +369,6 @@
             />
           </label>
           <label class="block text-xs font-medium text-text-muted">
-            Log Level
-            <select
-              data-testid="log-level-select"
-              class="{inputClass} mt-1"
-              bind:value={editLogLevel}
-            >
-              <option value="trace">trace</option>
-              <option value="debug">debug</option>
-              <option value="info">info</option>
-              <option value="warn">warn</option>
-              <option value="error">error</option>
-            </select>
-          </label>
-          <label class="block text-xs font-medium text-text-muted">
             Update Mode
             <select
               data-testid="update-mode-select"
@@ -399,12 +387,12 @@
         </div>
         <div class="flex items-center gap-2 mt-3">
           <button
-            data-testid="save-profile-btn"
+            data-testid="save-config-btn"
             class={btnPrimary}
             onclick={saveProfile}
             disabled={saving}
           >
-            {saving ? "Saving..." : "Save Profile"}
+            {saving ? "Saving..." : "Save"}
           </button>
           <button
             data-testid="check-update-btn"

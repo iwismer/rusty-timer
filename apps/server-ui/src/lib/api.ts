@@ -73,6 +73,15 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ----- Public API -----
 
+/** GET /api/v1/logs */
+export interface LogsResponse {
+  entries: string[];
+}
+
+export async function getLogs(): Promise<LogsResponse> {
+  return apiFetch<LogsResponse>("/api/v1/logs");
+}
+
 /** GET /api/v1/streams */
 export async function getStreams(): Promise<StreamsResponse> {
   return apiFetch<StreamsResponse>("/api/v1/streams");
@@ -450,6 +459,12 @@ export async function deleteReceiverStreamCursor(
     { method: "DELETE" },
   );
 }
+
+/** DELETE /api/v1/admin/races — delete ALL races, returns 204 */
+export async function deleteAllRaces(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/races", { method: "DELETE" });
+}
+
 // ----- Race types -----
 
 export interface RaceEntry {

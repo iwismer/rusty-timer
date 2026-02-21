@@ -1058,3 +1058,149 @@ async fn test_delete_receiver_stream_cursor_idempotent() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 }
+
+// ---------------------------------------------------------------------------
+// Race deletion tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_delete_all_races() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let race_a: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO races (name) VALUES ('Race A') RETURNING race_id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let race_b: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO races (name) VALUES ('Race B') RETURNING race_id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    sqlx::query(
+        "INSERT INTO participants (race_id, bib, first_name, last_name, gender, affiliation) VALUES ($1, 101, 'Ada', 'Runner', 'F', NULL)",
+    )
+    .bind(race_a)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO participants (race_id, bib, first_name, last_name, gender, affiliation) VALUES ($1, 202, 'Bob', 'Sprinter', 'M', NULL)",
+    )
+    .bind(race_b)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO chips (race_id, chip_id, bib) VALUES ($1, 'chip-101', 101)")
+        .bind(race_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO chips (race_id, chip_id, bib) VALUES ($1, 'chip-202', 202)")
+        .bind(race_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query("INSERT INTO forwarder_races (forwarder_id, race_id) VALUES ($1, $2)")
+        .bind("fwd-race-a")
+        .bind(race_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO forwarder_races (forwarder_id, race_id) VALUES ($1, $2)")
+        .bind("fwd-race-b")
+        .bind(race_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let addr = make_server(pool.clone()).await;
+    let client = Client::new();
+    let resp = client
+        .delete(format!("http://{}/api/v1/admin/races", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let races_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM races")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(races_count, 0);
+
+    let participants_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM participants")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(participants_count, 0);
+
+    let chips_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chips")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(chips_count, 0);
+
+    let forwarder_races_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM forwarder_races")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(forwarder_races_count, 0);
+}
+
+#[tokio::test]
+async fn test_delete_all_races_idempotent() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let race_id: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO races (name) VALUES ('Race Only') RETURNING race_id")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO forwarder_races (forwarder_id, race_id) VALUES ($1, $2)")
+        .bind("fwd-race")
+        .bind(race_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let addr = make_server(pool.clone()).await;
+    let client = Client::new();
+
+    let first = client
+        .delete(format!("http://{}/api/v1/admin/races", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 204);
+
+    let second = client
+        .delete(format!("http://{}/api/v1/admin/races", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 204);
+
+    let races_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM races")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(races_count, 0);
+
+    let forwarder_races_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM forwarder_races")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(forwarder_races_count, 0);
+}
