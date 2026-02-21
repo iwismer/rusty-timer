@@ -4,8 +4,10 @@ import {
   replaceStreams,
   setMetrics,
   setForwarderRace,
+  pushLog,
+  logsStore,
 } from "./stores";
-import { getStreams } from "./api";
+import { getStreams, getLogs } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
 
 let eventSource: EventSource | null = null;
@@ -53,6 +55,11 @@ export function initSSE(): void {
     setForwarderRace(data.forwarder_id, data.race_id ?? null);
   });
 
+  eventSource.addEventListener("log_entry", (e: MessageEvent) => {
+    const data = JSON.parse(e.data);
+    pushLog(data.entry);
+  });
+
   eventSource.addEventListener("resync", async () => {
     await resync();
   });
@@ -79,8 +86,12 @@ async function resync(): Promise<void> {
     while (true) {
       resyncQueued = false;
       try {
-        const resp = await getStreams();
-        replaceStreams(resp.streams);
+        const [streamsResp, logsResp] = await Promise.all([
+          getStreams(),
+          getLogs(),
+        ]);
+        replaceStreams(streamsResp.streams);
+        logsStore.set(logsResp.entries);
       } catch {
         // Resync failed — SSE will keep trying via auto-reconnect
       }
