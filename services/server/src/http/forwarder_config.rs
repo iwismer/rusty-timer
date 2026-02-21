@@ -132,7 +132,11 @@ pub async fn control_forwarder(
     Path((forwarder_id, action)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let action_value = match action.as_str() {
-        "restart-service" => "restart_service",
+        "restart-service" => {
+            return restart_forwarder(State(state), Path(forwarder_id))
+                .await
+                .into_response();
+        }
         "restart-device" => "restart_device",
         "shutdown-device" => "shutdown_device",
         _ => {

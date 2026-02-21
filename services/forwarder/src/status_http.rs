@@ -742,6 +742,10 @@ pub async fn apply_section_update(
         }
         "control" => {
             let allow_power_actions = optional_bool_field(payload, "allow_power_actions")?;
+            let action = optional_string_field(payload, "action")?;
+            if let Some(action) = action {
+                return apply_control_action(&action, Some(config_state), None).await;
+            }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.control = Some(crate::config::RawControlConfig {
                     allow_power_actions,
@@ -1026,35 +1030,22 @@ async fn restart_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
-async fn load_allow_power_actions<J: JournalAccess + Send + 'static>(
-    state: &AppState<J>,
-) -> Result<bool, Response> {
-    let cs = match get_config_state(state) {
-        Some(cs) => cs,
-        None => return Err(config_not_available()),
-    };
-
-    let _lock = cs.write_lock.lock().await;
-    let toml_str = match std::fs::read_to_string(&cs.path) {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
-                    .to_string(),
-            ))
-        }
-    };
-    let raw: crate::config::RawConfig = match toml::from_str(&toml_str) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
-                    .to_string(),
-            ))
-        }
-    };
+async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u16, String)> {
+    let _lock = config_state.write_lock.lock().await;
+    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                .to_string(),
+        )
+    })?;
+    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                .to_string(),
+        )
+    })?;
     Ok(raw
         .control
         .and_then(|c| c.allow_power_actions)
@@ -1093,70 +1084,122 @@ fn schedule_device_power_action(systemctl_action: &'static str) {
 #[cfg(not(unix))]
 fn schedule_device_power_action(_systemctl_action: &'static str) {}
 
+pub async fn apply_control_action(
+    action: &str,
+    config_state: Option<&ConfigState>,
+    restart_signal: Option<&Arc<Notify>>,
+) -> Result<(), (u16, String)> {
+    match action {
+        "restart_service" => {
+            let signal = restart_signal.ok_or_else(|| {
+                (
+                    404u16,
+                    serde_json::json!({"ok": false, "error": "restart signal not available"})
+                        .to_string(),
+                )
+            })?;
+            if cfg!(unix) {
+                signal.notify_one();
+                Ok(())
+            } else {
+                Err((
+                    501u16,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "restart not supported on non-unix platforms"
+                    })
+                    .to_string(),
+                ))
+            }
+        }
+        "restart_device" | "shutdown_device" => {
+            let cs = config_state.ok_or_else(|| {
+                (
+                    404u16,
+                    serde_json::json!({"ok": false, "error": "Config editing not available"})
+                        .to_string(),
+                )
+            })?;
+            let allow_power_actions = read_allow_power_actions(cs).await?;
+            if !allow_power_actions {
+                return Err((
+                    403u16,
+                    serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
+                ));
+            }
+            if !cfg!(unix) {
+                return Err((
+                    501u16,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": format!("{} not supported on non-unix platforms", action)
+                    })
+                    .to_string(),
+                ));
+            }
+            let systemctl_action = if action == "restart_device" {
+                "reboot"
+            } else {
+                "poweroff"
+            };
+            schedule_device_power_action(systemctl_action);
+            Ok(())
+        }
+        _ => Err(bad_request_error(format!(
+            "unknown control action: {}",
+            action
+        ))),
+    }
+}
+
 async fn control_restart_service_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    restart_handler(State(state)).await
+    match apply_control_action("restart_service", None, state.restart_signal.as_ref()).await {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
 }
 
 async fn control_restart_device_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let allow_power_actions = match load_allow_power_actions(&state).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
     };
-    if !allow_power_actions {
-        return json_response(
-            StatusCode::FORBIDDEN,
-            serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
-        );
+    match apply_control_action("restart_device", Some(&cs), state.restart_signal.as_ref()).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "status": "restart_device_scheduled"}).to_string(),
+        ),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
     }
-    if !cfg!(unix) {
-        return json_response(
-            StatusCode::NOT_IMPLEMENTED,
-            serde_json::json!({
-                "ok": false,
-                "error": "restart device not supported on non-unix platforms"
-            })
-            .to_string(),
-        );
-    }
-    schedule_device_power_action("reboot");
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({"ok": true, "status": "restart_device_scheduled"}).to_string(),
-    )
 }
 
 async fn control_shutdown_device_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    let allow_power_actions = match load_allow_power_actions(&state).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
     };
-    if !allow_power_actions {
-        return json_response(
-            StatusCode::FORBIDDEN,
-            serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
-        );
+    match apply_control_action("shutdown_device", Some(&cs), state.restart_signal.as_ref()).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "status": "shutdown_device_scheduled"}).to_string(),
+        ),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
     }
-    if !cfg!(unix) {
-        return json_response(
-            StatusCode::NOT_IMPLEMENTED,
-            serde_json::json!({
-                "ok": false,
-                "error": "shutdown device not supported on non-unix platforms"
-            })
-            .to_string(),
-        );
-    }
-    schedule_device_power_action("poweroff");
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({"ok": true, "status": "shutdown_device_scheduled"}).to_string(),
-    )
 }
 
 fn get_config_state<J: JournalAccess + Send + 'static>(
