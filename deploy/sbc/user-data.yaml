@@ -46,6 +46,7 @@ users:
 
 # Ensure required packages are present.
 packages:
+  - avahi-daemon
   - ca-certificates
   - jq
 
