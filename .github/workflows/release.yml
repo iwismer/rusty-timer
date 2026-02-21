@@ -104,30 +104,31 @@ jobs:
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
 
-      - name: Setup Node.js (receiver only)
-        if: env.SERVICE == 'receiver'
+      - name: Setup Node.js (UI-embedded services)
+        if: env.SERVICE == 'forwarder' || env.SERVICE == 'receiver'
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: apps/receiver-ui/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - name: Receiver UI checks (receiver only)
-        if: env.SERVICE == 'receiver'
-        working-directory: apps/receiver-ui
+      - name: UI checks (forwarder/receiver only)
+        if: env.SERVICE == 'forwarder' || env.SERVICE == 'receiver'
         run: |
           npm ci
-          npm run lint
-          npm run check
-          npm test
+          npm run lint --workspace "apps/${{ env.SERVICE }}-ui"
+          npm run check --workspace "apps/${{ env.SERVICE }}-ui"
+          npm test --workspace "apps/${{ env.SERVICE }}-ui"
 
       - name: Build release binary
         shell: bash
         run: |
           FEATURES=""
-          if [ "${{ env.SERVICE }}" = "receiver" ]; then
-            FEATURES="--features embed-ui"
-          fi
+          case "${{ env.SERVICE }}" in
+            forwarder|receiver)
+              FEATURES="--features embed-ui"
+              ;;
+          esac
           cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
 
       - name: Package (Linux)
