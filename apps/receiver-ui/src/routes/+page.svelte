@@ -253,8 +253,13 @@
                 state={connectionBadgeState}
               />
             </dd>
-            <dt class="text-text-muted">Local OK</dt>
-            <dd class="text-text-primary">{status.local_ok}</dd>
+            <dt class="text-text-muted">Local DB</dt>
+            <dd>
+              <StatusBadge
+                label={status.local_ok ? "ok" : "error"}
+                state={status.local_ok ? "ok" : "err"}
+              />
+            </dd>
             <dt class="text-text-muted">Streams</dt>
             <dd class="font-mono text-text-primary">{status.streams_count}</dd>
           </dl>
