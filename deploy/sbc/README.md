@@ -123,11 +123,14 @@ SSH is optional for troubleshooting only.
    ssh rt-admin@192.168.1.50
    ```
 
-   You can also try mDNS if your network supports it:
+   The Pi advertises its hostname via mDNS (avahi-daemon), so you can also
+   connect by name:
 
    ```bash
    ssh <ssh-admin-username>@<hostname>.local
    ```
+
+   The forwarder dashboard is available at `http://<hostname>.local`.
 
 ## Step 4 -- Run the Setup Script
 
