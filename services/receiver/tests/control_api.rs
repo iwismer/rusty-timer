@@ -128,7 +128,7 @@ async fn get_streams_degraded_when_disconnected_with_profile() {
         .db
         .lock()
         .await
-        .save_profile("wss://s.com", "tok", "info")
+        .save_profile("wss://s.com", "tok", "info", "check-and-download")
         .unwrap();
     *state.upstream_url.write().await = Some("wss://s.com".to_owned());
     let (_, val) = get_json(build_router(state), "/api/v1/streams").await;

@@ -19,6 +19,7 @@ pub struct Profile {
     pub server_url: String,
     pub token: String,
     pub log_level: String,
+    pub update_mode: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
@@ -63,21 +64,22 @@ impl Db {
     pub fn load_profile(&self) -> DbResult<Option<Profile>> {
         let mut s = self
             .conn
-            .prepare("SELECT server_url, token, log_level FROM profile LIMIT 1")?;
+            .prepare("SELECT server_url, token, log_level, update_mode FROM profile LIMIT 1")?;
         let mut rows = s.query_map([], |r| {
             Ok(Profile {
                 server_url: r.get(0)?,
                 token: r.get(1)?,
                 log_level: r.get(2)?,
+                update_mode: r.get(3)?,
             })
         })?;
         Ok(rows.next().transpose()?)
     }
-    pub fn save_profile(&self, url: &str, tok: &str, ll: &str) -> DbResult<()> {
+    pub fn save_profile(&self, url: &str, tok: &str, ll: &str, update_mode: &str) -> DbResult<()> {
         self.conn.execute_batch("DELETE FROM profile")?;
         self.conn.execute(
-            "INSERT INTO profile (server_url, token, log_level) VALUES (?1, ?2, ?3)",
-            rusqlite::params![url, tok, ll],
+            "INSERT INTO profile (server_url, token, log_level, update_mode) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![url, tok, ll, update_mode],
         )?;
         Ok(())
     }
@@ -139,6 +141,33 @@ impl Db {
     }
     fn apply_schema(&self) -> DbResult<()> {
         self.conn.execute_batch(SCHEMA_SQL)?;
+        // Migration: add update_mode column to existing profile tables.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE profile ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'check-and-download';"
+        );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_round_trip_with_update_mode() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "info", "check-only")
+            .unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.update_mode, "check-only");
+    }
+
+    #[test]
+    fn profile_update_mode_defaults_for_existing_db() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "info", "check-and-download")
+            .unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.update_mode, "check-and-download");
     }
 }

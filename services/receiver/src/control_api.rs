@@ -47,6 +47,7 @@ pub struct AppState {
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
     pub update_status: Arc<RwLock<UpdateStatus>>,
     pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
+    pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
 }
 
 impl AppState {
@@ -62,6 +63,7 @@ impl AppState {
             ui_tx,
             update_status: Arc::new(RwLock::new(UpdateStatus::UpToDate)),
             staged_update_path: Arc::new(RwLock::new(None)),
+            update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
         });
         (state, shutdown_rx)
     }
@@ -212,6 +214,12 @@ pub struct ProfileRequest {
     pub server_url: String,
     pub token: String,
     pub log_level: String,
+    #[serde(default = "default_update_mode")]
+    pub update_mode: String,
+}
+
+fn default_update_mode() -> String {
+    "check-and-download".to_owned()
 }
 
 #[derive(Debug, Serialize)]
@@ -219,6 +227,7 @@ pub struct ProfileResponse {
     pub server_url: String,
     pub token: String,
     pub log_level: String,
+    pub update_mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -341,6 +350,7 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             server_url: p.server_url,
             token: p.token,
             log_level: p.log_level,
+            update_mode: p.update_mode,
         })
         .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no profile").into_response(),
@@ -352,9 +362,25 @@ async fn put_profile(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ProfileRequest>,
 ) -> impl IntoResponse {
+    // Validate update_mode
+    if serde_json::from_value::<rt_updater::UpdateMode>(serde_json::Value::String(
+        body.update_mode.clone(),
+    ))
+    .is_err()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "update_mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'",
+                body.update_mode
+            ),
+        )
+            .into_response();
+    }
+
     let url = normalize_server_url(&body.server_url);
     let db = state.db.lock().await;
-    match db.save_profile(&url, &body.token, &body.log_level) {
+    match db.save_profile(&url, &body.token, &body.log_level, &body.update_mode) {
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
@@ -497,6 +523,77 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 }
 
+async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let update_mode = *state.update_mode.read().await;
+
+    let checker = match rt_updater::UpdateChecker::new(
+        "iwismer",
+        "rusty-timer",
+        "receiver",
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let status = rt_updater::UpdateStatus::Failed {
+                error: e.to_string(),
+            };
+            *state.update_status.write().await = status.clone();
+            return Json(status).into_response();
+        }
+    };
+
+    match checker.check().await {
+        Ok(rt_updater::UpdateStatus::Available { ref version }) => {
+            *state.update_status.write().await = rt_updater::UpdateStatus::Available {
+                version: version.clone(),
+            };
+
+            if update_mode == rt_updater::UpdateMode::CheckAndDownload {
+                match checker.download(version).await {
+                    Ok(path) => {
+                        let status = rt_updater::UpdateStatus::Downloaded {
+                            version: version.clone(),
+                        };
+                        *state.update_status.write().await = status.clone();
+                        *state.staged_update_path.write().await = Some(path);
+                        let _ =
+                            state
+                                .ui_tx
+                                .send(crate::ui_events::ReceiverUiEvent::UpdateAvailable {
+                                    version: version.clone(),
+                                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
+                                });
+                        Json(status).into_response()
+                    }
+                    Err(e) => {
+                        let status = rt_updater::UpdateStatus::Failed {
+                            error: e.to_string(),
+                        };
+                        *state.update_status.write().await = status.clone();
+                        Json(status).into_response()
+                    }
+                }
+            } else {
+                let status = rt_updater::UpdateStatus::Available {
+                    version: version.clone(),
+                };
+                Json(status).into_response()
+            }
+        }
+        Ok(status) => {
+            *state.update_status.write().await = status.clone();
+            Json(status).into_response()
+        }
+        Err(e) => {
+            let status = rt_updater::UpdateStatus::Failed {
+                error: e.to_string(),
+            };
+            *state.update_status.write().await = status.clone();
+            Json(status).into_response()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -513,6 +610,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/events", get(crate::sse::receiver_sse))
         .route("/api/v1/update/status", get(get_update_status))
         .route("/api/v1/update/apply", post(post_update_apply))
+        .route("/api/v1/update/check", post(post_update_check))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
