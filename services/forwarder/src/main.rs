@@ -481,6 +481,12 @@ async fn run_uplink(
                 s
             }
             Err(e) => {
+                let _ = ui_tx.send(forwarder::ui_events::ForwarderUiEvent::LogEntry {
+                    entry: format!(
+                        "uplink connect failed: {}; url={}; retrying in {}s",
+                        e, ws_url, backoff_secs
+                    ),
+                });
                 warn!(
                     error = %e,
                     backoff_secs = backoff_secs,
@@ -2072,5 +2078,92 @@ token_file = "/tmp/test-token"
             !resent,
             "forwarder should not resend batch after config-get interleaving once ack is sent"
         );
+    }
+
+    #[tokio::test]
+    async fn run_uplink_emits_ui_log_entry_when_connect_fails() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let config_path = temp_dir.path().join("forwarder.toml");
+
+        std::fs::write(&config_path, "schema_version = 1\ntoken = \"test-token\"\n")
+            .expect("write test config");
+
+        let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let unused_port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+
+        let cfg = ForwarderConfig {
+            schema_version: 1,
+            token: "test-token".to_string(),
+            display_name: Some("Connect Failure Test".to_string()),
+            server: forwarder::config::ServerConfig {
+                base_url: format!("http://127.0.0.1:{unused_port}"),
+                forwarders_ws_path: "/ws/v1/forwarders".to_string(),
+            },
+            journal: forwarder::config::JournalConfig {
+                sqlite_path: db_path.display().to_string(),
+                prune_watermark_pct: 80,
+            },
+            status_http: forwarder::config::StatusHttpConfig {
+                bind: "127.0.0.1:0".to_string(),
+            },
+            uplink: forwarder::config::UplinkConfig {
+                batch_mode: "immediate".to_string(),
+                batch_flush_ms: 50,
+                batch_max_events: 50,
+            },
+            readers: vec![],
+        };
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start test status server");
+        let mut ui_rx = status.ui_sender().subscribe();
+
+        let config_state = Arc::new(ConfigState::new(config_path));
+        let subsystem_arc = status.subsystem_arc();
+        let restart_signal = Arc::new(Notify::new());
+        let uplink_task = tokio::spawn(run_uplink(
+            cfg,
+            "fwd-connect-failure-test".to_string(),
+            vec![],
+            journal,
+            shutdown_rx,
+            status,
+            config_state,
+            subsystem_arc,
+            restart_signal,
+        ));
+
+        let log_entry = timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match ui_rx.recv().await.expect("recv ui event") {
+                    forwarder::ui_events::ForwarderUiEvent::LogEntry { entry } => break entry,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("expected ui log entry on connect failure");
+
+        assert!(
+            log_entry.contains("uplink connect failed"),
+            "expected uplink connect failure log entry, got: {log_entry}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(2), uplink_task)
+            .await
+            .expect("uplink task shutdown timeout")
+            .expect("uplink task join");
     }
 }
