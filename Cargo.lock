@@ -2925,6 +2925,7 @@ dependencies = [
  "reqwest",
  "rt-protocol",
  "rt-test-utils",
+ "rt-ui-log",
  "serde",
  "serde_json",
  "sha2",

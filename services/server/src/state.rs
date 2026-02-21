@@ -42,17 +42,24 @@ pub struct AppState {
     pub broadcast_registry: BroadcastRegistry,
     pub forwarder_command_senders: ForwarderCommandSenders,
     pub dashboard_tx: broadcast::Sender<DashboardEvent>,
+    pub logger: Arc<rt_ui_log::UiLogger<DashboardEvent>>,
 }
 
 impl AppState {
     pub fn new(pool: PgPool) -> Self {
         let (dashboard_tx, _) = broadcast::channel(4096);
+        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
+            dashboard_tx.clone(),
+            |entry| DashboardEvent::LogEntry { entry },
+            500,
+        ));
         Self {
             pool,
             active_forwarders: Arc::new(RwLock::new(HashMap::new())),
             broadcast_registry: Arc::new(RwLock::new(HashMap::new())),
             forwarder_command_senders: Arc::new(RwLock::new(HashMap::new())),
             dashboard_tx,
+            logger,
         }
     }
 
