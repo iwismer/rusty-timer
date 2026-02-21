@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "receiver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum 0.8.8",
  "bytes",
