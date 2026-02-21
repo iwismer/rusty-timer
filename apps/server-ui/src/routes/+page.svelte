@@ -91,12 +91,23 @@
 
   // Race filter (persisted to localStorage)
   let selectedRaceId = $state<string | null>(readRaceFilterPreference());
+  let racesStoreHydrated = $state(false);
+
   $effect(() => {
     writeRaceFilterPreference(selectedRaceId);
   });
-  // Reset if the persisted race no longer exists
+
+  // Mark store as hydrated once it receives data
+  $effect(() => {
+    if ($racesStore.length > 0) {
+      racesStoreHydrated = true;
+    }
+  });
+
+  // Reset if the persisted race no longer exists (only after store hydrates)
   $effect(() => {
     if (
+      racesStoreHydrated &&
       selectedRaceId &&
       !$racesStore.some((r) => r.race_id === selectedRaceId)
     ) {
@@ -107,9 +118,10 @@
   let visibleGroups = $derived.by(() => {
     let groups = groupedStreams;
     if (selectedRaceId) {
-      groups = groups.filter(
-        (g) => $forwarderRacesStore[g.forwarderId] === selectedRaceId,
-      );
+      groups = groups.filter((g) => {
+        const forwarderRaceId = $forwarderRacesStore[g.forwarderId];
+        return forwarderRaceId === selectedRaceId;
+      });
     }
     if (hideOffline) {
       groups = groups
@@ -228,6 +240,7 @@
     </h1>
     <div class="flex items-center gap-4">
       <select
+        data-testid="race-filter-select"
         class="text-sm px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
         value={selectedRaceId ?? ""}
         onchange={(e) => {
@@ -252,7 +265,7 @@
     </div>
   </div>
 
-  {#each visibleGroups as group, groupIdx (group.forwarderId)}
+  {#each visibleGroups as group (group.forwarderId)}
     {@const fullGroup = groupedStreamsById.get(group.forwarderId)}
     {@const stats = groupStats(
       fullGroup?.streams ?? group.streams,
