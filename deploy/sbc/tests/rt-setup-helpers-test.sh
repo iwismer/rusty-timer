@@ -103,4 +103,9 @@ assert_contains "${apply_script}" "TARGET_PATH=\"/usr/local/bin/rt-forwarder\"" 
 assert_contains "${apply_script}" "mv \"\${tmp_target}\" \"\${TARGET_PATH}\"" "apply helper should atomically promote binary"
 assert_contains "${apply_script}" "rm -f \"\${STAGED_PATH}\"" "apply helper should clean staged file"
 
+sudoers="$(render_power_actions_sudoers)"
+assert_contains "${sudoers}" "rt-forwarder" "sudoers should target the rt-forwarder user"
+assert_contains "${sudoers}" "systemctl --no-ask-password reboot" "sudoers should allow reboot action"
+assert_contains "${sudoers}" "systemctl --no-ask-password poweroff" "sudoers should allow poweroff action"
+
 echo "PASS: rt-setup helper tests"

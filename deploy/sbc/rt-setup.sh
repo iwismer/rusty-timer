@@ -24,6 +24,7 @@ VERIFY_POLICY="run_verify"
 FORWARDER_BIN_PATH="${INSTALL_DIR}/rt-forwarder"
 STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
+POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -221,6 +222,16 @@ TimeoutStopSec=30s
 
 [Install]
 WantedBy=multi-user.target
+EOF
+}
+
+render_power_actions_sudoers() {
+  cat <<EOF
+# Allow rt-forwarder to issue host reboot/poweroff from the forwarder UI.
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl --no-ask-password reboot
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl --no-ask-password poweroff
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password reboot
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password poweroff
 EOF
 }
 
@@ -549,6 +560,14 @@ install_service() {
 
   # Write systemd unit file
   render_forwarder_systemd_unit > /etc/systemd/system/rt-forwarder.service
+
+  # Allow power-action UI endpoints to run reboot/poweroff non-interactively.
+  render_power_actions_sudoers > "${POWER_ACTIONS_SUDOERS_PATH}"
+  chmod 0440 "${POWER_ACTIONS_SUDOERS_PATH}"
+  chown root:root "${POWER_ACTIONS_SUDOERS_PATH}"
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "${POWER_ACTIONS_SUDOERS_PATH}" >/dev/null
+  fi
 
   systemctl daemon-reload
   systemctl enable rt-forwarder

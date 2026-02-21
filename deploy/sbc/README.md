@@ -174,6 +174,10 @@ allow_power_actions = true
 ```
 
 That enables the config UI actions for restarting/shutting down the device.
+The setup script also installs `/etc/sudoers.d/90-rt-forwarder-power-actions`
+so the `rt-forwarder` service can run `systemctl reboot/poweroff` without an
+interactive password prompt.
+
 For non-interactive installs, set `RT_SETUP_ALLOW_POWER_ACTIONS=0` to disable
 this behavior.
 
