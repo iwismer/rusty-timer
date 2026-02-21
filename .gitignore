@@ -39,3 +39,6 @@ __pycache__/
 # Local agent run markers
 .last-run
 .last-run.json
+
+# Generated SBC cloud-init artifacts
+deploy/sbc/generated/

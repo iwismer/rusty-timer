@@ -210,7 +210,7 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
         "SSH public key",
     )
     static_ipv4_cidr = prompt_until_valid(
-        lambda: ask_with_default("Static IPv4/CIDR", DEFAULT_STATIC_IPV4_CIDR),
+        lambda: ask_with_default("Static IPv4/CIDR for eth0", DEFAULT_STATIC_IPV4_CIDR),
         validate_ipv4_interface,
         "static IPv4/CIDR",
     )
