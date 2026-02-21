@@ -31,6 +31,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::read_gen::generate_read_for_chip;
 
+/// Base date for deterministic scenario timestamps (IPICO two-digit year, month, day).
+const BASE_YEAR: u8 = 26;
+const BASE_MONTH: u8 = 1;
+const BASE_DAY: u8 = 1;
+
 // ---------------------------------------------------------------------------
 // Emulator mode
 // ---------------------------------------------------------------------------
@@ -220,9 +225,9 @@ pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<E
         let raw_read_line = generate_read_for_chip(
             chip_id,
             read_type,
-            26,
-            1,
-            1,
+            BASE_YEAR,
+            BASE_MONTH,
+            BASE_DAY,
             hours,
             mins,
             secs,
@@ -267,6 +272,8 @@ fn ms_to_time_str(ms: u64) -> String {
 
 /// Convert milliseconds offset to an ISO-8601 style timestamp string.
 fn ms_to_timestamp(ms: u64) -> String {
-    // Use 2026-01-01T00:00:00 as base
-    format!("2026-01-01T{}.000Z", ms_to_time_str(ms))
+    format!(
+        "20{BASE_YEAR:02}-{BASE_MONTH:02}-{BASE_DAY:02}T{}Z",
+        ms_to_time_str(ms)
+    )
 }

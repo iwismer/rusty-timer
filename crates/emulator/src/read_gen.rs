@@ -65,6 +65,7 @@ pub fn restamp_read(read: &str) -> String {
 /// and I/Q counters `0x0000`. The result passes `ChipRead::try_from()`.
 ///
 /// `centiseconds` must be 0..=99.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_read_for_chip(
     chip_id: u64,
     read_type: ReadType,
