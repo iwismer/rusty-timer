@@ -47,7 +47,7 @@ IPICO Reader ──TCP──► Streamer ──fanout──► Local Clients
 
 **[rt-updater](crates/rt-updater/)** — Self-update checker and downloader. Checks GitHub Releases for new versions, downloads and verifies archives by SHA-256, and stages binaries for replacement.
 
-**[emulator-v2](crates/emulator-v2/)** — Deterministic multi-reader emulator for integration testing. Supports YAML scenario definitions with configurable fault injection.
+**[emulator](crates/emulator/)** — Emulator library (package `rt-emulator`) for read generation, deterministic scenario playback, and fault injection.
 
 **[rt-test-utils](crates/rt-test-utils/)** — Mock WebSocket client and server for integration testing. Provides `MockWsServer` and `MockWsClient` for testing forwarder, server, and receiver interactions.
 

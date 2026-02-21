@@ -1,6 +1,6 @@
-# emulator-v2
+# emulator
 
-Deterministic multi-reader emulator for integration testing.
+Emulator library for read generation, deterministic multi-reader playback, and fault injection.
 
 ## Purpose
 

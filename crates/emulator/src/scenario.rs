@@ -1,4 +1,4 @@
-//! Scenario configuration and event generation for emulator-v2.
+//! Scenario configuration and event generation for the emulator.
 //!
 //! # YAML Scenario Schema (v1 Frozen)
 //!
@@ -26,7 +26,16 @@
 //! forwarder_id: "emulated-fwd-1"
 //! ```
 
+use ipico_core::read::ReadType;
 use serde::{Deserialize, Serialize};
+
+use crate::read_gen::generate_read_for_chip;
+
+/// Base date for deterministic scenario timestamps (IPICO two-digit year, month, day).
+const BASE_YEAR: u8 = 26;
+const BASE_MONTH: u8 = 1;
+const BASE_DAY: u8 = 1;
+const MAX_CHIP_ID: u64 = 0xFFFF_FFFF_FFFF;
 
 // ---------------------------------------------------------------------------
 // Emulator mode
@@ -114,13 +123,45 @@ pub struct ScenarioConfig {
 
 /// Parse a YAML scenario string into a `ScenarioConfig`.
 pub fn load_scenario_from_str(yaml: &str) -> Result<ScenarioConfig, ScenarioError> {
-    serde_yaml::from_str(yaml).map_err(|e| ScenarioError::Parse(e.to_string()))
+    let scenario: ScenarioConfig =
+        serde_yaml::from_str(yaml).map_err(|e| ScenarioError::Parse(e.to_string()))?;
+    validate_scenario(&scenario)?;
+    Ok(scenario)
 }
 
 /// Parse a YAML scenario from a file path.
 pub fn load_scenario_from_file(path: &std::path::Path) -> Result<ScenarioConfig, ScenarioError> {
     let content = std::fs::read_to_string(path).map_err(|e| ScenarioError::Io(e.to_string()))?;
     load_scenario_from_str(&content)
+}
+
+fn validate_scenario(cfg: &ScenarioConfig) -> Result<(), ScenarioError> {
+    for reader in &cfg.readers {
+        if reader.chip_ids.is_empty() {
+            return Err(ScenarioError::Invalid(format!(
+                "reader '{}' must define at least one chip_ids entry",
+                reader.ip
+            )));
+        }
+        if let Some(invalid_chip_id) = reader
+            .chip_ids
+            .iter()
+            .find(|&&chip_id| chip_id > MAX_CHIP_ID)
+        {
+            return Err(ScenarioError::Invalid(format!(
+                "reader '{}' has chip_ids entry '{}' above 48-bit max '{}'",
+                reader.ip, invalid_chip_id, MAX_CHIP_ID
+            )));
+        }
+
+        ReadType::try_from(reader.read_type.as_str()).map_err(|_| {
+            ScenarioError::Invalid(format!(
+                "reader '{}' has invalid read_type '{}'",
+                reader.ip, reader.read_type
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +202,7 @@ pub struct EmulatedEvent {
     pub seq: u64,
     /// Simulated reader timestamp (ISO-8601 format).
     pub reader_timestamp: String,
-    /// IPICO-format raw line: e.g. "1000,00:01:00.000"
+    /// IPICO wire-format raw line: e.g. "aa000000000003e80000260101000000006f"
     pub raw_read_line: String,
     /// Read type: "raw" or "fsls".
     pub read_type: String,
@@ -176,7 +217,34 @@ pub struct EmulatedEvent {
 /// The seed controls chip_id selection order. Events are generated with
 /// monotonically increasing seq starting at 1.  Timestamps advance by
 /// `1000 / events_per_second` milliseconds per event.
-pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<EmulatedEvent> {
+pub fn generate_reader_events(
+    reader: &ReaderScenarioConfig,
+    seed: u64,
+) -> Result<Vec<EmulatedEvent>, ScenarioError> {
+    if reader.chip_ids.is_empty() {
+        return Err(ScenarioError::Invalid(format!(
+            "reader '{}' must define at least one chip_ids entry",
+            reader.ip
+        )));
+    }
+    if let Some(invalid_chip_id) = reader
+        .chip_ids
+        .iter()
+        .find(|&&chip_id| chip_id > MAX_CHIP_ID)
+    {
+        return Err(ScenarioError::Invalid(format!(
+            "reader '{}' has chip_ids entry '{}' above 48-bit max '{}'",
+            reader.ip, invalid_chip_id, MAX_CHIP_ID
+        )));
+    }
+    let read_type = ReadType::try_from(reader.read_type.as_str()).map_err(|_| {
+        ScenarioError::Invalid(format!(
+            "reader '{}' has invalid read_type '{}'",
+            reader.ip, reader.read_type
+        ))
+    })?;
+    let canonical_read_type = read_type.as_str().to_owned();
+
     let mut events = Vec::with_capacity(reader.total_events as usize);
 
     // Simple seeded LCG for deterministic chip selection
@@ -202,8 +270,23 @@ pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<E
         // Generate a timestamp
         let ts = ms_to_timestamp(elapsed_ms);
 
-        // IPICO-style raw line: "chip_id,HH:MM:SS.mmm"
-        let raw_read_line = format!("{},{}", chip_id, ms_to_time_str(elapsed_ms));
+        // IPICO wire-format raw line via generate_read_for_chip
+        let total_secs = elapsed_ms / 1000;
+        let centiseconds = ((elapsed_ms % 1000) / 10) as u8;
+        let secs = (total_secs % 60) as u8;
+        let mins = ((total_secs / 60) % 60) as u8;
+        let hours = ((total_secs / 3600) % 24) as u8;
+        let raw_read_line = generate_read_for_chip(
+            chip_id,
+            read_type,
+            BASE_YEAR,
+            BASE_MONTH,
+            BASE_DAY,
+            hours,
+            mins,
+            secs,
+            centiseconds,
+        );
 
         events.push(EmulatedEvent {
             reader_ip: reader.ip.clone(),
@@ -211,13 +294,13 @@ pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<E
             seq,
             reader_timestamp: ts,
             raw_read_line,
-            read_type: reader.read_type.clone(),
+            read_type: canonical_read_type.clone(),
         });
 
         elapsed_ms += ms_per_event;
     }
 
-    events
+    Ok(events)
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +326,8 @@ fn ms_to_time_str(ms: u64) -> String {
 
 /// Convert milliseconds offset to an ISO-8601 style timestamp string.
 fn ms_to_timestamp(ms: u64) -> String {
-    // Use 2026-01-01T00:00:00 as base
-    format!("2026-01-01T{}.000Z", ms_to_time_str(ms))
+    format!(
+        "20{BASE_YEAR:02}-{BASE_MONTH:02}-{BASE_DAY:02}T{}Z",
+        ms_to_time_str(ms)
+    )
 }
