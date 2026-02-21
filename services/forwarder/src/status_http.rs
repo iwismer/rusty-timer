@@ -16,6 +16,7 @@
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
 //! - `POST /update/check`    — check for updates (respects update mode)
+//! - `POST /update/download`  — download an available update (mode-independent)
 //! - All other routes fall back to the embedded SvelteKit UI
 //!
 //! # Readiness contract
@@ -1391,6 +1392,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route("/update/status", get(update_status_handler::<J>))
         .route("/update/apply", post(update_apply_handler::<J>))
         .route("/update/check", post(update_check_handler::<J>))
+        .route("/update/download", post(update_download_handler::<J>))
         .route("/api/v1/config", get(config_json_handler::<J>))
         .route(
             "/api/v1/config/general",
@@ -1670,6 +1672,72 @@ async fn run_update_check_with_checker(
                 status: status.clone(),
             });
             status
+        }
+    }
+}
+
+async fn run_update_download_with_checker(
+    subsystem: &Arc<Mutex<SubsystemStatus>>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    checker: &dyn UpdateCheckClient,
+) -> Result<UpdateStatus, UpdateStatus> {
+    let current = subsystem.lock().await.update_status.clone();
+    match current {
+        UpdateStatus::Available { ref version } => match checker.download(version).await {
+            Ok(path) => {
+                let status = UpdateStatus::Downloaded {
+                    version: version.clone(),
+                };
+                let mut ss = subsystem.lock().await;
+                ss.update_status = status.clone();
+                ss.staged_update_path = Some(path);
+                drop(ss);
+                let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
+                    status: status.clone(),
+                });
+                Ok(status)
+            }
+            Err(error) => {
+                let status = UpdateStatus::Failed { error };
+                subsystem.lock().await.update_status = status.clone();
+                Err(status)
+            }
+        },
+        s @ UpdateStatus::Downloaded { .. } => Ok(s),
+        other => Err(other),
+    }
+}
+
+async fn update_download_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let checker = match rt_updater::UpdateChecker::new(
+        "iwismer",
+        "rusty-timer",
+        "forwarder",
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Ok(c) => RealUpdateChecker { inner: c },
+        Err(e) => {
+            let status = rt_updater::UpdateStatus::Failed {
+                error: e.to_string(),
+            };
+            state.subsystem.lock().await.update_status = status.clone();
+            let body = serde_json::to_string(&status).unwrap_or_else(|_| {
+                r#"{"status":"failed","error":"serialization error"}"#.to_owned()
+            });
+            return json_response(StatusCode::INTERNAL_SERVER_ERROR, body);
+        }
+    };
+
+    match run_update_download_with_checker(&state.subsystem, &state.ui_tx, &checker).await {
+        Ok(status) => {
+            let body = serde_json::to_string(&status).unwrap_or_default();
+            json_response(StatusCode::OK, body)
+        }
+        Err(status) => {
+            let body = serde_json::to_string(&status).unwrap_or_default();
+            json_response(StatusCode::CONFLICT, body)
         }
     }
 }
@@ -2483,5 +2551,103 @@ target = "192.168.1.100:10000"
         assert!(!apply_via_restart_from_env(None));
         assert!(!apply_via_restart_from_env(Some("0".to_owned())));
         assert!(!apply_via_restart_from_env(Some("false".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn update_download_downloads_when_available() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .set_update_status(UpdateStatus::Available {
+                version: "2.0.0".to_owned(),
+            })
+            .await;
+
+        let download_calls = Arc::new(AtomicUsize::new(0));
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(std::path::PathBuf::from("/tmp/staged-forwarder")),
+            download_calls: Arc::clone(&download_calls),
+        };
+
+        let status =
+            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+
+        assert_eq!(
+            status,
+            Ok(UpdateStatus::Downloaded {
+                version: "2.0.0".to_owned()
+            })
+        );
+        assert_eq!(download_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            server.subsystem.lock().await.staged_update_path,
+            Some(std::path::PathBuf::from("/tmp/staged-forwarder"))
+        );
+    }
+
+    #[tokio::test]
+    async fn update_download_returns_conflict_when_up_to_date() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
+            download_calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let status =
+            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+        assert!(status.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_download_is_idempotent_when_already_downloaded() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .set_update_status(UpdateStatus::Downloaded {
+                version: "2.0.0".to_owned(),
+            })
+            .await;
+
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
+            download_calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let status =
+            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+        assert_eq!(
+            status,
+            Ok(UpdateStatus::Downloaded {
+                version: "2.0.0".to_owned()
+            })
+        );
     }
 }
