@@ -11,6 +11,10 @@
   } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { groupStreamsByForwarder } from "$lib/groupStreams";
+  import {
+    readHideOfflinePreference,
+    writeHideOfflinePreference,
+  } from "$lib/hideOfflinePreference";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
   import { resolveChipRead } from "$lib/chipResolver";
   import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
@@ -71,14 +75,14 @@
 
   // Group streams by forwarder_id.
   let groupedStreams = $derived(groupStreamsByForwarder($streamsStore));
+  let groupedStreamsById = $derived(
+    new Map(groupedStreams.map((g) => [g.forwarderId, g])),
+  );
 
   // Hide-offline toggle (persisted to localStorage)
-  let hideOffline = $state(
-    typeof localStorage !== "undefined" &&
-      localStorage.getItem("hideOffline") === "true",
-  );
+  let hideOffline = $state(readHideOfflinePreference());
   $effect(() => {
-    localStorage.setItem("hideOffline", String(hideOffline));
+    writeHideOfflinePreference(hideOffline);
   });
   let visibleGroups = $derived(
     hideOffline
@@ -208,9 +212,7 @@
   </div>
 
   {#each visibleGroups as group, groupIdx (group.forwarderId)}
-    {@const fullGroup = groupedStreams.find(
-      (g) => g.forwarderId === group.forwarderId,
-    )}
+    {@const fullGroup = groupedStreamsById.get(group.forwarderId)}
     {@const stats = groupStats(
       fullGroup?.streams ?? group.streams,
       $metricsStore,

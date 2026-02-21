@@ -114,6 +114,35 @@ test.describe("stream list page", () => {
     await expect(items).toHaveCount(2);
   });
 
+  test("hide offline toggle filters offline stream rows", async ({ page }) => {
+    await page.goto("/");
+
+    const items = page.locator('[data-testid="stream-item"]');
+    await expect(items).toHaveCount(2);
+
+    await page.getByLabel("Hide offline").check();
+
+    await expect(items).toHaveCount(1);
+    await expect(
+      page.locator('[data-testid="stream-offline-badge"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="stream-online-badge"]'),
+    ).toHaveCount(1);
+  });
+
+  test("hide offline preference persists after reload", async ({ page }) => {
+    await page.goto("/");
+
+    await page.getByLabel("Hide offline").check();
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+
+    await page.reload();
+
+    await expect(page.getByLabel("Hide offline")).toBeChecked();
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+  });
+
   test("shows stream display alias when present", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByText("Alpha Reader")).toBeVisible();
