@@ -35,6 +35,7 @@ use crate::read_gen::generate_read_for_chip;
 const BASE_YEAR: u8 = 26;
 const BASE_MONTH: u8 = 1;
 const BASE_DAY: u8 = 1;
+const MAX_CHIP_ID: u64 = 0xFFFF_FFFF_FFFF;
 
 // ---------------------------------------------------------------------------
 // Emulator mode
@@ -142,6 +143,16 @@ fn validate_scenario(cfg: &ScenarioConfig) -> Result<(), ScenarioError> {
                 reader.ip
             )));
         }
+        if let Some(invalid_chip_id) = reader
+            .chip_ids
+            .iter()
+            .find(|&&chip_id| chip_id > MAX_CHIP_ID)
+        {
+            return Err(ScenarioError::Invalid(format!(
+                "reader '{}' has chip_ids entry '{}' above 48-bit max '{}'",
+                reader.ip, invalid_chip_id, MAX_CHIP_ID
+            )));
+        }
 
         ReadType::try_from(reader.read_type.as_str()).map_err(|_| {
             ScenarioError::Invalid(format!(
@@ -206,7 +217,34 @@ pub struct EmulatedEvent {
 /// The seed controls chip_id selection order. Events are generated with
 /// monotonically increasing seq starting at 1.  Timestamps advance by
 /// `1000 / events_per_second` milliseconds per event.
-pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<EmulatedEvent> {
+pub fn generate_reader_events(
+    reader: &ReaderScenarioConfig,
+    seed: u64,
+) -> Result<Vec<EmulatedEvent>, ScenarioError> {
+    if reader.chip_ids.is_empty() {
+        return Err(ScenarioError::Invalid(format!(
+            "reader '{}' must define at least one chip_ids entry",
+            reader.ip
+        )));
+    }
+    if let Some(invalid_chip_id) = reader
+        .chip_ids
+        .iter()
+        .find(|&&chip_id| chip_id > MAX_CHIP_ID)
+    {
+        return Err(ScenarioError::Invalid(format!(
+            "reader '{}' has chip_ids entry '{}' above 48-bit max '{}'",
+            reader.ip, invalid_chip_id, MAX_CHIP_ID
+        )));
+    }
+    let read_type = ReadType::try_from(reader.read_type.as_str()).map_err(|_| {
+        ScenarioError::Invalid(format!(
+            "reader '{}' has invalid read_type '{}'",
+            reader.ip, reader.read_type
+        ))
+    })?;
+    let canonical_read_type = read_type.as_str().to_owned();
+
     let mut events = Vec::with_capacity(reader.total_events as usize);
 
     // Simple seeded LCG for deterministic chip selection
@@ -220,11 +258,6 @@ pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<E
     };
 
     let mut elapsed_ms: u64 = 0;
-
-    // read_type is validated at scenario parse time.
-    let read_type = ReadType::try_from(reader.read_type.as_str())
-        .expect("reader.read_type must be validated before event generation");
-    let canonical_read_type = read_type.as_str().to_owned();
 
     for i in 0..reader.total_events {
         let seq = i + 1;
@@ -267,7 +300,7 @@ pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<E
         elapsed_ms += ms_per_event;
     }
 
-    events
+    Ok(events)
 }
 
 // ---------------------------------------------------------------------------
