@@ -113,6 +113,28 @@ async fn put_profile_updates_existing() {
 }
 
 #[tokio::test]
+async fn put_profile_omitted_update_mode_preserves_existing() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+    put_json(
+        app.clone(),
+        "/api/v1/profile",
+        json!({"server_url":"wss://old","token":"t1","log_level":"debug","update_mode":"check-only"}),
+    )
+    .await;
+    put_json(
+        app.clone(),
+        "/api/v1/profile",
+        json!({"server_url":"wss://new","token":"t2","log_level":"warn"}),
+    )
+    .await;
+    let (_, val) = get_json(app, "/api/v1/profile").await;
+    assert_eq!(val["server_url"], "wss://new");
+    assert_eq!(val["update_mode"], "check-only");
+}
+
+#[tokio::test]
 async fn put_profile_rejects_invalid_update_mode() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);

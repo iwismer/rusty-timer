@@ -20,7 +20,9 @@ use rt_protocol::StreamInfo;
 use rt_updater::UpdateStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::warn;
@@ -214,8 +216,8 @@ pub struct ProfileRequest {
     pub server_url: String,
     pub token: String,
     pub log_level: String,
-    #[serde(default = "default_update_mode")]
-    pub update_mode: String,
+    #[serde(default)]
+    pub update_mode: Option<String>,
 }
 
 fn default_update_mode() -> String {
@@ -362,25 +364,37 @@ async fn put_profile(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ProfileRequest>,
 ) -> impl IntoResponse {
+    let url = normalize_server_url(&body.server_url);
+    let db = state.db.lock().await;
+    let mut effective_update_mode = body.update_mode.clone().unwrap_or_else(|| {
+        db.load_profile()
+            .ok()
+            .flatten()
+            .map(|p| p.update_mode)
+            .unwrap_or_else(default_update_mode)
+    });
+
     let parsed_update_mode = match serde_json::from_value::<rt_updater::UpdateMode>(
-        serde_json::Value::String(body.update_mode.clone()),
+        serde_json::Value::String(effective_update_mode.clone()),
     ) {
         Ok(mode) => mode,
+        Err(_) if body.update_mode.is_none() => {
+            effective_update_mode = default_update_mode();
+            rt_updater::UpdateMode::default()
+        }
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
                 format!(
                     "update_mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'",
-                    body.update_mode
+                    effective_update_mode
                 ),
             )
                 .into_response();
         }
     };
 
-    let url = normalize_server_url(&body.server_url);
-    let db = state.db.lock().await;
-    match db.save_profile(&url, &body.token, &body.log_level, &body.update_mode) {
+    match db.save_profile(&url, &body.token, &body.log_level, &effective_update_mode) {
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
@@ -533,7 +547,7 @@ async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "receiver",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => c,
+        Ok(c) => RealUpdateChecker { inner: c },
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
@@ -543,16 +557,60 @@ async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoRespo
         }
     };
 
+    let status = run_update_check_with_checker(&state, &checker, update_mode).await;
+    Json(status).into_response()
+}
+
+trait UpdateCheckClient: Send + Sync {
+    fn check<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>>;
+
+    fn download<'a>(
+        &'a self,
+        version: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<PathBuf, String>> + Send + 'a>>;
+}
+
+struct RealUpdateChecker {
+    inner: rt_updater::UpdateChecker,
+}
+
+impl UpdateCheckClient for RealUpdateChecker {
+    fn check<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
+        Box::pin(async move { self.inner.check().await.map_err(|e| e.to_string()) })
+    }
+
+    fn download<'a>(
+        &'a self,
+        version: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<PathBuf, String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.inner
+                .download(version)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+}
+
+async fn run_update_check_with_checker(
+    state: &Arc<AppState>,
+    checker: &dyn UpdateCheckClient,
+    update_mode: rt_updater::UpdateMode,
+) -> UpdateStatus {
     match checker.check().await {
-        Ok(rt_updater::UpdateStatus::Available { ref version }) => {
-            *state.update_status.write().await = rt_updater::UpdateStatus::Available {
+        Ok(UpdateStatus::Available { version }) => {
+            *state.update_status.write().await = UpdateStatus::Available {
                 version: version.clone(),
             };
 
             if update_mode == rt_updater::UpdateMode::CheckAndDownload {
-                match checker.download(version).await {
+                match checker.download(&version).await {
                     Ok(path) => {
-                        let status = rt_updater::UpdateStatus::Downloaded {
+                        let status = UpdateStatus::Downloaded {
                             version: version.clone(),
                         };
                         *state.update_status.write().await = status.clone();
@@ -564,33 +622,26 @@ async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoRespo
                                     version: version.clone(),
                                     current_version: env!("CARGO_PKG_VERSION").to_owned(),
                                 });
-                        Json(status).into_response()
+                        status
                     }
-                    Err(e) => {
-                        let status = rt_updater::UpdateStatus::Failed {
-                            error: e.to_string(),
-                        };
+                    Err(error) => {
+                        let status = UpdateStatus::Failed { error };
                         *state.update_status.write().await = status.clone();
-                        Json(status).into_response()
+                        status
                     }
                 }
             } else {
-                let status = rt_updater::UpdateStatus::Available {
-                    version: version.clone(),
-                };
-                Json(status).into_response()
+                UpdateStatus::Available { version }
             }
         }
         Ok(status) => {
             *state.update_status.write().await = status.clone();
-            Json(status).into_response()
+            status
         }
-        Err(e) => {
-            let status = rt_updater::UpdateStatus::Failed {
-                error: e.to_string(),
-            };
+        Err(error) => {
+            let status = UpdateStatus::Failed { error };
             *state.update_status.write().await = status.clone();
-            Json(status).into_response()
+            status
         }
     }
 }
@@ -622,7 +673,34 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
+
+    struct FakeChecker {
+        check_result: Result<UpdateStatus, String>,
+        download_result: Result<std::path::PathBuf, String>,
+        download_calls: Arc<AtomicUsize>,
+    }
+
+    impl UpdateCheckClient for FakeChecker {
+        fn check<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
+            let result = self.check_result.clone();
+            Box::pin(async move { result })
+        }
+
+        fn download<'a>(
+            &'a self,
+            _version: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<std::path::PathBuf, String>> + Send + 'a>> {
+            self.download_calls.fetch_add(1, Ordering::SeqCst);
+            let result = self.download_result.clone();
+            Box::pin(async move { result })
+        }
+    }
 
     #[test]
     fn http_base_url_ws_with_port() {
@@ -843,5 +921,67 @@ mod tests {
         let body = response.into_body().collect().await.expect("collect body");
         let json: serde_json::Value = serde_json::from_slice(&body.to_bytes()).expect("json body");
         assert_eq!(json["error"], "no update staged");
+    }
+
+    #[tokio::test]
+    async fn update_check_skips_download_in_check_only_mode() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        let download_calls = Arc::new(AtomicUsize::new(0));
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::Available {
+                version: "1.2.3".to_owned(),
+            }),
+            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
+            download_calls: Arc::clone(&download_calls),
+        };
+
+        let status =
+            run_update_check_with_checker(&state, &checker, rt_updater::UpdateMode::CheckOnly)
+                .await;
+
+        assert_eq!(
+            status,
+            UpdateStatus::Available {
+                version: "1.2.3".to_owned()
+            }
+        );
+        assert_eq!(download_calls.load(Ordering::SeqCst), 0);
+        assert!(state.staged_update_path.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_check_downloads_in_check_and_download_mode() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        let download_calls = Arc::new(AtomicUsize::new(0));
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::Available {
+                version: "1.2.3".to_owned(),
+            }),
+            download_result: Ok(std::path::PathBuf::from("/tmp/staged-receiver")),
+            download_calls: Arc::clone(&download_calls),
+        };
+
+        let status = run_update_check_with_checker(
+            &state,
+            &checker,
+            rt_updater::UpdateMode::CheckAndDownload,
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            UpdateStatus::Downloaded {
+                version: "1.2.3".to_owned()
+            }
+        );
+        assert_eq!(download_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *state.staged_update_path.read().await,
+            Some(std::path::PathBuf::from("/tmp/staged-receiver"))
+        );
     }
 }

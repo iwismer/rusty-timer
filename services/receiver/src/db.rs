@@ -142,11 +142,20 @@ impl Db {
     fn apply_schema(&self) -> DbResult<()> {
         self.conn.execute_batch(SCHEMA_SQL)?;
         // Migration: add update_mode column to existing profile tables.
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE profile ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'check-and-download';"
-        );
+        match self.conn.execute_batch(
+            "ALTER TABLE profile ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'check-and-download';",
+        ) {
+            Ok(()) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if is_duplicate_update_mode_column_error(&message) => {}
+            Err(e) => return Err(e.into()),
+        }
         Ok(())
     }
+}
+
+fn is_duplicate_update_mode_column_error(message: &str) -> bool {
+    message.contains("duplicate column name: update_mode")
 }
 
 #[cfg(test)]
@@ -169,5 +178,15 @@ mod tests {
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.update_mode, "check-and-download");
+    }
+
+    #[test]
+    fn duplicate_column_message_detection_matches_expected_error() {
+        assert!(is_duplicate_update_mode_column_error(
+            "duplicate column name: update_mode"
+        ));
+        assert!(!is_duplicate_update_mode_column_error(
+            "near \"ALTER\": syntax error"
+        ));
     }
 }
