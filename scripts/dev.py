@@ -15,6 +15,7 @@ Usage:
     uv run scripts/dev.py
     uv run scripts/dev.py --no-build
     uv run scripts/dev.py --clear
+    uv run scripts/dev.py --log-level debug
     uv run scripts/dev.py --emulator port=10001,delay=500,file=start.txt
     uv run scripts/dev.py --emulator port=10001 --emulator port=10002,delay=500
     uv run scripts/dev.py --bibchip test_assets/bibchip/large.txt --ppl test_assets/ppl/large.ppl
@@ -191,7 +192,7 @@ def build_forwarder_toml(emulators: list[EmulatorSpec]) -> str:
     return FORWARDER_TOML_HEADER + "\n" + readers
 
 
-def build_panes(emulators: list[EmulatorSpec]) -> list[tuple[str, str]]:
+def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> list[tuple[str, str]]:
     dashboard_build_dir = REPO_ROOT / "apps" / "server-ui" / "build"
     dashboard_env = ""
     if dashboard_build_dir.is_dir():
@@ -203,7 +204,7 @@ def build_panes(emulators: list[EmulatorSpec]) -> list[tuple[str, str]]:
             "Server",
             f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
             f"{dashboard_env}"
-            "BIND_ADDR=0.0.0.0:8080 LOG_LEVEL=debug ./target/debug/server",
+            f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL={shlex.quote(log_level)} ./target/debug/server",
         ),
     ]
 
@@ -1095,8 +1096,9 @@ def detect_and_launch(
     *,
     bibchip_path: Path | None = None,
     ppl_path: Path | None = None,
+    log_level: str = "info",
 ) -> None:
-    panes = build_panes(emulators)
+    panes = build_panes(emulators, log_level=log_level)
     bg_threads: list[threading.Thread] = []
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
     bg_threads.append(start_receiver_auto_config())
@@ -1152,6 +1154,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ppl", type=Path, metavar="PATH",
         help="Path to a PPL participant file. Uploaded to a new race after server startup.",
+    )
+    parser.add_argument(
+        "--log-level", default="info", metavar="LEVEL",
+        help="Log level for the server (default: info)",
     )
     return parser.parse_args()
 
@@ -1226,7 +1232,7 @@ def main() -> None:
     ))
     setup(skip_build=args.no_build, emulators=emulators)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
-    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path)
+    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path, log_level=args.log_level)
 
 
 if __name__ == "__main__":
