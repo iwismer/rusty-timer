@@ -362,21 +362,21 @@ async fn put_profile(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ProfileRequest>,
 ) -> impl IntoResponse {
-    // Validate update_mode
-    if serde_json::from_value::<rt_updater::UpdateMode>(serde_json::Value::String(
-        body.update_mode.clone(),
-    ))
-    .is_err()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!(
-                "update_mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'",
-                body.update_mode
-            ),
-        )
-            .into_response();
-    }
+    let parsed_update_mode = match serde_json::from_value::<rt_updater::UpdateMode>(
+        serde_json::Value::String(body.update_mode.clone()),
+    ) {
+        Ok(mode) => mode,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "update_mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'",
+                    body.update_mode
+                ),
+            )
+                .into_response();
+        }
+    };
 
     let url = normalize_server_url(&body.server_url);
     let db = state.db.lock().await;
@@ -384,6 +384,7 @@ async fn put_profile(
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
+            *state.update_mode.write().await = parsed_update_mode;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

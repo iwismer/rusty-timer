@@ -765,27 +765,28 @@ pub async fn apply_section_update(
         }
         "update" => {
             let mode_str = optional_string_field(payload, "mode")?;
-            if let Some(ref m) = mode_str {
-                // Validate the mode string
-                if serde_json::from_value::<rt_updater::UpdateMode>(serde_json::Value::String(
-                    m.clone(),
-                ))
-                .is_err()
-                {
-                    return Err((
+            let parsed_mode = match mode_str.as_ref() {
+                Some(m) => serde_json::from_value::<rt_updater::UpdateMode>(
+                    serde_json::Value::String(m.clone()),
+                )
+                .map_err(|_| {
+                    (
                         400u16,
                         serde_json::json!({"ok": false, "error": format!(
                             "mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'", m
                         )})
                         .to_string(),
-                    ));
-                }
-            }
+                    )
+                })?,
+                None => rt_updater::UpdateMode::default(),
+            };
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.update = Some(crate::config::RawUpdateConfig { mode: mode_str });
                 Ok(())
             })
-            .await
+            .await?;
+            subsystem.lock().await.update_mode = parsed_mode;
+            Ok(())
         }
         "readers" => {
             let readers_val = payload.get("readers").ok_or_else(|| {
@@ -2136,6 +2137,117 @@ target = "192.168.1.100:10000"
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn config_update_endpoint_updates_runtime_mode_and_sets_restart_needed() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        assert_eq!(
+            server.subsystem.lock().await.update_mode,
+            rt_updater::UpdateMode::CheckAndDownload
+        );
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/update",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"check-only"}"#)
+            .send()
+            .await
+            .expect("post config update");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            server.subsystem.lock().await.update_mode,
+            rt_updater::UpdateMode::CheckOnly
+        );
+        assert!(
+            server.restart_needed().await,
+            "restart_needed must be true after update config change"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_update_endpoint_rejects_invalid_mode() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/update",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"bogus"}"#)
+            .send()
+            .await
+            .expect("post config update");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            server.subsystem.lock().await.update_mode,
+            rt_updater::UpdateMode::CheckAndDownload
+        );
     }
 
     #[cfg(unix)]
