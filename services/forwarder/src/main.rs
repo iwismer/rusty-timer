@@ -1347,6 +1347,9 @@ mod tests {
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
             },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -1796,6 +1799,9 @@ token_file = "/tmp/test-token"
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
             },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
+            },
             readers: vec![],
         };
 
@@ -2020,6 +2026,9 @@ token_file = "/tmp/test-token"
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
             },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -2125,6 +2134,9 @@ token_file = "/tmp/test-token"
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
+            },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![],
         };
