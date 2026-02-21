@@ -41,7 +41,7 @@ pub enum ConnectionState {
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
     pub connection_state: Arc<RwLock<ConnectionState>>,
-    pub log_entries: Arc<RwLock<Vec<String>>>,
+    pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
     pub shutdown_tx: watch::Sender<bool>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
@@ -56,7 +56,11 @@ impl AppState {
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
             connection_state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
-            log_entries: Arc::new(RwLock::new(Vec::new())),
+            logger: Arc::new(rt_ui_log::UiLogger::with_buffer(
+                ui_tx.clone(),
+                |entry| ReceiverUiEvent::LogEntry { entry },
+                500,
+            )),
             shutdown_tx,
             upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
@@ -64,27 +68,6 @@ impl AppState {
             staged_update_path: Arc::new(RwLock::new(None)),
         });
         (state, shutdown_rx)
-    }
-
-    /// Cap for the in-memory log ring buffer.
-    const MAX_LOG_ENTRIES: usize = 500;
-
-    /// Append a timestamped log entry and broadcast it to SSE clients.
-    pub async fn emit_log(&self, message: String) {
-        let entry = format!(
-            "{} {}",
-            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-            message
-        );
-        {
-            let mut entries = self.log_entries.write().await;
-            entries.push(entry.clone());
-            if entries.len() > Self::MAX_LOG_ENTRIES {
-                let excess = entries.len() - Self::MAX_LOG_ENTRIES;
-                entries.drain(..excess);
-            }
-        }
-        let _ = self.ui_tx.send(ReceiverUiEvent::LogEntry { entry });
     }
 
     /// Update connection state, broadcast status change, and emit a log entry.
@@ -104,7 +87,7 @@ impl AppState {
             ConnectionState::Connected => "Connected",
             ConnectionState::Disconnecting => "Disconnecting",
         };
-        self.emit_log(label.to_owned()).await;
+        self.logger.log(label);
     }
 
     /// Build the merged streams response from local subscriptions and upstream server.
@@ -211,14 +194,12 @@ impl AppState {
 pub struct ProfileRequest {
     pub server_url: String,
     pub token: String,
-    pub log_level: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
     pub server_url: String,
     pub token: String,
-    pub log_level: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -340,7 +321,6 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Ok(Some(p)) => Json(ProfileResponse {
             server_url: p.server_url,
             token: p.token,
-            log_level: p.log_level,
         })
         .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no profile").into_response(),
@@ -354,7 +334,7 @@ async fn put_profile(
 ) -> impl IntoResponse {
     let url = normalize_server_url(&body.server_url);
     let db = state.db.lock().await;
-    match db.save_profile(&url, &body.token, &body.log_level) {
+    match db.save_profile(&url, &body.token) {
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
@@ -421,7 +401,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn get_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entries = state.log_entries.read().await.clone();
+    let entries = state.logger.entries();
     Json(LogsResponse { entries }).into_response()
 }
 

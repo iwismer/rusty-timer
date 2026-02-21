@@ -72,6 +72,17 @@ async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
     }
 }
 
+fn created_reader_ips_for_logging<'a>(
+    requested_reader_ips: &'a [String],
+    stream_map: &HashMap<String, Uuid>,
+) -> Vec<&'a str> {
+    requested_reader_ips
+        .iter()
+        .filter(|reader_ip| stream_map.contains_key(reader_ip.as_str()))
+        .map(String::as_str)
+        .collect()
+}
+
 async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
     let token_str = match token {
         Some(t) => t,
@@ -130,7 +141,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         .await;
         return;
     }
-    info!(device_id = %device_id, "forwarder connected");
+    state.logger.log(format!("forwarder {device_id} connected"));
     let session_id = Uuid::new_v4().to_string();
 
     let hello = match tokio::time::timeout(SESSION_TIMEOUT, socket.recv()).await {
@@ -214,6 +225,11 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     // Notify dashboard of streams coming online
     for &sid in stream_map.values() {
         publish_stream_created(&state, sid).await;
+    }
+    for reader_ip in created_reader_ips_for_logging(&hello.reader_ips, &stream_map) {
+        state
+            .logger
+            .log(format!("stream created: {device_id}/{reader_ip}"));
     }
 
     let initial_display_name_patch = match &current_display_name {
@@ -369,6 +385,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                             let _ = set_stream_online(&state.pool, sid, true).await;
                                             state.get_or_create_broadcast(sid).await;
                                             publish_stream_created(&state, sid).await;
+                                            state.logger.log(format!("stream created: {device_id}/{reader_ip}"));
                                         }
                                     }
                                 }
@@ -396,9 +413,9 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         }
                     }
                     Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
-                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) => { info!(device_id = %device_id, "forwarder disconnected"); break; }
-                    Err(_) => { warn!(device_id = %device_id, "session timeout"); break; }
-                    Ok(Some(Err(e))) => { warn!(device_id = %device_id, error = %e, "WS error"); break; }
+                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) => { state.logger.log(format!("forwarder {device_id} disconnected")); break; }
+                    Err(_) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} session timeout")); break; }
+                    Ok(Some(Err(e))) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} WS error: {e}")); break; }
                     Ok(Some(Ok(_))) => {}
                 }
             }
@@ -473,6 +490,9 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
     state.unregister_forwarder(&device_id).await;
     info!(device_id = %device_id, "forwarder session ended");
+    state
+        .logger
+        .log(format!("forwarder {device_id} session ended"));
 }
 
 fn expire_pending_requests<T>(
@@ -682,4 +702,25 @@ async fn handle_event_batch(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn created_reader_ips_only_includes_successful_upserts_in_requested_order() {
+        let requested = vec![
+            "10.0.0.1:10000".to_owned(),
+            "10.0.0.2:10000".to_owned(),
+            "10.0.0.3:10000".to_owned(),
+        ];
+        let mut stream_map = HashMap::new();
+        stream_map.insert("10.0.0.1:10000".to_owned(), Uuid::new_v4());
+        stream_map.insert("10.0.0.3:10000".to_owned(), Uuid::new_v4());
+
+        let created = created_reader_ips_for_logging(&requested, &stream_map);
+
+        assert_eq!(created, vec!["10.0.0.1:10000", "10.0.0.3:10000"]);
+    }
 }

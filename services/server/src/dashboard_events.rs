@@ -63,4 +63,7 @@ pub enum DashboardEvent {
         forwarder_id: String,
         race_id: Option<Uuid>,
     },
+    LogEntry {
+        entry: String,
+    },
 }

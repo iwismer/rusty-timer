@@ -7,7 +7,6 @@ import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
 export interface Profile {
   server_url: string;
   token: string;
-  log_level: string;
 }
 
 export interface StreamEntry {

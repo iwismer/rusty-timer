@@ -10,6 +10,15 @@ export const forwarderRacesStore = writable<Record<string, string | null>>({});
 /** All races for dropdown selection */
 export const racesStore = writable<RaceEntry[]>([]);
 
+export const logsStore = writable<string[]>([]);
+
+export function pushLog(entry: string): void {
+  logsStore.update((entries) => {
+    const next = [...entries, entry.trim()];
+    return next.length <= 500 ? next : next.slice(next.length - 500);
+  });
+}
+
 export function addOrUpdateStream(stream: StreamEntry): void {
   streamsStore.update((streams) => {
     const idx = streams.findIndex((s) => s.stream_id === stream.stream_id);
@@ -55,4 +64,5 @@ export function resetStores(): void {
   metricsStore.set({});
   forwarderRacesStore.set({});
   racesStore.set([]);
+  logsStore.set([]);
 }

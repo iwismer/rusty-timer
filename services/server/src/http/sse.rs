@@ -22,6 +22,7 @@ pub async fn dashboard_sse(
                 crate::dashboard_events::DashboardEvent::ForwarderRaceAssigned { .. } => {
                     "forwarder_race_assigned"
                 }
+                crate::dashboard_events::DashboardEvent::LogEntry { .. } => "log_entry",
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),

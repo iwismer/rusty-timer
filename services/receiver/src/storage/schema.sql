@@ -9,8 +9,7 @@
 
 CREATE TABLE IF NOT EXISTS profile (
     server_url TEXT NOT NULL,
-    token      TEXT NOT NULL,
-    log_level  TEXT NOT NULL DEFAULT 'info'
+    token      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (

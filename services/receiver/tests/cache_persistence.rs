@@ -11,17 +11,16 @@ fn db_integrity_check_passes_on_fresh_db() {
 #[test]
 fn profile_save_and_load() {
     let db = Db::open_in_memory().unwrap();
-    db.save_profile("wss://e.com", "t", "info").unwrap();
+    db.save_profile("wss://e.com", "t").unwrap();
     let p = db.load_profile().unwrap().unwrap();
     assert_eq!(p.server_url, "wss://e.com");
     assert_eq!(p.token, "t");
-    assert_eq!(p.log_level, "info");
 }
 #[test]
 fn profile_update_replaces_existing() {
     let db = Db::open_in_memory().unwrap();
-    db.save_profile("wss://old", "old", "debug").unwrap();
-    db.save_profile("wss://new", "new", "warn").unwrap();
+    db.save_profile("wss://old", "old").unwrap();
+    db.save_profile("wss://new", "new").unwrap();
     assert_eq!(db.load_profile().unwrap().unwrap().server_url, "wss://new");
 }
 #[test]
@@ -137,7 +136,7 @@ fn db_profile_persists_to_file() {
     let p = dir.path().join("r.sqlite3");
     {
         let db = Db::open(&p).unwrap();
-        db.save_profile("wss://p.com", "t", "info").unwrap();
+        db.save_profile("wss://p.com", "t").unwrap();
         db.save_cursor("f", "i", 5, 200).unwrap();
     }
     {

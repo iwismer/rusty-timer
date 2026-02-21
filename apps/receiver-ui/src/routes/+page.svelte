@@ -27,7 +27,6 @@
   // Edit state
   let editServerUrl = $state("");
   let editToken = $state("");
-  let editLogLevel = $state("info");
   let saving = $state(false);
   let connectBusy = $state(false);
   let sseConnected = $state(false);
@@ -95,7 +94,6 @@
         profile = p;
         editServerUrl = p.server_url;
         editToken = p.token;
-        editLogLevel = p.log_level;
       }
       const updateStatus = await api.getUpdateStatus().catch(() => null);
       if (updateStatus?.status === "downloaded" && updateStatus.version) {
@@ -114,7 +112,6 @@
       await api.putProfile({
         server_url: editServerUrl,
         token: editToken,
-        log_level: editLogLevel,
       });
     } catch (e) {
       error = String(e);
@@ -283,9 +280,9 @@
       </section>
     </Card>
 
-    <!-- Profile Card -->
-    <Card title="Profile">
-      <section data-testid="profile-section">
+    <!-- Config Card -->
+    <Card title="Config">
+      <section data-testid="config-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
             Server URL
@@ -306,28 +303,14 @@
               placeholder="auth token"
             />
           </label>
-          <label class="block text-xs font-medium text-text-muted">
-            Log Level
-            <select
-              data-testid="log-level-select"
-              class="{inputClass} mt-1"
-              bind:value={editLogLevel}
-            >
-              <option value="trace">trace</option>
-              <option value="debug">debug</option>
-              <option value="info">info</option>
-              <option value="warn">warn</option>
-              <option value="error">error</option>
-            </select>
-          </label>
         </div>
         <button
-          data-testid="save-profile-btn"
+          data-testid="save-config-btn"
           class="{btnPrimary} mt-3"
           onclick={saveProfile}
           disabled={saving}
         >
-          {saving ? "Saving..." : "Save Profile"}
+          {saving ? "Saving..." : "Save"}
         </button>
       </section>
     </Card>

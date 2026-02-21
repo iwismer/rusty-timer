@@ -154,8 +154,8 @@ fn integrity_check_passes_on_fresh_db() {
 fn profile_insert_and_read() {
     let conn = open_memory_db();
     conn.execute(
-        "INSERT INTO profile (server_url, token, log_level) VALUES (?1,?2,?3)",
-        rusqlite::params!["wss://example.com", "tok", "info"],
+        "INSERT INTO profile (server_url, token) VALUES (?1,?2)",
+        rusqlite::params!["wss://example.com", "tok"],
     )
     .unwrap();
     let url: String = conn
@@ -171,8 +171,8 @@ fn profile_write_survives_reopen() {
     {
         let c = open_file_db(&p);
         c.execute(
-            "INSERT INTO profile (server_url,token,log_level) VALUES(?1,?2,?3)",
-            rusqlite::params!["wss://p.com", "t", "info"],
+            "INSERT INTO profile (server_url,token) VALUES(?1,?2)",
+            rusqlite::params!["wss://p.com", "t"],
         )
         .unwrap();
     }

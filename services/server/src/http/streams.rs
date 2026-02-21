@@ -139,6 +139,9 @@ pub async fn reset_epoch(
                     new_stream_epoch: (s.stream_epoch + 1) as u64,
                 };
                 if tx.send(ForwarderCommand::EpochReset(cmd)).await.is_ok() {
+                    state
+                        .logger
+                        .log(format!("epoch reset for stream {stream_id}"));
                     return StatusCode::NO_CONTENT.into_response();
                 }
             }

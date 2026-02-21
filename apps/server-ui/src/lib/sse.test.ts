@@ -21,6 +21,7 @@ class MockEventSource {
     MockEventSource.instances.push(this);
     // Simulate async open
     setTimeout(() => {
+      if (this.closed) return;
       this.readyState = 1;
       if (this.onopen) this.onopen();
     }, MockEventSource.openDelayMs);
@@ -55,6 +56,7 @@ import {
   setMetrics,
   racesStore,
   forwarderRacesStore,
+  logsStore,
 } from "./stores";
 import type { StreamEntry } from "./api";
 
@@ -85,6 +87,9 @@ describe("sse", () => {
       }
       if (url.includes("/api/v1/forwarder-races")) {
         return Promise.resolve(makeResponse({ assignments: [] }));
+      }
+      if (url.includes("/api/v1/logs")) {
+        return Promise.resolve(makeResponse({ entries: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -314,6 +319,9 @@ describe("sse", () => {
       if (url.includes("/api/v1/forwarder-races")) {
         return Promise.resolve(makeResponse({ assignments: [] }));
       }
+      if (url.includes("/api/v1/logs")) {
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
@@ -337,22 +345,68 @@ describe("sse", () => {
       if (url.includes("/api/v1/forwarder-races")) {
         return Promise.resolve(makeResponse({ assignments: [] }));
       }
+      if (url.includes("/api/v1/logs")) {
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
     const { initSSE } = await import("./sse");
     initSSE();
 
-    // Eager startup sync should run immediately.
-    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // Eager startup sync should run immediately (streams, races, forwarder assignments, and logs).
+    expect(mockFetch).toHaveBeenCalledTimes(4);
 
     // onopen should trigger exactly one follow-up sync.
     await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(mockFetch).toHaveBeenCalledTimes(6);
+    expect(mockFetch).toHaveBeenCalledTimes(8);
 
     // No additional fetches without explicit resync triggers.
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(mockFetch).toHaveBeenCalledTimes(6);
+    expect(mockFetch).toHaveBeenCalledTimes(8);
+  });
+
+  it("updates streams even when logs fetch fails during resync", async () => {
+    const { initSSE } = await import("./sse");
+    const stream: StreamEntry = {
+      stream_id: "s1",
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      display_alias: null,
+      forwarder_display_name: null,
+      online: true,
+      stream_epoch: 1,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+
+    MockEventSource.openDelayMs = 30;
+    mockFetch.mockReset();
+    let logFetches = 0;
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/streams")) {
+        return Promise.resolve(makeResponse({ streams: [stream] }));
+      }
+      if (url.includes("/api/v1/logs")) {
+        logFetches += 1;
+        if (logFetches === 1) {
+          return Promise.reject(new Error("logs down"));
+        }
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
+      if (url.includes("/api/v1/races")) {
+        return Promise.resolve(makeResponse({ races: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-races")) {
+        return Promise.resolve(makeResponse({ assignments: [] }));
+      }
+      return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
+    });
+
+    initSSE();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(get(streamsStore)).toEqual([stream]);
   });
 
   it("runs a follow-up resync when resync events arrive during an in-flight resync", async () => {
@@ -376,6 +430,7 @@ describe("sse", () => {
       },
     );
 
+    MockEventSource.openDelayMs = 100;
     mockFetch.mockReset();
     mockFetch.mockImplementation((input: unknown) => {
       const url = String(input);
@@ -392,6 +447,9 @@ describe("sse", () => {
       if (url.includes("/api/v1/forwarder-races")) {
         return Promise.resolve(makeResponse({ assignments: [] }));
       }
+      if (url.includes("/api/v1/logs")) {
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
@@ -402,13 +460,59 @@ describe("sse", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     es.emit("resync", "{}");
 
-    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
 
     resolveFirstStream(makeResponse({ streams: [streamA] }));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(mockFetch).toHaveBeenCalledTimes(6);
+    expect(mockFetch).toHaveBeenCalledTimes(8);
     expect(streamCalls).toBe(2);
     expect(get(streamsStore)[0].online).toBe(true);
+  });
+
+  it("keeps live log entries that arrive during an in-flight logs resync", async () => {
+    const { initSSE } = await import("./sse");
+    MockEventSource.openDelayMs = 200;
+
+    let resolveLogs!: (value: ReturnType<typeof makeResponse>) => void;
+    const delayedLogs = new Promise<ReturnType<typeof makeResponse>>(
+      (resolve) => {
+        resolveLogs = resolve;
+      },
+    );
+
+    mockFetch.mockReset();
+    mockFetch.mockImplementation((input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/v1/streams")) {
+        return Promise.resolve(makeResponse({ streams: [] }));
+      }
+      if (url.includes("/api/v1/races")) {
+        return Promise.resolve(makeResponse({ races: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-races")) {
+        return Promise.resolve(makeResponse({ assignments: [] }));
+      }
+      if (url.includes("/api/v1/logs")) {
+        return delayedLogs;
+      }
+      return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
+    });
+
+    initSSE();
+    const es = MockEventSource.instances[0];
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    es.emit(
+      "log_entry",
+      JSON.stringify({ entry: "15:00:00 [INFO] live entry" }),
+    );
+    resolveLogs(makeResponse({ entries: ["14:59:59 [INFO] snapshot entry"] }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(get(logsStore)).toEqual([
+      "14:59:59 [INFO] snapshot entry",
+      "15:00:00 [INFO] live entry",
+    ]);
   });
 });

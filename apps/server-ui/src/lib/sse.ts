@@ -6,13 +6,18 @@ import {
   setRaces,
   setMetrics,
   setForwarderRace,
+  pushLog,
+  logsStore,
 } from "./stores";
-import { getForwarderRaces, getRaces, getStreams } from "./api";
+import { getForwarderRaces, getLogs, getRaces, getStreams } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
+import { mergeLogsWithPendingLive } from "./logs-merge";
 
 let eventSource: EventSource | null = null;
 let resyncInFlight = false;
 let resyncQueued = false;
+let logsResyncInFlight = false;
+let pendingLiveLogs: string[] = [];
 
 function replaceForwarderAssignments(
   assignments: Array<{ forwarder_id: string; race_id: string | null }>,
@@ -65,6 +70,15 @@ export function initSSE(): void {
     setForwarderRace(data.forwarder_id, data.race_id ?? null);
   });
 
+  eventSource.addEventListener("log_entry", (e: MessageEvent) => {
+    const data = JSON.parse(e.data);
+    pushLog(data.entry);
+    if (logsResyncInFlight) {
+      const entry = String(data.entry ?? "").trim();
+      if (entry) pendingLiveLogs.push(entry);
+    }
+  });
+
   eventSource.addEventListener("resync", async () => {
     await resync();
   });
@@ -86,15 +100,17 @@ async function resync(): Promise<void> {
   }
 
   resyncInFlight = true;
+  logsResyncInFlight = true;
   try {
     // Coalesce multiple resync triggers into a single follow-up fetch.
     while (true) {
       resyncQueued = false;
-      const [streamsResp, racesResp, assignmentsResp] =
+      const [streamsResp, racesResp, assignmentsResp, logsResp] =
         await Promise.allSettled([
           getStreams(),
           getRaces(),
           getForwarderRaces(),
+          getLogs(),
         ]);
 
       if (streamsResp.status === "fulfilled") {
@@ -106,10 +122,21 @@ async function resync(): Promise<void> {
       if (assignmentsResp.status === "fulfilled") {
         replaceForwarderAssignments(assignmentsResp.value.assignments);
       }
+      if (logsResp.status === "fulfilled") {
+        logsStore.set(
+          mergeLogsWithPendingLive(
+            logsResp.value.entries,
+            pendingLiveLogs,
+            500,
+          ),
+        );
+        pendingLiveLogs = [];
+      }
       if (!resyncQueued) break;
     }
   } finally {
     resyncInFlight = false;
+    logsResyncInFlight = false;
   }
 }
 
@@ -120,4 +147,6 @@ export function destroySSE(): void {
   }
   resyncInFlight = false;
   resyncQueued = false;
+  logsResyncInFlight = false;
+  pendingLiveLogs = [];
 }

@@ -3,8 +3,10 @@ import { get } from "svelte/store";
 import {
   streamsStore,
   metricsStore,
+  logsStore,
   addOrUpdateStream,
   patchStream,
+  pushLog,
   setMetrics,
   resetStores,
   replaceStreams,
@@ -112,5 +114,16 @@ describe("stores", () => {
       },
     ]);
     expect(get(metricsStore)).toEqual({ aaa: METRICS_A });
+  });
+
+  it("pushLog caps entries at 500 and keeps the latest", () => {
+    for (let i = 0; i < 510; i += 1) {
+      pushLog(`15:00:${String(i % 60).padStart(2, "0")} [INFO] msg-${i}`);
+    }
+
+    const logs = get(logsStore);
+    expect(logs).toHaveLength(500);
+    expect(logs[0]).toContain("msg-10");
+    expect(logs[logs.length - 1]).toContain("msg-509");
   });
 });

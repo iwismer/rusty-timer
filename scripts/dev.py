@@ -161,7 +161,6 @@ def parse_emulator_spec(value: str) -> EmulatorSpec:
 
 PANES_AFTER_EMULATOR = [
     ("Forwarder", f"./target/debug/forwarder --config {FORWARDER_TOML_PATH}"),
-    ("Receiver",     "./target/debug/receiver"),
 ]
 
 FORWARDER_TOML_HEADER = f"""\
@@ -214,7 +213,10 @@ def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> li
         emu_panes = [
             (f"Emulator {i + 1}", e.to_cmd()) for i, e in enumerate(emulators)
         ]
-    return panes_before_emulator + emu_panes + PANES_AFTER_EMULATOR
+    panes_after_emulator = PANES_AFTER_EMULATOR + [
+        ("Receiver", f"RUST_LOG={shlex.quote(log_level)} ./target/debug/receiver"),
+    ]
+    return panes_before_emulator + emu_panes + panes_after_emulator
 
 console = Console()
 stderr_console = Console(stderr=True)

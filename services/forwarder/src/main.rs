@@ -11,10 +11,12 @@ use forwarder::status_http::{
     ConfigState, ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus,
 };
 use forwarder::storage::journal::Journal;
+use forwarder::ui_events::ForwarderUiEvent;
 use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkError, UplinkSession};
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
 use ipico_core::read::ChipRead;
 use rt_protocol::{ReadEvent, ResumeCursor, WsMessage};
+use rt_ui_log::UiLogLevel;
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
 use std::net::SocketAddr;
@@ -103,6 +105,7 @@ async fn run_reader(
     journal: Arc<Mutex<Journal>>,
     mut shutdown_rx: watch::Receiver<bool>,
     status: StatusServer,
+    logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
     let stream_key = format!("{}:{}", reader_ip, reader_port);
@@ -123,7 +126,7 @@ async fn run_reader(
 
         let stream = match TcpStream::connect(&target_addr).await {
             Ok(s) => {
-                info!(reader_ip = %reader_ip, "reader TCP connected");
+                logger.log(format!("reader {} connected", reader_ip));
                 backoff_secs = 1; // reset backoff on successful connect
                 status
                     .update_reader_state(&stream_key, ReaderConnectionState::Connected)
@@ -131,11 +134,12 @@ async fn run_reader(
                 s
             }
             Err(e) => {
-                warn!(
-                    reader_ip = %reader_ip,
-                    error = %e,
-                    backoff_secs = backoff_secs,
-                    "reader TCP connect failed, retrying"
+                logger.log_at(
+                    UiLogLevel::Warn,
+                    format!(
+                        "reader {} connect failed: {}; retrying in {}s",
+                        reader_ip, e, backoff_secs
+                    ),
                 );
                 mark_reader_disconnected(&status, &stream_key).await;
                 let delay = Duration::from_secs(backoff_secs);
@@ -181,12 +185,18 @@ async fn run_reader(
 
             match read_result {
                 Err(e) => {
-                    warn!(reader_ip = %reader_ip, error = %e, "TCP read error, reconnecting");
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} read error: {}; reconnecting", reader_ip, e),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Ok(0) => {
-                    warn!(reader_ip = %reader_ip, "TCP connection closed by reader, reconnecting");
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} connection closed; reconnecting", reader_ip),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
@@ -208,7 +218,10 @@ async fn run_reader(
                 }
                 Err(_) => {
                     // Line is not a valid IPICO read — log and skip
-                    warn!(reader_ip = %reader_ip, line = %raw_line, "skipping unparseable line");
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} skipped unparseable line", reader_ip),
+                    );
                     continue;
                 }
             }
@@ -406,6 +419,7 @@ async fn run_uplink(
     config_state: Arc<ConfigState>,
     subsystem: Arc<Mutex<SubsystemStatus>>,
     restart_signal: Arc<Notify>,
+    logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
 ) {
     let ui_tx = status.ui_sender();
     let server_url = format!(
@@ -457,11 +471,7 @@ async fn run_uplink(
                 .collect()
         };
 
-        info!(
-            url = %ws_url,
-            cursors = resume_cursors.len(),
-            "connecting uplink WebSocket"
-        );
+        logger.log(format!("uplink connecting to {}", ws_url));
 
         let mut session = match UplinkSession::connect_with_resume(
             uplink_cfg.clone(),
@@ -471,26 +481,18 @@ async fn run_uplink(
         .await
         {
             Ok(s) => {
-                info!(
-                    session_id = %s.session_id(),
-                    device_id = %s.device_id(),
-                    "uplink connected"
-                );
+                logger.log(format!("uplink connected (session {})", s.session_id()));
                 status.set_uplink_connected(true).await;
                 backoff_secs = 1;
                 s
             }
             Err(e) => {
-                let _ = ui_tx.send(forwarder::ui_events::ForwarderUiEvent::LogEntry {
-                    entry: format!(
-                        "uplink connect failed: {}; url={}; retrying in {}s",
-                        e, ws_url, backoff_secs
+                logger.log_at(
+                    UiLogLevel::Warn,
+                    format!(
+                        "uplink connect failed: {}; retrying in {}s",
+                        e, backoff_secs
                     ),
-                });
-                warn!(
-                    error = %e,
-                    backoff_secs = backoff_secs,
-                    "uplink connect failed, retrying"
                 );
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
@@ -546,11 +548,13 @@ async fn run_uplink(
                 })
                 .collect();
 
-            info!(
-                stream_key = %stream_key,
-                epoch = stream_epoch,
-                count = read_events.len(),
-                "replaying unacked events"
+            logger.log_at(
+                UiLogLevel::Debug,
+                format!(
+                    "replaying {} unacked events for {}",
+                    read_events.len(),
+                    stream_key
+                ),
             );
 
             let send_result = session.send_batch(read_events).await;
@@ -570,11 +574,10 @@ async fn run_uplink(
                     }
                 }
                 Ok(SendBatchResult::EpochReset(cmd)) => {
-                    info!(
-                        reader_ip = %cmd.reader_ip,
-                        new_epoch = cmd.new_stream_epoch,
-                        "epoch reset during replay, bumping journal and reconnecting"
-                    );
+                    logger.log(format!(
+                        "epoch reset for {}; bumping journal and reconnecting",
+                        cmd.reader_ip
+                    ));
                     let mut j = journal.lock().await;
                     if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
                         warn!(error = %e, "failed to bump epoch in journal");
@@ -645,6 +648,11 @@ async fn run_uplink(
                 result = session.recv_message() => {
                     match result {
                         Ok(msg @ WsMessage::ConfigGetRequest(_)) | Ok(msg @ WsMessage::ConfigSetRequest(_)) => {
+                            match &msg {
+                                WsMessage::ConfigGetRequest(_) => logger.log("server requested config"),
+                                WsMessage::ConfigSetRequest(req) => logger.log(format!("server updated config section '{}'", req.section)),
+                                _ => {}
+                            }
                             if let Err(e) = handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx).await {
                                 warn!(error = %e, "config handler failed during idle");
                                 break 'uplink;
@@ -652,6 +660,7 @@ async fn run_uplink(
                             continue 'uplink;
                         }
                         Ok(WsMessage::RestartRequest(req)) => {
+                            logger.log("restart requested by server");
                             if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await {
                                 warn!(error = %e, "restart handler failed during idle");
                                 break 'uplink;
@@ -720,7 +729,10 @@ async fn run_uplink(
                 continue;
             }
 
-            debug!(count = pending.len(), "sending event batch");
+            logger.log_at(
+                UiLogLevel::Debug,
+                format!("sent batch of {} events", pending.len()),
+            );
 
             match session.send_batch(pending).await {
                 Ok(SendBatchResult::Ack(ack)) => {
@@ -736,11 +748,10 @@ async fn run_uplink(
                     }
                 }
                 Ok(SendBatchResult::EpochReset(cmd)) => {
-                    info!(
-                        reader_ip = %cmd.reader_ip,
-                        new_epoch = cmd.new_stream_epoch,
-                        "epoch reset received, bumping journal and reconnecting"
-                    );
+                    logger.log(format!(
+                        "epoch reset for {}; bumping journal",
+                        cmd.reader_ip
+                    ));
                     let mut j = journal.lock().await;
                     if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
                         warn!(error = %e, "failed to bump epoch in journal");
@@ -748,6 +759,7 @@ async fn run_uplink(
                     break 'uplink;
                 }
                 Ok(SendBatchResult::ConfigGet(req)) => {
+                    logger.log("server requested config");
                     let msg = WsMessage::ConfigGetRequest(req);
                     if let Err(e) =
                         handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
@@ -758,6 +770,7 @@ async fn run_uplink(
                     }
                 }
                 Ok(SendBatchResult::ConfigSet(req)) => {
+                    logger.log(format!("server updated config section '{}'", req.section));
                     let msg = WsMessage::ConfigSetRequest(req);
                     if let Err(e) =
                         handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
@@ -784,9 +797,9 @@ async fn run_uplink(
         // Reconnect with backoff
         status.set_uplink_connected(false).await;
         let delay = Duration::from_secs(backoff_secs);
-        warn!(
-            backoff_secs = backoff_secs,
-            "uplink disconnected, reconnecting"
+        logger.log_at(
+            UiLogLevel::Warn,
+            format!("uplink disconnected; reconnecting in {}s", backoff_secs),
         );
         tokio::select! {
             _ = sleep(delay) => {}
@@ -891,6 +904,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let logger = status_server.logger();
     // Collect enabled reader endpoints
     let mut all_readers: Vec<(String, u16)> = Vec::new(); // (addr, local_port)
     let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)
@@ -987,8 +1001,9 @@ async fn main() {
         let j = journal.clone();
         let rx = shutdown_rx.clone();
         let ss = status_server.clone();
+        let lg = logger.clone();
         tokio::spawn(async move {
-            run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss).await;
+            run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss, lg).await;
         });
     }
 
@@ -1003,8 +1018,9 @@ async fn main() {
         let cs = config_state.clone();
         let sub = status_server.subsystem_arc();
         let rs = restart_signal.clone();
+        let lg = logger.clone();
         tokio::spawn(async move {
-            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss, cs, sub, rs).await;
+            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss, cs, sub, rs, lg).await;
         });
     }
 
@@ -1023,6 +1039,7 @@ async fn main() {
     // Spawn background update check
     {
         let ss = status_server.clone();
+        let lg = logger.clone();
         tokio::spawn(async move {
             let checker = match rt_updater::UpdateChecker::new(
                 "iwismer",
@@ -1045,6 +1062,7 @@ async fn main() {
                         available = %version,
                         "update available — POST /update/apply to install"
                     );
+                    lg.log(format!("update available: {}", version));
                     ss.set_update_status(rt_updater::UpdateStatus::Available {
                         version: version.clone(),
                     })
@@ -1052,11 +1070,7 @@ async fn main() {
 
                     match checker.download(version).await {
                         Ok(path) => {
-                            warn!(
-                                version = %version,
-                                path = %path.display(),
-                                "update downloaded and staged"
-                            );
+                            lg.log(format!("update {} downloaded and staged", version));
                             ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
                                 version: version.clone(),
                             })
@@ -1064,7 +1078,7 @@ async fn main() {
                             ss.set_staged_update_path(path).await;
                         }
                         Err(e) => {
-                            warn!(error = %e, "update download failed");
+                            lg.log_at(UiLogLevel::Warn, format!("update download failed: {}", e));
                             ss.set_update_status(rt_updater::UpdateStatus::Failed {
                                 error: e.to_string(),
                             })
@@ -1076,7 +1090,7 @@ async fn main() {
                     info!("no updates available");
                 }
                 Err(e) => {
-                    warn!(error = %e, "update check failed");
+                    lg.log_at(UiLogLevel::Warn, format!("update check failed: {}", e));
                     ss.set_update_status(rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     })
@@ -1086,11 +1100,10 @@ async fn main() {
         });
     }
 
-    info!(
-        readers = all_readers.len(),
-        forwarder_id = %forwarder_id,
-        "forwarder initialized — all worker tasks started"
-    );
+    logger.log(format!(
+        "forwarder v{} initialized — all workers running",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     // Wait for Ctrl-C, SIGTERM, or restart request
     let restart_requested;
@@ -1109,15 +1122,15 @@ async fn main() {
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                info!("SIGINT received, shutting down");
+                logger.log("shutdown: SIGINT received");
                 restart_requested = false;
             }
             _ = sigterm.recv() => {
-                info!("SIGTERM received, shutting down");
+                logger.log("shutdown: SIGTERM received");
                 restart_requested = false;
             }
             _ = restart_signal.notified() => {
-                info!("restart requested via API, shutting down");
+                logger.log("restart requested via API");
                 restart_requested = true;
             }
         }
@@ -1127,10 +1140,10 @@ async fn main() {
     {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl-C received, shutting down");
+                logger.log("shutdown: Ctrl-C received");
             }
             _ = restart_signal.notified() => {
-                info!("restart requested via API, shutting down");
+                logger.log("restart requested via API");
             }
         }
         restart_requested = false; // exec not available on non-unix
@@ -1370,6 +1383,7 @@ mod tests {
         let config_state = Arc::new(ConfigState::new(config_path));
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
+        let lg = status.logger();
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-epoch-reconnect-test".to_string(),
@@ -1380,6 +1394,7 @@ mod tests {
             config_state,
             subsystem_arc,
             restart_signal,
+            lg,
         ));
 
         let (sent_extra_batch_on_first_session, saw_second_session) =
@@ -1505,6 +1520,7 @@ mod tests {
         let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let lg = status.logger();
         let reader_task = tokio::spawn(run_reader(
             "127.0.0.1".to_owned(),
             reader_port,
@@ -1512,6 +1528,7 @@ mod tests {
             journal,
             shutdown_rx,
             status.clone(),
+            lg,
         ));
 
         let (_accepted, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
@@ -1568,6 +1585,7 @@ mod tests {
         let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let lg = status.logger();
         let reader_task = tokio::spawn(run_reader(
             "127.0.0.1".to_owned(),
             reader_port,
@@ -1575,6 +1593,7 @@ mod tests {
             journal.clone(),
             shutdown_rx,
             status,
+            lg,
         ));
 
         let (mut reader_stream, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
@@ -1812,6 +1831,7 @@ token_file = "/tmp/test-token"
         let config_state = Arc::new(ConfigState::new(config_path));
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
+        let lg = status.logger();
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-config-test".to_string(),
@@ -1822,6 +1842,7 @@ token_file = "/tmp/test-token"
             config_state,
             subsystem_arc,
             restart_signal,
+            lg,
         ));
 
         // 7. Wait for results
@@ -2041,6 +2062,7 @@ token_file = "/tmp/test-token"
         let config_state = Arc::new(ConfigState::new(config_path));
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
+        let lg = status.logger();
 
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
@@ -2052,6 +2074,7 @@ token_file = "/tmp/test-token"
             config_state,
             subsystem_arc,
             restart_signal,
+            lg,
         ));
 
         timeout(std::time::Duration::from_secs(2), ready_rx)
@@ -2144,6 +2167,7 @@ token_file = "/tmp/test-token"
         let config_state = Arc::new(ConfigState::new(config_path));
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
+        let lg = status.logger();
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-connect-failure-test".to_string(),
@@ -2154,12 +2178,17 @@ token_file = "/tmp/test-token"
             config_state,
             subsystem_arc,
             restart_signal,
+            lg,
         ));
 
         let log_entry = timeout(std::time::Duration::from_secs(2), async {
             loop {
                 match ui_rx.recv().await.expect("recv ui event") {
-                    forwarder::ui_events::ForwarderUiEvent::LogEntry { entry } => break entry,
+                    forwarder::ui_events::ForwarderUiEvent::LogEntry { entry }
+                        if entry.contains("uplink connect failed") =>
+                    {
+                        break entry
+                    }
                     _ => continue,
                 }
             }
