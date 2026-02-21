@@ -209,6 +209,32 @@ test.describe("stream list page", () => {
     await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(2);
   });
 
+  test("fails open to all races when races API is unavailable", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/races", async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "INTERNAL_ERROR",
+          message: "temporary failure",
+        }),
+      });
+    });
+
+    await page.addInitScript((raceId: string) => {
+      localStorage.setItem("raceFilter", raceId);
+    }, RACE_ID);
+
+    await page.goto("/");
+
+    await expect(
+      page.locator('[data-testid="race-filter-select"]'),
+    ).toHaveValue("");
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(2);
+  });
+
   test("shows empty state when selected race has no matching forwarders", async ({
     page,
   }) => {

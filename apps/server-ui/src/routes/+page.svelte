@@ -108,12 +108,21 @@
     }
   });
 
+  // Fail-open behavior: if races are unavailable or the selected race is missing,
+  // treat it as "All races" instead of filtering everything out.
+  let effectiveSelectedRaceId = $derived(
+    selectedRaceId &&
+      $racesStore.some((race) => race.race_id === selectedRaceId)
+      ? selectedRaceId
+      : null,
+  );
+
   let visibleGroups = $derived.by(() => {
     let groups = groupedStreams;
-    if (selectedRaceId) {
+    if (effectiveSelectedRaceId) {
       groups = groups.filter((g) => {
         const forwarderRaceId = $forwarderRacesStore[g.forwarderId];
-        return forwarderRaceId === selectedRaceId;
+        return forwarderRaceId === effectiveSelectedRaceId;
       });
     }
     if (hideOffline) {
@@ -236,7 +245,7 @@
         data-testid="race-filter-select"
         aria-label="Filter streams by race"
         class="text-sm px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
-        value={selectedRaceId ?? ""}
+        value={effectiveSelectedRaceId ?? ""}
         onchange={(e) => {
           selectedRaceId = e.currentTarget.value || null;
         }}
@@ -402,11 +411,11 @@
   {#if visibleGroups.length === 0}
     {#if $streamsStore.length === 0}
       <p class="text-sm text-text-muted">No streams found.</p>
-    {:else if selectedRaceId && hideOffline}
+    {:else if effectiveSelectedRaceId && hideOffline}
       <p class="text-sm text-text-muted">
         No online streams match the selected race.
       </p>
-    {:else if selectedRaceId}
+    {:else if effectiveSelectedRaceId}
       <p class="text-sm text-text-muted">No streams match the selected race.</p>
     {:else if hideOffline}
       <p data-testid="no-online-streams" class="text-sm text-text-muted">
