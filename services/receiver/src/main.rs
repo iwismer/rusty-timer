@@ -135,6 +135,13 @@ async fn main() {
                     *state.update_status.write().await = rt_updater::UpdateStatus::Available {
                         version: version.clone(),
                     };
+                    let _ = state
+                        .ui_tx
+                        .send(receiver::ReceiverUiEvent::UpdateStatusChanged {
+                            status: rt_updater::UpdateStatus::Available {
+                                version: version.clone(),
+                            },
+                        });
 
                     if update_mode == rt_updater::UpdateMode::CheckAndDownload {
                         match checker.download(version).await {
@@ -146,13 +153,13 @@ async fn main() {
                                     };
                                 *state.staged_update_path.write().await = Some(path);
 
-                                let _ =
-                                    state
-                                        .ui_tx
-                                        .send(receiver::ReceiverUiEvent::UpdateAvailable {
+                                let _ = state.ui_tx.send(
+                                    receiver::ReceiverUiEvent::UpdateStatusChanged {
+                                        status: rt_updater::UpdateStatus::Downloaded {
                                             version: version.clone(),
-                                            current_version: env!("CARGO_PKG_VERSION").to_owned(),
-                                        });
+                                        },
+                                    },
+                                );
                                 state.emit_log(format!("Update v{version} available")).await;
                             }
                             Err(e) => {
@@ -173,6 +180,13 @@ async fn main() {
                     *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     };
+                    let _ = state
+                        .ui_tx
+                        .send(receiver::ReceiverUiEvent::UpdateStatusChanged {
+                            status: rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            },
+                        });
                 }
             }
         });

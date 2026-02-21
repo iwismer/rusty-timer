@@ -615,32 +615,53 @@ async fn run_update_check_with_checker(
                         };
                         *state.update_status.write().await = status.clone();
                         *state.staged_update_path.write().await = Some(path);
-                        let _ =
-                            state
-                                .ui_tx
-                                .send(crate::ui_events::ReceiverUiEvent::UpdateAvailable {
-                                    version: version.clone(),
-                                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
-                                });
+                        let _ = state.ui_tx.send(
+                            crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                                status: status.clone(),
+                            },
+                        );
                         status
                     }
                     Err(error) => {
                         let status = UpdateStatus::Failed { error };
                         *state.update_status.write().await = status.clone();
+                        let _ = state.ui_tx.send(
+                            crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                                status: status.clone(),
+                            },
+                        );
                         status
                     }
                 }
             } else {
-                UpdateStatus::Available { version }
+                let status = UpdateStatus::Available {
+                    version: version.clone(),
+                };
+                let _ = state
+                    .ui_tx
+                    .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                        status: status.clone(),
+                    });
+                status
             }
         }
         Ok(status) => {
             *state.update_status.write().await = status.clone();
+            let _ = state
+                .ui_tx
+                .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                    status: status.clone(),
+                });
             status
         }
         Err(error) => {
             let status = UpdateStatus::Failed { error };
             *state.update_status.write().await = status.clone();
+            let _ = state
+                .ui_tx
+                .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                    status: status.clone(),
+                });
             status
         }
     }
