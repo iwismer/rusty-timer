@@ -130,7 +130,9 @@ SSH is optional for troubleshooting only.
    ssh <ssh-admin-username>@<hostname>.local
    ```
 
-   The forwarder dashboard is available at `http://<hostname>.local`.
+   After the forwarder is installed/configured (`--auto-first-boot` or Step 4),
+   the dashboard is available at `http://<hostname>.local` (include `:<port>`
+   if you configured a non-default status bind).
 
 ## Step 4 -- Run the Setup Script
 
