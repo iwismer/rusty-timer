@@ -27,6 +27,53 @@ APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+bool_env_is_true() {
+  local raw="${1:-}"
+  local lower="${raw,,}"
+  case "${lower}" in
+    1|true|yes|y|on)
+      printf '1\n'
+      ;;
+    *)
+      printf '0\n'
+      ;;
+  esac
+}
+
+is_noninteractive_mode() {
+  [[ "$(bool_env_is_true "${RT_SETUP_NONINTERACTIVE:-0}")" == "1" ]]
+}
+
+reader_targets_from_env() {
+  local raw="${1:-}"
+  if [[ -z "${raw}" ]]; then
+    return 0
+  fi
+
+  printf '%s\n' "${raw}" \
+    | tr ',;' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | awk 'NF > 0'
+}
+
+is_valid_reader_target() {
+  local target="$1"
+  [[ "${target}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]] \
+    || [[ "${target}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+:[0-9]+$ ]]
+}
+
+write_done_marker_if_requested() {
+  local marker="${RT_SETUP_DONE_MARKER:-}"
+  if [[ -z "${marker}" ]]; then
+    return 0
+  fi
+
+  install -d -m 0755 "$(dirname "${marker}")"
+  touch "${marker}"
+  chmod 0600 "${marker}" || true
+  echo "Wrote setup completion marker: ${marker}"
+}
+
 select_latest_forwarder_asset_from_pages() {
   if [[ $# -eq 0 ]]; then
     return 0
@@ -203,8 +250,17 @@ download_binary() {
   echo "── Download binary ──"
 
   if [[ -f "${INSTALL_DIR}/rt-forwarder" ]]; then
-    read -rp "rt-forwarder is already installed. Re-download? [y/N] " answer
-    if [[ ! "${answer}" =~ ^[Yy]$ ]]; then
+    local should_redownload="0"
+    if is_noninteractive_mode; then
+      should_redownload="$(bool_env_is_true "${RT_SETUP_REDOWNLOAD:-0}")"
+    else
+      read -rp "rt-forwarder is already installed. Re-download? [y/N] " answer
+      if [[ "${answer}" =~ ^[Yy]$ ]]; then
+        should_redownload="1"
+      fi
+    fi
+
+    if [[ "${should_redownload}" != "1" ]]; then
       echo "Skipping download."
       return
     fi
@@ -275,8 +331,17 @@ configure() {
   echo "── Configure ──"
 
   if [[ -f "${CONFIG_DIR}/forwarder.toml" ]]; then
-    read -rp "Config already exists. Overwrite? [y/N] " answer
-    if [[ ! "${answer}" =~ ^[Yy]$ ]]; then
+    local overwrite_config="0"
+    if is_noninteractive_mode; then
+      overwrite_config="$(bool_env_is_true "${RT_SETUP_OVERWRITE_CONFIG:-0}")"
+    else
+      read -rp "Config already exists. Overwrite? [y/N] " answer
+      if [[ "${answer}" =~ ^[Yy]$ ]]; then
+        overwrite_config="1"
+      fi
+    fi
+
+    if [[ "${overwrite_config}" != "1" ]]; then
       echo "Skipping configuration."
       # Read existing bind address for verify() to use
       local existing_bind
@@ -289,29 +354,49 @@ configure() {
   fi
 
   # Server base URL (required)
-  local server_base_url=""
-  while [[ -z "${server_base_url}" ]]; do
-    read -rp "Server base URL: " server_base_url
+  local server_base_url="${RT_SETUP_SERVER_BASE_URL:-}"
+  if is_noninteractive_mode; then
     if [[ -z "${server_base_url}" ]]; then
-      echo "Server base URL is required."
-      continue
+      echo "Error: RT_SETUP_SERVER_BASE_URL is required in non-interactive mode." >&2
+      exit 1
     fi
     if [[ ! "${server_base_url}" =~ ^https?:// ]]; then
-      echo "Server base URL must start with http:// or https://"
-      server_base_url=""
-      continue
+      echo "Error: RT_SETUP_SERVER_BASE_URL must start with http:// or https://." >&2
+      exit 1
     fi
-  done
+  else
+    server_base_url=""
+    while [[ -z "${server_base_url}" ]]; do
+      read -rp "Server base URL: " server_base_url
+      if [[ -z "${server_base_url}" ]]; then
+        echo "Server base URL is required."
+        continue
+      fi
+      if [[ ! "${server_base_url}" =~ ^https?:// ]]; then
+        echo "Server base URL must start with http:// or https://"
+        server_base_url=""
+        continue
+      fi
+    done
+  fi
 
   # Auth token (required, hidden input)
-  local auth_token=""
-  while [[ -z "${auth_token}" ]]; do
-    read -rsp "Auth token: " auth_token
-    echo ""
+  local auth_token="${RT_SETUP_AUTH_TOKEN:-}"
+  if is_noninteractive_mode; then
     if [[ -z "${auth_token}" ]]; then
-      echo "Auth token is required."
+      echo "Error: RT_SETUP_AUTH_TOKEN is required in non-interactive mode." >&2
+      exit 1
     fi
-  done
+  else
+    auth_token=""
+    while [[ -z "${auth_token}" ]]; do
+      read -rsp "Auth token: " auth_token
+      echo ""
+      if [[ -z "${auth_token}" ]]; then
+        echo "Auth token is required."
+      fi
+    done
+  fi
 
   # Write token file
   mkdir -p "${CONFIG_DIR}"
@@ -321,28 +406,54 @@ configure() {
 
   # Reader targets (at least one required)
   local readers=()
-  echo "Enter reader targets. At least one is required."
-  while true; do
-    read -rp "Reader target (IP:PORT, or empty to finish): " target
-    if [[ -z "${target}" ]]; then
-      if [[ ${#readers[@]} -eq 0 ]]; then
-        echo "At least one reader target is required."
+  if is_noninteractive_mode; then
+    local env_reader
+    while IFS= read -r env_reader; do
+      if [[ -z "${env_reader}" ]]; then
         continue
       fi
-      break
+      if ! is_valid_reader_target "${env_reader}"; then
+        echo "Error: invalid reader target in RT_SETUP_READER_TARGETS: ${env_reader}" >&2
+        exit 1
+      fi
+      readers+=("${env_reader}")
+    done < <(reader_targets_from_env "${RT_SETUP_READER_TARGETS:-}")
+
+    if [[ ${#readers[@]} -eq 0 ]]; then
+      echo "Error: RT_SETUP_READER_TARGETS must include at least one target." >&2
+      exit 1
     fi
-    if [[ ! "${target}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ && ! "${target}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+:[0-9]+$ ]]; then
-      echo "Invalid format. Expected IP:PORT (e.g. 192.168.1.10:4000) or IP_RANGE:PORT (e.g. 192.168.1.150-160:10000)"
-      continue
-    fi
-    readers+=("${target}")
-  done
+  else
+    echo "Enter reader targets. At least one is required."
+    while true; do
+      read -rp "Reader target (IP:PORT, or empty to finish): " target
+      if [[ -z "${target}" ]]; then
+        if [[ ${#readers[@]} -eq 0 ]]; then
+          echo "At least one reader target is required."
+          continue
+        fi
+        break
+      fi
+      if ! is_valid_reader_target "${target}"; then
+        echo "Invalid format. Expected IP:PORT (e.g. 192.168.1.10:4000) or IP_RANGE:PORT (e.g. 192.168.1.150-160:10000)"
+        continue
+      fi
+      readers+=("${target}")
+    done
+  fi
 
   # Status HTTP bind address
-  local input_bind
-  read -rp "Status HTTP bind address [${STATUS_BIND}]: " input_bind
-  if [[ -n "${input_bind}" ]]; then
-    STATUS_BIND="${input_bind}"
+  if is_noninteractive_mode; then
+    local env_status_bind="${RT_SETUP_STATUS_BIND:-}"
+    if [[ -n "${env_status_bind}" ]]; then
+      STATUS_BIND="${env_status_bind}"
+    fi
+  else
+    local input_bind
+    read -rp "Status HTTP bind address [${STATUS_BIND}]: " input_bind
+    if [[ -n "${input_bind}" ]]; then
+      STATUS_BIND="${input_bind}"
+    fi
   fi
 
   # Generate config file
@@ -402,8 +513,16 @@ install_service() {
   local restart_answer=""
 
   if systemctl is-active --quiet rt-forwarder; then
-    read -rp "Service is already running. Restart now? [Y/n] " answer
-    restart_answer="${answer}"
+    if is_noninteractive_mode; then
+      if [[ "$(bool_env_is_true "${RT_SETUP_RESTART_IF_RUNNING:-1}")" == "1" ]]; then
+        restart_answer="y"
+      else
+        restart_answer="n"
+      fi
+    else
+      read -rp "Service is already running. Restart now? [Y/n] " answer
+      restart_answer="${answer}"
+    fi
     VERIFY_POLICY="$(install_verify_policy "yes" "${restart_answer}")"
     if [[ "${VERIFY_POLICY}" == "skip_verify" ]]; then
       echo "Service not restarted. Run 'sudo systemctl restart rt-forwarder' when ready."
@@ -453,6 +572,13 @@ main() {
   echo "=== rt-forwarder Setup ==="
   echo ""
 
+  if is_noninteractive_mode \
+    && [[ -n "${RT_SETUP_DONE_MARKER:-}" ]] \
+    && [[ -f "${RT_SETUP_DONE_MARKER}" ]]; then
+    echo "Setup marker already present at ${RT_SETUP_DONE_MARKER}; skipping."
+    return 0
+  fi
+
   require_root
   ensure_prerequisites
 
@@ -470,6 +596,8 @@ main() {
     echo "  sudo systemctl restart rt-forwarder"
     echo "  curl -fsS ${probe_url}"
   fi
+
+  write_done_marker_if_requested
 
   echo ""
   echo "Setup complete."

@@ -63,6 +63,18 @@ assert_eq "skip_verify" "$(install_verify_policy yes n)" "active service + no re
 assert_eq "run_verify" "$(install_verify_policy yes y)" "active service + yes restart should run verify"
 assert_eq "run_verify" "$(install_verify_policy no '')" "inactive service should run verify"
 
+# --- non-interactive env helpers ---
+assert_eq "0" "$(bool_env_is_true '')" "empty env should be false"
+assert_eq "1" "$(bool_env_is_true '1')" "1 should be true"
+assert_eq "1" "$(bool_env_is_true 'yes')" "yes should be true"
+assert_eq "0" "$(bool_env_is_true 'no')" "no should be false"
+
+targets="$(reader_targets_from_env $'192.168.1.10:10000\n192.168.1.11:10000')"
+assert_eq $'192.168.1.10:10000\n192.168.1.11:10000' "${targets}" "newline reader list should be preserved"
+
+targets="$(reader_targets_from_env '192.168.1.10:10000, 192.168.1.11:10000')"
+assert_eq $'192.168.1.10:10000\n192.168.1.11:10000' "${targets}" "comma reader list should normalize to newline list"
+
 # --- service unit and staged-update helper rendering ---
 unit="$(render_forwarder_systemd_unit)"
 assert_contains "${unit}" "User=rt-forwarder" "unit should keep service user"

@@ -27,6 +27,34 @@ values, and installs the systemd service.
 
 ## Step 2 -- Configure cloud-init
 
+You can configure these files either manually or with the helper wizard.
+
+### Option A -- Generate files with the helper wizard (recommended)
+
+From the repository root:
+
+```bash
+uv run scripts/sbc_cloud_init.py
+```
+
+The script asks for hostname, SSH key, static IP settings, and DNS servers, then
+writes ready-to-copy `user-data` and `network-config` files.
+
+To enable fully automatic first boot (no SSH setup commands), use:
+
+```bash
+uv run scripts/sbc_cloud_init.py --auto-first-boot
+```
+
+This mode also asks for forwarder setup values (server URL, token, reader
+targets), then embeds a one-time non-interactive `rt-setup.sh` run in
+`user-data`.
+
+> **Security note:** `--auto-first-boot` stores the forwarder token in cloud-init
+> data on the SD card. Use a scoped per-device token and rotate/revoke as needed.
+
+### Option B -- Edit files manually
+
 1. Open `deploy/sbc/user-data.yaml` from this repository in a text editor.
 
 2. Change the two lines marked **CHANGEME**:
@@ -58,6 +86,10 @@ values, and installs the systemd service.
 
 ## Step 3 -- Boot and Connect
 
+If you used `--auto-first-boot`, boot the Pi and wait 2--3 minutes. The
+forwarder install/config is applied automatically via cloud-init on first boot.
+SSH is optional for troubleshooting only.
+
 1. Insert the SD card into the Pi and power it on.
 2. Wait approximately **2 minutes** for the first boot and cloud-init to finish.
 3. Connect via SSH using the static IP you configured in `network-config`:
@@ -79,6 +111,9 @@ values, and installs the systemd service.
    ```
 
 ## Step 4 -- Run the Setup Script
+
+If you used `--auto-first-boot`, skip this step. `rt-setup.sh` already ran
+automatically during first boot.
 
 You have two options:
 

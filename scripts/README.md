@@ -232,3 +232,50 @@ git push --atomic origin master <tag1> <tag2> ...
 - Duplicate service names in CLI args are de-duplicated (first occurrence wins).
 - If every selected service is already at the target version, it exits with “Nothing to release”.
 - Because rollback uses `git reset --hard`, only run this script when your tree is clean (the script enforces this).
+
+## `sbc_cloud_init.py` (SBC Cloud-Init File Wizard)
+
+`sbc_cloud_init.py` asks deployment questions and generates the two files needed
+for Raspberry Pi cloud-init setup:
+
+- `user-data`
+- `network-config`
+
+Use it when preparing an SBC image so you do not need to manually edit YAML.
+
+### Usage
+
+```bash
+uv run scripts/sbc_cloud_init.py
+```
+
+Optional output directory:
+
+```bash
+uv run scripts/sbc_cloud_init.py --output-dir /tmp/sbc-config
+```
+
+Enable full first-boot automation (no SSH setup commands required):
+
+```bash
+uv run scripts/sbc_cloud_init.py --auto-first-boot
+```
+
+In `--auto-first-boot` mode, the wizard also asks for:
+- Server base URL
+- Forwarder auth token
+- Reader targets
+- Status bind address
+
+and writes a `user-data` that runs `deploy/sbc/rt-setup.sh` non-interactively
+on first boot.
+
+The script prompts for:
+
+- Hostname
+- SSH public key
+- Static IPv4/CIDR
+- Default gateway
+- DNS servers
+
+By default, generated files are written to `deploy/sbc/generated/`.
