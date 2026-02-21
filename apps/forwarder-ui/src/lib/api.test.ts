@@ -68,6 +68,36 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("restartService calls control restart-service endpoint", async () => {
+    const { restartService } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await restartService();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/control/restart-service",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("restartDevice calls control restart-device endpoint", async () => {
+    const { restartDevice } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await restartDevice();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/control/restart-device",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("shutdownDevice calls control shutdown-device endpoint", async () => {
+    const { shutdownDevice } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await shutdownDevice();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/control/shutdown-device",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("resetEpoch calls correct endpoint", async () => {
     const { resetEpoch } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(200, { new_epoch: 2 }));

@@ -151,6 +151,11 @@ export interface ConfigSetResult {
   restart_needed: boolean;
 }
 
+export type ForwarderControlAction =
+  | "restart-service"
+  | "restart-device"
+  | "shutdown-device";
+
 // ----- Forwarder config API -----
 
 /** GET /api/v1/forwarders/{forwarderId}/config */
@@ -185,6 +190,39 @@ export async function restartForwarder(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/restart`,
     { method: "POST" },
   );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/control/{action} */
+export async function controlForwarderAction(
+  forwarderId: string,
+  action: ForwarderControlAction,
+): Promise<{ ok: boolean; error?: string }> {
+  const result = await apiFetch<{ ok: boolean; error?: string | null }>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/control/${encodeURIComponent(action)}`,
+    { method: "POST" },
+  );
+  return {
+    ok: result.ok,
+    error: result.error ?? undefined,
+  };
+}
+
+export async function restartForwarderService(
+  forwarderId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return controlForwarderAction(forwarderId, "restart-service");
+}
+
+export async function restartForwarderDevice(
+  forwarderId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return controlForwarderAction(forwarderId, "restart-device");
+}
+
+export async function shutdownForwarderDevice(
+  forwarderId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return controlForwarderAction(forwarderId, "shutdown-device");
 }
 
 // ----- Forwarder-race types -----

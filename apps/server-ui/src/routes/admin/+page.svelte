@@ -307,6 +307,10 @@
   <!-- Streams Section -->
   <div class="mb-6">
     <Card title="Streams" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Manage active and offline streams. Deleting a stream permanently removes
+        it along with all associated events, metrics, and receiver cursors.
+      </p>
       {#if streams.length === 0}
         <p class="text-sm text-text-muted m-0">No streams.</p>
       {:else}
@@ -364,6 +368,10 @@
   <!-- Events Section -->
   <div class="mb-6">
     <Card title="Events" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Delete stored timing events. You can clear events globally, for a
+        specific stream, or for a specific epoch within a stream.
+      </p>
       <div class="flex flex-col gap-4">
         <div class="flex flex-col gap-1">
           <label
@@ -441,6 +449,10 @@
   <!-- Device Tokens Section -->
   <div class="mb-6">
     <Card title="Device Tokens" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Create and manage authentication tokens for forwarders and receivers.
+        Revoking a token prevents the device from connecting.
+      </p>
       <!-- Token Reveal Banner -->
       {#if revealedToken}
         <div
@@ -588,6 +600,10 @@
   <!-- Receiver Cursors Section -->
   <div class="mb-6">
     <Card title="Receiver Cursors" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Manage receiver sync positions. Clearing a cursor causes the receiver to
+        re-sync from the beginning on its next connection.
+      </p>
       {#if cursors.length === 0}
         <p class="text-sm text-text-muted m-0">No receiver cursors.</p>
       {:else}

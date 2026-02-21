@@ -60,6 +60,11 @@ export function initSSE(): void {
   eventSource.onopen = async () => {
     await resync();
   };
+
+  // Eagerly fetch streams without waiting for the SSE connection to open.
+  // When no forwarders are connected, the SSE response body has no data
+  // until the first keep-alive (15 s), which can delay the onopen callback.
+  void resync();
 }
 
 async function resync(): Promise<void> {

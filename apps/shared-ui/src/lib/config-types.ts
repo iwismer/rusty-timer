@@ -4,7 +4,9 @@ export interface ConfigApi {
     section: string,
     data: Record<string, unknown>,
   ): Promise<ConfigSaveResult>;
-  restart(): Promise<ConfigRestartResult>;
+  restartService(): Promise<ConfigActionResult>;
+  restartDevice(): Promise<ConfigActionResult>;
+  shutdownDevice(): Promise<ConfigActionResult>;
 }
 
 export interface ConfigLoadResult {
@@ -20,7 +22,7 @@ export interface ConfigSaveResult {
   restart_needed: boolean;
 }
 
-export interface ConfigRestartResult {
+export interface ConfigActionResult {
   ok: boolean;
   error?: string;
 }
