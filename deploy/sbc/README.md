@@ -37,8 +37,9 @@ From the repository root:
 uv run scripts/sbc_cloud_init.py
 ```
 
-The script asks for hostname, SSH key, static IP settings, and DNS servers, then
-writes ready-to-copy `user-data` and `network-config` files.
+The script asks for hostname, SSH key, static IP settings, DNS servers, and
+optional Wi-Fi settings, then writes ready-to-copy `user-data` and
+`network-config` files.
 
 To enable fully automatic first boot (no SSH setup commands), use:
 
@@ -71,11 +72,13 @@ The setup writes `display_name` to match the configured hostname.
      cat ~/.ssh/id_rsa.pub
      ```
 
-3. Open `deploy/sbc/network-config` and edit the static IP settings:
+3. Open `deploy/sbc/network-config` and edit networking settings:
 
    - **`addresses`** -- the static IP for this Pi (default: `192.168.1.50/24`).
    - **`routes` → `via`** -- the default gateway (default: `192.168.1.1`).
    - **`nameservers`** -- DNS servers (default: `8.8.8.8`, `8.8.4.4`).
+   - **Optional Wi-Fi** -- under `wifis.wlan0`, set `regulatory-domain`,
+     SSID under `access-points`, and `password` if needed.
 
 4. Copy both files to the SD card's **boot** partition:
 

@@ -289,5 +289,6 @@ The script prompts for:
 - Static IPv4/CIDR
 - Default gateway
 - DNS servers
+- Optional Wi-Fi settings (SSID/password/regulatory domain for `wlan0`)
 
 By default, generated files are written to `deploy/sbc/generated/`.

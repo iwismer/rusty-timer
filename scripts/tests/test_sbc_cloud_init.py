@@ -49,10 +49,53 @@ class RenderTests(unittest.TestCase):
 
         text = sbc_cloud_init.render_network_config(config)
 
+        self.assertIn("network:", text)
+        self.assertIn("  version: 2", text)
+        self.assertIn("  ethernets:", text)
+        self.assertIn("      dhcp6: false", text)
+        self.assertIn("      optional: true", text)
         self.assertIn("- 192.168.1.77/24", text)
         self.assertIn("via: 192.168.1.1", text)
         self.assertIn("- 1.1.1.1", text)
         self.assertIn("- 8.8.8.8", text)
+
+    def test_render_network_config_includes_wifi_with_password(self) -> None:
+        config = sbc_cloud_init.SbcCloudInitConfig(
+            hostname="rt-fwd-77",
+            ssh_public_key="ssh-ed25519 AAAATEST user@test",
+            static_ipv4_cidr="192.168.1.77/24",
+            gateway_ipv4="192.168.1.1",
+            dns_servers=("1.1.1.1", "8.8.8.8"),
+            wifi_ssid="GranolaNet2.0",
+            wifi_password="super-secret",
+            wifi_country="CA",
+        )
+
+        text = sbc_cloud_init.render_network_config(config)
+
+        self.assertIn("wifis:", text)
+        self.assertIn("wlan0:", text)
+        self.assertIn("optional: true", text)
+        self.assertIn("regulatory-domain: 'CA'", text)
+        self.assertIn("'GranolaNet2.0':", text)
+        self.assertIn("password: 'super-secret'", text)
+
+    def test_render_network_config_includes_open_wifi_without_password(self) -> None:
+        config = sbc_cloud_init.SbcCloudInitConfig(
+            hostname="rt-fwd-77",
+            ssh_public_key="ssh-ed25519 AAAATEST user@test",
+            static_ipv4_cidr="192.168.1.77/24",
+            gateway_ipv4="192.168.1.1",
+            dns_servers=("1.1.1.1", "8.8.8.8"),
+            wifi_ssid="OpenNet",
+            wifi_password=None,
+            wifi_country="US",
+        )
+
+        text = sbc_cloud_init.render_network_config(config)
+
+        self.assertIn("'OpenNet': {}", text)
+        self.assertNotIn("password:", text)
 
     def test_render_user_data_auto_first_boot_includes_setup_env_and_runcmd(self) -> None:
         config = sbc_cloud_init.SbcCloudInitConfig(

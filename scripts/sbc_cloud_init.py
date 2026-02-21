@@ -27,6 +27,7 @@ DEFAULT_HOSTNAME = "rt-fwd-01"
 DEFAULT_STATIC_IPV4_CIDR = "192.168.1.50/24"
 DEFAULT_GATEWAY = "192.168.1.1"
 DEFAULT_DNS = "8.8.8.8,8.8.4.4"
+DEFAULT_WIFI_COUNTRY = "US"
 DEFAULT_STATUS_BIND = "0.0.0.0:8080"
 DEFAULT_SETUP_SCRIPT_URL = (
     "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh"
@@ -45,6 +46,9 @@ class SbcCloudInitConfig:
     static_ipv4_cidr: str
     gateway_ipv4: str
     dns_servers: tuple[str, ...]
+    wifi_ssid: str | None = None
+    wifi_password: str | None = None
+    wifi_country: str | None = None
     auto_first_boot: bool = False
     server_base_url: str | None = None
     auth_token: str | None = None
@@ -145,6 +149,13 @@ def validate_reader_target(value: str) -> str:
     return target
 
 
+def validate_wifi_country(value: str) -> str:
+    country = value.strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", country):
+        raise ValueError("Wi-Fi country code must be a 2-letter ISO code (for example US)")
+    return country
+
+
 def parse_reader_targets(value: str) -> tuple[str, ...]:
     normalized = value.replace("\n", ",").replace(";", ",")
     entries = [part.strip() for part in normalized.split(",") if part.strip()]
@@ -160,6 +171,19 @@ def ask_with_default(label: str, default: str) -> str:
 
 def ask_required(label: str) -> str:
     return input(f"{label}: ").strip()
+
+
+def ask_yes_no(label: str, default: bool = False) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        answer = input(f"{label} {suffix}: ").strip().lower()
+        if not answer:
+            return default
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("Please answer y or n.")
 
 
 def prompt_until_valid(prompt_fn, validator, error_label: str) -> str:
@@ -200,6 +224,22 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
         parse_dns_servers,
         "DNS server list",
     )
+    wifi_ssid: str | None = None
+    wifi_password: str | None = None
+    wifi_country: str | None = None
+    if ask_yes_no("Configure Wi-Fi (wlan0) in network-config?", default=False):
+        wifi_ssid = prompt_until_valid(
+            lambda: ask_required("Wi-Fi SSID"),
+            lambda value: validate_non_empty(value, "Wi-Fi SSID"),
+            "Wi-Fi SSID",
+        )
+        entered_password = input("Wi-Fi password (leave blank for open network): ")
+        wifi_password = entered_password if entered_password else None
+        wifi_country = prompt_until_valid(
+            lambda: ask_with_default("Wi-Fi country code", DEFAULT_WIFI_COUNTRY),
+            validate_wifi_country,
+            "Wi-Fi country code",
+        )
 
     if not auto_first_boot:
         return SbcCloudInitConfig(
@@ -208,6 +248,9 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
             static_ipv4_cidr=static_ipv4_cidr,
             gateway_ipv4=gateway_ipv4,
             dns_servers=dns_servers,
+            wifi_ssid=wifi_ssid,
+            wifi_password=wifi_password,
+            wifi_country=wifi_country,
             auto_first_boot=False,
         )
 
@@ -240,6 +283,9 @@ def collect_config(auto_first_boot: bool) -> SbcCloudInitConfig:
         static_ipv4_cidr=static_ipv4_cidr,
         gateway_ipv4=gateway_ipv4,
         dns_servers=dns_servers,
+        wifi_ssid=wifi_ssid,
+        wifi_password=wifi_password,
+        wifi_country=wifi_country,
         auto_first_boot=True,
         server_base_url=server_base_url,
         auth_token=auth_token,
@@ -328,21 +374,45 @@ def render_user_data(config: SbcCloudInitConfig) -> str:
 
 
 def render_network_config(config: SbcCloudInitConfig) -> str:
-    dns_lines = "\n".join(f"        - {server}" for server in config.dns_servers)
-    return (
-        "version: 2\n"
-        "ethernets:\n"
-        "  eth0:\n"
-        "    dhcp4: false\n"
-        "    addresses:\n"
-        f"      - {config.static_ipv4_cidr}\n"
-        "    routes:\n"
-        "      - to: default\n"
-        f"        via: {config.gateway_ipv4}\n"
-        "    nameservers:\n"
+    dns_lines = "\n".join(f"          - {server}" for server in config.dns_servers)
+    text = (
+        "network:\n"
+        "  version: 2\n"
+        "  ethernets:\n"
+        "    eth0:\n"
+        "      dhcp4: false\n"
+        "      dhcp6: false\n"
+        "      optional: true\n"
         "      addresses:\n"
+        f"        - {config.static_ipv4_cidr}\n"
+        "      routes:\n"
+        "        - to: default\n"
+        f"          via: {config.gateway_ipv4}\n"
+        "      nameservers:\n"
+        "        addresses:\n"
         f"{dns_lines}\n"
     )
+    if not config.wifi_ssid:
+        return text
+
+    wifi_country = config.wifi_country or DEFAULT_WIFI_COUNTRY
+    wifi_ssid = yaml_quote(config.wifi_ssid)
+    text += (
+        "  wifis:\n"
+        "    wlan0:\n"
+        "      dhcp4: true\n"
+        "      optional: true\n"
+        f"      regulatory-domain: {yaml_quote(wifi_country)}\n"
+        "      access-points:\n"
+    )
+    if config.wifi_password:
+        text += (
+            f"        {wifi_ssid}:\n"
+            f"          password: {yaml_quote(config.wifi_password)}\n"
+        )
+    else:
+        text += f"        {wifi_ssid}: {{}}\n"
+    return text
 
 
 def write_cloud_init_files(
