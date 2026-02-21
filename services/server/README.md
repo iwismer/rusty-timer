@@ -105,6 +105,7 @@ Run the image:
 docker run --rm \
   -e DATABASE_URL="postgres://user:pass@db:5432/rtserver" \
   -e BIND_ADDR="0.0.0.0:8080" \
+  -e DASHBOARD_DIR="/srv/dashboard" \
   -p 8080:8080 \
   rt-server
 ```

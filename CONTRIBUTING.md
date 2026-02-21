@@ -7,7 +7,7 @@
 - Node.js 20.x and npm 10.x
 
 JavaScript toolchain pinning:
-- `package.json` pins expected Node/npm via `engines` and `packageManager`
+- `package.json` pins expected Node/npm via `engines`
 - `.nvmrc` is set to `20` for `nvm use`
 
 ## Running Tests
@@ -20,10 +20,10 @@ cargo test --workspace --lib
 cargo test --workspace -- --test-threads=4
 
 # Dashboard unit tests
-cd apps/server-ui && npm test
+(cd apps/server-ui && npm test)
 
 # Packaging validation
-bash scripts/validate-packaging.sh
+(cd "$(git rev-parse --show-toplevel)" && bash scripts/validate-packaging.sh)
 ```
 
 ## Code Quality
@@ -36,9 +36,9 @@ cargo fmt --all
 cargo clippy --workspace --all-targets
 
 # Format JS/TS
-cd apps/server-ui && npm run format
-cd apps/receiver-ui && npm run format
-cd apps/forwarder-ui && npm run format
+(cd apps/server-ui && npm run format)
+(cd apps/receiver-ui && npm run format)
+(cd apps/forwarder-ui && npm run format)
 ```
 
 ## Git Hooks
