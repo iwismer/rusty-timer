@@ -275,9 +275,9 @@
       </section>
     </Card>
 
-    <!-- Profile Card -->
-    <Card title="Profile">
-      <section data-testid="profile-section">
+    <!-- Config Card -->
+    <Card title="Config">
+      <section data-testid="config-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
             Server URL
@@ -300,12 +300,12 @@
           </label>
         </div>
         <button
-          data-testid="save-profile-btn"
+          data-testid="save-config-btn"
           class="{btnPrimary} mt-3"
           onclick={saveProfile}
           disabled={saving}
         >
-          {saving ? "Saving..." : "Save Profile"}
+          {saving ? "Saving..." : "Save"}
         </button>
       </section>
     </Card>
