@@ -379,6 +379,8 @@
     "w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary focus:outline-none focus:border-accent";
   const saveBtnClass =
     "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+  const secondaryBtnClass =
+    "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
   const dangerousActionBtnClass =
     "px-3 py-1.5 text-xs font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
   const hintClass = "text-xs text-text-muted mt-1";
@@ -846,7 +848,7 @@
               </button>
               {#if configApi.checkForUpdate}
                 <button
-                  class="{saveBtnClass} !bg-surface-2 !text-text-primary !border !border-border hover:!bg-surface-3"
+                  class={secondaryBtnClass}
                   onclick={handleCheckUpdate}
                   disabled={checkingUpdate}
                 >
