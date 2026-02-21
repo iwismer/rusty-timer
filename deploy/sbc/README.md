@@ -62,6 +62,10 @@ It also enables forwarder device power controls by default
 
 > **Security note:** `--auto-first-boot` stores the forwarder token in cloud-init
 > data on the SD card. Use a scoped per-device token and rotate/revoke as needed.
+>
+> **Network trust model:** LAN-accessible unauthenticated status/control endpoints
+> are expected in this deployment model. Treat the forwarder network as trusted
+> infrastructure (for example private VLAN / physically controlled LAN only).
 
 ### Option B -- Edit files manually
 
@@ -167,6 +171,9 @@ allow_power_actions = true
 That enables the config UI actions for restarting/shutting down the device.
 For non-interactive installs, set `RT_SETUP_ALLOW_POWER_ACTIONS=0` to disable
 this behavior.
+
+Power-action control endpoints are intentionally unauthenticated on the
+forwarder; this is expected for trusted-LAN SBC deployments.
 
 ## Step 5 -- Verify
 

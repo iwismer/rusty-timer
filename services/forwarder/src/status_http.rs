@@ -1053,36 +1053,79 @@ async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u
 }
 
 #[cfg(unix)]
-fn schedule_device_power_action(systemctl_action: &'static str) {
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        match tokio::task::spawn_blocking(move || {
-            std::process::Command::new("systemctl")
-                .arg(systemctl_action)
-                .status()
-        })
-        .await
-        {
-            Ok(Ok(status)) if !status.success() => {
-                tracing::error!(
-                    action = systemctl_action,
-                    exit_status = ?status.code(),
-                    "control action command exited with failure"
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::error!(action = systemctl_action, error = %e, "control action command failed");
-            }
-            Err(e) => {
-                tracing::error!(action = systemctl_action, error = %e, "control action task failed");
-            }
-            Ok(Ok(_)) => {}
+fn map_power_action_command_result(
+    systemctl_action: &'static str,
+    result: std::io::Result<std::process::ExitStatus>,
+) -> Result<(), (u16, String)> {
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => {
+            tracing::error!(
+                action = systemctl_action,
+                exit_status = ?status.code(),
+                "control action command exited with failure"
+            );
+            Err((
+                500u16,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!(
+                        "control action command exited with failure: systemctl {}",
+                        systemctl_action
+                    )
+                })
+                .to_string(),
+            ))
         }
-    });
+        Err(e) => {
+            tracing::error!(action = systemctl_action, error = %e, "control action command failed");
+            Err((
+                500u16,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!("control action command failed: {}", e)
+                })
+                .to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn run_device_power_action(systemctl_action: &'static str) -> Result<(), (u16, String)> {
+    match tokio::task::spawn_blocking(move || {
+        std::process::Command::new("systemctl")
+            .arg(systemctl_action)
+            .status()
+    })
+    .await
+    {
+        Ok(result) => map_power_action_command_result(systemctl_action, result),
+        Err(e) => {
+            tracing::error!(action = systemctl_action, error = %e, "control action task failed");
+            Err((
+                500u16,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!("control action task failed: {}", e)
+                })
+                .to_string(),
+            ))
+        }
+    }
 }
 
 #[cfg(not(unix))]
-fn schedule_device_power_action(_systemctl_action: &'static str) {}
+async fn run_device_power_action(_systemctl_action: &'static str) -> Result<(), (u16, String)> {
+    Err((
+        501u16,
+        serde_json::json!({
+            "ok": false,
+            "error": "power actions not supported on non-unix platforms"
+        })
+        .to_string(),
+    ))
+}
 
 pub async fn apply_control_action(
     action: &str,
@@ -1142,7 +1185,7 @@ pub async fn apply_control_action(
             } else {
                 "poweroff"
             };
-            schedule_device_power_action(systemctl_action);
+            run_device_power_action(systemctl_action).await?;
             Ok(())
         }
         _ => Err(bad_request_error(format!(
@@ -1941,6 +1984,45 @@ target = "192.168.1.100:10000"
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_spawn_error() {
+        let result = map_power_action_command_result(
+            "reboot",
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "systemctl not found",
+            )),
+        );
+
+        let (status, body) = result.expect_err("spawn errors must return an HTTP error");
+        assert_eq!(status, 500);
+        assert!(body.contains("control action command failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_non_zero_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let result = map_power_action_command_result("poweroff", Ok(status));
+
+        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
+        assert_eq!(http_status, 500);
+        assert!(body.contains("control action command exited with failure"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_ok_on_success_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let status = std::process::ExitStatus::from_raw(0);
+        let result = map_power_action_command_result("reboot", Ok(status));
+        assert!(result.is_ok());
     }
 
     #[test]

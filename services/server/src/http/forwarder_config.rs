@@ -217,14 +217,15 @@ async fn send_config_set_command(
         Ok(Ok(ForwarderProxyReply::Response(resp))) => {
             let status = if resp.ok {
                 StatusCode::OK
-            } else if resp
-                .status_code
-                .is_some_and(|code| (400..500).contains(&code))
-                || resp.status_code.is_none()
-            {
-                StatusCode::BAD_REQUEST
             } else {
-                StatusCode::BAD_GATEWAY
+                match resp
+                    .status_code
+                    .and_then(|code| StatusCode::from_u16(code).ok())
+                {
+                    Some(code) if code.is_client_error() => code,
+                    Some(code) if code.is_server_error() => StatusCode::BAD_GATEWAY,
+                    Some(_) | None => StatusCode::BAD_REQUEST,
+                }
             };
             (
                 status,

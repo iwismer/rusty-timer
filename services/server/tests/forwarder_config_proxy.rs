@@ -502,6 +502,85 @@ async fn control_restart_device_proxies_as_config_set_control_action() {
 }
 
 #[tokio::test]
+async fn control_restart_device_preserves_forwarder_403_status() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(
+        &pool,
+        "fwd-control-403",
+        "forwarder",
+        b"fwd-control-403-token",
+    )
+    .await;
+
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-control-403-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-control-403".to_owned(),
+        reader_ips: vec!["10.10.0.8:10000".to_owned()],
+        resume: vec![],
+        display_name: Some("Proxy Target".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let _ = fwd.recv_message().await.unwrap(); // initial heartbeat
+
+    let client = reqwest::Client::new();
+    let request_task = tokio::spawn(async move {
+        client
+            .post(format!(
+                "http://{}/api/v1/forwarders/{}/control/restart-device",
+                addr, "fwd-control-403"
+            ))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    let request_id = loop {
+        let proxied = tokio::time::timeout(std::time::Duration::from_secs(5), fwd.recv_message())
+            .await
+            .expect("timed out waiting for proxied control request")
+            .unwrap();
+        match proxied {
+            WsMessage::Heartbeat(_) => continue,
+            WsMessage::ConfigSetRequest(req) => {
+                assert_eq!(req.section, "control");
+                assert_eq!(req.payload["action"], "restart_device");
+                break req.request_id;
+            }
+            other => panic!("expected ConfigSetRequest, got {:?}", other),
+        }
+    };
+
+    fwd.send_message(&WsMessage::ConfigSetResponse(
+        rt_protocol::ConfigSetResponse {
+            request_id,
+            ok: false,
+            error: Some("power actions disabled".to_owned()),
+            restart_needed: false,
+            status_code: Some(403),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let response = request_task.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"], "power actions disabled");
+    assert_eq!(body["status_code"], 403);
+}
+
+#[tokio::test]
 async fn control_restart_device_returns_bad_gateway_when_forwarder_disconnects_before_reply() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

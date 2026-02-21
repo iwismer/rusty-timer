@@ -22,7 +22,10 @@
     type ReaderEntry,
     type ForwarderConfigFormState,
   } from "../lib/forwarder-config-form";
-  import { saveSuccessMessage } from "../lib/forwarder-config-logic";
+  import {
+    controlPowerActionsEnabled,
+    saveSuccessMessage,
+  } from "../lib/forwarder-config-logic";
   import Card from "./Card.svelte";
   import AlertBanner from "./AlertBanner.svelte";
   import StatusBadge from "./StatusBadge.svelte";
@@ -58,8 +61,22 @@
   let uplinkBatchFlushMs = $state("");
   let uplinkBatchMaxEvents = $state("");
   let statusHttpBind = $state("");
+  let persistedControlAllowPowerActions = $state(false);
   let controlAllowPowerActions = $state(false);
   let readers: ReaderEntry[] = $state([]);
+  let powerActionsEnabled = $derived(
+    controlPowerActionsEnabled({
+      persistedAllowPowerActions,
+      currentAllowPowerActions: controlAllowPowerActions,
+    }),
+  );
+  let powerActionsDisabledReason = $derived(
+    powerActionsEnabled
+      ? undefined
+      : !controlAllowPowerActions
+        ? "Enable and save control power actions first"
+        : "Save Control to apply power-action setting",
+  );
 
   type ControlAction = "restartService" | "restartDevice" | "shutdownDevice";
   type ControlActionDetail = {
@@ -158,6 +175,7 @@
     uplinkBatchFlushMs = form.uplinkBatchFlushMs;
     uplinkBatchMaxEvents = form.uplinkBatchMaxEvents;
     statusHttpBind = form.statusHttpBind;
+    persistedControlAllowPowerActions = form.controlAllowPowerActions;
     controlAllowPowerActions = form.controlAllowPowerActions;
     readers = form.readers.map((reader) => ({ ...reader }));
   }
@@ -182,7 +200,7 @@
   async function saveSection(
     section: string,
     payload: Record<string, unknown>,
-  ) {
+  ): Promise<boolean> {
     sectionMessages[section] = { ok: false, text: "Saving..." };
     savingSection[section] = true;
     try {
@@ -193,14 +211,17 @@
           text: saveSuccessMessage(result.restart_needed),
         };
         restartNeeded = result.restart_needed;
+        return true;
       } else {
         sectionMessages[section] = {
           ok: false,
           text: result.error ?? "Unknown error",
         };
+        return false;
       }
     } catch (e) {
       sectionMessages[section] = { ok: false, text: String(e) };
+      return false;
     } finally {
       savingSection[section] = false;
     }
@@ -219,7 +240,7 @@
         return;
       }
     }
-    saveSection(section, payloadFn(form));
+    void saveSection(section, payloadFn(form));
   }
 
   function saveGeneral() {
@@ -240,8 +261,11 @@
   function saveStatusHttp() {
     saveSectionWithValidation("status_http", validateStatusHttp, toStatusHttpPayload);
   }
-  function saveControl() {
-    saveSectionWithValidation("control", null, toControlPayload);
+  async function saveControl() {
+    const saved = await saveSection("control", toControlPayload(currentFormState()));
+    if (saved) {
+      persistedControlAllowPowerActions = controlAllowPowerActions;
+    }
   }
   function saveReaders() {
     saveSectionWithValidation("readers", validateReaders, toReadersPayload);
@@ -491,10 +515,8 @@
             <button
               class={dangerousActionBtnClass}
               onclick={() => requestControlAction("restartDevice")}
-              disabled={controlActionBusy.restartDevice || !controlAllowPowerActions}
-              title={!controlAllowPowerActions
-                ? "Enable and save control power actions first"
-                : undefined}
+              disabled={controlActionBusy.restartDevice || !powerActionsEnabled}
+              title={powerActionsDisabledReason}
             >
               {controlActionBusy.restartDevice
                 ? "Restarting Device..."
@@ -505,10 +527,8 @@
             <button
               class={cautionActionBtnClass}
               onclick={() => requestControlAction("shutdownDevice")}
-              disabled={controlActionBusy.shutdownDevice || !controlAllowPowerActions}
-              title={!controlAllowPowerActions
-                ? "Enable and save control power actions first"
-                : undefined}
+              disabled={controlActionBusy.shutdownDevice || !powerActionsEnabled}
+              title={powerActionsDisabledReason}
             >
               {controlActionBusy.shutdownDevice
                 ? "Shutting Down..."
