@@ -4,14 +4,16 @@ import {
   streamsStore,
   metricsStore,
   logsStore,
+  racesLoadedStore,
   addOrUpdateStream,
   patchStream,
   pushLog,
   setMetrics,
+  setRaces,
   resetStores,
   replaceStreams,
 } from "./stores";
-import type { StreamEntry, StreamMetrics } from "./api";
+import type { StreamEntry, StreamMetrics, RaceEntry } from "./api";
 
 const STREAM_A: StreamEntry = {
   stream_id: "aaa",
@@ -38,6 +40,14 @@ const METRICS_A: StreamMetrics = {
   unique_chips: 3,
   last_tag_id: null,
   last_reader_timestamp: null,
+};
+
+const RACE_A: RaceEntry = {
+  race_id: "race-1",
+  name: "Race 1",
+  created_at: "2026-01-01T00:00:00Z",
+  participant_count: 0,
+  chip_count: 0,
 };
 
 describe("stores", () => {
@@ -125,5 +135,18 @@ describe("stores", () => {
     expect(logs).toHaveLength(500);
     expect(logs[0]).toContain("msg-10");
     expect(logs[logs.length - 1]).toContain("msg-509");
+  });
+
+  it("tracks when races have been loaded", () => {
+    expect(get(racesLoadedStore)).toBe(false);
+
+    setRaces([]);
+    expect(get(racesLoadedStore)).toBe(true);
+
+    resetStores();
+    expect(get(racesLoadedStore)).toBe(false);
+
+    setRaces([RACE_A]);
+    expect(get(racesLoadedStore)).toBe(true);
   });
 });

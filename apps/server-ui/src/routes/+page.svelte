@@ -7,6 +7,7 @@
     setMetrics,
     forwarderRacesStore,
     racesStore,
+    racesLoadedStore,
     setForwarderRace,
   } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
@@ -91,23 +92,15 @@
 
   // Race filter (persisted to localStorage)
   let selectedRaceId = $state<string | null>(readRaceFilterPreference());
-  let racesStoreHydrated = $state(false);
 
   $effect(() => {
     writeRaceFilterPreference(selectedRaceId);
   });
 
-  // Mark store as hydrated once it receives data
-  $effect(() => {
-    if ($racesStore.length > 0) {
-      racesStoreHydrated = true;
-    }
-  });
-
-  // Reset if the persisted race no longer exists (only after store hydrates)
+  // Reset if the persisted race no longer exists (only after races load)
   $effect(() => {
     if (
-      racesStoreHydrated &&
+      $racesLoadedStore &&
       selectedRaceId &&
       !$racesStore.some((r) => r.race_id === selectedRaceId)
     ) {
@@ -241,6 +234,7 @@
     <div class="flex items-center gap-4">
       <select
         data-testid="race-filter-select"
+        aria-label="Filter streams by race"
         class="text-sm px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
         value={selectedRaceId ?? ""}
         onchange={(e) => {
@@ -292,6 +286,8 @@
               {stats.totalChips.toLocaleString()} chips
             </span>
             <select
+              data-testid={`forwarder-race-select-${group.forwarderId}`}
+              aria-label={`Assign race for ${group.displayName}`}
               class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
               value={$forwarderRacesStore[group.forwarderId] ?? ""}
               onchange={(e) => {

@@ -9,6 +9,7 @@ export const forwarderRacesStore = writable<Record<string, string | null>>({});
 
 /** All races for dropdown selection */
 export const racesStore = writable<RaceEntry[]>([]);
+export const racesLoadedStore = writable(false);
 
 export const logsStore = writable<string[]>([]);
 
@@ -57,6 +58,7 @@ export function setForwarderRace(
 
 export function setRaces(races: RaceEntry[]): void {
   racesStore.set(races);
+  racesLoadedStore.set(true);
 }
 
 export function resetStores(): void {
@@ -64,5 +66,6 @@ export function resetStores(): void {
   metricsStore.set({});
   forwarderRacesStore.set({});
   racesStore.set([]);
+  racesLoadedStore.set(false);
   logsStore.set([]);
 }
