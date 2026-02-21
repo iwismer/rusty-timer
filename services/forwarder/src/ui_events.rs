@@ -19,9 +19,8 @@ pub enum ForwarderUiEvent {
     LogEntry {
         entry: String,
     },
-    UpdateAvailable {
-        version: String,
-        current_version: String,
+    UpdateStatusChanged {
+        status: rt_updater::UpdateStatus,
     },
 }
 

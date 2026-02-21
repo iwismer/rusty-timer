@@ -279,14 +279,9 @@ impl StatusServer {
     /// Update the current rt-updater status (shown on `/update/status`).
     pub async fn set_update_status(&self, status: UpdateStatus) {
         self.subsystem.lock().await.update_status = status.clone();
-        if let UpdateStatus::Downloaded { version } = status {
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::UpdateAvailable {
-                    version,
-                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
-                });
-        }
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status });
     }
 
     /// Record the filesystem path of a downloaded update artifact ready to apply.
@@ -1366,7 +1361,9 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
                 crate::ui_events::ForwarderUiEvent::StatusChanged { .. } => "status_changed",
                 crate::ui_events::ForwarderUiEvent::ReaderUpdated { .. } => "reader_updated",
                 crate::ui_events::ForwarderUiEvent::LogEntry { .. } => "log_entry",
-                crate::ui_events::ForwarderUiEvent::UpdateAvailable { .. } => "update_available",
+                crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { .. } => {
+                    "update_status_changed"
+                }
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
@@ -1635,29 +1632,43 @@ async fn run_update_check_with_checker(
                         ss.update_status = status.clone();
                         ss.staged_update_path = Some(path);
                         drop(ss);
-                        let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateAvailable {
-                            version: version.clone(),
-                            current_version: env!("CARGO_PKG_VERSION").to_owned(),
-                        });
+                        let _ =
+                            ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
+                                status: status.clone(),
+                            });
                         status
                     }
                     Err(error) => {
                         let status = UpdateStatus::Failed { error };
                         subsystem.lock().await.update_status = status.clone();
+                        let _ =
+                            ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
+                                status: status.clone(),
+                            });
                         status
                     }
                 }
             } else {
-                UpdateStatus::Available { version }
+                let status = UpdateStatus::Available { version };
+                let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
+                    status: status.clone(),
+                });
+                status
             }
         }
         Ok(status) => {
             subsystem.lock().await.update_status = status.clone();
+            let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
+                status: status.clone(),
+            });
             status
         }
         Err(error) => {
             let status = UpdateStatus::Failed { error };
             subsystem.lock().await.update_status = status.clone();
+            let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
+                status: status.clone(),
+            });
             status
         }
     }
@@ -2105,7 +2116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_update_status_downloaded_broadcasts_update_available() {
+    async fn set_update_status_broadcasts_update_status_changed() {
         let server = StatusServer::start(
             StatusConfig {
                 bind: "127.0.0.1:0".to_owned(),
@@ -2128,13 +2139,12 @@ mod tests {
             .expect("event timeout")
             .expect("recv event");
         match evt {
-            crate::ui_events::ForwarderUiEvent::UpdateAvailable {
-                version,
-                current_version,
-            } => {
-                assert_eq!(version, "1.2.3");
-                assert_eq!(current_version, env!("CARGO_PKG_VERSION"));
-            }
+            crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status } => match status {
+                UpdateStatus::Downloaded { version } => {
+                    assert_eq!(version, "1.2.3");
+                }
+                other => panic!("unexpected status: {other:?}"),
+            },
             other => panic!("unexpected event: {other:?}"),
         }
     }
