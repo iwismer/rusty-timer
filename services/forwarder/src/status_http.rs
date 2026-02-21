@@ -22,7 +22,6 @@
 //! No authentication in v1.
 
 use crate::storage::journal::Journal;
-use crate::ui_events::ui_log;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode, Uri};
@@ -161,6 +160,7 @@ pub struct StatusServer {
     local_addr: SocketAddr,
     subsystem: Arc<Mutex<SubsystemStatus>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -185,6 +185,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
     config_state: Option<Arc<ConfigState>>,
     restart_signal: Option<Arc<Notify>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -196,6 +197,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             config_state: self.config_state.clone(),
             restart_signal: self.restart_signal.clone(),
             ui_tx: self.ui_tx.clone(),
+            logger: self.logger.clone(),
         }
     }
 }
@@ -214,6 +216,11 @@ impl StatusServer {
     /// Return a clone of the UI event broadcast sender.
     pub fn ui_sender(&self) -> tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent> {
         self.ui_tx.clone()
+    }
+
+    /// Return a clone of the shared UI logger Arc.
+    pub fn logger(&self) -> Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>> {
+        self.logger.clone()
     }
 
     /// Mark all local subsystems as ready.
@@ -372,6 +379,9 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
+        let logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        }));
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -380,6 +390,7 @@ impl StatusServer {
             config_state: None,
             restart_signal: None,
             ui_tx: ui_tx.clone(),
+            logger: logger.clone(),
         };
 
         let app = build_router(state);
@@ -393,6 +404,7 @@ impl StatusServer {
             local_addr,
             subsystem,
             ui_tx,
+            logger,
         })
     }
 
@@ -408,6 +420,9 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
+        let logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        }));
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -416,6 +431,7 @@ impl StatusServer {
             config_state: Some(config_state),
             restart_signal: Some(restart_signal),
             ui_tx: ui_tx.clone(),
+            logger: logger.clone(),
         };
 
         let app = build_router(state);
@@ -429,6 +445,7 @@ impl StatusServer {
             local_addr,
             subsystem,
             ui_tx,
+            logger,
         })
     }
 }
@@ -1190,10 +1207,9 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     let result = state.journal.lock().await.reset_epoch(&reader_ip);
     match result {
         Ok(new_epoch) => {
-            ui_log(
-                &state.ui_tx,
-                format!("epoch reset for {} via API", reader_ip),
-            );
+            state
+                .logger
+                .log(format!("epoch reset for {} via API", reader_ip));
             let body = format!("{{\"new_epoch\":{}}}", new_epoch);
             json_response(StatusCode::OK, body)
         }
