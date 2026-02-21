@@ -62,6 +62,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             post(http::forwarder_config::set_forwarder_config),
         )
         .route(
+            "/api/v1/forwarders/:forwarder_id/control/:action",
+            post(http::forwarder_config::control_forwarder),
+        )
+        .route(
             "/api/v1/forwarders/:forwarder_id/restart",
             post(http::forwarder_config::restart_forwarder),
         )

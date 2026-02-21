@@ -124,8 +124,45 @@ pub async fn set_forwarder_config(
     Path((forwarder_id, section)): Path<(String, String)>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    send_config_set_command(&state, &forwarder_id, section, payload).await
+}
+
+pub async fn control_forwarder(
+    State(state): State<AppState>,
+    Path((forwarder_id, action)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let action_value = match action.as_str() {
+        "restart-service" => {
+            return restart_forwarder(State(state), Path(forwarder_id))
+                .await
+                .into_response();
+        }
+        "restart-device" => "restart_device",
+        "shutdown-device" => "shutdown_device",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HttpErrorEnvelope {
+                    code: "BAD_REQUEST".to_owned(),
+                    message: "unknown control action".to_owned(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+    let payload = serde_json::json!({ "action": action_value });
+    send_config_set_command(&state, &forwarder_id, "control".to_owned(), payload).await
+}
+
+async fn send_config_set_command(
+    state: &AppState,
+    forwarder_id: &str,
+    section: String,
+    payload: serde_json::Value,
+) -> axum::response::Response {
     let senders = state.forwarder_command_senders.read().await;
-    let tx = match senders.get(&forwarder_id) {
+    let tx = match senders.get(forwarder_id) {
         Some(tx) => tx.clone(),
         None => {
             return (
@@ -180,14 +217,15 @@ pub async fn set_forwarder_config(
         Ok(Ok(ForwarderProxyReply::Response(resp))) => {
             let status = if resp.ok {
                 StatusCode::OK
-            } else if resp
-                .status_code
-                .is_some_and(|code| (400..500).contains(&code))
-                || resp.status_code.is_none()
-            {
-                StatusCode::BAD_REQUEST
             } else {
-                StatusCode::BAD_GATEWAY
+                match resp
+                    .status_code
+                    .and_then(|code| StatusCode::from_u16(code).ok())
+                {
+                    Some(code) if code.is_client_error() => code,
+                    Some(code) if code.is_server_error() => StatusCode::BAD_GATEWAY,
+                    Some(_) | None => StatusCode::BAD_REQUEST,
+                }
             };
             (
                 status,

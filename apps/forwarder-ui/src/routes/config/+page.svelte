@@ -2,8 +2,18 @@
   import * as api from "$lib/api";
   import { loadConfigPageState } from "$lib/config-load";
   import { mapSaveSectionResult } from "$lib/config-api-adapter";
-  import { ForwarderConfig } from "@rusty-timer/shared-ui";
+  import { ForwarderConfigPage } from "@rusty-timer/shared-ui";
   import type { ConfigApi } from "@rusty-timer/shared-ui";
+
+  async function runControlAction(
+    action: () => Promise<{ ok: boolean; error?: string }>,
+  ): Promise<{ ok: boolean; error?: string }> {
+    try {
+      return await action();
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
 
   const configApi: ConfigApi = {
     async getConfig() {
@@ -19,18 +29,16 @@
       const result = await api.saveConfigSection(section, data);
       return mapSaveSectionResult(result);
     },
-    async restart() {
-      try {
-        await api.restart();
-        return { ok: true };
-      } catch (e) {
-        return { ok: false, error: String(e) };
-      }
+    async restartService() {
+      return runControlAction(() => api.restartService());
+    },
+    async restartDevice() {
+      return runControlAction(() => api.restartDevice());
+    },
+    async shutdownDevice() {
+      return runControlAction(() => api.shutdownDevice());
     },
   };
 </script>
 
-<main class="max-w-[900px] mx-auto px-6 py-6">
-  <h1 class="text-xl font-bold text-text-primary mb-6">Config</h1>
-  <ForwarderConfig {configApi} />
-</main>
+<ForwarderConfigPage {configApi} pageTitle="Config" />

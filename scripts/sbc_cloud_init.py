@@ -324,6 +324,7 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
     reader_targets_csv = ",".join(config.reader_targets)
     lines = (
         "RT_SETUP_NONINTERACTIVE=1",
+        "RT_SETUP_ALLOW_POWER_ACTIONS=1",
         "RT_SETUP_OVERWRITE_CONFIG=0",
         "RT_SETUP_RESTART_IF_RUNNING=1",
         f"RT_SETUP_DISPLAY_NAME={shell_quote(config.hostname)}",

@@ -57,9 +57,15 @@ This mode also asks for forwarder setup values (server URL, token, reader
 targets), then embeds a one-time non-interactive `rt-setup.sh` run in
 `user-data`.
 The setup writes `display_name` to match the configured hostname.
+It also enables forwarder device power controls by default
+(`RT_SETUP_ALLOW_POWER_ACTIONS=1`).
 
 > **Security note:** `--auto-first-boot` stores the forwarder token in cloud-init
 > data on the SD card. Use a scoped per-device token and rotate/revoke as needed.
+>
+> **Network trust model:** LAN-accessible unauthenticated status/control endpoints
+> are expected in this deployment model. Treat the forwarder network as trusted
+> infrastructure (for example private VLAN / physically controlled LAN only).
 
 ### Option B -- Edit files manually
 
@@ -154,6 +160,20 @@ The wizard will prompt you for:
 | Auth token | *(hidden input)* | Provided by the server operator |
 | Reader target(s) | `192.168.1.100:10000` | IP:PORT of each IPICO reader; enter one per line, blank line to finish |
 | Status HTTP bind address | `0.0.0.0:8080` | Press Enter to accept the default |
+
+SBC setup writes this control block by default:
+
+```toml
+[control]
+allow_power_actions = true
+```
+
+That enables the config UI actions for restarting/shutting down the device.
+For non-interactive installs, set `RT_SETUP_ALLOW_POWER_ACTIONS=0` to disable
+this behavior.
+
+Power-action control endpoints are intentionally unauthenticated on the
+forwarder; this is expected for trusted-LAN SBC deployments.
 
 ## Step 5 -- Verify
 

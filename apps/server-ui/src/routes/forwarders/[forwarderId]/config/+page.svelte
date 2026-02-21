@@ -2,7 +2,7 @@
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import { streamsStore } from "$lib/stores";
-  import { ForwarderConfig } from "@rusty-timer/shared-ui";
+  import { ForwarderConfigPage } from "@rusty-timer/shared-ui";
   import type { ConfigApi } from "@rusty-timer/shared-ui";
 
   const forwarderId = $page.params.forwarderId!;
@@ -33,17 +33,22 @@
         restart_needed: result.restart_needed,
       };
     },
-    async restart() {
-      return await api.restartForwarder(forwarderId);
+    async restartService() {
+      return api.restartForwarderService(forwarderId);
+    },
+    async restartDevice() {
+      return api.restartForwarderDevice(forwarderId);
+    },
+    async shutdownDevice() {
+      return api.shutdownForwarderDevice(forwarderId);
     },
   };
 </script>
 
-<main class="max-w-[900px] mx-auto px-6 py-6">
-  <div class="mb-4">
-    <a href="/" class="text-xs text-accent no-underline hover:underline">
-      &larr; Back to streams
-    </a>
-  </div>
-  <ForwarderConfig {configApi} {displayName} {isOnline} />
-</main>
+<ForwarderConfigPage
+  {configApi}
+  {displayName}
+  {isOnline}
+  backHref="/"
+  backLabel="Back to streams"
+/>

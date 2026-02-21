@@ -69,6 +69,14 @@ assert_eq "1" "$(bool_env_is_true '1')" "1 should be true"
 assert_eq "1" "$(bool_env_is_true 'yes')" "yes should be true"
 assert_eq "0" "$(bool_env_is_true 'no')" "no should be false"
 
+unset RT_SETUP_ALLOW_POWER_ACTIONS
+assert_eq "true" "$(allow_power_actions_toml_value)" "power actions should default to true for SBC setup"
+RT_SETUP_ALLOW_POWER_ACTIONS=0
+assert_eq "false" "$(allow_power_actions_toml_value)" "RT_SETUP_ALLOW_POWER_ACTIONS=0 should disable power actions"
+RT_SETUP_ALLOW_POWER_ACTIONS=true
+assert_eq "true" "$(allow_power_actions_toml_value)" "RT_SETUP_ALLOW_POWER_ACTIONS=true should enable power actions"
+unset RT_SETUP_ALLOW_POWER_ACTIONS
+
 targets="$(reader_targets_from_env $'192.168.1.10:10000\n192.168.1.11:10000')"
 assert_eq $'192.168.1.10:10000\n192.168.1.11:10000' "${targets}" "newline reader list should be preserved"
 
