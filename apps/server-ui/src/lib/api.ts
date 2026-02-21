@@ -450,6 +450,12 @@ export async function deleteReceiverStreamCursor(
     { method: "DELETE" },
   );
 }
+
+/** DELETE /api/v1/admin/races — delete ALL races, returns 204 */
+export async function deleteAllRaces(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/races", { method: "DELETE" });
+}
+
 // ----- Race types -----
 
 export interface RaceEntry {

@@ -16,6 +16,7 @@
   let tokens: TokenEntry[] = $state([]);
   let cursors: CursorEntry[] = $state([]);
   let busy = $state(false);
+  let races: api.RaceEntry[] = $state([]);
   let feedback: { message: string; ok: boolean } | null = $state(null);
 
   // ----- Create token state -----
@@ -47,6 +48,7 @@
     loadStreams();
     loadTokens();
     loadCursors();
+    loadRaces();
   });
 
   async function loadStreams() {
@@ -73,6 +75,15 @@
       cursors = resp.cursors;
     } catch {
       cursors = [];
+    }
+  }
+
+  async function loadRaces() {
+    try {
+      const resp = await api.getRaces();
+      races = resp.races;
+    } catch {
+      races = [];
     }
   }
 
@@ -134,6 +145,7 @@
       await loadStreams();
       await loadTokens();
       await loadCursors();
+      await loadRaces();
       if (selectedStreamId) await loadEpochs(selectedStreamId);
     } catch (e) {
       feedback = { message: String(e), ok: false };
@@ -281,6 +293,15 @@
       `This will clear the cursor for receiver "${receiverId}" on stream "${streamName}".`,
       "Clear Cursor",
       () => api.deleteReceiverStreamCursor(receiverId, streamId),
+    );
+  }
+
+  function confirmDeleteAllRaces() {
+    showConfirm(
+      "Delete All Races",
+      "This will permanently delete ALL races and all associated data (participants, chips, and forwarder associations). This cannot be undone.",
+      "Delete All",
+      () => api.deleteAllRaces(),
     );
   }
 </script>
@@ -675,6 +696,28 @@
           class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err text-white border-none cursor-pointer hover:opacity-80"
         >
           Clear All Cursors
+        </button>
+      </div>
+    </Card>
+  </div>
+
+  <!-- Races Section -->
+  <div class="mb-6">
+    <Card title="Races" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Delete all races and associated data. This removes all races,
+        participants, chip mappings, and forwarder-race associations.
+      </p>
+      <p class="text-sm text-text-secondary m-0 mb-4">
+        {races.length}
+        {races.length === 1 ? "race" : "races"}
+      </p>
+      <div>
+        <button
+          onclick={confirmDeleteAllRaces}
+          class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err text-white border-none cursor-pointer hover:opacity-80"
+        >
+          Delete All Races
         </button>
       </div>
     </Card>

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM forwarder_races",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3eddb356d5aa26860b47c47b1875ef5d99c545090b9f9d968a24c30e6474ffe3"
+}
