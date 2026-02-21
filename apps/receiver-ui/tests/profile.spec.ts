@@ -80,6 +80,14 @@ async function mockReceiverApi(
       body: JSON.stringify({ status: "up_to_date" }),
     });
   });
+
+  await page.route("**/api/v1/update/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "up_to_date" }),
+    });
+  });
 }
 
 test.describe("profile page", () => {
@@ -296,5 +304,77 @@ test.describe("profile page", () => {
     await expect(btn).toBeVisible();
     await btn.click();
     await expect(page.getByText("Up to date.")).toBeVisible();
+  });
+
+  test("check now shows download banner when update is available", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/update/check", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "available", version: "2.0.0" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator('[data-testid="check-update-btn"]').click();
+    await expect(page.locator('[data-testid="update-banner"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="download-update-btn"]'),
+    ).toBeVisible();
+    await expect(page.getByText("Update v2.0.0 available")).toBeVisible();
+  });
+
+  test("download button transitions banner to apply state", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/update/check", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "available", version: "2.0.0" }),
+      });
+    });
+
+    await page.route("**/api/v1/update/download", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "downloaded", version: "2.0.0" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator('[data-testid="check-update-btn"]').click();
+    await expect(
+      page.locator('[data-testid="download-update-btn"]'),
+    ).toBeVisible();
+
+    await page.locator('[data-testid="download-update-btn"]').click();
+    await expect(
+      page.locator('[data-testid="apply-update-btn"]'),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Update v2.0.0 ready to install"),
+    ).toBeVisible();
+  });
+
+  test("banner appears on load when update is already available", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/update/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "available", version: "3.0.0" }),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.locator('[data-testid="update-banner"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="download-update-btn"]'),
+    ).toBeVisible();
   });
 });

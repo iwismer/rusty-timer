@@ -134,3 +134,9 @@ export async function checkForUpdate(): Promise<UpdateStatusResponse> {
     method: "POST",
   });
 }
+
+export async function downloadUpdate(): Promise<UpdateStatusResponse> {
+  return apiFetch<UpdateStatusResponse>("/update/download", {
+    method: "POST",
+  });
+}

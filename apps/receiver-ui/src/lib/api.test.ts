@@ -206,7 +206,7 @@ describe("sse client", () => {
     );
   });
 
-  it("forwards update_available event payload", async () => {
+  it("forwards update_status_changed event payload", async () => {
     const { initSSE, destroySSE } = await import("./sse");
     const callbacks = {
       onStatusChanged: vi.fn(),
@@ -214,18 +214,20 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateAvailable: vi.fn(),
+      onUpdateStatusChanged: vi.fn(),
     };
 
     initSSE(callbacks);
     expect(MockEventSource.lastInstance).not.toBeNull();
 
-    MockEventSource.lastInstance!.emit("update_available", {
-      version: "1.2.3",
-      current_version: "1.0.0",
+    MockEventSource.lastInstance!.emit("update_status_changed", {
+      status: { status: "available", version: "1.2.3" },
     });
 
-    expect(callbacks.onUpdateAvailable).toHaveBeenCalledWith("1.2.3", "1.0.0");
+    expect(callbacks.onUpdateStatusChanged).toHaveBeenCalledWith({
+      status: "available",
+      version: "1.2.3",
+    });
     destroySSE();
     vi.unstubAllGlobals();
   });

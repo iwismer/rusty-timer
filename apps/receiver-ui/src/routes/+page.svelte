@@ -35,6 +35,7 @@
   let connectBusy = $state(false);
   let sseConnected = $state(false);
   let updateVersion = $state<string | null>(null);
+  let updateStatus = $state<"available" | "downloaded" | null>(null);
   let updateBusy = $state(false);
   let portOverrides = $state<Record<string, string | number | null>>({});
   let subscriptionsBusy = $state(false);
@@ -101,11 +102,16 @@
         editLogLevel = p.log_level;
         editUpdateMode = p.update_mode || "check-and-download";
       }
-      const updateStatus = await api.getUpdateStatus().catch(() => null);
-      if (updateStatus?.status === "downloaded" && updateStatus.version) {
-        updateVersion = updateStatus.version;
-      } else if (updateStatus?.status === "up_to_date") {
+      const us = await api.getUpdateStatus().catch(() => null);
+      if (
+        (us?.status === "downloaded" || us?.status === "available") &&
+        us.version
+      ) {
+        updateVersion = us.version;
+        updateStatus = us.status;
+      } else {
         updateVersion = null;
+        updateStatus = null;
       }
     } catch (e) {
       error = String(e);
@@ -140,6 +146,8 @@
         result.status === "downloaded"
       ) {
         checkMessage = null; // UpdateBanner will show via SSE
+        updateVersion = result.version ?? null;
+        updateStatus = result.status;
       } else if (result.status === "failed") {
         checkMessage = result.error ?? "Update check failed.";
       }
@@ -147,6 +155,24 @@
       checkMessage = String(e);
     } finally {
       checkingUpdate = false;
+    }
+  }
+
+  async function handleDownloadUpdate() {
+    updateBusy = true;
+    error = null;
+    try {
+      const result = await api.downloadUpdate();
+      if (result.status === "downloaded") {
+        updateVersion = result.version ?? null;
+        updateStatus = "downloaded";
+      } else if (result.status === "failed") {
+        error = result.error ?? "Download failed.";
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      updateBusy = false;
     }
   }
 
@@ -180,6 +206,7 @@
       const result = await waitForApplyResult(() => api.getUpdateStatus());
       if (result.outcome === "applied") {
         updateVersion = null;
+        updateStatus = null;
       } else if (result.outcome === "failed") {
         error = `Update failed: ${result.error}`;
       } else {
@@ -213,8 +240,17 @@
       onConnectionChange: (connected) => {
         sseConnected = connected;
       },
-      onUpdateAvailable: (version, _currentVersion) => {
-        updateVersion = version;
+      onUpdateStatusChanged: (us) => {
+        if (
+          (us.status === "available" || us.status === "downloaded") &&
+          us.version
+        ) {
+          updateVersion = us.version;
+          updateStatus = us.status;
+        } else {
+          updateVersion = null;
+          updateStatus = null;
+        }
       },
     });
   });
@@ -245,11 +281,13 @@
 </script>
 
 <main class="max-w-[900px] mx-auto px-8 py-6">
-  {#if updateVersion}
+  {#if updateVersion && updateStatus}
     <div class="mb-4">
       <UpdateBanner
         version={updateVersion}
+        status={updateStatus}
         busy={updateBusy}
+        onDownload={handleDownloadUpdate}
         onApply={handleApplyUpdate}
       />
     </div>
