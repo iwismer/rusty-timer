@@ -1,6 +1,18 @@
 use std::path::Path;
 use std::process::Command;
 
+fn npm_program_for(is_windows: bool) -> &'static str {
+    if is_windows {
+        "npm.cmd"
+    } else {
+        "npm"
+    }
+}
+
+fn npm_program() -> &'static str {
+    npm_program_for(cfg!(windows))
+}
+
 fn main() {
     // Only build the frontend when the embed-ui feature is active.
     if std::env::var("CARGO_FEATURE_EMBED_UI").is_err() {
@@ -32,10 +44,33 @@ fn main() {
     );
 
     // npm run build — produce static assets in build/.
-    let status = Command::new("npm")
+    // On Windows, npm is exposed as npm.cmd (not npm.exe), so pick the
+    // platform-specific program name explicitly.
+    let status = Command::new(npm_program())
         .args(["run", "build"])
         .current_dir(ui_dir)
         .status()
         .expect("failed to run npm run build");
     assert!(status.success(), "npm run build failed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{npm_program, npm_program_for};
+
+    #[test]
+    fn npm_program_for_windows_uses_cmd_wrapper() {
+        assert_eq!(npm_program_for(true), "npm.cmd");
+    }
+
+    #[test]
+    fn npm_program_for_non_windows_uses_plain_npm() {
+        assert_eq!(npm_program_for(false), "npm");
+    }
+
+    #[test]
+    fn npm_program_matches_current_target() {
+        let expected = if cfg!(windows) { "npm.cmd" } else { "npm" };
+        assert_eq!(npm_program(), expected);
+    }
 }
