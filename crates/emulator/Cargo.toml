@@ -1,0 +1,22 @@
+[package]
+name = "emulator-crate"
+version = "2.0.0"
+edition = "2021"
+authors = ["iwismer <isaac@iwismer.ca>"]
+
+[lib]
+name = "emulator"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+chrono = "0.4"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+timer-core = { path = "../timer-core" }
+ipico-core = { path = "../ipico-core" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

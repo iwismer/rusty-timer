@@ -749,6 +749,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "emulator-crate"
+version = "2.0.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "ipico-core",
+ "serde",
+ "serde_yaml",
+ "timer-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "emulator-v2"
 version = "0.1.0"
 dependencies = [
