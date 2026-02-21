@@ -351,8 +351,6 @@
     "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
   const dangerousActionBtnClass =
     "px-3 py-1.5 text-xs font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
-  const cautionActionBtnClass =
-    "px-3 py-1.5 text-xs font-medium rounded-md bg-status-warn-bg text-status-warn border border-status-warn-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
   const hintClass = "text-xs text-text-muted mt-1";
 </script>
 
@@ -458,89 +456,6 @@
         </Card>
       </div>
 
-      <Card title="Forwarder Controls">
-        <p class={hintClass}>
-          These actions affect service/process availability and device power state.
-        </p>
-
-        <label class="mt-3 block text-sm font-medium text-text-secondary">
-          <span class="inline-flex items-center gap-2">
-            <input
-              type="checkbox"
-              bind:checked={controlAllowPowerActions}
-              class="accent-accent"
-            />
-            Allow restart/shutdown actions for the forwarder device
-          </span>
-          <p class={hintClass}>
-            Required for "Restart Forwarder Device" and "Shutdown Forwarder Device".
-          </p>
-        </label>
-        <button
-          class={saveBtnClass}
-          onclick={saveControl}
-          disabled={savingSection["control"]}
-        >
-          {savingSection["control"] ? "Saving..." : "Save Control"}
-        </button>
-        {#if sectionMessages["control"]}
-          <p
-            class="text-xs mt-1 m-0 {sectionMessages['control'].ok
-              ? 'text-status-ok'
-              : 'text-status-err'}"
-          >
-            {sectionMessages["control"].text}
-          </p>
-        {/if}
-
-        <div class="mt-4 pt-4 border-t border-border">
-          <div class="mb-3">
-            <p class="text-xs font-semibold uppercase tracking-wide text-status-err m-0">
-              Dangerous Actions
-            </p>
-            <p class="{hintClass} mt-1">
-              Confirm before using these actions in production.
-            </p>
-          </div>
-          <div class="flex flex-wrap gap-2">
-            <button
-              class={dangerousActionBtnClass}
-              onclick={() => requestControlAction("restartService")}
-              disabled={controlActionBusy.restartService}
-            >
-              {controlActionBusy.restartService
-                ? "Restarting Service..."
-                : "Restart Forwarder Service"}
-            </button>
-            <button
-              class={dangerousActionBtnClass}
-              onclick={() => requestControlAction("restartDevice")}
-              disabled={controlActionBusy.restartDevice || !powerActionsEnabled}
-              title={powerActionsDisabledReason}
-            >
-              {controlActionBusy.restartDevice
-                ? "Restarting Device..."
-                : "Restart Forwarder Device"}
-            </button>
-          </div>
-          <div class="mt-3">
-            <button
-              class={cautionActionBtnClass}
-              onclick={() => requestControlAction("shutdownDevice")}
-              disabled={controlActionBusy.shutdownDevice || !powerActionsEnabled}
-              title={powerActionsDisabledReason}
-            >
-              {controlActionBusy.shutdownDevice
-                ? "Shutting Down..."
-                : "Shutdown Forwarder Device"}
-            </button>
-            <p class={hintClass}>
-              Good to do before unplugging the forwarder device.
-            </p>
-          </div>
-        </div>
-      </Card>
-
       <!-- Readers -->
       <Card title="Readers">
         <p class={hintClass}>
@@ -641,6 +556,79 @@
             {sectionMessages["readers"].text}
           </p>
         {/if}
+      </Card>
+
+      <Card title="Forwarder Controls">
+        <p class={hintClass}>
+          These actions affect service/process availability and device power state.
+        </p>
+
+        <label class="mt-3 block text-sm font-medium text-text-secondary">
+          <span class="inline-flex items-center gap-2">
+            <input
+              type="checkbox"
+              bind:checked={controlAllowPowerActions}
+              class="accent-accent"
+            />
+            Allow restart/shutdown actions for the forwarder device
+          </span>
+          <p class={hintClass}>
+            Required for "Restart Forwarder Device" and "Shutdown Forwarder Device".
+          </p>
+        </label>
+        <button
+          class={saveBtnClass}
+          onclick={saveControl}
+          disabled={savingSection["control"]}
+        >
+          {savingSection["control"] ? "Saving..." : "Save Control"}
+        </button>
+        {#if sectionMessages["control"]}
+          <p
+            class="text-xs mt-1 m-0 {sectionMessages['control'].ok
+              ? 'text-status-ok'
+              : 'text-status-err'}"
+          >
+            {sectionMessages["control"].text}
+          </p>
+        {/if}
+      </Card>
+
+      <Card title="Dangerous Actions">
+        <p class="{hintClass} mt-0">
+          Confirm before using these actions in production.
+        </p>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button
+            class={dangerousActionBtnClass}
+            onclick={() => requestControlAction("restartService")}
+            disabled={controlActionBusy.restartService}
+          >
+            {controlActionBusy.restartService
+              ? "Restarting Service..."
+              : "Restart Forwarder Service"}
+          </button>
+          <button
+            class={dangerousActionBtnClass}
+            onclick={() => requestControlAction("restartDevice")}
+            disabled={controlActionBusy.restartDevice || !powerActionsEnabled}
+            title={powerActionsDisabledReason}
+          >
+            {controlActionBusy.restartDevice
+              ? "Restarting Device..."
+              : "Restart Forwarder Device"}
+          </button>
+          <button
+            class={dangerousActionBtnClass}
+            onclick={() => requestControlAction("shutdownDevice")}
+            disabled={controlActionBusy.shutdownDevice || !powerActionsEnabled}
+            title={powerActionsDisabledReason}
+          >
+            {controlActionBusy.shutdownDevice
+              ? "Shutting Down..."
+              : "Shutdown Forwarder Device"}
+          </button>
+        </div>
       </Card>
 
       <!-- Advanced Settings Toggle -->
