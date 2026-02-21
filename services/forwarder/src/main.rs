@@ -16,6 +16,7 @@ use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkError, UplinkSessio
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
 use ipico_core::read::ChipRead;
 use rt_protocol::{ReadEvent, ResumeCursor, WsMessage};
+use rt_ui_log::UiLogLevel;
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
 use std::net::SocketAddr;
@@ -125,7 +126,6 @@ async fn run_reader(
 
         let stream = match TcpStream::connect(&target_addr).await {
             Ok(s) => {
-                info!(reader_ip = %reader_ip, "reader TCP connected");
                 logger.log(format!("reader {} connected", reader_ip));
                 backoff_secs = 1; // reset backoff on successful connect
                 status
@@ -134,16 +134,13 @@ async fn run_reader(
                 s
             }
             Err(e) => {
-                warn!(
-                    reader_ip = %reader_ip,
-                    error = %e,
-                    backoff_secs = backoff_secs,
-                    "reader TCP connect failed, retrying"
+                logger.log_at(
+                    UiLogLevel::Warn,
+                    format!(
+                        "reader {} connect failed: {}; retrying in {}s",
+                        reader_ip, e, backoff_secs
+                    ),
                 );
-                logger.log(format!(
-                    "reader {} connect failed: {}; retrying in {}s",
-                    reader_ip, e, backoff_secs
-                ));
                 mark_reader_disconnected(&status, &stream_key).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
@@ -188,20 +185,18 @@ async fn run_reader(
 
             match read_result {
                 Err(e) => {
-                    warn!(reader_ip = %reader_ip, error = %e, "TCP read error, reconnecting");
-                    logger.log(format!(
-                        "reader {} read error: {}; reconnecting",
-                        reader_ip, e
-                    ));
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} read error: {}; reconnecting", reader_ip, e),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Ok(0) => {
-                    warn!(reader_ip = %reader_ip, "TCP connection closed by reader, reconnecting");
-                    logger.log(format!(
-                        "reader {} connection closed; reconnecting",
-                        reader_ip
-                    ));
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} connection closed; reconnecting", reader_ip),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
@@ -223,8 +218,10 @@ async fn run_reader(
                 }
                 Err(_) => {
                     // Line is not a valid IPICO read — log and skip
-                    warn!(reader_ip = %reader_ip, line = %raw_line, "skipping unparseable line");
-                    logger.log(format!("reader {} skipped unparseable line", reader_ip));
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} skipped unparseable line", reader_ip),
+                    );
                     continue;
                 }
             }
@@ -474,11 +471,6 @@ async fn run_uplink(
                 .collect()
         };
 
-        info!(
-            url = %ws_url,
-            cursors = resume_cursors.len(),
-            "connecting uplink WebSocket"
-        );
         logger.log(format!("uplink connecting to {}", ws_url));
 
         let mut session = match UplinkSession::connect_with_resume(
@@ -489,25 +481,18 @@ async fn run_uplink(
         .await
         {
             Ok(s) => {
-                info!(
-                    session_id = %s.session_id(),
-                    device_id = %s.device_id(),
-                    "uplink connected"
-                );
                 logger.log(format!("uplink connected (session {})", s.session_id()));
                 status.set_uplink_connected(true).await;
                 backoff_secs = 1;
                 s
             }
             Err(e) => {
-                logger.log(format!(
-                    "uplink connect failed: {}; retrying in {}s",
-                    e, backoff_secs
-                ));
-                warn!(
-                    error = %e,
-                    backoff_secs = backoff_secs,
-                    "uplink connect failed, retrying"
+                logger.log_at(
+                    UiLogLevel::Warn,
+                    format!(
+                        "uplink connect failed: {}; retrying in {}s",
+                        e, backoff_secs
+                    ),
                 );
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
@@ -563,17 +548,14 @@ async fn run_uplink(
                 })
                 .collect();
 
-            info!(
-                stream_key = %stream_key,
-                epoch = stream_epoch,
-                count = read_events.len(),
-                "replaying unacked events"
+            logger.log_at(
+                UiLogLevel::Debug,
+                format!(
+                    "replaying {} unacked events for {}",
+                    read_events.len(),
+                    stream_key
+                ),
             );
-            logger.log(format!(
-                "replaying {} unacked events for {}",
-                read_events.len(),
-                stream_key
-            ));
 
             let send_result = session.send_batch(read_events).await;
             reconnect_after_replay = should_reconnect_after_replay_send(&send_result);
@@ -592,11 +574,6 @@ async fn run_uplink(
                     }
                 }
                 Ok(SendBatchResult::EpochReset(cmd)) => {
-                    info!(
-                        reader_ip = %cmd.reader_ip,
-                        new_epoch = cmd.new_stream_epoch,
-                        "epoch reset during replay, bumping journal and reconnecting"
-                    );
                     logger.log(format!(
                         "epoch reset for {}; bumping journal and reconnecting",
                         cmd.reader_ip
@@ -752,8 +729,10 @@ async fn run_uplink(
                 continue;
             }
 
-            debug!(count = pending.len(), "sending event batch");
-            logger.log(format!("sent batch of {} events", pending.len()));
+            logger.log_at(
+                UiLogLevel::Debug,
+                format!("sent batch of {} events", pending.len()),
+            );
 
             match session.send_batch(pending).await {
                 Ok(SendBatchResult::Ack(ack)) => {
@@ -769,11 +748,6 @@ async fn run_uplink(
                     }
                 }
                 Ok(SendBatchResult::EpochReset(cmd)) => {
-                    info!(
-                        reader_ip = %cmd.reader_ip,
-                        new_epoch = cmd.new_stream_epoch,
-                        "epoch reset received, bumping journal and reconnecting"
-                    );
                     logger.log(format!(
                         "epoch reset for {}; bumping journal",
                         cmd.reader_ip
@@ -823,14 +797,10 @@ async fn run_uplink(
         // Reconnect with backoff
         status.set_uplink_connected(false).await;
         let delay = Duration::from_secs(backoff_secs);
-        warn!(
-            backoff_secs = backoff_secs,
-            "uplink disconnected, reconnecting"
+        logger.log_at(
+            UiLogLevel::Warn,
+            format!("uplink disconnected; reconnecting in {}s", backoff_secs),
         );
-        logger.log(format!(
-            "uplink disconnected; reconnecting in {}s",
-            backoff_secs
-        ));
         tokio::select! {
             _ = sleep(delay) => {}
             _ = shutdown_rx.changed() => {
@@ -1100,11 +1070,6 @@ async fn main() {
 
                     match checker.download(version).await {
                         Ok(path) => {
-                            warn!(
-                                version = %version,
-                                path = %path.display(),
-                                "update downloaded and staged"
-                            );
                             lg.log(format!("update {} downloaded and staged", version));
                             ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
                                 version: version.clone(),
@@ -1113,8 +1078,7 @@ async fn main() {
                             ss.set_staged_update_path(path).await;
                         }
                         Err(e) => {
-                            warn!(error = %e, "update download failed");
-                            lg.log(format!("update download failed: {}", e));
+                            lg.log_at(UiLogLevel::Warn, format!("update download failed: {}", e));
                             ss.set_update_status(rt_updater::UpdateStatus::Failed {
                                 error: e.to_string(),
                             })
@@ -1126,8 +1090,7 @@ async fn main() {
                     info!("no updates available");
                 }
                 Err(e) => {
-                    warn!(error = %e, "update check failed");
-                    lg.log(format!("update check failed: {}", e));
+                    lg.log_at(UiLogLevel::Warn, format!("update check failed: {}", e));
                     ss.set_update_status(rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     })
@@ -1137,11 +1100,6 @@ async fn main() {
         });
     }
 
-    info!(
-        readers = all_readers.len(),
-        forwarder_id = %forwarder_id,
-        "forwarder initialized — all worker tasks started"
-    );
     logger.log(format!(
         "forwarder v{} initialized — all workers running",
         env!("CARGO_PKG_VERSION")
@@ -1164,17 +1122,14 @@ async fn main() {
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                info!("SIGINT received, shutting down");
                 logger.log("shutdown: SIGINT received");
                 restart_requested = false;
             }
             _ = sigterm.recv() => {
-                info!("SIGTERM received, shutting down");
                 logger.log("shutdown: SIGTERM received");
                 restart_requested = false;
             }
             _ = restart_signal.notified() => {
-                info!("restart requested via API, shutting down");
                 logger.log("restart requested via API");
                 restart_requested = true;
             }
@@ -1185,11 +1140,9 @@ async fn main() {
     {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl-C received, shutting down");
                 logger.log("shutdown: Ctrl-C received");
             }
             _ = restart_signal.notified() => {
-                info!("restart requested via API, shutting down");
                 logger.log("restart requested via API");
             }
         }

@@ -1,7 +1,45 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::fmt::Display;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
+
+/// Log level for UI-visible entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UiLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl fmt::Display for UiLogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Trace => write!(f, "TRACE"),
+            Self::Debug => write!(f, "DEBUG"),
+            Self::Info => write!(f, "INFO"),
+            Self::Warn => write!(f, "WARN"),
+            Self::Error => write!(f, "ERROR"),
+        }
+    }
+}
+
+impl FromStr for UiLogLevel {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_uppercase().as_str() {
+            "TRACE" => Ok(Self::Trace),
+            "DEBUG" => Ok(Self::Debug),
+            "INFO" => Ok(Self::Info),
+            "WARN" => Ok(Self::Warn),
+            "ERROR" => Ok(Self::Error),
+            _ => Err(()),
+        }
+    }
+}
 
 /// A UI logger that formats timestamped entries, prints to tracing, broadcasts
 /// to SSE subscribers, and optionally buffers for REST retrieval.
@@ -40,10 +78,22 @@ impl<T: Clone + Send> UiLogger<T> {
         }
     }
 
-    /// Format a timestamped log entry, print to tracing, broadcast, and optionally buffer.
-    pub fn log(&self, msg: impl Display) {
-        let entry = format!("{} {}", chrono::Utc::now().format("%H:%M:%S"), msg);
-        tracing::info!("{}", entry);
+    /// Format a timestamped, level-tagged log entry, print to tracing at the
+    /// appropriate level, broadcast, and optionally buffer.
+    pub fn log_at(&self, level: UiLogLevel, msg: impl Display) {
+        let entry = format!(
+            "{} [{}] {}",
+            chrono::Utc::now().format("%H:%M:%S"),
+            level,
+            msg,
+        );
+        match level {
+            UiLogLevel::Trace => tracing::trace!("{}", entry),
+            UiLogLevel::Debug => tracing::debug!("{}", entry),
+            UiLogLevel::Info => tracing::info!("{}", entry),
+            UiLogLevel::Warn => tracing::warn!("{}", entry),
+            UiLogLevel::Error => tracing::error!("{}", entry),
+        }
         if let Some(ref buf) = self.buffer {
             if let Ok(mut entries) = buf.write() {
                 entries.push_back(entry.clone());
@@ -53,6 +103,11 @@ impl<T: Clone + Send> UiLogger<T> {
             }
         }
         let _ = self.tx.send((self.map_fn)(entry));
+    }
+
+    /// Format a timestamped log entry at INFO level. Shorthand for `log_at(Info, msg)`.
+    pub fn log(&self, msg: impl Display) {
+        self.log_at(UiLogLevel::Info, msg);
     }
 
     /// Return a snapshot of buffered entries. Returns empty vec if no buffer.
@@ -83,6 +138,34 @@ mod tests {
     }
 
     #[test]
+    fn log_includes_info_tag() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let logger = UiLogger::new(tx, |entry| entry);
+        logger.log("hello");
+        let entry = rx.try_recv().unwrap();
+        assert!(entry.contains("[INFO]"), "unexpected: {entry}");
+    }
+
+    #[test]
+    fn log_at_debug_includes_level_tag() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let logger = UiLogger::new(tx, |entry| entry);
+        logger.log_at(UiLogLevel::Debug, "test msg");
+        let entry = rx.try_recv().unwrap();
+        assert!(entry.contains("[DEBUG]"), "unexpected: {entry}");
+        assert!(entry.ends_with(" test msg"), "unexpected: {entry}");
+    }
+
+    #[test]
+    fn log_at_warn_includes_level_tag() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let logger = UiLogger::new(tx, |entry| entry);
+        logger.log_at(UiLogLevel::Warn, "oops");
+        let entry = rx.try_recv().unwrap();
+        assert!(entry.contains("[WARN]"), "unexpected: {entry}");
+    }
+
+    #[test]
     fn log_buffers_entries() {
         let (tx, _) = broadcast::channel::<String>(4);
         let logger = UiLogger::with_buffer(tx, |entry| entry, 3);
@@ -94,6 +177,19 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert!(entries[0].ends_with(" b"));
         assert!(entries[2].ends_with(" d"));
+    }
+
+    #[test]
+    fn log_at_buffers_entries() {
+        let (tx, _) = broadcast::channel::<String>(4);
+        let logger = UiLogger::with_buffer(tx, |entry| entry, 2);
+        logger.log_at(UiLogLevel::Warn, "w");
+        logger.log_at(UiLogLevel::Debug, "d");
+        logger.log_at(UiLogLevel::Error, "e");
+        let entries = logger.entries();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("[DEBUG]"));
+        assert!(entries[1].contains("[ERROR]"));
     }
 
     #[test]
@@ -115,5 +211,20 @@ mod tests {
         logger.log("mapped");
         let event = rx.try_recv().unwrap();
         assert!(event.entry.ends_with(" mapped"));
+    }
+
+    #[test]
+    fn ui_log_level_display_roundtrip() {
+        for level in [
+            UiLogLevel::Trace,
+            UiLogLevel::Debug,
+            UiLogLevel::Info,
+            UiLogLevel::Warn,
+            UiLogLevel::Error,
+        ] {
+            let s = level.to_string();
+            let parsed: UiLogLevel = s.parse().unwrap();
+            assert_eq!(parsed, level);
+        }
     }
 }

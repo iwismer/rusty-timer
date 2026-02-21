@@ -43,13 +43,11 @@ async fn main() {
         .await
         .expect("failed to bind");
     logger.log(format!("server listening on {bind_addr}"));
-    info!(addr = %bind_addr, "server listening");
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
     logger.log("server shutting down");
-    info!("server shut down gracefully");
 }
 
 /// Waits for SIGTERM or Ctrl-C (SIGINT) and returns to trigger graceful shutdown.

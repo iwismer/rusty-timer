@@ -140,7 +140,6 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     }
 
     let session_id = Uuid::new_v4().to_string();
-    info!(device_id = %device_id, session_id = %session_id, "receiver connected");
     state.logger.log(format!(
         "receiver {device_id} connected (session {session_id})"
     ));
@@ -271,7 +270,6 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                     }
                     Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
                     Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                        info!(device_id = %device_id, "receiver disconnected");
                         state.logger.log(format!("receiver {device_id} disconnected"));
                         break;
                     }

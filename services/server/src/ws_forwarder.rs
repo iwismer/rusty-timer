@@ -141,7 +141,6 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         .await;
         return;
     }
-    info!(device_id = %device_id, "forwarder connected");
     state.logger.log(format!("forwarder {device_id} connected"));
     let session_id = Uuid::new_v4().to_string();
 
@@ -414,9 +413,9 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         }
                     }
                     Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
-                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) => { info!(device_id = %device_id, "forwarder disconnected"); state.logger.log(format!("forwarder {device_id} disconnected")); break; }
-                    Err(_) => { warn!(device_id = %device_id, "session timeout"); state.logger.log(format!("forwarder {device_id} session timeout")); break; }
-                    Ok(Some(Err(e))) => { warn!(device_id = %device_id, error = %e, "WS error"); state.logger.log(format!("forwarder {device_id} WS error: {e}")); break; }
+                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) => { state.logger.log(format!("forwarder {device_id} disconnected")); break; }
+                    Err(_) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} session timeout")); break; }
+                    Ok(Some(Err(e))) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} WS error: {e}")); break; }
                     Ok(Some(Ok(_))) => {}
                 }
             }
