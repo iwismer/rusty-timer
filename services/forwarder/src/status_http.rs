@@ -22,6 +22,7 @@
 //! No authentication in v1.
 
 use crate::storage::journal::Journal;
+use crate::ui_events::ui_log;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode, Uri};
@@ -1189,6 +1190,10 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     let result = state.journal.lock().await.reset_epoch(&reader_ip);
     match result {
         Ok(new_epoch) => {
+            ui_log(
+                &state.ui_tx,
+                format!("epoch reset for {} via API", reader_ip),
+            );
             let body = format!("{{\"new_epoch\":{}}}", new_epoch);
             json_response(StatusCode::OK, body)
         }
