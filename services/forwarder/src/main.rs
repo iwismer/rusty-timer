@@ -11,6 +11,7 @@ use forwarder::status_http::{
     ConfigState, ReaderConnectionState, StatusConfig, StatusServer, SubsystemStatus,
 };
 use forwarder::storage::journal::Journal;
+use forwarder::ui_events::ui_log;
 use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkError, UplinkSession};
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
 use ipico_core::read::ChipRead;
@@ -107,6 +108,7 @@ async fn run_reader(
     let target_addr = format!("{}:{}", reader_ip, reader_port);
     let stream_key = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
+    let ui_tx = status.ui_sender();
 
     loop {
         // Check for shutdown before attempting connect
@@ -124,6 +126,7 @@ async fn run_reader(
         let stream = match TcpStream::connect(&target_addr).await {
             Ok(s) => {
                 info!(reader_ip = %reader_ip, "reader TCP connected");
+                ui_log(&ui_tx, format!("reader {} connected", reader_ip));
                 backoff_secs = 1; // reset backoff on successful connect
                 status
                     .update_reader_state(&stream_key, ReaderConnectionState::Connected)
@@ -136,6 +139,13 @@ async fn run_reader(
                     error = %e,
                     backoff_secs = backoff_secs,
                     "reader TCP connect failed, retrying"
+                );
+                ui_log(
+                    &ui_tx,
+                    format!(
+                        "reader {} connect failed: {}; retrying in {}s",
+                        reader_ip, e, backoff_secs
+                    ),
                 );
                 mark_reader_disconnected(&status, &stream_key).await;
                 let delay = Duration::from_secs(backoff_secs);
@@ -182,11 +192,19 @@ async fn run_reader(
             match read_result {
                 Err(e) => {
                     warn!(reader_ip = %reader_ip, error = %e, "TCP read error, reconnecting");
+                    ui_log(
+                        &ui_tx,
+                        format!("reader {} read error: {}; reconnecting", reader_ip, e),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Ok(0) => {
                     warn!(reader_ip = %reader_ip, "TCP connection closed by reader, reconnecting");
+                    ui_log(
+                        &ui_tx,
+                        format!("reader {} connection closed; reconnecting", reader_ip),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
@@ -209,6 +227,10 @@ async fn run_reader(
                 Err(_) => {
                     // Line is not a valid IPICO read — log and skip
                     warn!(reader_ip = %reader_ip, line = %raw_line, "skipping unparseable line");
+                    ui_log(
+                        &ui_tx,
+                        format!("reader {} skipped unparseable line", reader_ip),
+                    );
                     continue;
                 }
             }
