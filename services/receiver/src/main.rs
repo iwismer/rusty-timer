@@ -105,7 +105,7 @@ async fn main() {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
             if update_mode == rt_updater::UpdateMode::Disabled {
-                info!("auto-update disabled by configuration");
+                state.logger.log("auto-update disabled by configuration");
                 return;
             }
 
@@ -117,18 +117,17 @@ async fn main() {
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!(error = %e, "failed to create update checker");
+                    state.logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("failed to create update checker: {e}"),
+                    );
                     return;
                 }
             };
 
             match checker.check().await {
                 Ok(rt_updater::UpdateStatus::Available { ref version }) => {
-                    info!(
-                        current = env!("CARGO_PKG_VERSION"),
-                        available = %version,
-                        "update available"
-                    );
+                    state.logger.log(format!("Update v{version} available"));
                     *state.update_status.write().await = rt_updater::UpdateStatus::Available {
                         version: version.clone(),
                     };
@@ -143,7 +142,9 @@ async fn main() {
                     if update_mode == rt_updater::UpdateMode::CheckAndDownload {
                         match checker.download(version).await {
                             Ok(path) => {
-                                info!(version = %version, "update downloaded and staged");
+                                state
+                                    .logger
+                                    .log(format!("Update v{version} downloaded and staged"));
                                 *state.update_status.write().await =
                                     rt_updater::UpdateStatus::Downloaded {
                                         version: version.clone(),
@@ -157,10 +158,12 @@ async fn main() {
                                         },
                                     },
                                 );
-                                state.logger.log(format!("Update v{version} available"));
                             }
                             Err(e) => {
-                                warn!(error = %e, "update download failed");
+                                state.logger.log_at(
+                                    UiLogLevel::Warn,
+                                    format!("update download failed: {e}"),
+                                );
                                 *state.update_status.write().await =
                                     rt_updater::UpdateStatus::Failed {
                                         error: e.to_string(),
@@ -170,10 +173,12 @@ async fn main() {
                     }
                 }
                 Ok(_) => {
-                    info!("receiver is up to date");
+                    state.logger.log("receiver is up to date");
                 }
                 Err(e) => {
-                    warn!(error = %e, "update check failed");
+                    state
+                        .logger
+                        .log_at(UiLogLevel::Warn, format!("update check failed: {e}"));
                     *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     };

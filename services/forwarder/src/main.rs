@@ -1045,7 +1045,7 @@ async fn main() {
         let lg = logger.clone();
         tokio::spawn(async move {
             if update_mode == rt_updater::UpdateMode::Disabled {
-                info!("auto-update disabled by configuration");
+                lg.log("auto-update disabled by configuration");
                 return;
             }
 
@@ -1057,7 +1057,10 @@ async fn main() {
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!(error = %e, "failed to create update checker");
+                    lg.log_at(
+                        UiLogLevel::Warn,
+                        format!("failed to create update checker: {e}"),
+                    );
                     return;
                 }
             };
@@ -1065,12 +1068,7 @@ async fn main() {
             let status = checker.check().await;
             match status {
                 Ok(rt_updater::UpdateStatus::Available { ref version }) => {
-                    warn!(
-                        current = env!("CARGO_PKG_VERSION"),
-                        available = %version,
-                        "update available — POST /update/apply to install"
-                    );
-                    lg.log(format!("update available: {}", version));
+                    lg.log(format!("Update v{version} available"));
                     ss.set_update_status(rt_updater::UpdateStatus::Available {
                         version: version.clone(),
                     })
@@ -1079,7 +1077,7 @@ async fn main() {
                     if update_mode == rt_updater::UpdateMode::CheckAndDownload {
                         match checker.download(version).await {
                             Ok(path) => {
-                                lg.log(format!("update {} downloaded and staged", version));
+                                lg.log(format!("Update v{version} downloaded and staged"));
                                 ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
                                     version: version.clone(),
                                 })
@@ -1087,10 +1085,7 @@ async fn main() {
                                 ss.set_staged_update_path(path).await;
                             }
                             Err(e) => {
-                                lg.log_at(
-                                    UiLogLevel::Warn,
-                                    format!("update download failed: {}", e),
-                                );
+                                lg.log_at(UiLogLevel::Warn, format!("update download failed: {e}"));
                                 ss.set_update_status(rt_updater::UpdateStatus::Failed {
                                     error: e.to_string(),
                                 })
@@ -1100,10 +1095,10 @@ async fn main() {
                     }
                 }
                 Ok(_) => {
-                    info!("no updates available");
+                    lg.log("forwarder is up to date");
                 }
                 Err(e) => {
-                    lg.log_at(UiLogLevel::Warn, format!("update check failed: {}", e));
+                    lg.log_at(UiLogLevel::Warn, format!("update check failed: {e}"));
                     ss.set_update_status(rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     })
