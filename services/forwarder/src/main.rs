@@ -1344,6 +1344,9 @@ mod tests {
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -1790,6 +1793,9 @@ token_file = "/tmp/test-token"
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
+            },
             readers: vec![],
         };
 
@@ -2011,6 +2017,9 @@ token_file = "/tmp/test-token"
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -2113,6 +2122,9 @@ token_file = "/tmp/test-token"
                 batch_mode: "immediate".to_string(),
                 batch_flush_ms: 50,
                 batch_max_events: 50,
+            },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
             },
             readers: vec![],
         };
