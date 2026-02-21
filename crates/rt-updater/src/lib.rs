@@ -25,6 +25,16 @@ pub enum UpdateStatus {
     Failed { error: String },
 }
 
+/// Controls automatic update behavior at startup and for manual checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateMode {
+    Disabled,
+    CheckOnly,
+    #[default]
+    CheckAndDownload,
+}
+
 // ---------------------------------------------------------------------------
 // UpdateChecker
 // ---------------------------------------------------------------------------
@@ -482,5 +492,47 @@ mod tests {
                 .contains("missing required sha256 sidecar asset"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn update_mode_serializes_to_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&UpdateMode::Disabled).unwrap(),
+            r#""disabled""#
+        );
+        assert_eq!(
+            serde_json::to_string(&UpdateMode::CheckOnly).unwrap(),
+            r#""check-only""#
+        );
+        assert_eq!(
+            serde_json::to_string(&UpdateMode::CheckAndDownload).unwrap(),
+            r#""check-and-download""#
+        );
+    }
+
+    #[test]
+    fn update_mode_deserializes_from_kebab_case() {
+        assert_eq!(
+            serde_json::from_str::<UpdateMode>(r#""disabled""#).unwrap(),
+            UpdateMode::Disabled
+        );
+        assert_eq!(
+            serde_json::from_str::<UpdateMode>(r#""check-only""#).unwrap(),
+            UpdateMode::CheckOnly
+        );
+        assert_eq!(
+            serde_json::from_str::<UpdateMode>(r#""check-and-download""#).unwrap(),
+            UpdateMode::CheckAndDownload
+        );
+    }
+
+    #[test]
+    fn update_mode_default_is_check_and_download() {
+        assert_eq!(UpdateMode::default(), UpdateMode::CheckAndDownload);
+    }
+
+    #[test]
+    fn update_mode_rejects_unknown_string() {
+        assert!(serde_json::from_str::<UpdateMode>(r#""bogus""#).is_err());
     }
 }

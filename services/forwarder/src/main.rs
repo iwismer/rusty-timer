@@ -891,6 +891,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    status_server.set_update_mode(cfg.update.mode).await;
+
     // Collect enabled reader endpoints
     let mut all_readers: Vec<(String, u16)> = Vec::new(); // (addr, local_port)
     let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)
@@ -1023,7 +1025,13 @@ async fn main() {
     // Spawn background update check
     {
         let ss = status_server.clone();
+        let update_mode = cfg.update.mode;
         tokio::spawn(async move {
+            if update_mode == rt_updater::UpdateMode::Disabled {
+                info!("auto-update disabled by configuration");
+                return;
+            }
+
             let checker = match rt_updater::UpdateChecker::new(
                 "iwismer",
                 "rusty-timer",
@@ -1050,25 +1058,27 @@ async fn main() {
                     })
                     .await;
 
-                    match checker.download(version).await {
-                        Ok(path) => {
-                            warn!(
-                                version = %version,
-                                path = %path.display(),
-                                "update downloaded and staged"
-                            );
-                            ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
-                                version: version.clone(),
-                            })
-                            .await;
-                            ss.set_staged_update_path(path).await;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "update download failed");
-                            ss.set_update_status(rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            })
-                            .await;
+                    if update_mode == rt_updater::UpdateMode::CheckAndDownload {
+                        match checker.download(version).await {
+                            Ok(path) => {
+                                warn!(
+                                    version = %version,
+                                    path = %path.display(),
+                                    "update downloaded and staged"
+                                );
+                                ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
+                                    version: version.clone(),
+                                })
+                                .await;
+                                ss.set_staged_update_path(path).await;
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "update download failed");
+                                ss.set_update_status(rt_updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                })
+                                .await;
+                            }
                         }
                     }
                 }
@@ -1346,6 +1356,9 @@ mod tests {
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
+            },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
@@ -1796,6 +1809,9 @@ token_file = "/tmp/test-token"
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
             },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
+            },
             readers: vec![],
         };
 
@@ -2020,6 +2036,9 @@ token_file = "/tmp/test-token"
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
             },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -2125,6 +2144,9 @@ token_file = "/tmp/test-token"
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
+            },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![],
         };
