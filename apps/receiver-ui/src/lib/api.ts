@@ -8,6 +8,7 @@ export interface Profile {
   server_url: string;
   token: string;
   log_level: string;
+  update_mode: string;
 }
 
 export interface StreamEntry {
@@ -104,4 +105,10 @@ export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
 export async function applyUpdate(): Promise<void> {
   const resp = await fetch("/api/v1/update/apply", { method: "POST" });
   if (resp.status !== 200) throw new Error(`apply update -> ${resp.status}`);
+}
+
+export async function checkForUpdate(): Promise<UpdateStatusResponse> {
+  return apiFetch<UpdateStatusResponse>("/api/v1/update/check", {
+    method: "POST",
+  });
 }

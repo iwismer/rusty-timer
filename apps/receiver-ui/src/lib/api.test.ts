@@ -25,6 +25,7 @@ describe("api client", () => {
         server_url: "wss://s.com",
         token: "tok",
         log_level: "info",
+        update_mode: "check-and-download",
       }),
     );
     const p = await getProfile();
@@ -42,6 +43,7 @@ describe("api client", () => {
       server_url: "wss://s.com",
       token: "t",
       log_level: "info",
+      update_mode: "check-and-download",
     });
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/profile",
@@ -150,6 +152,17 @@ describe("api client", () => {
       text: async () => "err",
     });
     await expect(applyUpdate()).rejects.toThrow("apply update -> 500");
+  });
+
+  it("checkForUpdate calls POST /api/v1/update/check", async () => {
+    const { checkForUpdate } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { status: "up_to_date" }));
+    const result = await checkForUpdate();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/update/check",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result.status).toBe("up_to_date");
   });
 });
 

@@ -28,6 +28,9 @@
   let editServerUrl = $state("");
   let editToken = $state("");
   let editLogLevel = $state("info");
+  let editUpdateMode = $state("check-and-download");
+  let checkingUpdate = $state(false);
+  let checkMessage = $state<string | null>(null);
   let saving = $state(false);
   let connectBusy = $state(false);
   let sseConnected = $state(false);
@@ -96,6 +99,7 @@
         editServerUrl = p.server_url;
         editToken = p.token;
         editLogLevel = p.log_level;
+        editUpdateMode = p.update_mode || "check-and-download";
       }
       const updateStatus = await api.getUpdateStatus().catch(() => null);
       if (updateStatus?.status === "downloaded" && updateStatus.version) {
@@ -115,11 +119,34 @@
         server_url: editServerUrl,
         token: editToken,
         log_level: editLogLevel,
+        update_mode: editUpdateMode,
       });
     } catch (e) {
       error = String(e);
     } finally {
       saving = false;
+    }
+  }
+
+  async function handleCheckUpdate() {
+    checkingUpdate = true;
+    checkMessage = null;
+    try {
+      const result = await api.checkForUpdate();
+      if (result.status === "up_to_date") {
+        checkMessage = "Up to date.";
+      } else if (
+        result.status === "available" ||
+        result.status === "downloaded"
+      ) {
+        checkMessage = null; // UpdateBanner will show via SSE
+      } else if (result.status === "failed") {
+        checkMessage = result.error ?? "Update check failed.";
+      }
+    } catch (e) {
+      checkMessage = String(e);
+    } finally {
+      checkingUpdate = false;
     }
   }
 
@@ -315,15 +342,44 @@
               <option value="error">error</option>
             </select>
           </label>
+          <label class="block text-xs font-medium text-text-muted">
+            Update Mode
+            <select
+              data-testid="update-mode-select"
+              class="{inputClass} mt-1"
+              bind:value={editUpdateMode}
+            >
+              <option value="check-and-download"
+                >Automatic (check and download)</option
+              >
+              <option value="check-only"
+                >Check Only (notify but don't download)</option
+              >
+              <option value="disabled">Disabled</option>
+            </select>
+          </label>
         </div>
-        <button
-          data-testid="save-profile-btn"
-          class="{btnPrimary} mt-3"
-          onclick={saveProfile}
-          disabled={saving}
-        >
-          {saving ? "Saving..." : "Save Profile"}
-        </button>
+        <div class="flex items-center gap-2 mt-3">
+          <button
+            data-testid="save-profile-btn"
+            class={btnPrimary}
+            onclick={saveProfile}
+            disabled={saving}
+          >
+            {saving ? "Saving..." : "Save Profile"}
+          </button>
+          <button
+            data-testid="check-update-btn"
+            class={btnSecondary}
+            onclick={handleCheckUpdate}
+            disabled={checkingUpdate}
+          >
+            {checkingUpdate ? "Checking..." : "Check Now"}
+          </button>
+        </div>
+        {#if checkMessage}
+          <p class="text-xs mt-1 m-0 text-text-muted">{checkMessage}</p>
+        {/if}
       </section>
     </Card>
   </div>
