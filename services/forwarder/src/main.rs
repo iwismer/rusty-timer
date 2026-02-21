@@ -891,6 +891,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    status_server.set_update_mode(cfg.update.mode).await;
+
     // Collect enabled reader endpoints
     let mut all_readers: Vec<(String, u16)> = Vec::new(); // (addr, local_port)
     let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)

@@ -15,6 +15,7 @@
 //! - `POST /api/v1/control/shutdown-device` — trigger host shutdown (gated by config)
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
+//! - `POST /update/check`    — check for updates (respects update mode)
 //! - All other routes fall back to the embedded SvelteKit UI
 //!
 //! # Readiness contract
@@ -92,6 +93,7 @@ pub struct SubsystemStatus {
     readers: HashMap<String, ReaderStatus>,
     update_status: UpdateStatus,
     staged_update_path: Option<std::path::PathBuf>,
+    pub update_mode: rt_updater::UpdateMode,
     /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
     restart_needed: bool,
 }
@@ -108,6 +110,7 @@ impl SubsystemStatus {
             readers: HashMap::new(),
             update_status: UpdateStatus::UpToDate,
             staged_update_path: None,
+            update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
         }
     }
@@ -123,6 +126,7 @@ impl SubsystemStatus {
             readers: HashMap::new(),
             update_status: UpdateStatus::UpToDate,
             staged_update_path: None,
+            update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
         }
     }
@@ -263,6 +267,11 @@ impl StatusServer {
     /// Set the detected local IP (call once at startup).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.subsystem.lock().await.local_ip = ip;
+    }
+
+    /// Set the update mode (controls check-only vs check-and-download behavior).
+    pub async fn set_update_mode(&self, mode: rt_updater::UpdateMode) {
+        self.subsystem.lock().await.update_mode = mode;
     }
 
     /// Update the current rt-updater status (shown on `/update/status`).
@@ -627,7 +636,7 @@ async fn mark_restart_needed_and_emit(
 /// payload, and calls `update_config_file` to persist the change.
 ///
 /// Recognised sections: `"general"`, `"server"`, `"auth"`, `"journal"`,
-/// `"uplink"`, `"status_http"`, `"control"`, `"readers"`.
+/// `"uplink"`, `"status_http"`, `"control"`, `"update"`, `"readers"`.
 pub async fn apply_section_update(
     section: &str,
     payload: &serde_json::Value,
@@ -750,6 +759,30 @@ pub async fn apply_section_update(
                 raw.control = Some(crate::config::RawControlConfig {
                     allow_power_actions,
                 });
+                Ok(())
+            })
+            .await
+        }
+        "update" => {
+            let mode_str = optional_string_field(payload, "mode")?;
+            if let Some(ref m) = mode_str {
+                // Validate the mode string
+                if serde_json::from_value::<rt_updater::UpdateMode>(serde_json::Value::String(
+                    m.clone(),
+                ))
+                .is_err()
+                {
+                    return Err((
+                        400u16,
+                        serde_json::json!({"ok": false, "error": format!(
+                            "mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'", m
+                        )})
+                        .to_string(),
+                    ));
+                }
+            }
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                raw.update = Some(crate::config::RawUpdateConfig { mode: mode_str });
                 Ok(())
             })
             .await
@@ -1357,6 +1390,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         )
         .route("/update/status", get(update_status_handler::<J>))
         .route("/update/apply", post(update_apply_handler::<J>))
+        .route("/update/check", post(update_check_handler::<J>))
         .route("/api/v1/config", get(config_json_handler::<J>))
         .route(
             "/api/v1/config/general",
@@ -1382,6 +1416,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route(
             "/api/v1/config/control",
             post(post_config_control_handler::<J>),
+        )
+        .route(
+            "/api/v1/config/update",
+            post(post_config_update_handler::<J>),
         )
         .route(
             "/api/v1/config/readers",
@@ -1500,6 +1538,93 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
                 StatusCode::NOT_FOUND,
                 r#"{"error":"no update staged"}"#.to_owned(),
             )
+        }
+    }
+}
+
+async fn update_check_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let update_mode = {
+        let ss = state.subsystem.lock().await;
+        ss.update_mode
+    };
+
+    let checker = match rt_updater::UpdateChecker::new(
+        "iwismer",
+        "rusty-timer",
+        "forwarder",
+        env!("CARGO_PKG_VERSION"),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            let status = rt_updater::UpdateStatus::Failed {
+                error: e.to_string(),
+            };
+            state.subsystem.lock().await.update_status = status.clone();
+            let body = serde_json::to_string(&status).unwrap_or_else(|_| {
+                r#"{"status":"failed","error":"serialization error"}"#.to_owned()
+            });
+            return json_response(StatusCode::INTERNAL_SERVER_ERROR, body);
+        }
+    };
+
+    let check_result = checker.check().await;
+    match check_result {
+        Ok(rt_updater::UpdateStatus::Available { ref version }) => {
+            state.subsystem.lock().await.update_status = rt_updater::UpdateStatus::Available {
+                version: version.clone(),
+            };
+
+            if update_mode == rt_updater::UpdateMode::CheckAndDownload {
+                match checker.download(version).await {
+                    Ok(path) => {
+                        let status = rt_updater::UpdateStatus::Downloaded {
+                            version: version.clone(),
+                        };
+                        let mut ss = state.subsystem.lock().await;
+                        ss.update_status = status.clone();
+                        ss.staged_update_path = Some(path);
+                        drop(ss);
+                        let _ =
+                            state
+                                .ui_tx
+                                .send(crate::ui_events::ForwarderUiEvent::UpdateAvailable {
+                                    version: version.clone(),
+                                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
+                                });
+                        let body = serde_json::to_string(&status).unwrap_or_default();
+                        json_response(StatusCode::OK, body)
+                    }
+                    Err(e) => {
+                        let status = rt_updater::UpdateStatus::Failed {
+                            error: e.to_string(),
+                        };
+                        state.subsystem.lock().await.update_status = status.clone();
+                        let body = serde_json::to_string(&status).unwrap_or_default();
+                        json_response(StatusCode::OK, body)
+                    }
+                }
+            } else {
+                let status = rt_updater::UpdateStatus::Available {
+                    version: version.clone(),
+                };
+                let body = serde_json::to_string(&status).unwrap_or_default();
+                json_response(StatusCode::OK, body)
+            }
+        }
+        Ok(status) => {
+            state.subsystem.lock().await.update_status = status.clone();
+            let body = serde_json::to_string(&status).unwrap_or_default();
+            json_response(StatusCode::OK, body)
+        }
+        Err(e) => {
+            let status = rt_updater::UpdateStatus::Failed {
+                error: e.to_string(),
+            };
+            state.subsystem.lock().await.update_status = status.clone();
+            let body = serde_json::to_string(&status).unwrap_or_default();
+            json_response(StatusCode::OK, body)
         }
     }
 }
@@ -1735,6 +1860,33 @@ async fn post_config_control_handler<J: JournalAccess + Send + 'static>(
     };
 
     match apply_section_update("control", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn post_config_update_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    match apply_section_update("update", &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
