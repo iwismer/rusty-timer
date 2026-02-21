@@ -1000,6 +1000,7 @@ name = "forwarder"
 version = "0.2.0"
 dependencies = [
  "axum 0.8.8",
+ "chrono",
  "futures-util",
  "ipico-core",
  "mime_guess",
@@ -2472,6 +2473,15 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "uuid",
+]
+
+[[package]]
+name = "rt-ui-log"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
