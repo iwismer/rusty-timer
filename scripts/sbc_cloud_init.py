@@ -324,6 +324,9 @@ def render_user_data(config: SbcCloudInitConfig) -> str:
     text = (
         "#cloud-config\n"
         f"hostname: {config.hostname}\n"
+        "manage_etc_hosts: true\n"
+        "enable_ssh: true\n"
+        "ssh_pwauth: false\n"
         "\n"
         "users:\n"
         "  - default\n"

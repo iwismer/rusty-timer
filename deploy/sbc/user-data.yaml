@@ -20,6 +20,9 @@
 
 # CHANGEME: Set a unique hostname for this device (e.g. rt-fwd-01)
 hostname: rt-fwd-01
+manage_etc_hosts: true
+enable_ssh: true
+ssh_pwauth: false
 
 # System user for the forwarder service (non-login, dedicated).
 users:

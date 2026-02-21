@@ -35,6 +35,9 @@ class RenderTests(unittest.TestCase):
         text = sbc_cloud_init.render_user_data(config)
 
         self.assertIn("hostname: rt-fwd-77", text)
+        self.assertIn("manage_etc_hosts: true", text)
+        self.assertIn("enable_ssh: true", text)
+        self.assertIn("ssh_pwauth: false", text)
         self.assertIn("ssh_authorized_keys:", text)
         self.assertIn("ssh-ed25519 AAAATEST user@test", text)
 
