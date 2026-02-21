@@ -204,7 +204,7 @@ def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> li
             "Server",
             f"DATABASE_URL=postgres://{PG_USER}:{PG_PASSWORD}@localhost:{PG_PORT}/{PG_DB} "
             f"{dashboard_env}"
-            f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL={log_level} ./target/debug/server",
+            f"BIND_ADDR=0.0.0.0:8080 LOG_LEVEL={shlex.quote(log_level)} ./target/debug/server",
         ),
     ]
 

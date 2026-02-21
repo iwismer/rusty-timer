@@ -18,6 +18,7 @@ def make_args(**overrides: object) -> argparse.Namespace:
         "emulator": [dev.EmulatorSpec(port=10001)],
         "bibchip": None,
         "ppl": None,
+        "log_level": "info",
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -63,6 +64,16 @@ class ParseArgsEmulatorFlagTests(unittest.TestCase):
         self.assertEqual(spec.delay, 500)
         self.assertEqual(spec.file, "data/reads.txt")
         self.assertEqual(spec.read_type, "raw")
+
+    def test_parse_args_reads_log_level(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["dev.py", "--log-level", "server=debug,sqlx=warn"],
+        ):
+            args = dev.parse_args()
+
+        self.assertEqual(args.log_level, "server=debug,sqlx=warn")
 
 
 class ParseEmulatorSpecErrorTests(unittest.TestCase):
@@ -144,6 +155,12 @@ class MainValidationTests(unittest.TestCase):
 
         self.assertEqual(events, ["check", "setup", "launch"])
         check_existing_instance_mock.assert_called_once_with()
+        detect_mock.assert_called_once_with(
+            [dev.EmulatorSpec(port=10001)],
+            bibchip_path=None,
+            ppl_path=None,
+            log_level="info",
+        )
 
     @patch("scripts.dev.console.input")
     @patch("scripts.dev.check_existing_instance")
@@ -673,6 +690,15 @@ class BuildPanesTests(unittest.TestCase):
 
         server_cmd = next(cmd for title, cmd in panes if title == "Server")
         self.assertNotIn("DASHBOARD_DIR=", server_cmd)
+
+    def test_server_pane_includes_shell_safe_log_level(self) -> None:
+        panes = dev.build_panes(
+            [dev.EmulatorSpec(port=10001)],
+            log_level="server=debug; echo unsafe",
+        )
+
+        server_cmd = next(cmd for title, cmd in panes if title == "Server")
+        self.assertIn("LOG_LEVEL='server=debug; echo unsafe'", server_cmd)
 
 
 class StartReceiverAutoConfigTests(unittest.TestCase):
