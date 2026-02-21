@@ -2272,6 +2272,7 @@ dependencies = [
  "reqwest",
  "rt-protocol",
  "rt-test-utils",
+ "rt-ui-log",
  "rt-updater",
  "rusqlite",
  "rust-embed",

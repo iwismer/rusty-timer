@@ -439,12 +439,11 @@ async fn emit_log_stores_entry_and_broadcasts() {
     let (state, _rx) = AppState::new(db);
     let mut ui_rx = state.ui_tx.subscribe();
 
-    state.emit_log("test message".to_owned()).await;
+    state.logger.log("test message");
 
-    let entries = state.log_entries.read().await;
+    let entries = state.logger.entries();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].contains("test message"));
-    drop(entries);
 
     let event = ui_rx.try_recv().unwrap();
     let json = serde_json::to_value(&event).unwrap();
@@ -481,9 +480,9 @@ async fn emit_log_caps_at_max_entries() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
     for i in 0..510 {
-        state.emit_log(format!("msg {i}")).await;
+        state.logger.log(format!("msg {i}"));
     }
-    let entries = state.log_entries.read().await;
+    let entries = state.logger.entries();
     assert_eq!(entries.len(), 500);
     // Oldest entries should have been drained
     assert!(entries[0].contains("msg 10"));
