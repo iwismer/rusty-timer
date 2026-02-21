@@ -61,12 +61,12 @@
   let uplinkBatchFlushMs = $state("");
   let uplinkBatchMaxEvents = $state("");
   let statusHttpBind = $state("");
-  let persistedControlAllowPowerActions = $state(false);
+  let persistedAllowPowerActions = $state(false);
   let controlAllowPowerActions = $state(false);
   let readers: ReaderEntry[] = $state([]);
   let powerActionsEnabled = $derived(
     controlPowerActionsEnabled({
-      persistedAllowPowerActions: persistedControlAllowPowerActions,
+      persistedAllowPowerActions,
       currentAllowPowerActions: controlAllowPowerActions,
     }),
   );
@@ -175,7 +175,7 @@
     uplinkBatchFlushMs = form.uplinkBatchFlushMs;
     uplinkBatchMaxEvents = form.uplinkBatchMaxEvents;
     statusHttpBind = form.statusHttpBind;
-    persistedControlAllowPowerActions = form.controlAllowPowerActions;
+    persistedAllowPowerActions = form.controlAllowPowerActions;
     controlAllowPowerActions = form.controlAllowPowerActions;
     readers = form.readers.map((reader) => ({ ...reader }));
   }
@@ -264,7 +264,7 @@
   async function saveControl() {
     const saved = await saveSection("control", toControlPayload(currentFormState()));
     if (saved) {
-      persistedControlAllowPowerActions = controlAllowPowerActions;
+      persistedAllowPowerActions = controlAllowPowerActions;
     }
   }
   function saveReaders() {
