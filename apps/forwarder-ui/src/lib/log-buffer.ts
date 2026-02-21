@@ -1,7 +1,7 @@
 export function pushLogEntry(
   entries: string[],
   next: string,
-  maxEntries = 200,
+  maxEntries = 500,
 ): string[] {
   const normalized = next.trim();
   if (!normalized) return entries;

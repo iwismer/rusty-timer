@@ -11,10 +11,13 @@ import {
 } from "./stores";
 import { getForwarderRaces, getLogs, getRaces, getStreams } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
+import { mergeLogsWithPendingLive } from "./logs-merge";
 
 let eventSource: EventSource | null = null;
 let resyncInFlight = false;
 let resyncQueued = false;
+let logsResyncInFlight = false;
+let pendingLiveLogs: string[] = [];
 
 function replaceForwarderAssignments(
   assignments: Array<{ forwarder_id: string; race_id: string | null }>,
@@ -70,6 +73,10 @@ export function initSSE(): void {
   eventSource.addEventListener("log_entry", (e: MessageEvent) => {
     const data = JSON.parse(e.data);
     pushLog(data.entry);
+    if (logsResyncInFlight) {
+      const entry = String(data.entry ?? "").trim();
+      if (entry) pendingLiveLogs.push(entry);
+    }
   });
 
   eventSource.addEventListener("resync", async () => {
@@ -93,6 +100,7 @@ async function resync(): Promise<void> {
   }
 
   resyncInFlight = true;
+  logsResyncInFlight = true;
   try {
     // Coalesce multiple resync triggers into a single follow-up fetch.
     while (true) {
@@ -115,12 +123,20 @@ async function resync(): Promise<void> {
         replaceForwarderAssignments(assignmentsResp.value.assignments);
       }
       if (logsResp.status === "fulfilled") {
-        logsStore.set(logsResp.value.entries);
+        logsStore.set(
+          mergeLogsWithPendingLive(
+            logsResp.value.entries,
+            pendingLiveLogs,
+            500,
+          ),
+        );
+        pendingLiveLogs = [];
       }
       if (!resyncQueued) break;
     }
   } finally {
     resyncInFlight = false;
+    logsResyncInFlight = false;
   }
 }
 
@@ -131,4 +147,6 @@ export function destroySSE(): void {
   }
   resyncInFlight = false;
   resyncQueued = false;
+  logsResyncInFlight = false;
+  pendingLiveLogs = [];
 }
