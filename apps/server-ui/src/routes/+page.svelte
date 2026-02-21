@@ -15,6 +15,10 @@
     readHideOfflinePreference,
     writeHideOfflinePreference,
   } from "$lib/hideOfflinePreference";
+  import {
+    readRaceFilterPreference,
+    writeRaceFilterPreference,
+  } from "$lib/raceFilterPreference";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
   import { resolveChipRead } from "$lib/chipResolver";
   import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
@@ -84,16 +88,39 @@
   $effect(() => {
     writeHideOfflinePreference(hideOffline);
   });
-  let visibleGroups = $derived(
-    hideOffline
-      ? groupedStreams
-          .map((g) => ({
-            ...g,
-            streams: g.streams.filter((s) => s.online),
-          }))
-          .filter((g) => g.streams.length > 0)
-      : groupedStreams,
-  );
+
+  // Race filter (persisted to localStorage)
+  let selectedRaceId = $state<string | null>(readRaceFilterPreference());
+  $effect(() => {
+    writeRaceFilterPreference(selectedRaceId);
+  });
+  // Reset if the persisted race no longer exists
+  $effect(() => {
+    if (
+      selectedRaceId &&
+      !$racesStore.some((r) => r.race_id === selectedRaceId)
+    ) {
+      selectedRaceId = null;
+    }
+  });
+
+  let visibleGroups = $derived.by(() => {
+    let groups = groupedStreams;
+    if (selectedRaceId) {
+      groups = groups.filter(
+        (g) => $forwarderRacesStore[g.forwarderId] === selectedRaceId,
+      );
+    }
+    if (hideOffline) {
+      groups = groups
+        .map((g) => ({
+          ...g,
+          streams: g.streams.filter((s) => s.online),
+        }))
+        .filter((g) => g.streams.length > 0);
+    }
+    return groups;
+  });
 
   // Time-since-last-read helpers
   function formatDuration(ms: number): string {
@@ -199,16 +226,30 @@
     >
       Streams
     </h1>
-    <label
-      class="flex items-center gap-2 text-sm text-text-muted cursor-pointer select-none"
-    >
-      <input
-        type="checkbox"
-        bind:checked={hideOffline}
-        class="cursor-pointer"
-      />
-      Hide offline
-    </label>
+    <div class="flex items-center gap-4">
+      <select
+        class="text-sm px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+        value={selectedRaceId ?? ""}
+        onchange={(e) => {
+          selectedRaceId = e.currentTarget.value || null;
+        }}
+      >
+        <option value="">All races</option>
+        {#each $racesStore as race (race.race_id)}
+          <option value={race.race_id}>{race.name}</option>
+        {/each}
+      </select>
+      <label
+        class="flex items-center gap-2 text-sm text-text-muted cursor-pointer select-none"
+      >
+        <input
+          type="checkbox"
+          bind:checked={hideOffline}
+          class="cursor-pointer"
+        />
+        Hide offline
+      </label>
+    </div>
   </div>
 
   {#each visibleGroups as group, groupIdx (group.forwarderId)}
@@ -352,6 +393,12 @@
   {#if visibleGroups.length === 0}
     {#if $streamsStore.length === 0}
       <p class="text-sm text-text-muted">No streams found.</p>
+    {:else if selectedRaceId && hideOffline}
+      <p class="text-sm text-text-muted">
+        No online streams match the selected race.
+      </p>
+    {:else if selectedRaceId}
+      <p class="text-sm text-text-muted">No streams match the selected race.</p>
     {:else if hideOffline}
       <p data-testid="no-online-streams" class="text-sm text-text-muted">
         No online streams found.
