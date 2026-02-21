@@ -338,7 +338,7 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
 
 
 def render_user_data(config: SbcCloudInitConfig) -> str:
-    packages = ["ca-certificates", "jq"]
+    packages = ["avahi-daemon", "ca-certificates", "jq"]
     if config.auto_first_boot:
         packages.extend(["curl", "tar", "coreutils"])
 
