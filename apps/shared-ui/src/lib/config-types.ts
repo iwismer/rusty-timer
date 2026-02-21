@@ -7,6 +7,7 @@ export interface ConfigApi {
   restartService(): Promise<ConfigActionResult>;
   restartDevice(): Promise<ConfigActionResult>;
   shutdownDevice(): Promise<ConfigActionResult>;
+  checkForUpdate?(): Promise<{ status: string; version?: string; error?: string }>;
 }
 
 export interface ConfigLoadResult {

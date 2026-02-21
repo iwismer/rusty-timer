@@ -4,6 +4,7 @@ import {
   toGeneralPayload,
   toControlPayload,
   toReadersPayload,
+  toUpdatePayload,
   validateGeneral,
   validateServer,
   validateAuth,
@@ -30,6 +31,16 @@ describe("fromConfig", () => {
       },
     });
     expect(form.controlAllowPowerActions).toBe(true);
+  });
+
+  it("reads update.mode when present", () => {
+    const form = fromConfig({ update: { mode: "check-only" } });
+    expect(form.updateMode).toBe("check-only");
+  });
+
+  it("defaults updateMode to empty string when update section missing", () => {
+    const form = fromConfig({});
+    expect(form.updateMode).toBe("");
   });
 });
 
@@ -85,6 +96,22 @@ describe("payload builders", () => {
       allow_power_actions: true,
     });
   });
+
+  it("serializes update mode", () => {
+    expect(
+      toUpdatePayload({
+        updateMode: "check-only",
+      } as ForwarderConfigFormState),
+    ).toEqual({ mode: "check-only" });
+  });
+
+  it("serializes empty update mode as null", () => {
+    expect(
+      toUpdatePayload({
+        updateMode: "",
+      } as ForwarderConfigFormState),
+    ).toEqual({ mode: null });
+  });
 });
 
 function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderConfigFormState {
@@ -100,6 +127,7 @@ function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderC
     uplinkBatchMaxEvents: "",
     statusHttpBind: "",
     controlAllowPowerActions: false,
+    updateMode: "",
     readers: [{ target: "192.168.0.1:10000", enabled: true, local_fallback_port: "" }],
     ...overrides,
   };
