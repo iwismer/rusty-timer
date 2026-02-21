@@ -238,7 +238,7 @@
   </div>
 
   {#if stream}
-    <div class="grid grid-cols-2 gap-4 mb-6">
+    <div class="grid grid-cols-2 gap-4 mb-6 items-start">
       <Card title="Info">
         <dl
           class="grid gap-y-2 gap-x-4 text-sm m-0"
@@ -411,7 +411,7 @@
       </Card>
     </div>
 
-    <div class="grid grid-cols-2 gap-4 mb-6">
+    <div class="grid grid-cols-2 gap-4 mb-6 items-start">
       <Card title="Export">
         <div data-testid="export-section">
           <p class="text-xs text-text-secondary mb-3 m-0">
