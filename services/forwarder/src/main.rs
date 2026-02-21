@@ -954,6 +954,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let ui_tx = status_server.ui_sender();
     // Collect enabled reader endpoints
     let mut all_readers: Vec<(String, u16)> = Vec::new(); // (addr, local_port)
     let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)
@@ -1084,6 +1085,7 @@ async fn main() {
     }
 
     // Spawn background update check
+    let ui_tx_update = ui_tx.clone();
     {
         let ss = status_server.clone();
         tokio::spawn(async move {
@@ -1108,6 +1110,7 @@ async fn main() {
                         available = %version,
                         "update available — POST /update/apply to install"
                     );
+                    ui_log(&ui_tx_update, format!("update available: {}", version));
                     ss.set_update_status(rt_updater::UpdateStatus::Available {
                         version: version.clone(),
                     })
@@ -1120,6 +1123,10 @@ async fn main() {
                                 path = %path.display(),
                                 "update downloaded and staged"
                             );
+                            ui_log(
+                                &ui_tx_update,
+                                format!("update {} downloaded and staged", version),
+                            );
                             ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
                                 version: version.clone(),
                             })
@@ -1128,6 +1135,7 @@ async fn main() {
                         }
                         Err(e) => {
                             warn!(error = %e, "update download failed");
+                            ui_log(&ui_tx_update, format!("update download failed: {}", e));
                             ss.set_update_status(rt_updater::UpdateStatus::Failed {
                                 error: e.to_string(),
                             })
@@ -1140,6 +1148,7 @@ async fn main() {
                 }
                 Err(e) => {
                     warn!(error = %e, "update check failed");
+                    ui_log(&ui_tx_update, format!("update check failed: {}", e));
                     ss.set_update_status(rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     })
@@ -1153,6 +1162,13 @@ async fn main() {
         readers = all_readers.len(),
         forwarder_id = %forwarder_id,
         "forwarder initialized — all worker tasks started"
+    );
+    ui_log(
+        &ui_tx,
+        format!(
+            "forwarder v{} initialized — all workers running",
+            env!("CARGO_PKG_VERSION")
+        ),
     );
 
     // Wait for Ctrl-C, SIGTERM, or restart request
@@ -1173,14 +1189,17 @@ async fn main() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT received, shutting down");
+                ui_log(&ui_tx, "shutdown: SIGINT received");
                 restart_requested = false;
             }
             _ = sigterm.recv() => {
                 info!("SIGTERM received, shutting down");
+                ui_log(&ui_tx, "shutdown: SIGTERM received");
                 restart_requested = false;
             }
             _ = restart_signal.notified() => {
                 info!("restart requested via API, shutting down");
+                ui_log(&ui_tx, "restart requested via API");
                 restart_requested = true;
             }
         }
@@ -1191,9 +1210,11 @@ async fn main() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Ctrl-C received, shutting down");
+                ui_log(&ui_tx, "shutdown: Ctrl-C received");
             }
             _ = restart_signal.notified() => {
                 info!("restart requested via API, shutting down");
+                ui_log(&ui_tx, "restart requested via API");
             }
         }
         restart_requested = false; // exec not available on non-unix
