@@ -37,15 +37,18 @@ async fn main() {
         .expect("failed to reset stream online status");
 
     let state = AppState::new(pool);
+    let logger = state.logger.clone();
     let router = server::build_router(state, dashboard_dir);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .expect("failed to bind");
+    logger.log(format!("server listening on {bind_addr}"));
     info!(addr = %bind_addr, "server listening");
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+    logger.log("server shutting down");
     info!("server shut down gracefully");
 }
 
