@@ -16,15 +16,19 @@
   <title>Forwarder · Rusty Timer</title>
 </svelte:head>
 
-<NavBar
-  links={[
-    { href: "/", label: "Status", active: currentPath === "/" },
-    { href: "/config", label: "Config", active: currentPath === "/config" },
-  ]}
-/>
+<div class="flex flex-col min-h-screen min-h-[100dvh]">
+  <NavBar
+    links={[
+      { href: "/", label: "Status", active: currentPath === "/" },
+      { href: "/config", label: "Config", active: currentPath === "/config" },
+    ]}
+  />
 
-{@render children()}
+  <div class="grow">
+    {@render children()}
+  </div>
 
-<footer class="border-t border-border py-3 px-6 text-center mt-8">
-  <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Forwarder</p>
-</footer>
+  <footer class="border-t border-border py-3 px-6 text-center">
+    <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Forwarder</p>
+  </footer>
+</div>
