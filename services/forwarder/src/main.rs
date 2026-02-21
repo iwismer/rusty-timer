@@ -24,7 +24,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -243,7 +243,7 @@ async fn run_reader(
                 }
             };
 
-            info!(
+            debug!(
                 reader_ip = %reader_ip,
                 epoch = epoch,
                 seq = seq,
@@ -720,7 +720,7 @@ async fn run_uplink(
                 continue;
             }
 
-            info!(count = pending.len(), "sending event batch");
+            debug!(count = pending.len(), "sending event batch");
 
             match session.send_batch(pending).await {
                 Ok(SendBatchResult::Ack(ack)) => {
