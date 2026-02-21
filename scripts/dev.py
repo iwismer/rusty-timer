@@ -679,7 +679,7 @@ def build_rust(skip_build: bool) -> None:
         return
     console.print("[bold]Building Rust binaries…[/bold]")
     subprocess.run(
-        ["cargo", "build", "-p", "server", "-p", "forwarder", "--features", "forwarder/embed-ui", "-p", "receiver", "--features", "receiver/embed-ui", "-p", "emulator-bin"],
+        ["cargo", "build", "-p", "server", "-p", "forwarder", "--features", "forwarder/embed-ui", "-p", "receiver", "--features", "receiver/embed-ui", "-p", "emulator"],
         check=True,
         cwd=REPO_ROOT,
     )

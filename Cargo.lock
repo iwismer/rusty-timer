@@ -737,24 +737,10 @@ dependencies = [
 
 [[package]]
 name = "emulator"
-version = "2.0.0"
-dependencies = [
- "chrono",
- "futures",
- "ipico-core",
- "serde",
- "serde_yaml",
- "timer-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "emulator-bin"
 version = "1.0.2"
 dependencies = [
  "clap",
- "emulator",
+ "rt-emulator",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2449,6 +2435,20 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rt-emulator"
+version = "2.0.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "ipico-core",
+ "serde",
+ "serde_yaml",
+ "timer-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

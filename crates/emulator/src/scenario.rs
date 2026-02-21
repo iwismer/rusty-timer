@@ -122,13 +122,35 @@ pub struct ScenarioConfig {
 
 /// Parse a YAML scenario string into a `ScenarioConfig`.
 pub fn load_scenario_from_str(yaml: &str) -> Result<ScenarioConfig, ScenarioError> {
-    serde_yaml::from_str(yaml).map_err(|e| ScenarioError::Parse(e.to_string()))
+    let scenario: ScenarioConfig =
+        serde_yaml::from_str(yaml).map_err(|e| ScenarioError::Parse(e.to_string()))?;
+    validate_scenario(&scenario)?;
+    Ok(scenario)
 }
 
 /// Parse a YAML scenario from a file path.
 pub fn load_scenario_from_file(path: &std::path::Path) -> Result<ScenarioConfig, ScenarioError> {
     let content = std::fs::read_to_string(path).map_err(|e| ScenarioError::Io(e.to_string()))?;
     load_scenario_from_str(&content)
+}
+
+fn validate_scenario(cfg: &ScenarioConfig) -> Result<(), ScenarioError> {
+    for reader in &cfg.readers {
+        if reader.chip_ids.is_empty() {
+            return Err(ScenarioError::Invalid(format!(
+                "reader '{}' must define at least one chip_ids entry",
+                reader.ip
+            )));
+        }
+
+        ReadType::try_from(reader.read_type.as_str()).map_err(|_| {
+            ScenarioError::Invalid(format!(
+                "reader '{}' has invalid read_type '{}'",
+                reader.ip, reader.read_type
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -199,11 +221,10 @@ pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<E
 
     let mut elapsed_ms: u64 = 0;
 
-    // Parse read_type string to ReadType enum
-    let read_type = match reader.read_type.as_str() {
-        "fsls" => ReadType::FSLS,
-        _ => ReadType::RAW,
-    };
+    // read_type is validated at scenario parse time.
+    let read_type = ReadType::try_from(reader.read_type.as_str())
+        .expect("reader.read_type must be validated before event generation");
+    let canonical_read_type = read_type.as_str().to_owned();
 
     for i in 0..reader.total_events {
         let seq = i + 1;
@@ -240,7 +261,7 @@ pub fn generate_reader_events(reader: &ReaderScenarioConfig, seed: u64) -> Vec<E
             seq,
             reader_timestamp: ts,
             raw_read_line,
-            read_type: reader.read_type.clone(),
+            read_type: canonical_read_type.clone(),
         });
 
         elapsed_ms += ms_per_event;

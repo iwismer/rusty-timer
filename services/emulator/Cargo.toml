@@ -1,5 +1,5 @@
 [package]
-name = "emulator-bin"
+name = "emulator"
 version = "1.0.2"
 edition = "2021"
 authors = ["iwismer <isaac@iwismer.ca>"]
@@ -13,4 +13,4 @@ tokio = { version = "1", features = ["full"] }
 clap = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-emulator = { path = "../../crates/emulator" }
+emulator = { package = "rt-emulator", path = "../../crates/emulator" }

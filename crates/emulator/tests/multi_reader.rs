@@ -88,6 +88,52 @@ fn parse_missing_required_field_returns_error() {
     assert!(result.is_err(), "missing mode must fail to parse");
 }
 
+#[test]
+fn parse_empty_chip_ids_returns_error() {
+    let bad_yaml = r#"
+mode: reader
+seed: 1
+readers:
+  - ip: "192.168.2.10"
+    port: 10010
+    read_type: raw
+    chip_ids: []
+    events_per_second: 1
+    total_events: 1
+    start_delay_ms: 0
+"#;
+    let result = load_scenario_from_str(bad_yaml);
+    assert!(result.is_err(), "empty chip_ids must fail validation");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("chip_ids"),
+        "error should mention chip_ids: {err}"
+    );
+}
+
+#[test]
+fn parse_invalid_read_type_returns_error() {
+    let bad_yaml = r#"
+mode: reader
+seed: 1
+readers:
+  - ip: "192.168.2.10"
+    port: 10010
+    read_type: invalid
+    chip_ids: [1000]
+    events_per_second: 1
+    total_events: 1
+    start_delay_ms: 0
+"#;
+    let result = load_scenario_from_str(bad_yaml);
+    assert!(result.is_err(), "invalid read_type must fail validation");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("read_type"),
+        "error should mention read_type: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic playback tests
 // ---------------------------------------------------------------------------
@@ -246,4 +292,30 @@ fn chip_ids_map_to_hex_tag_ids() {
             expected_tag_ids
         );
     }
+}
+
+#[test]
+fn events_canonicalize_read_type_to_lowercase() {
+    use emulator::scenario::generate_reader_events;
+
+    let yaml = r#"
+mode: reader
+seed: 1
+readers:
+  - ip: "192.168.2.10"
+    port: 10010
+    read_type: FSLS
+    chip_ids: [1000]
+    events_per_second: 1
+    total_events: 1
+    start_delay_ms: 0
+"#;
+    let cfg = load_scenario_from_str(yaml).expect("parse");
+    let reader = &cfg.readers[0];
+    let events = generate_reader_events(reader, cfg.seed);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].read_type, "fsls");
+
+    let parsed = ChipRead::try_from(events[0].raw_read_line.as_str()).expect("raw read must parse");
+    assert_eq!(parsed.read_type.as_str(), "fsls");
 }

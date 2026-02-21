@@ -30,7 +30,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server")
 EMBED_UI_SERVICES = ("forwarder", "receiver")
-PACKAGE_NAME_OVERRIDES = {"emulator": "emulator-bin"}
 UI_WORKSPACES = {
     "forwarder": "apps/forwarder-ui",
     "receiver": "apps/receiver-ui",
@@ -283,7 +282,7 @@ def run_release_workflow_checks(
         "build",
         "--release",
         "--package",
-        PACKAGE_NAME_OVERRIDES.get(service, service),
+        service,
         "--bin",
         service,
     ]

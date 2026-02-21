@@ -127,15 +127,6 @@ jobs:
           npm run check --workspace "apps/${{ env.SERVICE }}-ui"
           npm test --workspace "apps/${{ env.SERVICE }}-ui"
 
-      - name: Set package name
-        shell: bash
-        run: |
-          if [ "${{ env.SERVICE }}" = "emulator" ]; then
-            echo "PACKAGE=emulator-bin" >> "$GITHUB_ENV"
-          else
-            echo "PACKAGE=${{ env.SERVICE }}" >> "$GITHUB_ENV"
-          fi
-
       - name: Build release binary
         shell: bash
         run: |
@@ -145,7 +136,7 @@ jobs:
               FEATURES="--features embed-ui"
               ;;
           esac
-          cargo build --release --package ${{ env.PACKAGE }} --bin ${{ env.SERVICE }} $FEATURES
+          cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
