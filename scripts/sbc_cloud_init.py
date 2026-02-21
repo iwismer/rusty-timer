@@ -259,6 +259,7 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
         "RT_SETUP_NONINTERACTIVE=1",
         "RT_SETUP_OVERWRITE_CONFIG=0",
         "RT_SETUP_RESTART_IF_RUNNING=1",
+        f"RT_SETUP_DISPLAY_NAME={shell_quote(config.hostname)}",
         f"RT_SETUP_SERVER_BASE_URL={shell_quote(config.server_base_url)}",
         f"RT_SETUP_AUTH_TOKEN={shell_quote(config.auth_token)}",
         f"RT_SETUP_READER_TARGETS={shell_quote(reader_targets_csv)}",

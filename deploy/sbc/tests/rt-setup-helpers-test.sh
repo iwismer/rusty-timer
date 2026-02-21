@@ -75,6 +75,11 @@ assert_eq $'192.168.1.10:10000\n192.168.1.11:10000' "${targets}" "newline reader
 targets="$(reader_targets_from_env '192.168.1.10:10000, 192.168.1.11:10000')"
 assert_eq $'192.168.1.10:10000\n192.168.1.11:10000' "${targets}" "comma reader list should normalize to newline list"
 
+# --- hostname/display name + TOML escaping helpers ---
+host_name="$(default_forwarder_display_name)"
+assert_nonempty "${host_name}" "default display name should resolve to non-empty host name"
+assert_eq "a\\\"b\\\\c" "$(toml_escape_string 'a"b\c')" "toml_escape_string should escape quotes and backslashes"
+
 # --- service unit and staged-update helper rendering ---
 unit="$(render_forwarder_systemd_unit)"
 assert_contains "${unit}" "User=rt-forwarder" "unit should keep service user"

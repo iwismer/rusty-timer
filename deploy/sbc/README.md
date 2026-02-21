@@ -49,6 +49,7 @@ uv run scripts/sbc_cloud_init.py --auto-first-boot
 This mode also asks for forwarder setup values (server URL, token, reader
 targets), then embeds a one-time non-interactive `rt-setup.sh` run in
 `user-data`.
+The setup writes `display_name` to match the configured hostname.
 
 > **Security note:** `--auto-first-boot` stores the forwarder token in cloud-init
 > data on the SD card. Use a scoped per-device token and rotate/revoke as needed.

@@ -218,6 +218,8 @@ The script prints each step and the exact command before execution.
 In `--dry-run`, it still runs the checks/build commands, but prints and skips
 mutating commands (version file write, `git add`, `git commit`, `git tag`,
 `git push`).
+When output is a TTY, step/command/status lines are colorized for readability.
+Set `NO_COLOR=1` to force plain text output.
 
 After all services succeed, it pushes branch + tags in a single atomic command:
 
@@ -277,6 +279,8 @@ In `--auto-first-boot` mode, the wizard also asks for:
 
 and writes a `user-data` that runs `deploy/sbc/rt-setup.sh` non-interactively
 on first boot.
+The generated setup env also sets forwarder `display_name` to the same value as
+the configured hostname.
 
 The script prompts for:
 

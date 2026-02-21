@@ -62,6 +62,22 @@ is_valid_reader_target() {
     || [[ "${target}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+:[0-9]+$ ]]
 }
 
+default_forwarder_display_name() {
+  local current_host=""
+  current_host="$(hostname -s 2>/dev/null || true)"
+  if [[ -z "${current_host}" ]]; then
+    current_host="$(hostname 2>/dev/null || true)"
+  fi
+  if [[ -z "${current_host}" ]]; then
+    current_host="rt-forwarder"
+  fi
+  printf '%s\n' "${current_host}"
+}
+
+toml_escape_string() {
+  printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 write_done_marker_if_requested() {
   local marker="${RT_SETUP_DONE_MARKER:-}"
   if [[ -z "${marker}" ]]; then
@@ -456,9 +472,18 @@ configure() {
     fi
   fi
 
+  # Forwarder display name defaults to host name.
+  local forwarder_display_name="${RT_SETUP_DISPLAY_NAME:-}"
+  if [[ -z "${forwarder_display_name}" ]]; then
+    forwarder_display_name="$(default_forwarder_display_name)"
+  fi
+  local escaped_forwarder_display_name
+  escaped_forwarder_display_name="$(toml_escape_string "${forwarder_display_name}")"
+
   # Generate config file
   cat > "${CONFIG_DIR}/forwarder.toml" <<EOF
 schema_version = 1
+display_name = "${escaped_forwarder_display_name}"
 
 [server]
 base_url = "${server_base_url}"
