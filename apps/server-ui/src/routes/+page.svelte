@@ -11,6 +11,10 @@
   } from "$lib/stores";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
   import { groupStreamsByForwarder } from "$lib/groupStreams";
+  import {
+    readHideOfflinePreference,
+    writeHideOfflinePreference,
+  } from "$lib/hideOfflinePreference";
   import { StatusBadge, Card } from "@rusty-timer/shared-ui";
   import { resolveChipRead } from "$lib/chipResolver";
   import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
@@ -71,6 +75,25 @@
 
   // Group streams by forwarder_id.
   let groupedStreams = $derived(groupStreamsByForwarder($streamsStore));
+  let groupedStreamsById = $derived(
+    new Map(groupedStreams.map((g) => [g.forwarderId, g])),
+  );
+
+  // Hide-offline toggle (persisted to localStorage)
+  let hideOffline = $state(readHideOfflinePreference());
+  $effect(() => {
+    writeHideOfflinePreference(hideOffline);
+  });
+  let visibleGroups = $derived(
+    hideOffline
+      ? groupedStreams
+          .map((g) => ({
+            ...g,
+            streams: g.streams.filter((s) => s.online),
+          }))
+          .filter((g) => g.streams.length > 0)
+      : groupedStreams,
+  );
 
   // Time-since-last-read helpers
   function formatDuration(ms: number): string {
@@ -176,10 +199,24 @@
     >
       Streams
     </h1>
+    <label
+      class="flex items-center gap-2 text-sm text-text-muted cursor-pointer select-none"
+    >
+      <input
+        type="checkbox"
+        bind:checked={hideOffline}
+        class="cursor-pointer"
+      />
+      Hide offline
+    </label>
   </div>
 
-  {#each groupedStreams as group, groupIdx (group.forwarderId)}
-    {@const stats = groupStats(group.streams, $metricsStore)}
+  {#each visibleGroups as group, groupIdx (group.forwarderId)}
+    {@const fullGroup = groupedStreamsById.get(group.forwarderId)}
+    {@const stats = groupStats(
+      fullGroup?.streams ?? group.streams,
+      $metricsStore,
+    )}
     {@const border = groupBorderStatus(stats)}
     <div class="mb-6">
       <Card borderStatus={border} headerBg>
@@ -312,7 +349,13 @@
     </div>
   {/each}
 
-  {#if $streamsStore.length === 0}
-    <p class="text-sm text-text-muted">No streams found.</p>
+  {#if visibleGroups.length === 0}
+    {#if $streamsStore.length === 0}
+      <p class="text-sm text-text-muted">No streams found.</p>
+    {:else if hideOffline}
+      <p data-testid="no-online-streams" class="text-sm text-text-muted">
+        No online streams found.
+      </p>
+    {/if}
   {/if}
 </main>

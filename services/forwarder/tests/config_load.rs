@@ -331,6 +331,53 @@ target = "192.168.2.156:10000"
 }
 
 #[test]
+fn control_allow_power_actions_defaults_to_false() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert!(!cfg.control.allow_power_actions);
+}
+
+#[test]
+fn control_allow_power_actions_true_is_loaded() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[control]
+allow_power_actions = true
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert!(cfg.control.allow_power_actions);
+}
+
+#[test]
 fn default_reader_enabled() {
     let token_file = write_token_file("tok");
     let toml = format!(

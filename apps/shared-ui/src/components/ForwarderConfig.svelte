@@ -9,6 +9,7 @@
     toJournalPayload,
     toUplinkPayload,
     toStatusHttpPayload,
+    toControlPayload,
     toReadersPayload,
     validateGeneral,
     validateServer,
@@ -21,10 +22,14 @@
     type ReaderEntry,
     type ForwarderConfigFormState,
   } from "../lib/forwarder-config-form";
-  import { saveSuccessMessage } from "../lib/forwarder-config-logic";
+  import {
+    controlPowerActionsEnabled,
+    saveSuccessMessage,
+  } from "../lib/forwarder-config-logic";
   import Card from "./Card.svelte";
   import AlertBanner from "./AlertBanner.svelte";
   import StatusBadge from "./StatusBadge.svelte";
+  import ConfirmDialog from "./ConfirmDialog.svelte";
 
   let {
     configApi,
@@ -42,8 +47,7 @@
   let restartNeeded = $state(false);
   let sectionMessages: Record<string, { ok: boolean; text: string }> = $state({});
   let savingSection: Record<string, boolean> = $state({});
-  let restarting = $state(false);
-  let restartMessage: { ok: boolean; text: string } | null = $state(null);
+  let controlActionMessage: { ok: boolean; text: string } | null = $state(null);
   let showAdvanced = $state(false);
 
   // Form fields
@@ -57,7 +61,86 @@
   let uplinkBatchFlushMs = $state("");
   let uplinkBatchMaxEvents = $state("");
   let statusHttpBind = $state("");
+  let persistedAllowPowerActions = $state(false);
+  let controlAllowPowerActions = $state(false);
   let readers: ReaderEntry[] = $state([]);
+  let powerActionsEnabled = $derived(
+    controlPowerActionsEnabled({
+      persistedAllowPowerActions,
+      currentAllowPowerActions: controlAllowPowerActions,
+    }),
+  );
+  let powerActionsDisabledReason = $derived(
+    powerActionsEnabled
+      ? undefined
+      : !controlAllowPowerActions
+        ? "Enable and save control power actions first"
+        : "Save Control to apply power-action setting",
+  );
+
+  type ControlAction = "restartService" | "restartDevice" | "shutdownDevice";
+  type ControlActionDetail = {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    successMessage: string;
+    variant: "warn" | "err";
+  };
+
+  const controlActionBusy = $state<Record<ControlAction, boolean>>({
+    restartService: false,
+    restartDevice: false,
+    shutdownDevice: false,
+  });
+
+  const controlActionDetails: Record<ControlAction, ControlActionDetail> = {
+    restartService: {
+      title: "Restart forwarder service?",
+      message:
+        "Dangerous action: this will restart the forwarder service and briefly interrupt reads and forwarding.",
+      confirmLabel: "Restart Service",
+      successMessage: "Restart forwarder service initiated.",
+      variant: "err" as const,
+    },
+    restartDevice: {
+      title: "Restart forwarder device?",
+      message:
+        "Dangerous action: this reboots the entire forwarder device and interrupts all timing activity until it comes back.",
+      confirmLabel: "Restart Device",
+      successMessage: "Restart forwarder device initiated.",
+      variant: "err" as const,
+    },
+    shutdownDevice: {
+      title: "Shutdown forwarder device?",
+      message:
+        "Good practice before unplugging: shut down the forwarder device first to avoid corruption or lost data.",
+      confirmLabel: "Shutdown Device",
+      successMessage: "Shutdown forwarder device initiated.",
+      variant: "warn" as const,
+    },
+  };
+
+  let pendingControlAction = $state<ControlAction | null>(null);
+  let confirmControlActionOpen = $state(false);
+  let confirmControlActionBusy = $derived(
+    pendingControlAction ? controlActionBusy[pendingControlAction] : false,
+  );
+  let confirmControlActionTitle = $derived(
+    pendingControlAction ? controlActionDetails[pendingControlAction].title : "",
+  );
+  let confirmControlActionMessage = $derived(
+    pendingControlAction ? controlActionDetails[pendingControlAction].message : "",
+  );
+  let confirmControlActionLabel = $derived(
+    pendingControlAction
+      ? controlActionDetails[pendingControlAction].confirmLabel
+      : "Confirm",
+  );
+  let confirmControlActionVariant: "warn" | "err" = $derived(
+    pendingControlAction
+      ? controlActionDetails[pendingControlAction].variant
+      : "err",
+  );
 
   onMount(async () => {
     await loadConfig();
@@ -92,6 +175,8 @@
     uplinkBatchFlushMs = form.uplinkBatchFlushMs;
     uplinkBatchMaxEvents = form.uplinkBatchMaxEvents;
     statusHttpBind = form.statusHttpBind;
+    persistedAllowPowerActions = form.controlAllowPowerActions;
+    controlAllowPowerActions = form.controlAllowPowerActions;
     readers = form.readers.map((reader) => ({ ...reader }));
   }
 
@@ -107,6 +192,7 @@
       uplinkBatchFlushMs,
       uplinkBatchMaxEvents,
       statusHttpBind,
+      controlAllowPowerActions,
       readers: readers.map((reader) => ({ ...reader })),
     };
   }
@@ -114,7 +200,7 @@
   async function saveSection(
     section: string,
     payload: Record<string, unknown>,
-  ) {
+  ): Promise<boolean> {
     sectionMessages[section] = { ok: false, text: "Saving..." };
     savingSection[section] = true;
     try {
@@ -125,14 +211,17 @@
           text: saveSuccessMessage(result.restart_needed),
         };
         restartNeeded = result.restart_needed;
+        return true;
       } else {
         sectionMessages[section] = {
           ok: false,
           text: result.error ?? "Unknown error",
         };
+        return false;
       }
     } catch (e) {
       sectionMessages[section] = { ok: false, text: String(e) };
+      return false;
     } finally {
       savingSection[section] = false;
     }
@@ -151,7 +240,7 @@
         return;
       }
     }
-    saveSection(section, payloadFn(form));
+    void saveSection(section, payloadFn(form));
   }
 
   function saveGeneral() {
@@ -172,6 +261,12 @@
   function saveStatusHttp() {
     saveSectionWithValidation("status_http", validateStatusHttp, toStatusHttpPayload);
   }
+  async function saveControl() {
+    const saved = await saveSection("control", toControlPayload(currentFormState()));
+    if (saved) {
+      persistedAllowPowerActions = controlAllowPowerActions;
+    }
+  }
   function saveReaders() {
     saveSectionWithValidation("readers", validateReaders, toReadersPayload);
   }
@@ -186,24 +281,65 @@
     readers = readers.filter((_, i) => i !== index);
   }
 
-  async function doRestart() {
-    restarting = true;
-    restartMessage = null;
+  function requestControlAction(action: ControlAction): void {
+    pendingControlAction = action;
+    confirmControlActionOpen = true;
+  }
+
+  function cancelControlAction(): void {
+    if (confirmControlActionBusy) {
+      return;
+    }
+    confirmControlActionOpen = false;
+    pendingControlAction = null;
+  }
+
+  async function invokeControlAction(
+    action: ControlAction,
+  ): Promise<{ ok: boolean; error?: string }> {
+    switch (action) {
+      case "restartService":
+        return configApi.restartService();
+      case "restartDevice":
+        return configApi.restartDevice();
+      case "shutdownDevice":
+        return configApi.shutdownDevice();
+      default:
+        return { ok: false, error: `Unsupported control action: ${action}` };
+    }
+  }
+
+  async function runPendingControlAction(): Promise<void> {
+    if (!pendingControlAction) {
+      return;
+    }
+
+    const action = pendingControlAction;
+    controlActionBusy[action] = true;
+    controlActionMessage = null;
+
     try {
-      const result = await configApi.restart();
+      const result = await invokeControlAction(action);
       if (result.ok) {
-        restartMessage = { ok: true, text: "Restart initiated." };
-        restartNeeded = false;
+        controlActionMessage = {
+          ok: true,
+          text: controlActionDetails[action].successMessage,
+        };
+        if (action === "restartService") {
+          restartNeeded = false;
+        }
       } else {
-        restartMessage = {
+        controlActionMessage = {
           ok: false,
           text: result.error ?? "Unknown error",
         };
       }
     } catch (e) {
-      restartMessage = { ok: false, text: String(e) };
+      controlActionMessage = { ok: false, text: String(e) };
     } finally {
-      restarting = false;
+      controlActionBusy[action] = false;
+      confirmControlActionOpen = false;
+      pendingControlAction = null;
     }
   }
 
@@ -213,6 +349,8 @@
     "w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary focus:outline-none focus:border-accent";
   const saveBtnClass =
     "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+  const dangerousActionBtnClass =
+    "px-3 py-1.5 text-xs font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
   const hintClass = "text-xs text-text-muted mt-1";
 </script>
 
@@ -236,20 +374,22 @@
       <AlertBanner
         variant="warn"
         message="Restart needed — some changes require a forwarder restart to take effect."
-        actionLabel={restarting ? "Restarting..." : "Restart Now"}
-        actionBusy={restarting}
-        onAction={doRestart}
+        actionLabel={controlActionBusy.restartService
+          ? "Restarting..."
+          : "Restart Forwarder Service"}
+        actionBusy={controlActionBusy.restartService}
+        onAction={() => requestControlAction("restartService")}
       />
     </div>
   {/if}
 
-  {#if restartMessage}
+  {#if controlActionMessage}
     <p
-      class="text-sm mb-4 m-0 {restartMessage.ok
+      class="text-sm mb-4 m-0 {controlActionMessage.ok
         ? 'text-status-ok'
         : 'text-status-err'}"
     >
-      {restartMessage.text}
+      {controlActionMessage.text}
     </p>
   {/if}
 
@@ -416,6 +556,79 @@
             {sectionMessages["readers"].text}
           </p>
         {/if}
+      </Card>
+
+      <Card title="Forwarder Controls">
+        <p class={hintClass}>
+          These actions affect service/process availability and device power state.
+        </p>
+
+        <label class="mt-3 block text-sm font-medium text-text-secondary">
+          <span class="inline-flex items-center gap-2">
+            <input
+              type="checkbox"
+              bind:checked={controlAllowPowerActions}
+              class="accent-accent"
+            />
+            Allow restart/shutdown actions for the forwarder device
+          </span>
+          <p class={hintClass}>
+            Required for "Restart Forwarder Device" and "Shutdown Forwarder Device".
+          </p>
+        </label>
+        <button
+          class={saveBtnClass}
+          onclick={saveControl}
+          disabled={savingSection["control"]}
+        >
+          {savingSection["control"] ? "Saving..." : "Save Control"}
+        </button>
+        {#if sectionMessages["control"]}
+          <p
+            class="text-xs mt-1 m-0 {sectionMessages['control'].ok
+              ? 'text-status-ok'
+              : 'text-status-err'}"
+          >
+            {sectionMessages["control"].text}
+          </p>
+        {/if}
+      </Card>
+
+      <Card title="Dangerous Actions">
+        <p class="{hintClass} mt-0">
+          Confirm before using these actions in production.
+        </p>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button
+            class={dangerousActionBtnClass}
+            onclick={() => requestControlAction("restartService")}
+            disabled={controlActionBusy.restartService}
+          >
+            {controlActionBusy.restartService
+              ? "Restarting Service..."
+              : "Restart Forwarder Service"}
+          </button>
+          <button
+            class={dangerousActionBtnClass}
+            onclick={() => requestControlAction("restartDevice")}
+            disabled={controlActionBusy.restartDevice || !powerActionsEnabled}
+            title={powerActionsDisabledReason}
+          >
+            {controlActionBusy.restartDevice
+              ? "Restarting Device..."
+              : "Restart Forwarder Device"}
+          </button>
+          <button
+            class={dangerousActionBtnClass}
+            onclick={() => requestControlAction("shutdownDevice")}
+            disabled={controlActionBusy.shutdownDevice || !powerActionsEnabled}
+            title={powerActionsDisabledReason}
+          >
+            {controlActionBusy.shutdownDevice
+              ? "Shutting Down..."
+              : "Shutdown Forwarder Device"}
+          </button>
+        </div>
       </Card>
 
       <!-- Advanced Settings Toggle -->
@@ -585,3 +798,14 @@
     </div>
   {/if}
 </div>
+
+<ConfirmDialog
+  open={confirmControlActionOpen}
+  title={confirmControlActionTitle}
+  message={confirmControlActionMessage}
+  confirmLabel={confirmControlActionLabel}
+  variant={confirmControlActionVariant}
+  busy={confirmControlActionBusy}
+  onConfirm={runPendingControlAction}
+  onCancel={cancelControlAction}
+/>

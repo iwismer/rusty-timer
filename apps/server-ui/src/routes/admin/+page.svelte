@@ -16,6 +16,7 @@
   let tokens: TokenEntry[] = $state([]);
   let cursors: CursorEntry[] = $state([]);
   let busy = $state(false);
+  let races: api.RaceEntry[] = $state([]);
   let feedback: { message: string; ok: boolean } | null = $state(null);
 
   // ----- Create token state -----
@@ -47,6 +48,7 @@
     loadStreams();
     loadTokens();
     loadCursors();
+    loadRaces();
   });
 
   async function loadStreams() {
@@ -73,6 +75,15 @@
       cursors = resp.cursors;
     } catch {
       cursors = [];
+    }
+  }
+
+  async function loadRaces() {
+    try {
+      const resp = await api.getRaces();
+      races = resp.races;
+    } catch {
+      races = [];
     }
   }
 
@@ -134,6 +145,7 @@
       await loadStreams();
       await loadTokens();
       await loadCursors();
+      await loadRaces();
       if (selectedStreamId) await loadEpochs(selectedStreamId);
     } catch (e) {
       feedback = { message: String(e), ok: false };
@@ -283,6 +295,15 @@
       () => api.deleteReceiverStreamCursor(receiverId, streamId),
     );
   }
+
+  function confirmDeleteAllRaces() {
+    showConfirm(
+      "Delete All Races",
+      "This will permanently delete ALL races and all associated data (participants, chips, and forwarder associations). This cannot be undone.",
+      "Delete All",
+      () => api.deleteAllRaces(),
+    );
+  }
 </script>
 
 <svelte:head>
@@ -307,6 +328,10 @@
   <!-- Streams Section -->
   <div class="mb-6">
     <Card title="Streams" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Manage active and offline streams. Deleting a stream permanently removes
+        it along with all associated events, metrics, and receiver cursors.
+      </p>
       {#if streams.length === 0}
         <p class="text-sm text-text-muted m-0">No streams.</p>
       {:else}
@@ -364,6 +389,10 @@
   <!-- Events Section -->
   <div class="mb-6">
     <Card title="Events" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Delete stored timing events. You can clear events globally, for a
+        specific stream, or for a specific epoch within a stream.
+      </p>
       <div class="flex flex-col gap-4">
         <div class="flex flex-col gap-1">
           <label
@@ -441,6 +470,10 @@
   <!-- Device Tokens Section -->
   <div class="mb-6">
     <Card title="Device Tokens" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Create and manage authentication tokens for forwarders and receivers.
+        Revoking a token prevents the device from connecting.
+      </p>
       <!-- Token Reveal Banner -->
       {#if revealedToken}
         <div
@@ -588,6 +621,10 @@
   <!-- Receiver Cursors Section -->
   <div class="mb-6">
     <Card title="Receiver Cursors" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Manage receiver sync positions. Clearing a cursor causes the receiver to
+        re-sync from the beginning on its next connection.
+      </p>
       {#if cursors.length === 0}
         <p class="text-sm text-text-muted m-0">No receiver cursors.</p>
       {:else}
@@ -659,6 +696,28 @@
           class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err text-white border-none cursor-pointer hover:opacity-80"
         >
           Clear All Cursors
+        </button>
+      </div>
+    </Card>
+  </div>
+
+  <!-- Races Section -->
+  <div class="mb-6">
+    <Card title="Races" borderStatus="err">
+      <p class="text-sm text-text-muted m-0 mb-4">
+        Delete all races and associated data. This removes all races,
+        participants, chip mappings, and forwarder-race associations.
+      </p>
+      <p class="text-sm text-text-secondary m-0 mb-4">
+        {races.length}
+        {races.length === 1 ? "race" : "races"}
+      </p>
+      <div>
+        <button
+          onclick={confirmDeleteAllRaces}
+          class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err text-white border-none cursor-pointer hover:opacity-80"
+        >
+          Delete All Races
         </button>
       </div>
     </Card>

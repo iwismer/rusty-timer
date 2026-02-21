@@ -25,7 +25,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -259,7 +259,7 @@ async fn run_reader(
                 }
             };
 
-            info!(
+            debug!(
                 reader_ip = %reader_ip,
                 epoch = epoch,
                 seq = seq,
@@ -752,7 +752,7 @@ async fn run_uplink(
                 continue;
             }
 
-            info!(count = pending.len(), "sending event batch");
+            debug!(count = pending.len(), "sending event batch");
             logger.log(format!("sent batch of {} events", pending.len()));
 
             match session.send_batch(pending).await {
@@ -1404,6 +1404,9 @@ mod tests {
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -1856,6 +1859,9 @@ token_file = "/tmp/test-token"
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
+            },
             readers: vec![],
         };
 
@@ -2079,6 +2085,9 @@ token_file = "/tmp/test-token"
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -2183,6 +2192,9 @@ token_file = "/tmp/test-token"
                 batch_mode: "immediate".to_string(),
                 batch_flush_ms: 50,
                 batch_max_events: 50,
+            },
+            control: forwarder::config::ControlConfig {
+                allow_power_actions: false,
             },
             readers: vec![],
         };

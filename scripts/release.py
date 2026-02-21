@@ -321,6 +321,9 @@ def main() -> None:
         print(f"Error: must be on the master branch (currently on: {branch})", file=sys.stderr)
         sys.exit(1)
 
+    print(style("Pulling latest changes from origin...", role="step"))
+    log_command(["git", "pull", "--ff-only", "origin", "master"], execute=True)
+
     # --- Build release plan ---
     plan: list[tuple[str, str, str]] = []  # (service, current, new)
     skipped: list[tuple[str, str]] = []  # (service, version)

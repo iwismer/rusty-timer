@@ -10,6 +10,9 @@
 //! - `POST /api/v1/config/{section}` — update a config section
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
 //!   501 on non-Unix platforms
+//! - `POST /api/v1/control/restart-service` — trigger graceful service restart
+//! - `POST /api/v1/control/restart-device` — trigger host reboot (gated by config)
+//! - `POST /api/v1/control/shutdown-device` — trigger host shutdown (gated by config)
 //! - `GET /update/status`    — current rt-updater status as JSON
 //! - `POST /update/apply`    — apply a staged update
 //! - All other routes fall back to the embedded SvelteKit UI
@@ -642,7 +645,7 @@ async fn mark_restart_needed_and_emit(
 /// payload, and calls `update_config_file` to persist the change.
 ///
 /// Recognised sections: `"general"`, `"server"`, `"auth"`, `"journal"`,
-/// `"uplink"`, `"status_http"`, `"readers"`.
+/// `"uplink"`, `"status_http"`, `"control"`, `"readers"`.
 pub async fn apply_section_update(
     section: &str,
     payload: &serde_json::Value,
@@ -751,6 +754,20 @@ pub async fn apply_section_update(
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.status_http = Some(crate::config::RawStatusHttpConfig { bind });
+                Ok(())
+            })
+            .await
+        }
+        "control" => {
+            let allow_power_actions = optional_bool_field(payload, "allow_power_actions")?;
+            let action = optional_string_field(payload, "action")?;
+            if let Some(action) = action {
+                return apply_control_action(&action, Some(config_state), None).await;
+            }
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                raw.control = Some(crate::config::RawControlConfig {
+                    allow_power_actions,
+                });
                 Ok(())
             })
             .await
@@ -1031,6 +1048,221 @@ async fn restart_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u16, String)> {
+    let _lock = config_state.write_lock.lock().await;
+    let toml_str = std::fs::read_to_string(&config_state.path).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("File read error: {}", e)})
+                .to_string(),
+        )
+    })?;
+    let raw: crate::config::RawConfig = toml::from_str(&toml_str).map_err(|e| {
+        (
+            500u16,
+            serde_json::json!({"ok": false, "error": format!("TOML parse error: {}", e)})
+                .to_string(),
+        )
+    })?;
+    Ok(raw
+        .control
+        .and_then(|c| c.allow_power_actions)
+        .unwrap_or(false))
+}
+
+#[cfg(unix)]
+fn map_power_action_command_result(
+    systemctl_action: &'static str,
+    result: std::io::Result<std::process::ExitStatus>,
+) -> Result<(), (u16, String)> {
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => {
+            tracing::error!(
+                action = systemctl_action,
+                exit_status = ?status.code(),
+                "control action command exited with failure"
+            );
+            Err((
+                500u16,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!(
+                        "control action command exited with failure: systemctl {}",
+                        systemctl_action
+                    )
+                })
+                .to_string(),
+            ))
+        }
+        Err(e) => {
+            tracing::error!(action = systemctl_action, error = %e, "control action command failed");
+            Err((
+                500u16,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!("control action command failed: {}", e)
+                })
+                .to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn run_device_power_action(systemctl_action: &'static str) -> Result<(), (u16, String)> {
+    match tokio::task::spawn_blocking(move || {
+        std::process::Command::new("systemctl")
+            .arg(systemctl_action)
+            .status()
+    })
+    .await
+    {
+        Ok(result) => map_power_action_command_result(systemctl_action, result),
+        Err(e) => {
+            tracing::error!(action = systemctl_action, error = %e, "control action task failed");
+            Err((
+                500u16,
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!("control action task failed: {}", e)
+                })
+                .to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn run_device_power_action(_systemctl_action: &'static str) -> Result<(), (u16, String)> {
+    Err((
+        501u16,
+        serde_json::json!({
+            "ok": false,
+            "error": "power actions not supported on non-unix platforms"
+        })
+        .to_string(),
+    ))
+}
+
+pub async fn apply_control_action(
+    action: &str,
+    config_state: Option<&ConfigState>,
+    restart_signal: Option<&Arc<Notify>>,
+) -> Result<(), (u16, String)> {
+    match action {
+        "restart_service" => {
+            let signal = restart_signal.ok_or_else(|| {
+                (
+                    404u16,
+                    serde_json::json!({"ok": false, "error": "restart signal not available"})
+                        .to_string(),
+                )
+            })?;
+            if cfg!(unix) {
+                signal.notify_one();
+                Ok(())
+            } else {
+                Err((
+                    501u16,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "restart not supported on non-unix platforms"
+                    })
+                    .to_string(),
+                ))
+            }
+        }
+        "restart_device" | "shutdown_device" => {
+            let cs = config_state.ok_or_else(|| {
+                (
+                    404u16,
+                    serde_json::json!({"ok": false, "error": "Config editing not available"})
+                        .to_string(),
+                )
+            })?;
+            let allow_power_actions = read_allow_power_actions(cs).await?;
+            if !allow_power_actions {
+                return Err((
+                    403u16,
+                    serde_json::json!({"ok": false, "error": "power actions disabled"}).to_string(),
+                ));
+            }
+            if !cfg!(unix) {
+                return Err((
+                    501u16,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": format!("{} not supported on non-unix platforms", action)
+                    })
+                    .to_string(),
+                ));
+            }
+            let systemctl_action = if action == "restart_device" {
+                "reboot"
+            } else {
+                "poweroff"
+            };
+            run_device_power_action(systemctl_action).await?;
+            Ok(())
+        }
+        _ => Err(bad_request_error(format!(
+            "unknown control action: {}",
+            action
+        ))),
+    }
+}
+
+async fn control_restart_service_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    match apply_control_action("restart_service", None, state.restart_signal.as_ref()).await {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn control_restart_device_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    match apply_control_action("restart_device", Some(&cs), state.restart_signal.as_ref()).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "status": "restart_device_scheduled"}).to_string(),
+        ),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
+async fn control_shutdown_device_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    match apply_control_action("shutdown_device", Some(&cs), state.restart_signal.as_ref()).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "status": "shutdown_device_scheduled"}).to_string(),
+        ),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
 fn get_config_state<J: JournalAccess + Send + 'static>(
     state: &AppState<J>,
 ) -> Option<Arc<ConfigState>> {
@@ -1166,10 +1398,26 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(post_config_status_http_handler::<J>),
         )
         .route(
+            "/api/v1/config/control",
+            post(post_config_control_handler::<J>),
+        )
+        .route(
             "/api/v1/config/readers",
             post(post_config_readers_handler::<J>),
         )
         .route("/api/v1/restart", post(restart_handler::<J>))
+        .route(
+            "/api/v1/control/restart-service",
+            post(control_restart_service_handler::<J>),
+        )
+        .route(
+            "/api/v1/control/restart-device",
+            post(control_restart_device_handler::<J>),
+        )
+        .route(
+            "/api/v1/control/shutdown-device",
+            post(control_shutdown_device_handler::<J>),
+        )
         .route("/api/v1/status", get(status_json_handler::<J>))
         .route("/api/v1/events", get(events_handler::<J>))
         .fallback(crate::ui_server::serve_ui)
@@ -1489,6 +1737,33 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+async fn post_config_control_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    let cs = match get_config_state(&state) {
+        Some(cs) => cs,
+        None => return config_not_available(),
+    };
+    let payload: serde_json::Value = match parse_json_body(&body) {
+        Ok(v) => v,
+        Err(err) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"ok": false, "error": err}).to_string(),
+            )
+        }
+    };
+
+    match apply_section_update("control", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
+        Err((status_code, body)) => json_response(
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            body,
+        ),
+    }
+}
+
 fn apply_via_restart_enabled() -> bool {
     apply_via_restart_from_env(std::env::var("RT_FORWARDER_UPDATE_APPLY_VIA_RESTART").ok())
 }
@@ -1730,6 +2005,45 @@ target = "192.168.1.100:10000"
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_spawn_error() {
+        let result = map_power_action_command_result(
+            "reboot",
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "systemctl not found",
+            )),
+        );
+
+        let (status, body) = result.expect_err("spawn errors must return an HTTP error");
+        assert_eq!(status, 500);
+        assert!(body.contains("control action command failed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_non_zero_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        let result = map_power_action_command_result("poweroff", Ok(status));
+
+        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
+        assert_eq!(http_status, 500);
+        assert!(body.contains("control action command exited with failure"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_ok_on_success_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let status = std::process::ExitStatus::from_raw(0);
+        let result = map_power_action_command_result("reboot", Ok(status));
+        assert!(result.is_ok());
     }
 
     #[test]

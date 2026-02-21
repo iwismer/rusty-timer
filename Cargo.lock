@@ -737,30 +737,13 @@ dependencies = [
 
 [[package]]
 name = "emulator"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
- "chrono",
  "clap",
- "futures",
- "timer-core",
+ "rt-emulator",
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "emulator-v2"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "rt-protocol",
- "rt-test-utils",
- "serde",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "tracing",
 ]
 
 [[package]]
@@ -2260,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "receiver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum 0.8.8",
  "bytes",
@@ -2455,6 +2438,20 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rt-emulator"
+version = "2.0.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "ipico-core",
+ "serde",
+ "serde_yaml",
+ "timer-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3635,11 +3632,9 @@ checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
 dependencies = [
  "futures-util",
  "log",
- "native-tls",
  "rustls",
  "rustls-pki-types",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tungstenite 0.26.2",
  "webpki-roots 0.26.11",
@@ -3891,7 +3886,6 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "native-tls",
  "rand 0.9.2",
  "rustls",
  "rustls-pki-types",

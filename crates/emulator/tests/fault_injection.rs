@@ -1,4 +1,4 @@
-//! Integration tests for Task 18: Fault Injection Modes.
+//! Integration tests for fault injection.
 //!
 //! Reader mode faults: jitter, disconnect, reconnect_delay
 //! Forwarder mode faults: malformed_messages, slow_acks
@@ -14,8 +14,8 @@
 //! 8. Slow ack fault introduces delay before ack
 //! 9. No fault = zero delays, all events emitted
 
-use emulator_v2::faults::{apply_fault_to_event_emission, FaultOutcome, FaultSchedule};
-use emulator_v2::scenario::{load_scenario_from_str, FaultConfig};
+use emulator::faults::{apply_fault_to_event_emission, FaultOutcome, FaultSchedule};
+use emulator::scenario::{load_scenario_from_str, FaultConfig};
 
 // ---------------------------------------------------------------------------
 // YAML parsing tests for fault configs

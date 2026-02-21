@@ -36,6 +36,9 @@ export interface ForwarderConfig {
   status_http?: {
     bind?: string;
   };
+  control?: {
+    allow_power_actions?: boolean;
+  };
   uplink?: {
     batch_mode?: string;
     batch_flush_ms?: number;
@@ -74,6 +77,36 @@ export async function saveConfigSection(
 
 export async function restart(): Promise<void> {
   await apiFetch("/api/v1/restart", { method: "POST" });
+}
+
+export async function restartService(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  return apiFetch<{ ok: boolean; error?: string }>(
+    "/api/v1/control/restart-service",
+    { method: "POST" },
+  );
+}
+
+export async function restartDevice(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  return apiFetch<{ ok: boolean; error?: string }>(
+    "/api/v1/control/restart-device",
+    { method: "POST" },
+  );
+}
+
+export async function shutdownDevice(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  return apiFetch<{ ok: boolean; error?: string }>(
+    "/api/v1/control/shutdown-device",
+    { method: "POST" },
+  );
 }
 
 export async function resetEpoch(

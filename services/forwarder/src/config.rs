@@ -31,6 +31,7 @@ pub struct ForwarderConfig {
     pub journal: JournalConfig,
     pub status_http: StatusHttpConfig,
     pub uplink: UplinkConfig,
+    pub control: ControlConfig,
     pub readers: Vec<ReaderConfig>,
 }
 
@@ -59,6 +60,11 @@ pub struct UplinkConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ControlConfig {
+    pub allow_power_actions: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReaderConfig {
     pub target: String,
     pub enabled: bool,
@@ -79,6 +85,7 @@ pub struct RawConfig {
     pub journal: Option<RawJournalConfig>,
     pub status_http: Option<RawStatusHttpConfig>,
     pub uplink: Option<RawUplinkConfig>,
+    pub control: Option<RawControlConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
 }
 
@@ -109,6 +116,11 @@ pub struct RawUplinkConfig {
     pub batch_mode: Option<String>,
     pub batch_flush_ms: Option<u64>,
     pub batch_max_events: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawControlConfig {
+    pub allow_power_actions: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +226,16 @@ pub fn load_config_from_str(
         },
     };
 
+    // Control defaults
+    let control = match raw.control {
+        Some(c) => ControlConfig {
+            allow_power_actions: c.allow_power_actions.unwrap_or(false),
+        },
+        None => ControlConfig {
+            allow_power_actions: false,
+        },
+    };
+
     // Validate readers
     let raw_readers = raw
         .readers
@@ -246,6 +268,7 @@ pub fn load_config_from_str(
         journal,
         status_http,
         uplink,
+        control,
         readers,
     })
 }

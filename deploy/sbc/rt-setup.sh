@@ -19,7 +19,7 @@ HELPER_DIR="/usr/local/lib"
 CONFIG_DIR="/etc/rusty-timer"
 DATA_DIR="/var/lib/rusty-timer"
 SERVICE_USER="rt-forwarder"
-STATUS_BIND="0.0.0.0:8080"
+STATUS_BIND="0.0.0.0:80"
 VERIFY_POLICY="run_verify"
 FORWARDER_BIN_PATH="${INSTALL_DIR}/rt-forwarder"
 STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
@@ -29,7 +29,8 @@ APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 
 bool_env_is_true() {
   local raw="${1:-}"
-  local lower="${raw,,}"
+  local lower
+  lower="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
   case "${lower}" in
     1|true|yes|y|on)
       printf '1\n'
@@ -38,6 +39,15 @@ bool_env_is_true() {
       printf '0\n'
       ;;
   esac
+}
+
+allow_power_actions_toml_value() {
+  local raw="${RT_SETUP_ALLOW_POWER_ACTIONS:-1}"
+  if [[ "$(bool_env_is_true "${raw}")" == "1" ]]; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
 }
 
 is_noninteractive_mode() {
@@ -116,7 +126,7 @@ select_latest_forwarder_asset_from_pages() {
 status_probe_url_from_bind() {
   local bind="$1"
   local host="localhost"
-  local port="8080"
+  local port="80"
 
   if [[ "${bind}" =~ ^\[([0-9A-Fa-f:]+)\]:([0-9]+)$ ]]; then
     local ipv6_host="${BASH_REMATCH[1]}"
@@ -201,6 +211,7 @@ StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rt-forwarder
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -481,6 +492,8 @@ configure() {
   fi
   local escaped_forwarder_display_name
   escaped_forwarder_display_name="$(toml_escape_string "${forwarder_display_name}")"
+  local control_allow_power_actions
+  control_allow_power_actions="$(allow_power_actions_toml_value)"
 
   # Generate config file
   cat > "${CONFIG_DIR}/forwarder.toml" <<EOF
@@ -499,6 +512,9 @@ prune_watermark_pct = 80
 
 [status_http]
 bind = "${STATUS_BIND}"
+
+[control]
+allow_power_actions = ${control_allow_power_actions}
 
 [uplink]
 batch_mode = "immediate"

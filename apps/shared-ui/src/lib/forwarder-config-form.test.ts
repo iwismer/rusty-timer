@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   fromConfig,
   toGeneralPayload,
+  toControlPayload,
   toReadersPayload,
   validateGeneral,
   validateServer,
@@ -18,7 +19,17 @@ describe("fromConfig", () => {
   it("normalizes missing sections to empty form defaults", () => {
     const form = fromConfig({});
     expect(form.serverBaseUrl).toBe("");
+    expect(form.controlAllowPowerActions).toBe(false);
     expect(form.readers).toEqual([]);
+  });
+
+  it("loads control.allow_power_actions when present", () => {
+    const form = fromConfig({
+      control: {
+        allow_power_actions: true,
+      },
+    });
+    expect(form.controlAllowPowerActions).toBe(true);
   });
 });
 
@@ -64,6 +75,16 @@ describe("payload builders", () => {
       ],
     });
   });
+
+  it("serializes control allow_power_actions boolean", () => {
+    const form = {
+      controlAllowPowerActions: true,
+    } as ForwarderConfigFormState;
+
+    expect(toControlPayload(form)).toEqual({
+      allow_power_actions: true,
+    });
+  });
 });
 
 function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderConfigFormState {
@@ -78,6 +99,7 @@ function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderC
     uplinkBatchFlushMs: "",
     uplinkBatchMaxEvents: "",
     statusHttpBind: "",
+    controlAllowPowerActions: false,
     readers: [{ target: "192.168.0.1:10000", enabled: true, local_fallback_port: "" }],
     ...overrides,
   };

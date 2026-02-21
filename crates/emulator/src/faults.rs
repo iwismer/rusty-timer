@@ -1,4 +1,4 @@
-//! Fault injection framework for emulator-v2.
+//! Fault injection framework for the emulator.
 //!
 //! # Fault types
 //!
@@ -13,8 +13,8 @@
 //!
 //! # Usage
 //! ```rust,ignore
-//! use emulator_v2::faults::{FaultSchedule, apply_fault_to_event_emission, FaultOutcome};
-//! use emulator_v2::scenario::FaultConfig;
+//! use emulator::faults::{FaultSchedule, apply_fault_to_event_emission, FaultOutcome};
+//! use emulator::scenario::FaultConfig;
 //!
 //! let faults = vec![FaultConfig { fault_type: "jitter".into(), after_events: 10, duration_ms: 200 }];
 //! let schedule = FaultSchedule::from_fault_configs(&faults);

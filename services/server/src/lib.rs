@@ -63,6 +63,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             post(http::forwarder_config::set_forwarder_config),
         )
         .route(
+            "/api/v1/forwarders/:forwarder_id/control/:action",
+            post(http::forwarder_config::control_forwarder),
+        )
+        .route(
             "/api/v1/forwarders/:forwarder_id/restart",
             post(http::forwarder_config::restart_forwarder),
         )
@@ -123,6 +127,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             "/api/v1/admin/receiver-cursors/:receiver_id/:stream_id",
             delete(http::admin::delete_receiver_stream_cursor),
         )
+        .route("/api/v1/admin/races", delete(http::admin::delete_all_races))
         .route(
             "/api/v1/races",
             get(http::races::list_races).post(http::races::create_race),

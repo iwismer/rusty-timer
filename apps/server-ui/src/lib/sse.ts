@@ -1,18 +1,30 @@
 import {
   addOrUpdateStream,
+  forwarderRacesStore,
   patchStream,
   replaceStreams,
+  setRaces,
   setMetrics,
   setForwarderRace,
   pushLog,
   logsStore,
 } from "./stores";
-import { getStreams, getLogs } from "./api";
+import { getForwarderRaces, getLogs, getRaces, getStreams } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
 
 let eventSource: EventSource | null = null;
 let resyncInFlight = false;
 let resyncQueued = false;
+
+function replaceForwarderAssignments(
+  assignments: Array<{ forwarder_id: string; race_id: string | null }>,
+): void {
+  const next: Record<string, string | null> = {};
+  for (const assignment of assignments) {
+    next[assignment.forwarder_id] = assignment.race_id;
+  }
+  forwarderRacesStore.set(next);
+}
 
 export function initSSE(): void {
   if (eventSource) return;
@@ -68,7 +80,7 @@ export function initSSE(): void {
     await resync();
   };
 
-  // Eagerly fetch streams without waiting for the SSE connection to open.
+  // Eagerly fetch dashboard state without waiting for the SSE connection to open.
   // When no forwarders are connected, the SSE response body has no data
   // until the first keep-alive (15 s), which can delay the onopen callback.
   void resync();
@@ -85,20 +97,25 @@ async function resync(): Promise<void> {
     // Coalesce multiple resync triggers into a single follow-up fetch.
     while (true) {
       resyncQueued = false;
-      try {
-        const [streamsResp, logsResp] = await Promise.allSettled([
+      const [streamsResp, racesResp, assignmentsResp, logsResp] =
+        await Promise.allSettled([
           getStreams(),
+          getRaces(),
+          getForwarderRaces(),
           getLogs(),
         ]);
 
-        if (streamsResp.status === "fulfilled") {
-          replaceStreams(streamsResp.value.streams);
-        }
-        if (logsResp.status === "fulfilled") {
-          logsStore.set(logsResp.value.entries);
-        }
-      } catch {
-        // Resync failed — SSE will keep trying via auto-reconnect
+      if (streamsResp.status === "fulfilled") {
+        replaceStreams(streamsResp.value.streams);
+      }
+      if (racesResp.status === "fulfilled") {
+        setRaces(racesResp.value.races);
+      }
+      if (assignmentsResp.status === "fulfilled") {
+        replaceForwarderAssignments(assignmentsResp.value.assignments);
+      }
+      if (logsResp.status === "fulfilled") {
+        logsStore.set(logsResp.value.entries);
       }
       if (!resyncQueued) break;
     }
