@@ -1,12 +1,8 @@
 [package]
-name = "emulator-crate"
+name = "emulator"
 version = "2.0.0"
 edition = "2021"
 authors = ["iwismer <isaac@iwismer.ca>"]
-
-[lib]
-name = "emulator"
-path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

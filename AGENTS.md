@@ -21,7 +21,7 @@ This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust worksp
 - `apps/receiver-ui/` — SvelteKit static frontend for the receiver (embedded in binary via `--features embed-ui`)
 - `crates/rt-protocol/` — Frozen WebSocket message types (WsMessage enum)
 - `crates/ipico-core/` — Frozen IPICO chip read parser
-- `crates/emulator-v2/` — Deterministic multi-reader playback for integration testing
+- `crates/emulator/` — Emulator library: read generation, scenarios, fault injection
 - `crates/rt-test-utils/` — MockWsServer + MockWsClient test helpers
 
 ### Key Decisions

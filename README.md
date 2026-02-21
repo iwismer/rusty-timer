@@ -24,7 +24,7 @@ IPICO Reader ──TCP──► Streamer ──fanout──► Local Clients
 | receiver     | services/receiver/    | Subscribes to server, proxies streams to local TCP ports         |
 | server-ui    | apps/server-ui/       | SvelteKit static web dashboard (served by server)                |
 | receiver-ui  | apps/receiver-ui/     | Tauri v2 + SvelteKit desktop app for the receiver                |
-| emulator-v2  | crates/emulator-v2/   | Deterministic multi-reader playback for integration testing      |
+| emulator     | crates/emulator/      | Emulator library: read generation, scenarios, fault injection    |
 
 ## Quick Start
 

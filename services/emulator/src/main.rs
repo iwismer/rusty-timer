@@ -1,24 +1,24 @@
 use clap::{Arg, Command};
-use emulator::{EmulatorConfig, ReadType};
+use emulator::server::{is_delay, is_file, is_port, EmulatorConfig, ReadType};
 use std::convert::TryFrom;
 use tracing::info;
 
 fn validate_port_value(value: &str) -> Result<u16, String> {
-    emulator::is_port(value.to_owned())?;
+    is_port(value.to_owned())?;
     value
         .parse::<u16>()
         .map_err(|_| "Invalid port number".to_owned())
 }
 
 fn validate_delay_value(value: &str) -> Result<u64, String> {
-    emulator::is_delay(value.to_owned())?;
+    is_delay(value.to_owned())?;
     value
         .parse::<u64>()
         .map_err(|_| "Invalid delay value".to_owned())
 }
 
 fn validate_file_value(value: &str) -> Result<String, String> {
-    emulator::is_file(value.to_owned())?;
+    is_file(value.to_owned())?;
     Ok(value.to_owned())
 }
 
@@ -85,5 +85,5 @@ async fn main() {
             .expect("read_type has a default"),
     };
 
-    emulator::run(config).await;
+    emulator::server::run(config).await;
 }
