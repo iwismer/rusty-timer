@@ -519,6 +519,9 @@ allow_power_actions = ${control_allow_power_actions}
 batch_mode = "immediate"
 batch_flush_ms = 100
 batch_max_events = 50
+
+[update]
+mode = "check-only"
 EOF
 
   # Append reader targets
