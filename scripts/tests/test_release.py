@@ -25,6 +25,18 @@ class VersionUpdateTests(unittest.TestCase):
         self.assertNotIn('version = "1.2.3"', updated)
 
 
+class OutputStyleTests(unittest.TestCase):
+    def test_style_wraps_text_with_ansi_codes_when_color_enabled(self) -> None:
+        styled = release.style("hello", role="step", color_enabled=True)
+        self.assertTrue(styled.startswith("\x1b["))
+        self.assertIn("hello", styled)
+        self.assertTrue(styled.endswith("\x1b[0m"))
+
+    def test_style_returns_plain_text_when_color_disabled(self) -> None:
+        styled = release.style("hello", role="step", color_enabled=False)
+        self.assertEqual(styled, "hello")
+
+
 class TransactionTests(unittest.TestCase):
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")

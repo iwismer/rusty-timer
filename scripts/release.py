@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import shlex
 import subprocess
@@ -28,6 +29,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator")
 EMBED_UI_SERVICES = ("forwarder", "receiver")
 VERSION_FORMAT_RE = re.compile(r"^\d+\.\d+\.\d+$")
+RESET = "\x1b[0m"
+STYLE_CODES = {
+    "step": "\x1b[1;36m",
+    "command": "\x1b[33m",
+    "success": "\x1b[32m",
+    "dry_run": "\x1b[2;37m",
+    "header": "\x1b[1;34m",
+    "warning": "\x1b[1;33m",
+    "error": "\x1b[1;31m",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,12 +85,31 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, **defaults)
 
 
+def supports_color() -> bool:
+    if os.getenv("NO_COLOR") is not None:
+        return False
+    term = os.getenv("TERM", "")
+    if term.lower() == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def style(text: str, *, role: str, color_enabled: bool | None = None) -> str:
+    enabled = supports_color() if color_enabled is None else color_enabled
+    if not enabled:
+        return text
+    code = STYLE_CODES.get(role)
+    if code is None:
+        return text
+    return f"{code}{text}{RESET}"
+
+
 def log_command(cmd: list[str], *, execute: bool) -> None:
-    print(f"    $ {shlex.join(cmd)}")
+    print(style(f"    $ {shlex.join(cmd)}", role="command"))
     if execute:
         run(cmd, capture_output=False)
     else:
-        print("    (dry-run) skipped")
+        print(style("    (dry-run) skipped", role="dry_run"))
 
 
 def git_is_dirty() -> bool:
@@ -168,13 +198,13 @@ def run_release_workflow_checks(service: str, *, start_step: int) -> int:
     step = start_step
     if service_uses_embed_ui(service):
         ui_workspace = f"apps/{service}-ui"
-        print(f"  [{step}] Run UI checks for {ui_workspace}")
+        print(style(f"  [{step}] Run UI checks for {ui_workspace}", role="step"))
         step += 1
         log_command(["npm", "ci"], execute=True)
         log_command(["npm", "run", "lint", "--workspace", ui_workspace], execute=True)
         log_command(["npm", "run", "check", "--workspace", ui_workspace], execute=True)
         log_command(["npm", "test", "--workspace", ui_workspace], execute=True)
-        print("    UI checks passed")
+        print(style("    UI checks passed", role="success"))
 
     build_cmd = [
         "cargo",
@@ -188,10 +218,10 @@ def run_release_workflow_checks(service: str, *, start_step: int) -> int:
     if service_uses_embed_ui(service):
         build_cmd.extend(["--features", "embed-ui"])
 
-    print(f"  [{step}] Run release build")
+    print(style(f"  [{step}] Run release build", role="step"))
     step += 1
     log_command(build_cmd, execute=True)
-    print("    Release build passed")
+    print(style("    Release build passed", role="success"))
     return step
 
 
@@ -231,13 +261,18 @@ def main() -> None:
             skipped.append((service, current))
         else:
             if parse_semver(new) < parse_semver(current):
-                print(f"  WARNING: {service} version downgrade {current} -> {new}")
+                print(
+                    style(
+                        f"  WARNING: {service} version downgrade {current} -> {new}",
+                        role="warning",
+                    )
+                )
             plan.append((service, current, new))
 
     # --- Display plan ---
     print()
-    print("Release Plan")
-    print("=" * 50)
+    print(style("Release Plan", role="header"))
+    print(style("=" * 50, role="header"))
     for service, current, new in plan:
         print(f"  {service}: {current} -> {new}")
     for service, version in skipped:
@@ -249,7 +284,12 @@ def main() -> None:
         return
 
     if args.dry_run:
-        print("Dry run mode: checks/builds will run, mutating steps are printed only.")
+        print(
+            style(
+                "Dry run mode: checks/builds will run, mutating steps are printed only.",
+                role="dry_run",
+            )
+        )
     else:
         start_head = git_head_sha()
 
@@ -269,19 +309,19 @@ def main() -> None:
             step = 1
 
             # Update Cargo.toml
-            print(f"  [{step}] Update {cargo_path} version to {new}")
+            print(style(f"  [{step}] Update {cargo_path} version to {new}", role="step"))
             step += 1
             if args.dry_run:
-                print(f"    (dry-run) would update {cargo_path}")
+                print(style(f"    (dry-run) would update {cargo_path}", role="dry_run"))
             else:
                 write_version(service, new)
-                print(f"    Updated {cargo_path}")
+                print(style(f"    Updated {cargo_path}", role="success"))
 
             # Validate with the same checks/build used by release workflow.
             step = run_release_workflow_checks(service, start_step=step)
 
             # Stage, commit, tag
-            print(f"  [{step}] Stage release files")
+            print(style(f"  [{step}] Stage release files", role="step"))
             step += 1
             log_command(
                 ["git", "add", cargo_path, "Cargo.lock"],
@@ -289,43 +329,49 @@ def main() -> None:
             )
 
             commit_msg = f"chore({service}): bump version to {new}"
-            print(f"  [{step}] Create release commit")
+            print(style(f"  [{step}] Create release commit", role="step"))
             step += 1
             log_command(
                 ["git", "commit", "-m", commit_msg],
                 execute=not args.dry_run,
             )
             if args.dry_run:
-                print(f"    (dry-run) would commit: {commit_msg}")
+                print(style(f"    (dry-run) would commit: {commit_msg}", role="dry_run"))
             else:
-                print(f"    Committed: {commit_msg}")
+                print(style(f"    Committed: {commit_msg}", role="success"))
 
             tag = f"{service}-v{new}"
-            print(f"  [{step}] Create release tag")
+            print(style(f"  [{step}] Create release tag", role="step"))
             step += 1
             log_command(["git", "tag", tag], execute=not args.dry_run)
             if args.dry_run:
-                print(f"    (dry-run) would tag: {tag}")
+                print(style(f"    (dry-run) would tag: {tag}", role="dry_run"))
             else:
-                print(f"    Tagged: {tag}")
+                print(style(f"    Tagged: {tag}", role="success"))
                 tags.append(tag)
 
         # --- Push ---
-        print("\n[Final Step] Push commits and tags")
+        print(style("\n[Final Step] Push commits and tags", role="step"))
         push_cmd = ["git", "push", "--atomic", "origin", "master", *tags]
         if args.dry_run and plan:
             dry_tags = [f"{service}-v{new}" for service, _, new in plan]
             push_cmd = ["git", "push", "--atomic", "origin", "master", *dry_tags]
         log_command(push_cmd, execute=not args.dry_run)
         if args.dry_run:
-            print("Dry run complete.")
+            print(style("Dry run complete.", role="dry_run"))
         else:
-            print("Done!")
+            print(style("Done!", role="success"))
     except subprocess.CalledProcessError as e:
         if args.dry_run:
-            print("Error: dry-run checks failed.", file=sys.stderr)
+            print(
+                style("Error: dry-run checks failed.", role="error"),
+                file=sys.stderr,
+            )
         else:
-            print("Error: release failed, rolling back transaction.", file=sys.stderr)
+            print(
+                style("Error: release failed, rolling back transaction.", role="error"),
+                file=sys.stderr,
+            )
         if e.stderr:
             print(e.stderr, file=sys.stderr)
         if not args.dry_run:
