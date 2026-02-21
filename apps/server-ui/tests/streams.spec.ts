@@ -24,6 +24,27 @@ const MOCK_STREAMS = [
   },
 ];
 
+const MOCK_ALL_OFFLINE_STREAMS = [
+  {
+    stream_id: "stream-offline-1",
+    forwarder_id: "fwd-offline",
+    reader_ip: "172.16.0.10:10000",
+    display_alias: "Offline Reader A",
+    online: false,
+    stream_epoch: 5,
+    created_at: "2024-01-03T00:00:00Z",
+  },
+  {
+    stream_id: "stream-offline-2",
+    forwarder_id: "fwd-offline",
+    reader_ip: "172.16.0.11:10000",
+    display_alias: "Offline Reader B",
+    online: false,
+    stream_epoch: 6,
+    created_at: "2024-01-04T00:00:00Z",
+  },
+];
+
 const MOCK_METRICS = {
   raw_count: 500,
   dedup_count: 480,
@@ -141,6 +162,28 @@ test.describe("stream list page", () => {
 
     await expect(page.getByLabel("Hide offline")).toBeChecked();
     await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(1);
+  });
+
+  test("shows empty-state message when hiding offline streams with no online streams", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/streams", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ streams: MOCK_ALL_OFFLINE_STREAMS }),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(2);
+
+    await page.getByLabel("Hide offline").check();
+
+    await expect(page.locator('[data-testid="stream-item"]')).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="no-online-streams"]'),
+    ).toBeVisible();
   });
 
   test("shows stream display alias when present", async ({ page }) => {

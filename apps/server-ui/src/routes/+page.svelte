@@ -349,7 +349,13 @@
     </div>
   {/each}
 
-  {#if $streamsStore.length === 0}
-    <p class="text-sm text-text-muted">No streams found.</p>
+  {#if visibleGroups.length === 0}
+    {#if $streamsStore.length === 0}
+      <p class="text-sm text-text-muted">No streams found.</p>
+    {:else if hideOffline}
+      <p data-testid="no-online-streams" class="text-sm text-text-muted">
+        No online streams found.
+      </p>
+    {/if}
   {/if}
 </main>
