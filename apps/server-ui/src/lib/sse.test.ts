@@ -21,6 +21,7 @@ class MockEventSource {
     MockEventSource.instances.push(this);
     // Simulate async open
     setTimeout(() => {
+      if (this.closed) return;
       this.readyState = 1;
       if (this.onopen) this.onopen();
     }, MockEventSource.openDelayMs);
@@ -251,16 +252,53 @@ describe("sse", () => {
     const { initSSE } = await import("./sse");
     initSSE();
 
-    // Eager startup sync should run immediately.
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Eager startup sync should run immediately (streams + logs).
+    expect(mockFetch).toHaveBeenCalledTimes(2);
 
     // onopen should trigger exactly one follow-up sync.
     await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
 
     // No additional fetches without explicit resync triggers.
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("updates streams even when logs fetch fails during resync", async () => {
+    const { initSSE } = await import("./sse");
+    const stream: StreamEntry = {
+      stream_id: "s1",
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      display_alias: null,
+      forwarder_display_name: null,
+      online: true,
+      stream_epoch: 1,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+
+    MockEventSource.openDelayMs = 30;
+    mockFetch.mockReset();
+    let logFetches = 0;
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/streams")) {
+        return Promise.resolve(makeResponse({ streams: [stream] }));
+      }
+      if (url.includes("/api/v1/logs")) {
+        logFetches += 1;
+        if (logFetches === 1) {
+          return Promise.reject(new Error("logs down"));
+        }
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
+      return Promise.resolve(makeResponse({}));
+    });
+
+    initSSE();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(get(streamsStore)).toEqual([stream]);
   });
 
   it("runs a follow-up resync when resync events arrive during an in-flight resync", async () => {
@@ -281,9 +319,21 @@ describe("sse", () => {
       resolveFirst = resolve;
     });
 
+    MockEventSource.openDelayMs = 100;
     mockFetch.mockReset();
-    mockFetch.mockImplementationOnce(() => first);
-    mockFetch.mockResolvedValueOnce(makeResponse({ streams: [streamB] }));
+    let streamFetches = 0;
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/streams")) {
+        streamFetches += 1;
+        if (streamFetches === 1) return first;
+        return Promise.resolve(makeResponse({ streams: [streamB] }));
+      }
+      if (url.includes("/api/v1/logs")) {
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
+      return Promise.resolve(makeResponse({}));
+    });
 
     const { initSSE } = await import("./sse");
     initSSE();
@@ -292,12 +342,12 @@ describe("sse", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     es.emit("resync", "{}");
 
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
 
     resolveFirst(makeResponse({ streams: [streamA] }));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
     expect(get(streamsStore)[0].online).toBe(true);
   });
 });

@@ -86,12 +86,17 @@ async function resync(): Promise<void> {
     while (true) {
       resyncQueued = false;
       try {
-        const [streamsResp, logsResp] = await Promise.all([
+        const [streamsResp, logsResp] = await Promise.allSettled([
           getStreams(),
           getLogs(),
         ]);
-        replaceStreams(streamsResp.streams);
-        logsStore.set(logsResp.entries);
+
+        if (streamsResp.status === "fulfilled") {
+          replaceStreams(streamsResp.value.streams);
+        }
+        if (logsResp.status === "fulfilled") {
+          logsStore.set(logsResp.value.entries);
+        }
       } catch {
         // Resync failed — SSE will keep trying via auto-reconnect
       }

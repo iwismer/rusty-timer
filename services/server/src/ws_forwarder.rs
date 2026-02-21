@@ -72,6 +72,17 @@ async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
     }
 }
 
+fn created_reader_ips_for_logging<'a>(
+    requested_reader_ips: &'a [String],
+    stream_map: &HashMap<String, Uuid>,
+) -> Vec<&'a str> {
+    requested_reader_ips
+        .iter()
+        .filter(|reader_ip| stream_map.contains_key(reader_ip.as_str()))
+        .map(String::as_str)
+        .collect()
+}
+
 async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
     let token_str = match token {
         Some(t) => t,
@@ -216,7 +227,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     for &sid in stream_map.values() {
         publish_stream_created(&state, sid).await;
     }
-    for reader_ip in &hello.reader_ips {
+    for reader_ip in created_reader_ips_for_logging(&hello.reader_ips, &stream_map) {
         state
             .logger
             .log(format!("stream created: {device_id}/{reader_ip}"));
@@ -692,4 +703,25 @@ async fn handle_event_batch(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn created_reader_ips_only_includes_successful_upserts_in_requested_order() {
+        let requested = vec![
+            "10.0.0.1:10000".to_owned(),
+            "10.0.0.2:10000".to_owned(),
+            "10.0.0.3:10000".to_owned(),
+        ];
+        let mut stream_map = HashMap::new();
+        stream_map.insert("10.0.0.1:10000".to_owned(), Uuid::new_v4());
+        stream_map.insert("10.0.0.3:10000".to_owned(), Uuid::new_v4());
+
+        let created = created_reader_ips_for_logging(&requested, &stream_map);
+
+        assert_eq!(created, vec!["10.0.0.1:10000", "10.0.0.3:10000"]);
+    }
 }
