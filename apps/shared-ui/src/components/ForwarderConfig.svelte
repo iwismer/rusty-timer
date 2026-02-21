@@ -66,7 +66,7 @@
   let readers: ReaderEntry[] = $state([]);
   let powerActionsEnabled = $derived(
     controlPowerActionsEnabled({
-      persistedAllowPowerActions,
+      persistedAllowPowerActions: persistedControlAllowPowerActions,
       currentAllowPowerActions: controlAllowPowerActions,
     }),
   );
