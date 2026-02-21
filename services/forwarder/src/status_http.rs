@@ -382,9 +382,11 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
-        let logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
-        }));
+        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
+            ui_tx.clone(),
+            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
+            500,
+        ));
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -423,9 +425,11 @@ impl StatusServer {
         let local_addr = listener.local_addr()?;
 
         let (ui_tx, _) = tokio::sync::broadcast::channel(256);
-        let logger = Arc::new(rt_ui_log::UiLogger::new(ui_tx.clone(), |entry| {
-            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
-        }));
+        let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
+            ui_tx.clone(),
+            |entry| crate::ui_events::ForwarderUiEvent::LogEntry { entry },
+            500,
+        ));
         let subsystem = Arc::new(Mutex::new(subsystem));
         let state = AppState {
             subsystem: subsystem.clone(),
@@ -1330,6 +1334,12 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
     json_response(StatusCode::OK, body)
 }
 
+async fn logs_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "entries": state.logger.entries() }))
+}
+
 async fn events_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> axum::response::sse::Sse<
@@ -1419,6 +1429,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(control_shutdown_device_handler::<J>),
         )
         .route("/api/v1/status", get(status_json_handler::<J>))
+        .route("/api/v1/logs", get(logs_handler::<J>))
         .route("/api/v1/events", get(events_handler::<J>))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
