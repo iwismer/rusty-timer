@@ -203,6 +203,27 @@ pub async fn create_token(
     }
 }
 
+pub async fn delete_all_tokens(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query!("DELETE FROM device_tokens")
+        .execute(&state.pool)
+        .await
+    {
+        Ok(_) => {
+            state.logger.log("all device tokens deleted");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HttpErrorEnvelope {
+                code: "INTERNAL_ERROR".to_owned(),
+                message: e.to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn delete_stream(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,

@@ -452,6 +452,63 @@ async fn test_create_token_duplicate_rejected() {
     assert_eq!(body["code"], "CONFLICT");
 }
 
+#[tokio::test]
+async fn test_delete_all_tokens_removes_active_and_revoked_tokens() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    insert_token(&pool, "fwd-active", "forwarder", b"active-token").await;
+    insert_token(&pool, "rcv-revoked", "receiver", b"revoked-token").await;
+    sqlx::query("UPDATE device_tokens SET revoked_at = now() WHERE device_id = $1")
+        .bind("rcv-revoked")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let addr = make_server(pool.clone()).await;
+    let client = Client::new();
+    let resp = client
+        .delete(format!("http://{}/api/v1/admin/tokens", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let token_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_tokens")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(token_count, 0);
+}
+
+#[tokio::test]
+async fn test_delete_all_tokens_is_idempotent() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = Client::new();
+    let first = client
+        .delete(format!("http://{}/api/v1/admin/tokens", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 204);
+
+    let second = client
+        .delete(format!("http://{}/api/v1/admin/tokens", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 204);
+}
+
 // ---------------------------------------------------------------------------
 // Stream deletion tests
 // ---------------------------------------------------------------------------
