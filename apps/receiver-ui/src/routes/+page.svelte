@@ -464,6 +464,12 @@
                   <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                     {stream.forwarder_id} / {stream.reader_ip}
                   </p>
+                  {#if stream.reads_total !== undefined}
+                    <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
+                      reads: {stream.reads_total} total{#if stream.reads_epoch !== undefined},
+                        {stream.reads_epoch} epoch{/if}
+                    </p>
+                  {/if}
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
                   {#if stream.subscribed}

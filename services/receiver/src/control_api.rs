@@ -49,6 +49,7 @@ pub struct AppState {
     pub update_status: Arc<RwLock<UpdateStatus>>,
     pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
+    pub stream_counts: crate::cache::StreamCounts,
 }
 
 impl AppState {
@@ -69,6 +70,7 @@ impl AppState {
             update_status: Arc::new(RwLock::new(UpdateStatus::UpToDate)),
             staged_update_path: Arc::new(RwLock::new(None)),
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
+            stream_counts: crate::cache::StreamCounts::new(),
         });
         (state, shutdown_rx)
     }
@@ -95,6 +97,7 @@ impl AppState {
 
     /// Build the merged streams response from local subscriptions and upstream server.
     pub async fn build_streams_response(&self) -> StreamsResponse {
+        let counts_snapshot = self.stream_counts.snapshot();
         let db = self.db.lock().await;
         let subs = match db.load_subscriptions() {
             Ok(s) => s,
@@ -141,6 +144,9 @@ impl AppState {
                     s.local_port_override
                         .or_else(|| crate::ports::default_port(&s.reader_ip))
                 });
+                let sk =
+                    crate::cache::StreamKey::new(si.forwarder_id.as_str(), si.reader_ip.as_str());
+                let counts = counts_snapshot.get(&sk);
                 streams.push(StreamEntry {
                     forwarder_id: si.forwarder_id.clone(),
                     reader_ip: si.reader_ip.clone(),
@@ -148,6 +154,8 @@ impl AppState {
                     local_port: port,
                     online: Some(si.online),
                     display_alias: si.display_alias.clone(),
+                    reads_total: counts.as_ref().map(|c| c.total),
+                    reads_epoch: counts.as_ref().map(|c| c.epoch),
                 });
                 seen.insert(key);
             }
@@ -160,6 +168,9 @@ impl AppState {
             let port = sub
                 .local_port_override
                 .or_else(|| crate::ports::default_port(&sub.reader_ip));
+            let sk =
+                crate::cache::StreamKey::new(sub.forwarder_id.as_str(), sub.reader_ip.as_str());
+            let counts = counts_snapshot.get(&sk);
             streams.push(StreamEntry {
                 forwarder_id: sub.forwarder_id.clone(),
                 reader_ip: sub.reader_ip.clone(),
@@ -167,6 +178,8 @@ impl AppState {
                 local_port: port,
                 online: None,
                 display_alias: None,
+                reads_total: counts.as_ref().map(|c| c.total),
+                reads_epoch: counts.as_ref().map(|c| c.epoch),
             });
         }
 
@@ -234,6 +247,10 @@ pub struct StreamEntry {
     pub online: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reads_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reads_epoch: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

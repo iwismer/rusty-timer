@@ -4,6 +4,57 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tracing::debug;
 const CAP: usize = 256;
+
+/// Per-stream read counts (in-memory only, lost on restart).
+#[derive(Debug, Clone, Default)]
+pub struct Counts {
+    pub total: u64,
+    pub epoch: u64,
+    pub current_epoch: u64,
+}
+
+/// Thread-safe container for per-stream read counts.
+#[derive(Clone)]
+pub struct StreamCounts {
+    inner: Arc<RwLock<HashMap<StreamKey, Counts>>>,
+}
+
+impl StreamCounts {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Record `n` reads for a given stream at the specified epoch.
+    /// If the epoch has advanced, the epoch counter resets.
+    pub fn record(&self, key: &StreamKey, stream_epoch: u64, n: u64) {
+        let mut inner = self.inner.write().unwrap();
+        let counts = inner.entry(key.clone()).or_default();
+        counts.total += n;
+        if stream_epoch > counts.current_epoch {
+            counts.current_epoch = stream_epoch;
+            counts.epoch = n;
+        } else {
+            counts.epoch += n;
+        }
+    }
+
+    pub fn get(&self, key: &StreamKey) -> Option<Counts> {
+        self.inner.read().unwrap().get(key).cloned()
+    }
+
+    pub fn snapshot(&self) -> HashMap<StreamKey, Counts> {
+        self.inner.read().unwrap().clone()
+    }
+}
+
+impl Default for StreamCounts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamKey {
     pub forwarder_id: String,
@@ -133,5 +184,31 @@ mod tests {
         let k = StreamKey::new("f", "i");
         let _ = b.subscribe(&k);
         b.remove(&k);
+    }
+    #[test]
+    fn stream_counts_record_increments_total_and_epoch() {
+        let sc = StreamCounts::new();
+        let k = StreamKey::new("f", "i");
+        sc.record(&k, 1, 5);
+        let c = sc.get(&k).unwrap();
+        assert_eq!(c.total, 5);
+        assert_eq!(c.epoch, 5);
+        assert_eq!(c.current_epoch, 1);
+    }
+    #[test]
+    fn stream_counts_epoch_resets_on_advance() {
+        let sc = StreamCounts::new();
+        let k = StreamKey::new("f", "i");
+        sc.record(&k, 1, 10);
+        sc.record(&k, 2, 3);
+        let c = sc.get(&k).unwrap();
+        assert_eq!(c.total, 13);
+        assert_eq!(c.epoch, 3);
+        assert_eq!(c.current_epoch, 2);
+    }
+    #[test]
+    fn stream_counts_get_returns_none_for_unknown() {
+        let sc = StreamCounts::new();
+        assert!(sc.get(&StreamKey::new("x", "y")).is_none());
     }
 }

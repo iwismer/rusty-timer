@@ -53,6 +53,7 @@ pub async fn run_session_loop<S>(
     session_id: String,
     db: Arc<Mutex<Db>>,
     event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
+    stream_counts: crate::cache::StreamCounts,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), SessionError>
 where
@@ -73,6 +74,11 @@ where
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
                                 for e in &b.events { let _ = event_tx.send(e.clone()); }
+                                {
+                                    let mut bc: std::collections::HashMap<(String,String,u64),u64> = std::collections::HashMap::new();
+                                    for e in &b.events { *bc.entry((e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch)).or_insert(0) += 1; }
+                                    for ((f,i,ep),n) in &bc { stream_counts.record(&crate::cache::StreamKey::new(f.as_str(),i.as_str()),*ep,*n); }
+                                }
                                 let mut hw: std::collections::HashMap<(String,String,u64),u64> = std::collections::HashMap::new();
                                 for e in &b.events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();

@@ -7,7 +7,7 @@ pub mod session;
 pub mod sse;
 pub mod ui_events;
 pub mod ui_server;
-pub use cache::{EventBus, StreamKey};
+pub use cache::{EventBus, StreamCounts, StreamKey};
 pub use db::{Db, DbError, DbResult, Profile, Subscription};
 pub use ui_events::ReceiverUiEvent;
 

@@ -17,6 +17,8 @@ export interface StreamEntry {
   local_port: number | null;
   online?: boolean;
   display_alias?: string;
+  reads_total?: number;
+  reads_epoch?: number;
 }
 
 export interface StreamsResponse {
