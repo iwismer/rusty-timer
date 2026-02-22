@@ -3,6 +3,7 @@ pub mod forwarder_races;
 pub mod races;
 pub mod reads;
 pub mod receiver_cursors;
+pub mod stream_epoch_races;
 
 pub struct EventRow {
     pub stream_epoch: i64,

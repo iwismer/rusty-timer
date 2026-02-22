@@ -10,6 +10,10 @@ const INDEX_MIGRATION_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/migrations/0003_events_epoch_tag_index.sql"
 );
+const EPOCH_RACE_MIGRATION_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/migrations/0007_stream_epoch_races_and_receiver_epoch_cursors.sql"
+);
 
 fn read_migration() -> String {
     std::fs::read_to_string(MIGRATION_PATH)
@@ -19,6 +23,12 @@ fn read_migration() -> String {
 fn read_index_migration() -> String {
     std::fs::read_to_string(INDEX_MIGRATION_PATH).expect(
         "Migration file should exist at services/server/migrations/0003_events_epoch_tag_index.sql",
+    )
+}
+
+fn read_epoch_race_migration() -> String {
+    std::fs::read_to_string(EPOCH_RACE_MIGRATION_PATH).expect(
+        "Migration file should exist at services/server/migrations/0007_stream_epoch_races_and_receiver_epoch_cursors.sql",
     )
 }
 
@@ -428,5 +438,35 @@ fn unique_chip_index_migration_exists_and_has_expected_index() {
     assert!(
         sql.contains("WHERE tag_id IS NOT NULL"),
         "Index migration must be partial on tag_id IS NOT NULL"
+    );
+}
+
+#[test]
+fn migration_creates_stream_epoch_races_table() {
+    let sql = read_epoch_race_migration();
+    assert!(
+        sql.contains("CREATE TABLE stream_epoch_races"),
+        "0007 migration must define stream_epoch_races table"
+    );
+    assert!(
+        sql.contains("PRIMARY KEY (stream_id, stream_epoch)"),
+        "0007 migration must define stream_epoch_races PK (stream_id, stream_epoch)"
+    );
+    assert!(
+        sql.contains("idx_stream_epoch_races_race_id"),
+        "0007 migration must define race_id lookup index"
+    );
+}
+
+#[test]
+fn migration_changes_receiver_cursors_pk_to_include_epoch() {
+    let sql = read_epoch_race_migration();
+    assert!(
+        sql.contains("DROP CONSTRAINT receiver_cursors_pkey"),
+        "0007 migration must drop old receiver_cursors PK"
+    );
+    assert!(
+        sql.contains("PRIMARY KEY (receiver_id, stream_id, stream_epoch)"),
+        "0007 migration must set receiver_cursors PK (receiver_id, stream_id, stream_epoch)"
     );
 }
