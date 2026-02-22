@@ -178,6 +178,51 @@ describe("api client", () => {
       error: "no update available",
     });
   });
+
+  it("getSelection calls selection endpoint", async () => {
+    const { getSelection } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        selection: { mode: "manual", streams: [] },
+        replay_policy: "resume",
+      }),
+    );
+    const result = await getSelection();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/selection",
+      expect.any(Object),
+    );
+    expect(result.replay_policy).toBe("resume");
+  });
+
+  it("putSelection sends PUT body", async () => {
+    const { putSelection } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    await putSelection({
+      selection: {
+        mode: "race",
+        race_id: "race-1",
+        epoch_scope: "current",
+      },
+      replay_policy: "live_only",
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/selection",
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+
+  it("getRaces calls races endpoint", async () => {
+    const { getRaces } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        races: [{ race_id: "r1", name: "Race 1", created_at: "now" }],
+      }),
+    );
+    const result = await getRaces();
+    expect(mockFetch).toHaveBeenCalledWith("/api/v1/races", expect.any(Object));
+    expect(result.races[0].race_id).toBe("r1");
+  });
 });
 
 class MockEventSource {

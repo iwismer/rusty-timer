@@ -12,6 +12,10 @@
     AlertBanner,
   } from "@rusty-timer/shared-ui";
   import type {
+    EpochScope,
+    RaceEntry,
+    ReceiverSelection,
+    ReplayPolicy,
     Profile,
     StreamCountUpdate,
     StatusResponse,
@@ -40,6 +44,15 @@
   let portOverrides = $state<Record<string, string | number | null>>({});
   let subscriptionsBusy = $state(false);
   let activeSubscriptionKey = $state<string | null>(null);
+  let races = $state<RaceEntry[]>([]);
+  let selectionMode = $state<ReceiverSelection["mode"]>("manual");
+  let selectedStreams = $state<{ forwarder_id: string; reader_ip: string }[]>(
+    [],
+  );
+  let raceIdDraft = $state("");
+  let epochScopeDraft = $state<EpochScope>("current");
+  let replayPolicyDraft = $state<ReplayPolicy>("resume");
+  let selectionBusy = $state(false);
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
     return `${forwarder_id}/${reader_ip}`;
@@ -116,11 +129,31 @@
 
   async function loadAll() {
     try {
-      [status, streams, logs] = await Promise.all([
-        api.getStatus(),
-        api.getStreams(),
-        api.getLogs(),
-      ]);
+      const [nextStatus, nextStreams, nextLogs, nextSelection, nextRaces] =
+        await Promise.all([
+          api.getStatus(),
+          api.getStreams(),
+          api.getLogs(),
+          api.getSelection().catch(() => null),
+          api.getRaces().catch(() => ({ races: [] })),
+        ]);
+      status = nextStatus;
+      streams = nextStreams;
+      logs = nextLogs;
+      races = nextRaces.races;
+      if (nextSelection) {
+        selectionMode = nextSelection.selection.mode;
+        replayPolicyDraft = nextSelection.replay_policy;
+        if (nextSelection.selection.mode === "manual") {
+          selectedStreams = nextSelection.selection.streams;
+          raceIdDraft = "";
+          epochScopeDraft = "current";
+        } else {
+          raceIdDraft = nextSelection.selection.race_id;
+          epochScopeDraft = nextSelection.selection.epoch_scope;
+          selectedStreams = [];
+        }
+      }
       const p = await api.getProfile().catch(() => null);
       if (p) {
         profile = p;
@@ -142,6 +175,70 @@
     } catch (e) {
       error = String(e);
     }
+  }
+
+  function selectionPayload(): api.ReceiverSetSelection {
+    if (selectionMode === "manual") {
+      return {
+        selection: {
+          mode: "manual",
+          streams: selectedStreams,
+        },
+        replay_policy: replayPolicyDraft,
+      };
+    }
+
+    return {
+      selection: {
+        mode: "race",
+        race_id: raceIdDraft.trim(),
+        epoch_scope: epochScopeDraft,
+      },
+      replay_policy: replayPolicyDraft,
+    };
+  }
+
+  async function applySelection(): Promise<void> {
+    if (selectionBusy) {
+      return;
+    }
+
+    selectionBusy = true;
+    error = null;
+    try {
+      await api.putSelection(selectionPayload());
+    } catch (e) {
+      error = String(e);
+    } finally {
+      selectionBusy = false;
+    }
+  }
+
+  function handleSelectionModeChange(event: Event): void {
+    const nextMode = (event.currentTarget as HTMLSelectElement).value as
+      | "manual"
+      | "race";
+    selectionMode = nextMode;
+    void applySelection();
+  }
+
+  function handleRaceIdBlur(): void {
+    raceIdDraft = raceIdDraft.trim();
+    if (selectionMode === "race") {
+      void applySelection();
+    }
+  }
+
+  function handleEpochScopeChange(event: Event): void {
+    epochScopeDraft = (event.currentTarget as HTMLSelectElement)
+      .value as EpochScope;
+    void applySelection();
+  }
+
+  function handleReplayPolicyChange(event: Event): void {
+    replayPolicyDraft = (event.currentTarget as HTMLSelectElement)
+      .value as ReplayPolicy;
+    void applySelection();
   }
 
   async function saveProfile() {
@@ -439,6 +536,77 @@
         {#if checkMessage}
           <p class="text-xs mt-1 m-0 text-text-muted">{checkMessage}</p>
         {/if}
+      </section>
+    </Card>
+  </div>
+
+  <div class="mb-6">
+    <Card title="Selection">
+      <section data-testid="selection-section">
+        <div class="grid gap-3">
+          <label class="block text-xs font-medium text-text-muted">
+            Mode
+            <select
+              data-testid="selection-mode-select"
+              class="{inputClass} mt-1"
+              bind:value={selectionMode}
+              onchange={handleSelectionModeChange}
+              disabled={selectionBusy}
+            >
+              <option value="manual">Manual</option>
+              <option value="race">Race</option>
+            </select>
+          </label>
+
+          {#if selectionMode === "race"}
+            <label class="block text-xs font-medium text-text-muted">
+              Race ID
+              <input
+                data-testid="race-id-input"
+                class="{inputClass} mt-1"
+                bind:value={raceIdDraft}
+                onblur={handleRaceIdBlur}
+                list="race-id-options"
+                placeholder="race id"
+                disabled={selectionBusy}
+              />
+              <datalist id="race-id-options">
+                {#each races as race}
+                  <option value={race.race_id}>{race.name}</option>
+                {/each}
+              </datalist>
+            </label>
+
+            <label class="block text-xs font-medium text-text-muted">
+              Epoch Scope
+              <select
+                data-testid="epoch-scope-select"
+                class="{inputClass} mt-1"
+                bind:value={epochScopeDraft}
+                onchange={handleEpochScopeChange}
+                disabled={selectionBusy}
+              >
+                <option value="current">Current</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+          {/if}
+
+          <label class="block text-xs font-medium text-text-muted">
+            Replay Policy
+            <select
+              data-testid="replay-policy-select"
+              class="{inputClass} mt-1"
+              bind:value={replayPolicyDraft}
+              onchange={handleReplayPolicyChange}
+              disabled={selectionBusy}
+            >
+              <option value="resume">Resume</option>
+              <option value="live_only">Live only</option>
+              <option value="targeted">Targeted replay</option>
+            </select>
+          </label>
+        </div>
       </section>
     </Card>
   </div>
