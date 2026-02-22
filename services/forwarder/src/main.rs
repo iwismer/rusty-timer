@@ -24,8 +24,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::{watch, Mutex, Notify};
-use tokio::time::{sleep, Duration};
+use tokio::sync::{Mutex, Notify, watch};
+use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -1143,7 +1143,7 @@ async fn main() {
     let restart_requested;
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
@@ -2273,7 +2273,7 @@ token_file = "/tmp/test-token"
                     forwarder::ui_events::ForwarderUiEvent::LogEntry { entry }
                         if entry.contains("uplink connect failed") =>
                     {
-                        break entry
+                        break entry;
                     }
                     _ => continue,
                 }

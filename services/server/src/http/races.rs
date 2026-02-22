@@ -2,10 +2,10 @@ use super::response::{bad_request, internal_error, not_found};
 use crate::repo::races as repo;
 use crate::state::AppState;
 use axum::{
+    Json,
     extract::{Multipart, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use uuid::Uuid;
 

@@ -1,4 +1,4 @@
-use receiver::ports::{default_port, last_octet, resolve_ports, stream_key, PortAssignment};
+use receiver::ports::{PortAssignment, default_port, last_octet, resolve_ports, stream_key};
 use receiver::{Db, Subscription};
 
 #[test]

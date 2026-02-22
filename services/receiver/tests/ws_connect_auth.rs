@@ -3,14 +3,14 @@
 //! server.
 
 use axum::{
+    Router,
     extract::{
-        ws::{WebSocket, WebSocketUpgrade},
         State,
+        ws::{WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use receiver::build_authenticated_request;
 use std::sync::Arc;

@@ -32,7 +32,7 @@ must_use_candidate = "allow"
 name = "rusty-timer"
 version = "1.0.0"
 authors = ["iwismer <isaac@iwismer.ca>"]
-edition = "2021"
+edition = "2024"
 homepage = "https://github.com/iwismer/rusty-timer"
 
 [lib]

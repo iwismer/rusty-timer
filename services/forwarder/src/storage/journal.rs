@@ -11,7 +11,7 @@
 //! # stream_key
 //! `stream_key` = `reader_ip` (forwarder_id is implicit since one forwarder = one device).
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------

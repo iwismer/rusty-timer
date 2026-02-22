@@ -10,12 +10,12 @@ use crate::{
     },
 };
 use axum::extract::{
-    ws::{Message, WebSocket, WebSocketUpgrade},
     State,
+    ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use rt_protocol::{error_codes, ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage};
+use rt_protocol::{ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage, error_codes};
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
