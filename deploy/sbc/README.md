@@ -174,6 +174,11 @@ allow_power_actions = true
 ```
 
 That enables the config UI actions for restarting/shutting down the device.
+The setup script installs
+`/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules` when
+`[control].allow_power_actions = true`, and removes it when
+`[control].allow_power_actions = false`.
+
 For non-interactive installs, set `RT_SETUP_ALLOW_POWER_ACTIONS=0` to disable
 this behavior.
 

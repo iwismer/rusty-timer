@@ -1109,23 +1109,31 @@ async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u
 #[cfg(unix)]
 fn map_power_action_command_result(
     systemctl_action: &'static str,
-    result: std::io::Result<std::process::ExitStatus>,
+    result: std::io::Result<std::process::Output>,
 ) -> Result<(), (u16, String)> {
     match result {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let detail = power_action_command_detail(&output);
+            let status_code = if power_action_auth_failed(&detail) {
+                403u16
+            } else {
+                500u16
+            };
             tracing::error!(
                 action = systemctl_action,
-                exit_status = ?status.code(),
+                exit_status = ?output.status.code(),
+                detail = %detail,
                 "control action command exited with failure"
             );
             Err((
-                500u16,
+                status_code,
                 serde_json::json!({
                     "ok": false,
                     "error": format!(
-                        "control action command exited with failure: systemctl {}",
-                        systemctl_action
+                        "control action command exited with failure: systemctl {} ({})",
+                        systemctl_action,
+                        detail
                     )
                 })
                 .to_string(),
@@ -1147,13 +1155,7 @@ fn map_power_action_command_result(
 
 #[cfg(unix)]
 async fn run_device_power_action(systemctl_action: &'static str) -> Result<(), (u16, String)> {
-    match tokio::task::spawn_blocking(move || {
-        std::process::Command::new("systemctl")
-            .arg(systemctl_action)
-            .status()
-    })
-    .await
-    {
+    match tokio::task::spawn_blocking(move || run_power_action_command(systemctl_action)).await {
         Ok(result) => map_power_action_command_result(systemctl_action, result),
         Err(e) => {
             tracing::error!(action = systemctl_action, error = %e, "control action task failed");
@@ -1167,6 +1169,40 @@ async fn run_device_power_action(systemctl_action: &'static str) -> Result<(), (
             ))
         }
     }
+}
+
+#[cfg(unix)]
+fn run_power_action_command(
+    systemctl_action: &'static str,
+) -> std::io::Result<std::process::Output> {
+    std::process::Command::new("systemctl")
+        .arg("--no-ask-password")
+        .arg(systemctl_action)
+        .output()
+}
+
+#[cfg(unix)]
+fn power_action_command_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    "no command output".to_owned()
+}
+
+#[cfg(unix)]
+fn power_action_auth_failed(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("interactive authentication required")
+        || lower.contains("authentication is required")
+        || lower.contains("not authorized")
+        || lower.contains("access denied")
+        || lower.contains("permission denied")
+        || lower.contains("a password is required")
 }
 
 #[cfg(not(unix))]
@@ -1249,15 +1285,50 @@ pub async fn apply_control_action(
     }
 }
 
+fn control_action_error_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| {
+            json.get("error")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| body.to_owned())
+}
+
+fn log_control_action_failure(
+    logger: &rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>,
+    action: &str,
+    status_code: u16,
+    body: &str,
+) {
+    let error = control_action_error_message(body);
+    logger.log_at(
+        rt_ui_log::UiLogLevel::Error,
+        format!(
+            "control action '{}' failed (HTTP {}): {}",
+            action, status_code, error
+        ),
+    );
+}
+
 async fn control_restart_service_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
     match apply_control_action("restart_service", None, state.restart_signal.as_ref()).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
+        Err((status_code, body)) => {
+            log_control_action_failure(
+                state.logger.as_ref(),
+                "restart_service",
+                status_code,
+                &body,
+            );
+            json_response(
+                StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
     }
 }
 
@@ -1273,10 +1344,13 @@ async fn control_restart_device_handler<J: JournalAccess + Send + 'static>(
             StatusCode::OK,
             serde_json::json!({"ok": true, "status": "restart_device_scheduled"}).to_string(),
         ),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
+        Err((status_code, body)) => {
+            log_control_action_failure(state.logger.as_ref(), "restart_device", status_code, &body);
+            json_response(
+                StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
     }
 }
 
@@ -1292,10 +1366,18 @@ async fn control_shutdown_device_handler<J: JournalAccess + Send + 'static>(
             StatusCode::OK,
             serde_json::json!({"ok": true, "status": "shutdown_device_scheduled"}).to_string(),
         ),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
+        Err((status_code, body)) => {
+            log_control_action_failure(
+                state.logger.as_ref(),
+                "shutdown_device",
+                status_code,
+                &body,
+            );
+            json_response(
+                StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
     }
 }
 
@@ -2540,6 +2622,16 @@ target = "192.168.1.100:10000"
 
     #[cfg(unix)]
     #[test]
+    fn power_action_execution_does_not_use_sudo_fallback() {
+        let source = include_str!("status_http.rs");
+        assert!(
+            !source.contains("Command::new(\"sudo\")"),
+            "power actions must not invoke sudo fallback"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn power_action_command_result_returns_500_on_spawn_error() {
         let result = map_power_action_command_result(
             "reboot",
@@ -2559,8 +2651,14 @@ target = "192.168.1.100:10000"
     fn power_action_command_result_returns_500_on_non_zero_exit() {
         use std::os::unix::process::ExitStatusExt;
 
-        let status = std::process::ExitStatus::from_raw(1 << 8);
-        let result = map_power_action_command_result("poweroff", Ok(status));
+        let result = map_power_action_command_result(
+            "poweroff",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: vec![],
+            }),
+        );
 
         let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
         assert_eq!(http_status, 500);
@@ -2569,11 +2667,77 @@ target = "192.168.1.100:10000"
 
     #[cfg(unix)]
     #[test]
+    fn power_action_command_result_returns_403_on_auth_failure() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "poweroff",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"Call to PowerOff failed: Interactive authentication required.\n".to_vec(),
+            }),
+        );
+
+        let (http_status, body) = result.expect_err("auth failures must return an HTTP error");
+        assert_eq!(http_status, 403);
+        assert!(body
+            .to_ascii_lowercase()
+            .contains("interactive authentication required"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_non_auth_polkit_error() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "poweroff",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"polkit daemon unavailable".to_vec(),
+            }),
+        );
+
+        let (http_status, body) =
+            result.expect_err("non-auth polkit failures must return an HTTP error");
+        assert_eq!(http_status, 500);
+        assert!(body.contains("polkit daemon unavailable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_includes_stderr_in_error_body() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "reboot",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"sudo: a password is required".to_vec(),
+            }),
+        );
+
+        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
+        assert_eq!(http_status, 403);
+        assert!(body.contains("sudo: a password is required"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn power_action_command_result_returns_ok_on_success_exit() {
         use std::os::unix::process::ExitStatusExt;
 
-        let status = std::process::ExitStatus::from_raw(0);
-        let result = map_power_action_command_result("reboot", Ok(status));
+        let result = map_power_action_command_result(
+            "reboot",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: vec![],
+                stderr: vec![],
+            }),
+        );
         assert!(result.is_ok());
     }
 
