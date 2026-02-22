@@ -325,6 +325,52 @@ async fn main() {
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
 
+                                                // Send ReceiverSubscribe for streams not covered by resume cursors.
+                                                let ws = {
+                                                    let db = state.db.lock().await;
+                                                    let subs = db.load_subscriptions().unwrap_or_default();
+                                                    let cursors = db.load_resume_cursors().unwrap_or_default();
+                                                    let cursor_set: std::collections::HashSet<(&str, &str)> = cursors
+                                                        .iter()
+                                                        .map(|c| (c.forwarder_id.as_str(), c.reader_ip.as_str()))
+                                                        .collect();
+                                                    let new_streams: Vec<rt_protocol::StreamRef> = subs
+                                                        .iter()
+                                                        .filter(|s| !cursor_set.contains(&(s.forwarder_id.as_str(), s.reader_ip.as_str())))
+                                                        .map(|s| rt_protocol::StreamRef {
+                                                            forwarder_id: s.forwarder_id.clone(),
+                                                            reader_ip: s.reader_ip.clone(),
+                                                        })
+                                                        .collect();
+                                                    drop(db);
+
+                                                    if new_streams.is_empty() {
+                                                        ws
+                                                    } else {
+                                                        info!(n = new_streams.len(), "subscribing to new streams");
+                                                        let msg = rt_protocol::WsMessage::ReceiverSubscribe(
+                                                            rt_protocol::ReceiverSubscribe {
+                                                                session_id: session_id.clone(),
+                                                                streams: new_streams,
+                                                            },
+                                                        );
+                                                        use futures_util::SinkExt;
+                                                        use tokio_tungstenite::tungstenite::protocol::Message;
+                                                        let mut ws = ws;
+                                                        if let Err(e) = ws.send(Message::Text(
+                                                            serde_json::to_string(&msg).unwrap().into(),
+                                                        )).await {
+                                                            state.logger.log_at(
+                                                                UiLogLevel::Error,
+                                                                format!("Failed to send ReceiverSubscribe: {e}"),
+                                                            );
+                                                            state.set_connection_state(ConnectionState::Disconnected).await;
+                                                            continue;
+                                                        }
+                                                        ws
+                                                    }
+                                                };
+
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
                                                 let db_arc = Arc::clone(&state.db);
