@@ -97,7 +97,7 @@ mod tests {
         });
         let hello_json = serde_json::to_string(&hello).expect("serialize hello");
 
-        let parsed = parse_text_message(Some(Ok(Message::Text(hello_json.clone().into()))))
+        let parsed = parse_text_message(Some(Ok(Message::Text(hello_json.clone()))))
             .expect("text message should be returned");
         match serde_json::from_str::<WsMessage>(&parsed).expect("hello JSON should parse") {
             WsMessage::ForwarderHello(_) => {}
