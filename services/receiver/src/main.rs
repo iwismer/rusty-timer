@@ -282,7 +282,8 @@ async fn main() {
                         match url_opt {
                             None => {
                                 state.logger.log_at(UiLogLevel::Warn, "No upstream URL configured");
-                                state.set_connection_state(ConnectionState::Disconnected).await;
+                                let _ =
+                                    set_disconnected_if_attempt_current(&state, attempt).await;
                             }
                             Some(base_url) => {
                                 // Build the full WS URL from the base URL.
@@ -299,7 +300,8 @@ async fn main() {
                                 match token_opt {
                                   None => {
                                     state.logger.log_at(UiLogLevel::Warn, "No auth token in profile");
-                                    state.set_connection_state(ConnectionState::Disconnected).await;
+                                    let _ = set_disconnected_if_attempt_current(&state, attempt)
+                                        .await;
                                   }
                                   Some(token) => {
                                 let ws_request =
@@ -307,13 +309,15 @@ async fn main() {
                                 match ws_request {
                                   Err(e) => {
                                     state.logger.log_at(UiLogLevel::Error, format!("Failed to build WS request: {e}"));
-                                    state.set_connection_state(ConnectionState::Disconnected).await;
+                                    let _ = set_disconnected_if_attempt_current(&state, attempt)
+                                        .await;
                                   }
                                   Ok(ws_request) => {
                                 match connect_async(ws_request).await {
                                     Err(e) => {
                                         state.logger.log_at(UiLogLevel::Error, format!("Connection failed: {e}"));
-                                        state.set_connection_state(ConnectionState::Disconnected).await;
+                                        let _ = set_disconnected_if_attempt_current(&state, attempt)
+                                            .await;
                                     }
                                     Ok((ws, _)) => {
                                         // Perform the receiver hello / heartbeat handshake.
@@ -324,11 +328,14 @@ async fn main() {
                                         match (session_result, ws) {
                                             (Err(e), _) => {
                                                 state.logger.log_at(UiLogLevel::Error, format!("Handshake failed: {e}"));
-                                                state.set_connection_state(ConnectionState::Disconnected).await;
+                                                let _ = set_disconnected_if_attempt_current(
+                                                    &state, attempt,
+                                                )
+                                                .await;
                                             }
                                             (Ok(session_id), Some(ws)) => {
-                                                let still_current = state.current_connect_attempt() == attempt
-                                                    && *state.connection_state.read().await == ConnectionState::Connecting;
+                                                let still_current =
+                                                    is_current_connect_attempt(&state, attempt).await;
                                                 if !still_current {
                                                     state.logger.log("Discarding stale connect attempt");
                                                     continue;
@@ -382,7 +389,10 @@ async fn main() {
                                             }
                                             (Ok(_), None) => {
                                                 state.logger.log_at(UiLogLevel::Error, "Handshake succeeded but connection lost");
-                                                state.set_connection_state(ConnectionState::Disconnected).await;
+                                                let _ = set_disconnected_if_attempt_current(
+                                                    &state, attempt,
+                                                )
+                                                .await;
                                             }
                                         }
                                     }
@@ -435,6 +445,22 @@ async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
             return cs;
         }
     }
+}
+
+async fn is_current_connect_attempt(state: &Arc<AppState>, attempt: u64) -> bool {
+    state.current_connect_attempt() == attempt
+        && *state.connection_state.read().await == ConnectionState::Connecting
+}
+
+async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
+    if !is_current_connect_attempt(state, attempt).await {
+        state.logger.log("Ignoring stale connect attempt result");
+        return false;
+    }
+    state
+        .set_connection_state(ConnectionState::Disconnected)
+        .await;
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -663,5 +689,27 @@ async fn reconcile_proxies(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_connect_attempt_failure_does_not_force_disconnected() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        let stale_attempt = state.current_connect_attempt();
+        state.request_connect().await;
+
+        let transitioned = set_disconnected_if_attempt_current(&state, stale_attempt).await;
+        assert!(!transitioned);
+        assert_eq!(
+            *state.connection_state.read().await,
+            ConnectionState::Connecting
+        );
     }
 }
