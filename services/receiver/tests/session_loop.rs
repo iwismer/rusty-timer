@@ -1,6 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
+use receiver::cache::StreamCounts;
 use receiver::db::Db;
 use receiver::session::{SessionError, connect, run_session_loop};
+use receiver::ui_events::ReceiverUiEvent;
 use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, WsMessage};
 use rt_test_utils::MockWsServer;
 use std::collections::HashMap;
@@ -144,6 +146,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
         .unwrap();
     let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(16);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     run_session_loop(
@@ -151,6 +154,8 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
         "session-1".to_owned(),
         db.clone(),
         event_tx,
+        StreamCounts::new(),
+        ui_tx,
         shutdown_rx,
     )
     .await
@@ -212,7 +217,18 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let result = run_session_loop(ws, "session-2".to_owned(), db, event_tx, shutdown_rx).await;
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+
+    let result = run_session_loop(
+        ws,
+        "session-2".to_owned(),
+        db,
+        event_tx,
+        StreamCounts::new(),
+        ui_tx,
+        shutdown_rx,
+    )
+    .await;
     assert!(matches!(result, Err(SessionError::ConnectionClosed)));
     join_server_task(task).await;
 }
@@ -238,7 +254,18 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let result = run_session_loop(ws, "session-3".to_owned(), db, event_tx, shutdown_rx).await;
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+
+    let result = run_session_loop(
+        ws,
+        "session-3".to_owned(),
+        db,
+        event_tx,
+        StreamCounts::new(),
+        ui_tx,
+        shutdown_rx,
+    )
+    .await;
     assert!(result.is_ok());
     join_server_task(task).await;
 }
@@ -266,7 +293,18 @@ async fn run_session_loop_replies_to_ping_with_pong() {
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let result = run_session_loop(ws, "session-4".to_owned(), db, event_tx, shutdown_rx).await;
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+
+    let result = run_session_loop(
+        ws,
+        "session-4".to_owned(),
+        db,
+        event_tx,
+        StreamCounts::new(),
+        ui_tx,
+        shutdown_rx,
+    )
+    .await;
 
     assert!(result.is_ok());
     assert_eq!(pong_rx.await.unwrap(), vec![1, 2, 3]);
@@ -287,11 +325,15 @@ async fn run_session_loop_stops_on_shutdown_signal() {
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+
     let handle = tokio::spawn(run_session_loop(
         ws,
         "session-5".to_owned(),
         db,
         event_tx,
+        StreamCounts::new(),
+        ui_tx,
         shutdown_rx,
     ));
 
