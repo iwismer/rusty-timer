@@ -663,6 +663,7 @@ pub async fn apply_section_update(
     config_state: &ConfigState,
     subsystem: &Arc<Mutex<SubsystemStatus>>,
     ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
 ) -> Result<(), (u16, String)> {
     require_object_payload(payload)?;
 
@@ -773,7 +774,7 @@ pub async fn apply_section_update(
             let allow_power_actions = optional_bool_field(payload, "allow_power_actions")?;
             let action = optional_string_field(payload, "action")?;
             if let Some(action) = action {
-                return apply_control_action(&action, Some(config_state), None).await;
+                return apply_control_action_from_config(&action, config_state, logger).await;
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.control = Some(crate::config::RawControlConfig {
@@ -1110,6 +1111,7 @@ async fn read_allow_power_actions(config_state: &ConfigState) -> Result<bool, (u
 fn map_power_action_command_result(
     systemctl_action: &'static str,
     result: std::io::Result<std::process::Output>,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
 ) -> Result<(), (u16, String)> {
     match result {
         Ok(output) if output.status.success() => Ok(()),
@@ -1126,6 +1128,16 @@ fn map_power_action_command_result(
                 detail = %detail,
                 "control action command exited with failure"
             );
+            if let Some(logger) = logger {
+                logger.log_at(
+                    rt_ui_log::UiLogLevel::Error,
+                    format!(
+                        "systemctl {} exited with failure (code {:?})",
+                        systemctl_action,
+                        output.status.code(),
+                    ),
+                );
+            }
             Err((
                 status_code,
                 serde_json::json!({
@@ -1141,6 +1153,12 @@ fn map_power_action_command_result(
         }
         Err(e) => {
             tracing::error!(action = systemctl_action, error = %e, "control action command failed");
+            if let Some(logger) = logger {
+                logger.log_at(
+                    rt_ui_log::UiLogLevel::Error,
+                    format!("systemctl {} failed: {}", systemctl_action, e),
+                );
+            }
             Err((
                 500u16,
                 serde_json::json!({
@@ -1154,20 +1172,36 @@ fn map_power_action_command_result(
 }
 
 #[cfg(unix)]
-async fn run_device_power_action(systemctl_action: &'static str) -> Result<(), (u16, String)> {
+fn map_power_action_join_error(
+    systemctl_action: &'static str,
+    e: tokio::task::JoinError,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> (u16, String) {
+    tracing::error!(action = systemctl_action, error = %e, "control action task failed");
+    if let Some(logger) = logger {
+        logger.log_at(
+            rt_ui_log::UiLogLevel::Error,
+            format!("systemctl {} task failed: {}", systemctl_action, e),
+        );
+    }
+    (
+        500u16,
+        serde_json::json!({
+            "ok": false,
+            "error": format!("control action task failed: {}", e)
+        })
+        .to_string(),
+    )
+}
+
+#[cfg(unix)]
+async fn run_device_power_action(
+    systemctl_action: &'static str,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
     match tokio::task::spawn_blocking(move || run_power_action_command(systemctl_action)).await {
-        Ok(result) => map_power_action_command_result(systemctl_action, result),
-        Err(e) => {
-            tracing::error!(action = systemctl_action, error = %e, "control action task failed");
-            Err((
-                500u16,
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!("control action task failed: {}", e)
-                })
-                .to_string(),
-            ))
-        }
+        Ok(result) => map_power_action_command_result(systemctl_action, result, logger),
+        Err(e) => Err(map_power_action_join_error(systemctl_action, e, logger)),
     }
 }
 
@@ -1206,7 +1240,10 @@ fn power_action_auth_failed(detail: &str) -> bool {
 }
 
 #[cfg(not(unix))]
-async fn run_device_power_action(_systemctl_action: &'static str) -> Result<(), (u16, String)> {
+async fn run_device_power_action(
+    _systemctl_action: &'static str,
+    _logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
     Err((
         501u16,
         serde_json::json!({
@@ -1217,10 +1254,46 @@ async fn run_device_power_action(_systemctl_action: &'static str) -> Result<(), 
     ))
 }
 
+async fn apply_control_action_from_config(
+    action: &str,
+    config_state: &ConfigState,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+) -> Result<(), (u16, String)> {
+    apply_control_action_from_config_with(
+        action,
+        config_state,
+        logger,
+        |action, config_state, restart_signal, logger| {
+            Box::pin(async move {
+                apply_control_action(action, config_state, restart_signal, logger).await
+            })
+        },
+    )
+    .await
+}
+
+async fn apply_control_action_from_config_with<F>(
+    action: &str,
+    config_state: &ConfigState,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    apply_fn: F,
+) -> Result<(), (u16, String)>
+where
+    F: for<'a> FnOnce(
+        &'a str,
+        Option<&'a ConfigState>,
+        Option<&'a Arc<Notify>>,
+        Option<&'a rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), (u16, String)>> + Send + 'a>>,
+{
+    apply_fn(action, Some(config_state), None, logger).await
+}
+
 pub async fn apply_control_action(
     action: &str,
     config_state: Option<&ConfigState>,
     restart_signal: Option<&Arc<Notify>>,
+    logger: Option<&rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
 ) -> Result<(), (u16, String)> {
     match action {
         "restart_service" => {
@@ -1275,7 +1348,7 @@ pub async fn apply_control_action(
             } else {
                 "poweroff"
             };
-            run_device_power_action(systemctl_action).await?;
+            run_device_power_action(systemctl_action, logger).await?;
             Ok(())
         }
         _ => Err(bad_request_error(format!(
@@ -1315,7 +1388,14 @@ fn log_control_action_failure(
 async fn control_restart_service_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> Response {
-    match apply_control_action("restart_service", None, state.restart_signal.as_ref()).await {
+    match apply_control_action(
+        "restart_service",
+        None,
+        state.restart_signal.as_ref(),
+        Some(&state.logger),
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => {
             log_control_action_failure(
@@ -1339,7 +1419,14 @@ async fn control_restart_device_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    match apply_control_action("restart_device", Some(&cs), state.restart_signal.as_ref()).await {
+    match apply_control_action(
+        "restart_device",
+        Some(&cs),
+        state.restart_signal.as_ref(),
+        Some(&state.logger),
+    )
+    .await
+    {
         Ok(()) => json_response(
             StatusCode::OK,
             serde_json::json!({"ok": true, "status": "restart_device_scheduled"}).to_string(),
@@ -1361,7 +1448,14 @@ async fn control_shutdown_device_handler<J: JournalAccess + Send + 'static>(
         Some(cs) => cs,
         None => return config_not_available(),
     };
-    match apply_control_action("shutdown_device", Some(&cs), state.restart_signal.as_ref()).await {
+    match apply_control_action(
+        "shutdown_device",
+        Some(&cs),
+        state.restart_signal.as_ref(),
+        Some(&state.logger),
+    )
+    .await
+    {
         Ok(()) => json_response(
             StatusCode::OK,
             serde_json::json!({"ok": true, "status": "shutdown_device_scheduled"}).to_string(),
@@ -1900,7 +1994,16 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("general", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "general",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        None,
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1927,7 +2030,16 @@ async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("server", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "server",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        None,
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1954,7 +2066,7 @@ async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("auth", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update("auth", &payload, &cs, &state.subsystem, &state.ui_tx, None).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1981,7 +2093,16 @@ async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("journal", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "journal",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        None,
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2008,7 +2129,16 @@ async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("uplink", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "uplink",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        None,
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2035,7 +2165,16 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("status_http", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "status_http",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        None,
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2062,7 +2201,16 @@ async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("readers", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "readers",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        None,
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2089,7 +2237,16 @@ async fn post_config_control_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("control", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "control",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        Some(&state.logger),
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2116,7 +2273,16 @@ async fn post_config_update_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("update", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(
+        "update",
+        &payload,
+        &cs,
+        &state.subsystem,
+        &state.ui_tx,
+        None,
+    )
+    .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2152,7 +2318,7 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::time::{sleep, Duration};
 
     struct FakeChecker {
@@ -2639,6 +2805,7 @@ target = "192.168.1.100:10000"
                 std::io::ErrorKind::NotFound,
                 "systemctl not found",
             )),
+            None,
         );
 
         let (status, body) = result.expect_err("spawn errors must return an HTTP error");
@@ -2658,6 +2825,7 @@ target = "192.168.1.100:10000"
                 stdout: vec![],
                 stderr: vec![],
             }),
+            None,
         );
 
         let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
@@ -2677,6 +2845,7 @@ target = "192.168.1.100:10000"
                 stdout: vec![],
                 stderr: b"Call to PowerOff failed: Interactive authentication required.\n".to_vec(),
             }),
+            None,
         );
 
         let (http_status, body) = result.expect_err("auth failures must return an HTTP error");
@@ -2698,6 +2867,7 @@ target = "192.168.1.100:10000"
                 stdout: vec![],
                 stderr: b"polkit daemon unavailable".to_vec(),
             }),
+            None,
         );
 
         let (http_status, body) =
@@ -2718,6 +2888,7 @@ target = "192.168.1.100:10000"
                 stdout: vec![],
                 stderr: b"sudo: a password is required".to_vec(),
             }),
+            None,
         );
 
         let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
@@ -2737,8 +2908,63 @@ target = "192.168.1.100:10000"
                 stdout: vec![],
                 stderr: vec![],
             }),
+            None,
         );
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn power_action_join_error_logs_to_ui_when_logger_present() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        });
+
+        let join_err = tokio::task::spawn_blocking(|| -> () {
+            panic!("boom");
+        })
+        .await
+        .expect_err("task must panic");
+
+        let (_status, _body) = map_power_action_join_error("reboot", join_err, Some(&logger));
+
+        let evt = rx.try_recv().expect("expected UI log event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry } => {
+                assert!(entry.contains("systemctl reboot task failed"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn control_action_from_config_forwards_logger_to_apply_fn() {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let logger = rt_ui_log::UiLogger::new(tx, |entry| {
+            crate::ui_events::ForwarderUiEvent::LogEntry { entry }
+        });
+        let config = ConfigState::new(std::path::PathBuf::from("/tmp/unused.toml"));
+
+        let saw_logger = Arc::new(AtomicBool::new(false));
+        let spy = Arc::clone(&saw_logger);
+
+        let _ = apply_control_action_from_config_with(
+            "restart_device",
+            &config,
+            Some(&logger),
+            move |_action, _config_state, _restart_signal, logger| {
+                let spy = Arc::clone(&spy);
+                let has_logger = logger.is_some();
+                Box::pin(async move {
+                    spy.store(has_logger, Ordering::SeqCst);
+                    Err((500u16, "{\"ok\":false}".to_owned()))
+                })
+            },
+        )
+        .await;
+
+        assert!(saw_logger.load(Ordering::SeqCst));
     }
 
     #[test]
