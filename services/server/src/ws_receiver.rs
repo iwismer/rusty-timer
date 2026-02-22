@@ -223,10 +223,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 session_id: session_id.clone(),
                 events: events_to_send,
             });
-            if let Ok(json) = serde_json::to_string(&batch) {
-                if socket.send(Message::Text(json.into())).await.is_err() {
-                    break;
-                }
+            if let Ok(json) = serde_json::to_string(&batch)
+                && socket.send(Message::Text(json.into())).await.is_err()
+            {
+                break;
             }
             continue;
         }

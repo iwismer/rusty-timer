@@ -250,10 +250,10 @@ pub async fn create_token(
                 .into_response()
         }
         Err(e) => {
-            if let Some(db_err) = e.as_database_error() {
-                if db_err.is_unique_violation() {
-                    return conflict("a token with this value already exists");
-                }
+            if let Some(db_err) = e.as_database_error()
+                && db_err.is_unique_violation()
+            {
+                return conflict("a token with this value already exists");
             }
             internal_error(e)
         }

@@ -176,10 +176,10 @@ fn check_blocking(
     // Find the latest release whose tag matches our service prefix.
     let mut best: Option<(Version, String)> = None;
     for release in &releases {
-        if let Some(ver) = parse_version_from_tag(&release.version, service_name) {
-            if best.as_ref().is_none_or(|(v, _)| ver > *v) {
-                best = Some((ver, release.version.clone()));
-            }
+        if let Some(ver) = parse_version_from_tag(&release.version, service_name)
+            && best.as_ref().is_none_or(|(v, _)| ver > *v)
+        {
+            best = Some((ver, release.version.clone()));
         }
     }
 
@@ -338,12 +338,11 @@ fn find_extracted_binary(
     for entry in std::fs::read_dir(extract_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name == service_name || name == exe_name {
-                    return Ok(path);
-                }
-            }
+        if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && (name == service_name || name == exe_name)
+        {
+            return Ok(path);
         }
     }
 
