@@ -1,5 +1,5 @@
 use axum::http::{Method, Uri};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 #[cfg(feature = "embed-ui")]
 #[derive(rust_embed::Embed)]
@@ -15,7 +15,7 @@ struct UiAssets;
 pub async fn serve_ui(method: Method, uri: Uri) -> Response {
     let raw_path = match rt_ui_http::validate_ui_request(&method, &uri, &["/api", "/update"]) {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
 
     #[cfg(feature = "embed-ui")]

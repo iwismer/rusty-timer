@@ -502,25 +502,19 @@ fn load_new_streams_to_subscribe(db: &Db) -> receiver::DbResult<Vec<rt_protocol:
     load_streams_to_subscribe_from_results(db.load_subscriptions(), db.load_resume_cursors())
 }
 
+type WsIoMessage = tokio_tungstenite::tungstenite::protocol::Message;
+type WsIoError = tokio_tungstenite::tungstenite::Error;
+type HandshakeResult<S> = (Result<String, receiver::session::SessionError>, Option<S>);
+
 // ---------------------------------------------------------------------------
 // Helper: perform ReceiverHello / Heartbeat handshake on an open WS.
 // Returns (Result<session_id>, Option<ws>) — ws is Some on success.
 // ---------------------------------------------------------------------------
-#[allow(clippy::type_complexity)]
-async fn do_handshake<S>(
-    mut ws: S,
-    db: &Db,
-) -> (Result<String, receiver::session::SessionError>, Option<S>)
+async fn do_handshake<S>(mut ws: S, db: &Db) -> HandshakeResult<S>
 where
-    S: futures_util::Stream<
-            Item = Result<
-                tokio_tungstenite::tungstenite::protocol::Message,
-                tokio_tungstenite::tungstenite::Error,
-            >,
-        > + futures_util::Sink<
-            tokio_tungstenite::tungstenite::protocol::Message,
-            Error = tokio_tungstenite::tungstenite::Error,
-        > + Unpin,
+    S: futures_util::Stream<Item = Result<WsIoMessage, WsIoError>>
+        + futures_util::Sink<WsIoMessage, Error = WsIoError>
+        + Unpin,
 {
     use futures_util::{SinkExt, StreamExt};
     use rt_protocol::{ReceiverHello, WsMessage};

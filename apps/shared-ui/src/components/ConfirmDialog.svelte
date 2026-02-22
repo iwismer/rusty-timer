@@ -1,4 +1,9 @@
 <script lang="ts">
+  import {
+    shouldCancelOnBackdropClick,
+    shouldCancelOnEscape,
+  } from "../lib/confirm-dialog";
+
   let {
     open = false,
     title = "",
@@ -30,15 +35,23 @@
     }
   });
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      onCancel();
-    }
-  }
+  $effect(() => {
+    if (!dialogEl) return;
+    const el = dialogEl;
 
-  function handleBackdropClick(e: MouseEvent) {
-    if (e.target === dialogEl) {
+    const handleClick = (e: MouseEvent) => {
+      if (shouldCancelOnBackdropClick(e.target, el)) {
+        onCancel();
+      }
+    };
+
+    el.addEventListener("click", handleClick);
+    return () => el.removeEventListener("click", handleClick);
+  });
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (shouldCancelOnEscape(e.key)) {
+      e.preventDefault();
       onCancel();
     }
   }
@@ -50,11 +63,9 @@
   );
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <dialog
   bind:this={dialogEl}
   onkeydown={handleKeydown}
-  onclick={handleBackdropClick}
   class="fixed inset-0 m-auto max-w-md w-full rounded-lg border border-border bg-surface-1 p-0 shadow-lg backdrop:bg-black/50"
 >
   <div class="p-6">
