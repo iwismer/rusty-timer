@@ -52,6 +52,31 @@ fn profile_selection_defaults_to_manual_resume() {
     );
     assert_eq!(replay_policy, "resume");
 }
+
+#[test]
+fn profile_selection_rejects_targeted_without_replay_targets() {
+    let d = tempfile::tempdir().unwrap();
+    let db_path = d.path().join("r.db");
+    let c = open_db(&db_path);
+    c.execute(
+        "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
+        rusqlite::params!["wss://s.com", "t"],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE profile SET replay_policy = 'targeted', replay_targets_json = NULL",
+        [],
+    )
+    .unwrap();
+    drop(c);
+
+    let db = receiver::db::Db::open(&db_path).unwrap();
+    let err = db.load_receiver_selection().unwrap_err();
+    assert!(matches!(
+        err,
+        receiver::db::DbError::InvalidReceiverSelection(_)
+    ));
+}
 #[test]
 fn profile_persists_across_db_reopen() {
     let d = tempfile::tempdir().unwrap();

@@ -22,6 +22,7 @@ use rt_updater::UpdateStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tracing::warn;
@@ -50,6 +51,7 @@ pub struct AppState {
     pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
+    connect_attempt: AtomicU64,
 }
 
 impl AppState {
@@ -71,8 +73,18 @@ impl AppState {
             staged_update_path: Arc::new(RwLock::new(None)),
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
+            connect_attempt: AtomicU64::new(0),
         });
         (state, shutdown_rx)
+    }
+
+    pub fn current_connect_attempt(&self) -> u64 {
+        self.connect_attempt.load(Ordering::SeqCst)
+    }
+
+    pub async fn request_connect(&self) {
+        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+        self.set_connection_state(ConnectionState::Connecting).await;
     }
 
     /// Update connection state, broadcast status change, and emit a log entry.
@@ -423,6 +435,19 @@ async fn put_selection(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReceiverSetSelection>,
 ) -> impl IntoResponse {
+    if body.replay_policy == ReplayPolicy::Targeted
+        && body
+            .replay_targets
+            .as_ref()
+            .is_none_or(std::vec::Vec::is_empty)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "replay_targets must be provided when replay_policy is targeted",
+        )
+            .into_response();
+    }
+
     let normalized = ReceiverSetSelection {
         selection: body.selection,
         replay_policy: body.replay_policy,
@@ -437,10 +462,12 @@ async fn put_selection(
     match db.save_receiver_selection(&normalized) {
         Ok(()) => {
             drop(db);
-            if *state.connection_state.read().await == ConnectionState::Connected {
-                state
-                    .set_connection_state(ConnectionState::Connecting)
-                    .await;
+            let current_state = state.connection_state.read().await.clone();
+            if matches!(
+                current_state,
+                ConnectionState::Connected | ConnectionState::Connecting
+            ) {
+                state.request_connect().await;
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -568,9 +595,7 @@ async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if current == ConnectionState::Connected {
         return StatusCode::OK.into_response();
     }
-    state
-        .set_connection_state(ConnectionState::Connecting)
-        .await;
+    state.request_connect().await;
     StatusCode::ACCEPTED.into_response()
 }
 

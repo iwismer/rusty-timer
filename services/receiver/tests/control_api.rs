@@ -207,6 +207,90 @@ async fn put_selection_connected_transitions_to_connecting() {
 }
 
 #[tokio::test]
+async fn put_selection_connecting_reissues_connect_attempt() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    state.request_connect().await;
+    let before_attempt = state.current_connect_attempt();
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/selection",
+            json!({
+                "selection":{"mode":"manual","streams":[]},
+                "replay_policy":"resume"
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Connecting
+    );
+    assert!(
+        state.current_connect_attempt() > before_attempt,
+        "selection update while connecting should request a fresh connect attempt"
+    );
+}
+
+#[tokio::test]
+async fn put_selection_rejects_targeted_without_targets() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/selection",
+            json!({
+                "selection":{"mode":"manual","streams":[]},
+                "replay_policy":"targeted"
+            })
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/selection",
+            json!({
+                "selection":{"mode":"manual","streams":[]},
+                "replay_policy":"targeted",
+                "replay_targets":[]
+            })
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn get_races_proxies_to_upstream() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);

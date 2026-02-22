@@ -274,6 +274,7 @@ async fn main() {
             result = watch_connection_state(Arc::clone(&state)) => {
                 match result {
                     ConnectionState::Connecting => {
+                        let attempt = state.current_connect_attempt();
                         // Cancel any existing session first.
                         cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
 
@@ -326,6 +327,12 @@ async fn main() {
                                                 state.set_connection_state(ConnectionState::Disconnected).await;
                                             }
                                             (Ok(session_id), Some(ws)) => {
+                                                let still_current = state.current_connect_attempt() == attempt
+                                                    && *state.connection_state.read().await == ConnectionState::Connecting;
+                                                if !still_current {
+                                                    state.logger.log("Discarding stale connect attempt");
+                                                    continue;
+                                                }
                                                 state.logger.log(format!("Connected (session {session_id})"));
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;

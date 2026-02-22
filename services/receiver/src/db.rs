@@ -19,6 +19,8 @@ pub enum DbError {
     Json(#[from] serde_json::Error),
     #[error("Profile missing")]
     ProfileMissing,
+    #[error("Invalid receiver selection: {0}")]
+    InvalidReceiverSelection(String),
 }
 pub type DbResult<T> = Result<T, DbError>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +70,28 @@ fn replay_policy_to_string(policy: ReplayPolicy) -> String {
 fn parse_replay_policy(raw: &str) -> ReplayPolicy {
     serde_json::from_str::<ReplayPolicy>(&format!("\"{raw}\""))
         .unwrap_or_else(|_| default_replay_policy())
+}
+
+fn normalize_receiver_selection(
+    selection: ReceiverSetSelection,
+) -> Result<ReceiverSetSelection, DbError> {
+    let replay_targets =
+        match selection.replay_policy {
+            ReplayPolicy::Targeted => match selection.replay_targets {
+                Some(targets) if !targets.is_empty() => Some(targets),
+                _ => return Err(DbError::InvalidReceiverSelection(
+                    "replay_targets must be present and non-empty when replay_policy is targeted"
+                        .to_owned(),
+                )),
+            },
+            _ => None,
+        };
+
+    Ok(ReceiverSetSelection {
+        selection: selection.selection,
+        replay_policy: selection.replay_policy,
+        replay_targets,
+    })
 }
 impl Db {
     pub fn open(path: &Path) -> DbResult<Self> {
@@ -133,18 +157,20 @@ impl Db {
         let replay_targets = raw
             .replay_targets_json
             .as_deref()
-            .and_then(|j| serde_json::from_str::<Vec<ReplayTarget>>(j).ok());
+            .map(serde_json::from_str::<Vec<ReplayTarget>>)
+            .transpose()?;
 
-        Ok(ReceiverSetSelection {
+        normalize_receiver_selection(ReceiverSetSelection {
             selection,
             replay_policy,
             replay_targets,
         })
     }
     pub fn save_receiver_selection(&self, selection: &ReceiverSetSelection) -> DbResult<()> {
-        let selection_json = serde_json::to_string(&selection.selection)?;
-        let replay_policy = replay_policy_to_string(selection.replay_policy);
-        let replay_targets_json = selection
+        let normalized = normalize_receiver_selection(selection.clone())?;
+        let selection_json = serde_json::to_string(&normalized.selection)?;
+        let replay_policy = replay_policy_to_string(normalized.replay_policy);
+        let replay_targets_json = normalized
             .replay_targets
             .as_ref()
             .map(serde_json::to_string)
@@ -349,5 +375,21 @@ mod tests {
         );
         assert_eq!(selection.replay_policy, ReplayPolicy::Resume);
         assert!(selection.replay_targets.is_none());
+    }
+
+    #[test]
+    fn load_receiver_selection_rejects_targeted_without_targets() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "check-and-download")
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE profile SET replay_policy = 'targeted', replay_targets_json = NULL",
+                [],
+            )
+            .unwrap();
+
+        let err = db.load_receiver_selection().unwrap_err();
+        assert!(matches!(err, DbError::InvalidReceiverSelection(_)));
     }
 }
