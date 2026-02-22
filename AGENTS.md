@@ -26,7 +26,7 @@ This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust worksp
 
 ### Key Decisions
 - Rust 1.89.0 (see `rust-toolchain.toml`)
-- Node 20.x / npm 10.x (see root `package.json` + `.nvmrc`)
+- Node 24.x / npm 11.x (see root `package.json` + `.nvmrc`)
 - Server config: env vars only (`DATABASE_URL`, `BIND_ADDR`, `LOG_LEVEL`)
 - Forwarder config: TOML only (no env var overrides)
 - sqlx 0.8 offline cache at `services/server/.sqlx/`
