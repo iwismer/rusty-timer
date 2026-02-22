@@ -3,9 +3,9 @@ type: is
 id: is-01kj3b53n95tz8rd5g2ya5nehm
 title: "Task 12: Add server UI mapping and activation controls plus component tests"
 kind: task
-status: open
+status: in_progress
 priority: 2
-version: 7
+version: 8
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -18,6 +18,20 @@ child_order_hints:
   - is-01kj3bmrtzbhstn53wrjbyb5pd
   - is-01kj3bms18h8hvkhr9nr8btabf
 created_at: 2026-02-22T18:52:54.823Z
-updated_at: 2026-02-22T19:01:30.062Z
+updated_at: 2026-02-22T22:59:48.758Z
 ---
 From implementation plan Task 12 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md).
+
+## Notes
+
+UI plan approved by product (2026-02-22): server-ui owns stream epoch -> race mapping and activation controls.
+
+Decisions:
+- Epoch mapping is edited per row with an explicit Save action per row.
+- Row-level UX must expose dirty/pending/success/error state.
+- Keep activate-next on stream detail page aligned with selected race mapping workflows.
+
+Non-goals for this task:
+- No auto-save-on-change for server-ui epoch mapping rows.
+- No receiver replay controls in server-ui.
+- No bulk save-all-rows requirement in this iteration.
