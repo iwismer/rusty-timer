@@ -65,6 +65,28 @@ async fn spawn_upstream_streams_server(
     (format!("ws://{addr}/ws/v1/receivers"), handle)
 }
 
+async fn spawn_upstream_races_server(
+    status: StatusCode,
+    payload: Value,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let app = axum::Router::new().route(
+        "/api/v1/races",
+        axum::routing::get(move || {
+            let status = status;
+            let payload = payload.clone();
+            async move { (status, axum::Json(payload)) }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (format!("ws://{addr}/ws/v1.1/receivers"), handle)
+}
+
 #[tokio::test]
 async fn get_profile_returns_404_when_no_profile() {
     let (status, _) = get_json(setup(), "/api/v1/profile").await;
@@ -89,6 +111,132 @@ async fn put_profile_stores_and_get_returns_it() {
     assert_eq!(val["server_url"], "wss://s.com");
     assert_eq!(val["token"], "tok");
     assert_eq!(val["update_mode"], "check-and-download");
+}
+
+#[tokio::test]
+async fn get_selection_returns_manual_resume_by_default() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/selection").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["selection"]["mode"], "manual");
+    assert_eq!(val["selection"]["streams"], json!([]));
+    assert_eq!(val["replay_policy"], "resume");
+    assert!(val["replay_targets"].is_null());
+}
+
+#[tokio::test]
+async fn put_selection_persists_and_get_selection_returns_it() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/selection",
+            json!({
+                "selection": {"mode":"race","race_id":"race-1","epoch_scope":"current"},
+                "replay_policy":"live_only"
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/selection").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["selection"]["mode"], "race");
+    assert_eq!(val["selection"]["race_id"], "race-1");
+    assert_eq!(val["selection"]["epoch_scope"], "current");
+    assert_eq!(val["replay_policy"], "live_only");
+}
+
+#[tokio::test]
+async fn put_selection_connected_transitions_to_connecting() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    *state.connection_state.write().await = ConnectionState::Connected;
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/selection",
+            json!({
+                "selection":{"mode":"manual","streams":[]},
+                "replay_policy":"resume"
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Connecting
+    );
+}
+
+#[tokio::test]
+async fn get_races_proxies_to_upstream() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let (ws_url, upstream_handle) = spawn_upstream_races_server(
+        StatusCode::OK,
+        json!({
+            "races": [
+                {"race_id":"r1","name":"Spring 5K"},
+                {"race_id":"r2","name":"Summer 10K"}
+            ]
+        }),
+    )
+    .await;
+    let app = build_router(Arc::clone(&state));
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":ws_url,"token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/races").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["races"].as_array().unwrap().len(), 2);
+    assert_eq!(val["races"][0]["race_id"], "r1");
+
+    upstream_handle.abort();
 }
 #[tokio::test]
 async fn put_profile_updates_existing() {

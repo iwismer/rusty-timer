@@ -15,10 +15,10 @@
 use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse};
-use rt_protocol::StreamInfo;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
+use rt_protocol::{ReceiverSetSelection, ReplayPolicy, StreamInfo};
+use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
-use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -218,6 +218,16 @@ fn default_update_mode() -> String {
     "check-and-download".to_owned()
 }
 
+fn default_selection_body() -> ReceiverSetSelection {
+    ReceiverSetSelection {
+        selection: rt_protocol::ReceiverSelection::Manual {
+            streams: Vec::new(),
+        },
+        replay_policy: ReplayPolicy::Resume,
+        replay_targets: None,
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
     pub server_url: String,
@@ -356,6 +366,14 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }
 }
 
+async fn get_selection(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db = state.db.lock().await;
+    match db.load_receiver_selection() {
+        Ok(selection) => Json(selection).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn put_profile(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ProfileRequest>,
@@ -401,8 +419,91 @@ async fn put_profile(
     }
 }
 
+async fn put_selection(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ReceiverSetSelection>,
+) -> impl IntoResponse {
+    let normalized = ReceiverSetSelection {
+        selection: body.selection,
+        replay_policy: body.replay_policy,
+        replay_targets: if body.replay_policy == ReplayPolicy::Targeted {
+            body.replay_targets
+        } else {
+            None
+        },
+    };
+
+    let db = state.db.lock().await;
+    match db.save_receiver_selection(&normalized) {
+        Ok(()) => {
+            drop(db);
+            if *state.connection_state.read().await == ConnectionState::Connected {
+                state
+                    .set_connection_state(ConnectionState::Connecting)
+                    .await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(crate::db::DbError::ProfileMissing) => {
+            let defaults = default_selection_body();
+            if normalized == defaults {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "no profile").into_response()
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(state.build_streams_response().await).into_response()
+}
+
+async fn get_races(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let profile = {
+        let db = state.db.lock().await;
+        match db.load_profile() {
+            Ok(Some(p)) => p,
+            Ok(None) => return (StatusCode::NOT_FOUND, "no profile").into_response(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    };
+
+    let Some(base) = http_base_url(&profile.server_url) else {
+        return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
+    };
+    let url = format!("{base}/api/v1/races");
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("HTTP client error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let response = match client.get(&url).bearer_auth(profile.token).send().await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => (status, Json(body)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("invalid JSON from upstream: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn put_subscriptions(
@@ -667,7 +768,9 @@ async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoRe
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/profile", get(get_profile).put(put_profile))
+        .route("/api/v1/selection", get(get_selection).put(put_selection))
         .route("/api/v1/streams", get(get_streams))
+        .route("/api/v1/races", get(get_races))
         .route("/api/v1/subscriptions", put(put_subscriptions))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/logs", get(get_logs))

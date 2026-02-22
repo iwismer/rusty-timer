@@ -25,6 +25,33 @@ fn profile_stored_and_loaded() {
         .unwrap();
     assert_eq!(url, "wss://s.com");
 }
+
+#[test]
+fn profile_selection_defaults_to_manual_resume() {
+    let d = tempfile::tempdir().unwrap();
+    let c = open_db(&d.path().join("r.db"));
+    c.execute(
+        "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
+        rusqlite::params!["wss://s.com", "t"],
+    )
+    .unwrap();
+
+    let (selection_json, replay_policy): (String, String) = c
+        .query_row(
+            "SELECT selection_json, replay_policy FROM profile LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let selection: ReceiverSelection = serde_json::from_str(&selection_json).unwrap();
+    assert_eq!(
+        selection,
+        ReceiverSelection::Manual {
+            streams: Vec::new()
+        }
+    );
+    assert_eq!(replay_policy, "resume");
+}
 #[test]
 fn profile_persists_across_db_reopen() {
     let d = tempfile::tempdir().unwrap();
