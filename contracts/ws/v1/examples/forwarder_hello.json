@@ -1,19 +1,5 @@
 {
   "kind": "forwarder_hello",
   "forwarder_id": "fwd-001",
-  "reader_ips": ["192.168.1.10", "192.168.1.11"],
-  "resume": [
-    {
-      "forwarder_id": "fwd-001",
-      "reader_ip": "192.168.1.10",
-      "stream_epoch": 1,
-      "last_seq": 4200
-    },
-    {
-      "forwarder_id": "fwd-001",
-      "reader_ip": "192.168.1.11",
-      "stream_epoch": 2,
-      "last_seq": 317
-    }
-  ]
+  "reader_ips": ["192.168.1.10", "192.168.1.11"]
 }

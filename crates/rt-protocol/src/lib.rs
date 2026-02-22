@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 /// A resume cursor for a single (stream, epoch) pair.
 ///
-/// Used by both forwarder and receiver hello messages to communicate the
-/// highest sequence number the device has already processed, enabling the
-/// server to replay only the missing tail.
+/// Used by receiver hello messages to communicate the highest sequence number
+/// already processed per stream, enabling the server to replay only the
+/// missing tail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeCursor {
     pub forwarder_id: String,
@@ -59,20 +59,14 @@ pub struct AckEntry {
 /// Does NOT carry `session_id` -- the session_id is assigned by the server
 /// and returned in the first `heartbeat`.
 ///
-/// The `resume` list implicitly subscribes the server to begin (or resume)
-/// delivering events for those (stream, epoch) pairs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForwarderHello {
     /// Advisory identity; must match token claims if present.
     pub forwarder_id: String,
     /// IP addresses of locally attached readers.
     pub reader_ips: Vec<String>,
-    /// Resume cursors so the server knows where to start acking from.
-    /// An empty list means the forwarder starts fresh (no prior history).
-    #[serde(default)]
-    pub resume: Vec<ResumeCursor>,
     /// Human-friendly name for this forwarder (e.g. "Start Line").
-    /// Configured in the forwarder's TOML config. Optional for backward compat.
+    /// Configured in the forwarder's TOML config. Optional in payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }
@@ -209,7 +203,7 @@ pub struct ErrorMessage {
 /// - `stream_epoch` increments to `new_stream_epoch`.
 /// - `seq` restarts at 1 for new events on the affected stream.
 /// - Unacked events from older epochs remain eligible for replay/ack until drained.
-/// - The forwarder confirms by sending a new `forwarder_hello` with the updated epoch.
+/// - The forwarder applies the new epoch locally before sending subsequent events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochResetCommand {
     pub session_id: String,

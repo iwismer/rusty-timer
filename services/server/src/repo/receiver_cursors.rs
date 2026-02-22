@@ -8,11 +8,23 @@ pub async fn upsert_cursor(
     stream_epoch: i64,
     last_seq: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        r#"INSERT INTO receiver_cursors (receiver_id, stream_id, stream_epoch, last_seq, updated_at) VALUES ($1, $2, $3, $4, now())
-           ON CONFLICT (receiver_id, stream_id) DO UPDATE SET stream_epoch = EXCLUDED.stream_epoch, last_seq = EXCLUDED.last_seq, updated_at = now()"#,
-        receiver_id, stream_id, stream_epoch, last_seq
-    ).execute(pool).await?;
+    sqlx::query(
+        r#"INSERT INTO receiver_cursors (receiver_id, stream_id, stream_epoch, last_seq, updated_at)
+           VALUES ($1, $2, $3, $4, now())
+           ON CONFLICT (receiver_id, stream_id) DO UPDATE
+           SET stream_epoch = EXCLUDED.stream_epoch,
+               last_seq = EXCLUDED.last_seq,
+               updated_at = now()
+           WHERE EXCLUDED.stream_epoch > receiver_cursors.stream_epoch
+              OR (EXCLUDED.stream_epoch = receiver_cursors.stream_epoch
+                  AND EXCLUDED.last_seq >= receiver_cursors.last_seq)"#,
+    )
+    .bind(receiver_id)
+    .bind(stream_id)
+    .bind(stream_epoch)
+    .bind(last_seq)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

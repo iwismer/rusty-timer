@@ -204,6 +204,13 @@ impl Journal {
         acked_epoch: i64,
         acked_through_seq: i64,
     ) -> Result<(), JournalError> {
+        let (current_epoch, current_seq) = self.ack_cursor(stream_key)?;
+        let is_stale = acked_epoch < current_epoch
+            || (acked_epoch == current_epoch && acked_through_seq < current_seq);
+        if is_stale {
+            return Ok(());
+        }
+
         self.conn.execute(
             "UPDATE stream_state
              SET acked_epoch = ?2, acked_through_seq = ?3

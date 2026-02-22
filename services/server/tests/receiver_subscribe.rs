@@ -2,6 +2,7 @@
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
 use sha2::{Digest, Sha256};
+use sqlx::Row;
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -119,7 +120,6 @@ async fn test_receiver_receives_realtime_events() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-rt".to_owned(),
         reader_ips: vec!["10.0.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -216,7 +216,6 @@ async fn test_receiver_ack_updates_cursor() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-ack".to_owned(),
         reader_ips: vec!["10.1.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -295,9 +294,35 @@ async fn test_receiver_ack_updates_cursor() {
 
     // After ack, cursor should be persisted in DB
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let row = sqlx::query!("SELECT last_seq FROM receiver_cursors WHERE receiver_id = 'rcv-ack'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(row.last_seq, 5);
+    let row = sqlx::query(
+        "SELECT stream_epoch, last_seq FROM receiver_cursors WHERE receiver_id = 'rcv-ack'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<i64, _>("stream_epoch"), 1);
+    assert_eq!(row.get::<i64, _>("last_seq"), 5);
+
+    // Send stale ack: older epoch with higher seq must not regress cursor.
+    rcv.send_message(&WsMessage::ReceiverAck(ReceiverAck {
+        session_id: rcv_session,
+        entries: vec![AckEntry {
+            forwarder_id: "fwd-ack".to_owned(),
+            reader_ip: "10.1.0.1:10000".to_owned(),
+            stream_epoch: 0,
+            last_seq: 999,
+        }],
+    }))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let row2 = sqlx::query(
+        "SELECT stream_epoch, last_seq FROM receiver_cursors WHERE receiver_id = 'rcv-ack'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row2.get::<i64, _>("stream_epoch"), 1);
+    assert_eq!(row2.get::<i64, _>("last_seq"), 5);
 }

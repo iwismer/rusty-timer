@@ -78,7 +78,6 @@ async fn server_restart_events_survive_in_postgres() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-srv-01".to_owned(),
         reader_ips: vec!["10.110.110.1".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -196,7 +195,6 @@ async fn server_restart_new_forwarder_connection_works() {
     fwd1.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-srv-02".to_owned(),
         reader_ips: vec!["10.120.120.1".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -236,12 +234,6 @@ async fn server_restart_new_forwarder_connection_works() {
     fwd2.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-srv-02".to_owned(),
         reader_ips: vec!["10.120.120.1".to_owned()],
-        resume: vec![ResumeCursor {
-            forwarder_id: "fwd-srv-02".to_owned(),
-            reader_ip: "10.120.120.1".to_owned(),
-            stream_epoch: 1,
-            last_seq: 2,
-        }],
         display_name: None,
     }))
     .await
@@ -307,7 +299,6 @@ async fn server_restart_http_api_accessible_after_restart() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-srv-03".to_owned(),
         reader_ips: vec!["10.130.130.1".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -324,7 +315,6 @@ async fn server_restart_http_api_accessible_after_restart() {
         fwd2.send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-srv-03".to_owned(),
             reader_ips: vec!["10.130.130.1".to_owned()],
-            resume: vec![],
             display_name: None,
         }))
         .await

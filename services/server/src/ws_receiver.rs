@@ -1,7 +1,7 @@
 use crate::{
     auth::validate_token,
     repo::{
-        events::fetch_events_after_cursor,
+        events::{fetch_events_after_cursor_through_cursor_limited, fetch_max_event_cursor},
         receiver_cursors::{fetch_cursor, upsert_cursor},
     },
     state::AppState,
@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
+const REPLAY_BATCH_LIMIT: i64 = 500;
 
 pub async fn ws_receiver_handler(
     ws: WebSocketUpgrade,
@@ -38,6 +39,10 @@ struct StreamSub {
     last_epoch: i64,
     last_seq: i64,
     rx: tokio::sync::broadcast::Receiver<ReadEvent>,
+}
+
+fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
+    (left_epoch, left_seq) > (right_epoch, right_seq)
 }
 
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
@@ -172,8 +177,27 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
             loop {
                 match sub.rx.try_recv() {
                     Ok(event) => {
-                        sub.last_epoch = event.stream_epoch as i64;
-                        sub.last_seq = event.seq as i64;
+                        let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
+                            warn!(
+                                stream_id = %sub.stream_id,
+                                stream_epoch = event.stream_epoch,
+                                "dropping live event with out-of-range stream_epoch"
+                            );
+                            continue;
+                        };
+                        let Ok(event_seq) = i64::try_from(event.seq) else {
+                            warn!(
+                                stream_id = %sub.stream_id,
+                                seq = event.seq,
+                                "dropping live event with out-of-range seq"
+                            );
+                            continue;
+                        };
+                        if !cursor_gt(event_epoch, event_seq, sub.last_epoch, sub.last_seq) {
+                            continue;
+                        }
+                        sub.last_epoch = event_epoch;
+                        sub.last_seq = event_seq;
                         events_to_send.push(event);
                     }
                     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -334,37 +358,63 @@ async fn replay_backlog(
     session_id: &str,
     sub: &mut StreamSub,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let events =
-        fetch_events_after_cursor(&state.pool, sub.stream_id, sub.last_epoch, sub.last_seq).await?;
-    if events.is_empty() {
+    let Some((through_epoch, through_seq)) =
+        fetch_max_event_cursor(&state.pool, sub.stream_id).await?
+    else {
+        return Ok(());
+    };
+    if !cursor_gt(through_epoch, through_seq, sub.last_epoch, sub.last_seq) {
         return Ok(());
     }
 
-    let read_events: Vec<ReadEvent> = events
-        .iter()
-        .map(|e| ReadEvent {
-            forwarder_id: e.forwarder_id.clone(),
-            reader_ip: e.reader_ip.clone(),
-            stream_epoch: e.stream_epoch as u64,
-            seq: e.seq as u64,
-            reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
-            raw_read_line: e.raw_read_line.clone(),
-            read_type: e.read_type.clone(),
-        })
-        .collect();
+    loop {
+        let events = fetch_events_after_cursor_through_cursor_limited(
+            &state.pool,
+            sub.stream_id,
+            sub.last_epoch,
+            sub.last_seq,
+            through_epoch,
+            through_seq,
+            REPLAY_BATCH_LIMIT,
+        )
+        .await?;
+        if events.is_empty() {
+            return Ok(());
+        }
 
-    if let Some(last) = events.last() {
-        sub.last_epoch = last.stream_epoch;
-        sub.last_seq = last.seq;
+        let read_events: Vec<ReadEvent> = events
+            .iter()
+            .map(|e| ReadEvent {
+                forwarder_id: e.forwarder_id.clone(),
+                reader_ip: e.reader_ip.clone(),
+                stream_epoch: e.stream_epoch as u64,
+                seq: e.seq as u64,
+                reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
+                raw_read_line: e.raw_read_line.clone(),
+                read_type: e.read_type.clone(),
+            })
+            .collect();
+
+        if let Some(last) = events.last() {
+            sub.last_epoch = last.stream_epoch;
+            sub.last_seq = last.seq;
+        }
+
+        let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+            session_id: session_id.to_owned(),
+            events: read_events,
+        });
+        let json = serde_json::to_string(&batch)?;
+        socket.send(Message::Text(json)).await?;
+
+        if !cursor_gt(through_epoch, through_seq, sub.last_epoch, sub.last_seq) {
+            return Ok(());
+        }
+
+        if events.len() < REPLAY_BATCH_LIMIT as usize {
+            return Ok(());
+        }
     }
-
-    let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
-        session_id: session_id.to_owned(),
-        events: read_events,
-    });
-    let json = serde_json::to_string(&batch)?;
-    socket.send(Message::Text(json)).await?;
-    Ok(())
 }
 
 async fn handle_receiver_ack(

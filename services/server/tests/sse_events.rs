@@ -124,7 +124,6 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse".to_owned(),
         reader_ips: vec!["192.168.100.1:10000".to_owned()],
-        resume: vec![],
         display_name: Some("My Forwarder".to_owned()),
     }))
     .await
@@ -296,7 +295,6 @@ async fn test_sse_emits_stream_updated_on_forwarder_display_name_change() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse-updated".to_owned(),
         reader_ips: vec!["192.168.100.2".to_owned()],
-        resume: vec![],
         display_name: Some("Start Line".to_owned()),
     }))
     .await
@@ -312,7 +310,6 @@ async fn test_sse_emits_stream_updated_on_forwarder_display_name_change() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse-updated".to_owned(),
         reader_ips: vec!["192.168.100.2".to_owned()],
-        resume: vec![],
         display_name: Some("Finish Line".to_owned()),
     }))
     .await
@@ -408,7 +405,6 @@ async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse-clear-name".to_owned(),
         reader_ips: vec!["192.168.100.3".to_owned()],
-        resume: vec![],
         display_name: Some("Start Line".to_owned()),
     }))
     .await
@@ -419,7 +415,6 @@ async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse-clear-name".to_owned(),
         reader_ips: vec!["192.168.100.3".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -541,7 +536,6 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_display_name
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse-update-all".to_owned(),
         reader_ips: vec!["192.168.101.1".to_owned()],
-        resume: vec![],
         display_name: Some("Start Line".to_owned()),
     }))
     .await
@@ -565,7 +559,6 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_display_name
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse-update-all".to_owned(),
         reader_ips: vec!["192.168.101.1".to_owned()],
-        resume: vec![],
         display_name: Some("Finish Line".to_owned()),
     }))
     .await
@@ -666,7 +659,6 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_initial_hell
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-sse-initial-update-all".to_owned(),
         reader_ips: vec!["192.168.111.1".to_owned()],
-        resume: vec![],
         display_name: Some("Finish Line".to_owned()),
     }))
     .await

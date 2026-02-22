@@ -47,7 +47,6 @@ async fn test_export_raw_canonical_events_ordered() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-export".to_owned(),
         reader_ips: vec!["10.40.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await

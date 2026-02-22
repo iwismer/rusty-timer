@@ -171,10 +171,9 @@ async fn e2e_export_txt_and_csv() {
         batch_flush_ms: 100,
         batch_max_events: 50,
     };
-    let mut session =
-        UplinkSession::connect_with_resume(uplink_cfg, vec![READER_IP.to_owned()], vec![])
-            .await
-            .expect("UplinkSession connect failed");
+    let mut session = UplinkSession::connect_with_readers(uplink_cfg, vec![READER_IP.to_owned()])
+        .await
+        .expect("UplinkSession connect failed");
 
     match session.send_batch(events).await.expect("send_batch failed") {
         SendBatchResult::Ack(ack) => {

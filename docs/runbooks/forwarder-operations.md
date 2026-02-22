@@ -221,7 +221,7 @@ The server sends an `epoch_reset_command` to the connected forwarder.
 The forwarder:
 1. Increments `stream_epoch` for the affected reader.
 2. Restarts `seq` at 1 for new events.
-3. Sends a new `forwarder_hello` with the updated epoch to confirm.
+3. Applies the new epoch before sending subsequent events for that reader.
 4. **Does NOT discard unacked events from the old epoch** — they remain
    replayable until the server acks them.
 
