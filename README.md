@@ -54,7 +54,7 @@ IPICO Reader ──TCP──► Streamer ──fanout──► Local Clients
 ## Quick Start
 
 **Prerequisites:**
-- Rust 1.85.0 (see `rust-toolchain.toml`)
+- Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`)
 - Docker (for server / integration tests)
 - Node.js 24.x and npm 11.x (see `.nvmrc`)
 

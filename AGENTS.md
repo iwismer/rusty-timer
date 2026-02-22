@@ -25,7 +25,7 @@ This is the **Rusty Timer Remote Forwarding Suite**, a multi-service Rust worksp
 - `crates/rt-test-utils/` — MockWsServer + MockWsClient test helpers
 
 ### Key Decisions
-- Rust 1.85.0 (see `rust-toolchain.toml`)
+- Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`)
 - Node 24.x / npm 11.x (see root `package.json` + `.nvmrc`)
 - Server config: env vars only (`DATABASE_URL`, `BIND_ADDR`, `LOG_LEVEL`)
 - Forwarder config: TOML only (no env var overrides)
