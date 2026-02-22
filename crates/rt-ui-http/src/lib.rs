@@ -12,6 +12,7 @@ fn is_blocked_path(raw_path: &str, blocked_prefix: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+#[allow(clippy::result_large_err)]
 pub fn validate_ui_request<'a>(
     method: &Method,
     uri: &'a Uri,
