@@ -17,12 +17,11 @@ use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
 use rt_protocol::StreamInfo;
+use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::warn;
@@ -527,7 +526,7 @@ async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "receiver",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealUpdateChecker { inner: c },
+        Ok(c) => RealChecker::new(c),
         Err(e) => {
             let (status_code, status) = update_check_init_error_status(e.to_string());
             *state.update_status.write().await = status.clone();
@@ -535,7 +534,8 @@ async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoRespo
         }
     };
 
-    let status = run_update_check_with_checker(&state, &checker, update_mode).await;
+    let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+    let status = run_check(&workflow_state, &checker, update_mode).await;
     Json(status).into_response()
 }
 
@@ -546,145 +546,55 @@ fn update_check_init_error_status(error: String) -> (StatusCode, UpdateStatus) {
     )
 }
 
-trait UpdateCheckClient: Send + Sync {
-    fn check<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>>;
-
-    fn download<'a>(
-        &'a self,
-        version: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<PathBuf, String>> + Send + 'a>>;
+struct ReceiverWorkflowAdapter {
+    state: Arc<AppState>,
 }
 
-struct RealUpdateChecker {
-    inner: rt_updater::UpdateChecker,
+impl ReceiverWorkflowAdapter {
+    fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
 }
 
-impl UpdateCheckClient for RealUpdateChecker {
-    fn check<'a>(
+impl WorkflowState for ReceiverWorkflowAdapter {
+    fn current_status<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
-        Box::pin(async move { self.inner.check().await.map_err(|e| e.to_string()) })
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = UpdateStatus> + Send + 'a>> {
+        Box::pin(async move { self.state.update_status.read().await.clone() })
     }
 
-    fn download<'a>(
+    fn set_status<'a>(
         &'a self,
-        version: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<PathBuf, String>> + Send + 'a>> {
+        status: UpdateStatus,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            self.inner
-                .download(version)
-                .await
-                .map_err(|e| e.to_string())
+            *self.state.update_status.write().await = status;
         })
     }
-}
 
-async fn run_update_check_with_checker(
-    state: &Arc<AppState>,
-    checker: &dyn UpdateCheckClient,
-    update_mode: rt_updater::UpdateMode,
-) -> UpdateStatus {
-    match checker.check().await {
-        Ok(UpdateStatus::Available { version }) => {
-            *state.update_status.write().await = UpdateStatus::Available {
-                version: version.clone(),
-            };
-
-            if update_mode == rt_updater::UpdateMode::CheckAndDownload {
-                match checker.download(&version).await {
-                    Ok(path) => {
-                        let status = UpdateStatus::Downloaded {
-                            version: version.clone(),
-                        };
-                        *state.update_status.write().await = status.clone();
-                        *state.staged_update_path.write().await = Some(path);
-                        let _ = state.ui_tx.send(
-                            crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                                status: status.clone(),
-                            },
-                        );
-                        status
-                    }
-                    Err(error) => {
-                        let status = UpdateStatus::Failed { error };
-                        *state.update_status.write().await = status.clone();
-                        let _ = state.ui_tx.send(
-                            crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                                status: status.clone(),
-                            },
-                        );
-                        status
-                    }
-                }
-            } else {
-                let status = UpdateStatus::Available {
-                    version: version.clone(),
-                };
-                let _ = state
-                    .ui_tx
-                    .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                        status: status.clone(),
-                    });
-                status
-            }
-        }
-        Ok(status) => {
-            *state.update_status.write().await = status.clone();
-            let _ = state
-                .ui_tx
-                .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                    status: status.clone(),
-                });
-            status
-        }
-        Err(error) => {
-            let status = UpdateStatus::Failed { error };
-            *state.update_status.write().await = status.clone();
-            let _ = state
-                .ui_tx
-                .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                    status: status.clone(),
-                });
-            status
-        }
+    fn set_downloaded<'a>(
+        &'a self,
+        status: UpdateStatus,
+        path: PathBuf,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            *self.state.update_status.write().await = status;
+            *self.state.staged_update_path.write().await = Some(path);
+        })
     }
-}
 
-async fn run_update_download_with_checker(
-    state: &Arc<AppState>,
-    checker: &dyn UpdateCheckClient,
-) -> Result<UpdateStatus, UpdateStatus> {
-    let current = state.update_status.read().await.clone();
-    match current {
-        UpdateStatus::Available { ref version } => match checker.download(version).await {
-            Ok(path) => {
-                let status = UpdateStatus::Downloaded {
-                    version: version.clone(),
-                };
-                *state.update_status.write().await = status.clone();
-                *state.staged_update_path.write().await = Some(path);
-                let _ = state
-                    .ui_tx
-                    .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                        status: status.clone(),
-                    });
-                Ok(status)
-            }
-            Err(error) => {
-                let status = UpdateStatus::Failed { error };
-                *state.update_status.write().await = status.clone();
-                let _ = state
-                    .ui_tx
-                    .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                        status: status.clone(),
-                    });
-                Err(status)
-            }
-        },
-        s @ UpdateStatus::Downloaded { .. } => Ok(s),
-        other => Err(other),
+    fn emit_status_changed<'a>(
+        &'a self,
+        status: UpdateStatus,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let _ = self
+                .state
+                .ui_tx
+                .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                    status: status.clone(),
+                });
+        })
     }
 }
 
@@ -695,7 +605,7 @@ async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoRe
         "receiver",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealUpdateChecker { inner: c },
+        Ok(c) => RealChecker::new(c),
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
@@ -705,7 +615,8 @@ async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoRe
         }
     };
 
-    match run_update_download_with_checker(&state, &checker).await {
+    let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+    match run_download(&workflow_state, &checker).await {
         Ok(status) => Json(status).into_response(),
         Err(status) => (StatusCode::CONFLICT, Json(status)).into_response(),
     }
@@ -739,6 +650,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use rt_updater::workflow::{run_check, run_download, Checker};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -750,7 +662,7 @@ mod tests {
         download_calls: Arc<AtomicUsize>,
     }
 
-    impl UpdateCheckClient for FakeChecker {
+    impl Checker for FakeChecker {
         fn check<'a>(
             &'a self,
         ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
@@ -1003,9 +915,8 @@ mod tests {
             download_calls: Arc::clone(&download_calls),
         };
 
-        let status =
-            run_update_check_with_checker(&state, &checker, rt_updater::UpdateMode::CheckOnly)
-                .await;
+        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+        let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::CheckOnly).await;
 
         assert_eq!(
             status,
@@ -1031,8 +942,9 @@ mod tests {
             download_calls: Arc::clone(&download_calls),
         };
 
-        let status = run_update_check_with_checker(
-            &state,
+        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+        let status = run_check(
+            &workflow_state,
             &checker,
             rt_updater::UpdateMode::CheckAndDownload,
         )
@@ -1066,7 +978,8 @@ mod tests {
             download_calls: Arc::clone(&download_calls),
         };
 
-        let status = run_update_download_with_checker(&state, &checker).await;
+        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+        let status = run_download(&workflow_state, &checker).await;
 
         assert_eq!(
             status,
@@ -1097,7 +1010,8 @@ mod tests {
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let status = run_update_download_with_checker(&state, &checker).await;
+        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+        let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
             Err(UpdateStatus::Failed {
@@ -1130,7 +1044,8 @@ mod tests {
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let status = run_update_download_with_checker(&state, &checker).await;
+        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+        let status = run_download(&workflow_state, &checker).await;
         assert!(status.is_err());
     }
 
@@ -1149,7 +1064,8 @@ mod tests {
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let status = run_update_download_with_checker(&state, &checker).await;
+        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
+        let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
             Ok(UpdateStatus::Downloaded {

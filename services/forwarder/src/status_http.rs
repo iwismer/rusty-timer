@@ -33,13 +33,12 @@ use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
-use std::future::Future;
 use std::io::Write as _;
 use std::net::{SocketAddr, SocketAddrV4};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -1590,7 +1589,7 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
         "forwarder",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealUpdateChecker { inner: c },
+        Ok(c) => RealChecker::new(c),
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
@@ -1603,143 +1602,64 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    let status =
-        run_update_check_with_checker(&state.subsystem, &state.ui_tx, &checker, update_mode).await;
+    let workflow_state =
+        ForwarderWorkflowAdapter::new(state.subsystem.clone(), state.ui_tx.clone());
+    let status = run_check(&workflow_state, &checker, update_mode).await;
     let body = serde_json::to_string(&status).unwrap_or_default();
     json_response(StatusCode::OK, body)
 }
 
-trait UpdateCheckClient: Send + Sync {
-    fn check<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>>;
-
-    fn download<'a>(
-        &'a self,
-        version: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<std::path::PathBuf, String>> + Send + 'a>>;
+struct ForwarderWorkflowAdapter {
+    subsystem: Arc<Mutex<SubsystemStatus>>,
+    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
 }
 
-struct RealUpdateChecker {
-    inner: rt_updater::UpdateChecker,
+impl ForwarderWorkflowAdapter {
+    fn new(
+        subsystem: Arc<Mutex<SubsystemStatus>>,
+        ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
+    ) -> Self {
+        Self { subsystem, ui_tx }
+    }
 }
 
-impl UpdateCheckClient for RealUpdateChecker {
-    fn check<'a>(
+impl WorkflowState for ForwarderWorkflowAdapter {
+    fn current_status<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
-        Box::pin(async move { self.inner.check().await.map_err(|e| e.to_string()) })
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = UpdateStatus> + Send + 'a>> {
+        Box::pin(async move { self.subsystem.lock().await.update_status.clone() })
     }
 
-    fn download<'a>(
+    fn set_status<'a>(
         &'a self,
-        version: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<std::path::PathBuf, String>> + Send + 'a>> {
+        status: UpdateStatus,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            self.inner
-                .download(version)
-                .await
-                .map_err(|e| e.to_string())
+            self.subsystem.lock().await.update_status = status;
         })
     }
-}
 
-async fn run_update_check_with_checker(
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    checker: &dyn UpdateCheckClient,
-    update_mode: rt_updater::UpdateMode,
-) -> UpdateStatus {
-    match checker.check().await {
-        Ok(UpdateStatus::Available { version }) => {
-            subsystem.lock().await.update_status = UpdateStatus::Available {
-                version: version.clone(),
-            };
-
-            if update_mode == rt_updater::UpdateMode::CheckAndDownload {
-                match checker.download(&version).await {
-                    Ok(path) => {
-                        let status = UpdateStatus::Downloaded {
-                            version: version.clone(),
-                        };
-                        let mut ss = subsystem.lock().await;
-                        ss.update_status = status.clone();
-                        ss.staged_update_path = Some(path);
-                        drop(ss);
-                        let _ =
-                            ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
-                                status: status.clone(),
-                            });
-                        status
-                    }
-                    Err(error) => {
-                        let status = UpdateStatus::Failed { error };
-                        subsystem.lock().await.update_status = status.clone();
-                        let _ =
-                            ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
-                                status: status.clone(),
-                            });
-                        status
-                    }
-                }
-            } else {
-                let status = UpdateStatus::Available { version };
-                let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
-                    status: status.clone(),
-                });
-                status
-            }
-        }
-        Ok(status) => {
-            subsystem.lock().await.update_status = status.clone();
-            let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
-                status: status.clone(),
-            });
-            status
-        }
-        Err(error) => {
-            let status = UpdateStatus::Failed { error };
-            subsystem.lock().await.update_status = status.clone();
-            let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
-                status: status.clone(),
-            });
-            status
-        }
+    fn set_downloaded<'a>(
+        &'a self,
+        status: UpdateStatus,
+        path: std::path::PathBuf,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let mut ss = self.subsystem.lock().await;
+            ss.update_status = status;
+            ss.staged_update_path = Some(path);
+        })
     }
-}
 
-async fn run_update_download_with_checker(
-    subsystem: &Arc<Mutex<SubsystemStatus>>,
-    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
-    checker: &dyn UpdateCheckClient,
-) -> Result<UpdateStatus, UpdateStatus> {
-    let current = subsystem.lock().await.update_status.clone();
-    match current {
-        UpdateStatus::Available { ref version } => match checker.download(version).await {
-            Ok(path) => {
-                let status = UpdateStatus::Downloaded {
-                    version: version.clone(),
-                };
-                let mut ss = subsystem.lock().await;
-                ss.update_status = status.clone();
-                ss.staged_update_path = Some(path);
-                drop(ss);
-                let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
-                    status: status.clone(),
-                });
-                Ok(status)
-            }
-            Err(error) => {
-                let status = UpdateStatus::Failed { error };
-                subsystem.lock().await.update_status = status.clone();
-                let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
-                    status: status.clone(),
-                });
-                Err(status)
-            }
-        },
-        s @ UpdateStatus::Downloaded { .. } => Ok(s),
-        other => Err(other),
+    fn emit_status_changed<'a>(
+        &'a self,
+        status: UpdateStatus,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status });
+        })
     }
 }
 
@@ -1752,7 +1672,7 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
         "forwarder",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealUpdateChecker { inner: c },
+        Ok(c) => RealChecker::new(c),
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
@@ -1765,7 +1685,9 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match run_update_download_with_checker(&state.subsystem, &state.ui_tx, &checker).await {
+    let workflow_state =
+        ForwarderWorkflowAdapter::new(state.subsystem.clone(), state.ui_tx.clone());
+    match run_download(&workflow_state, &checker).await {
         Ok(status) => {
             let body = serde_json::to_string(&status).unwrap_or_default();
             json_response(StatusCode::OK, body)
@@ -1916,6 +1838,7 @@ fn schedule_process_restart() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rt_updater::workflow::{run_check, run_download, Checker};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1927,7 +1850,7 @@ mod tests {
         download_calls: Arc<AtomicUsize>,
     }
 
-    impl UpdateCheckClient for FakeChecker {
+    impl Checker for FakeChecker {
         fn check<'a>(
             &'a self,
         ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
@@ -2291,13 +2214,9 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let status = run_update_check_with_checker(
-            &server.subsystem,
-            &server.ui_tx,
-            &checker,
-            rt_updater::UpdateMode::CheckOnly,
-        )
-        .await;
+        let workflow_state =
+            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::CheckOnly).await;
 
         assert_eq!(
             status,
@@ -2328,13 +2247,9 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let status = run_update_check_with_checker(
-            &server.subsystem,
-            &server.ui_tx,
-            &checker,
-            rt_updater::UpdateMode::Disabled,
-        )
-        .await;
+        let workflow_state =
+            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::Disabled).await;
 
         assert_eq!(
             status,
@@ -2365,9 +2280,10 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let status = run_update_check_with_checker(
-            &server.subsystem,
-            &server.ui_tx,
+        let workflow_state =
+            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let status = run_check(
+            &workflow_state,
             &checker,
             rt_updater::UpdateMode::CheckAndDownload,
         )
@@ -2461,8 +2377,9 @@ target = "192.168.1.100:10000"
             download_calls: Arc::clone(&download_calls),
         };
 
-        let status =
-            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+        let workflow_state =
+            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let status = run_download(&workflow_state, &checker).await;
 
         assert_eq!(
             status,
@@ -2502,8 +2419,9 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let status =
-            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+        let workflow_state =
+            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
             Err(UpdateStatus::Failed {
@@ -2542,8 +2460,9 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let status =
-            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+        let workflow_state =
+            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let status = run_download(&workflow_state, &checker).await;
         assert!(status.is_err());
     }
 
@@ -2571,8 +2490,9 @@ target = "192.168.1.100:10000"
             download_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let status =
-            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+        let workflow_state =
+            ForwarderWorkflowAdapter::new(server.subsystem.clone(), server.ui_tx.clone());
+        let status = run_download(&workflow_state, &checker).await;
         assert_eq!(
             status,
             Ok(UpdateStatus::Downloaded {
