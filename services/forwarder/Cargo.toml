@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2021"
 
 [features]
-embed-ui = ["dep:rust-embed", "dep:mime_guess"]
+embed-ui = ["dep:rust-embed", "rt-ui-http/embed-ui"]
 
 [lib]
 name = "forwarder"
@@ -31,10 +31,10 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 rt-protocol = { path = "../../crates/rt-protocol" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
+rt-ui-http = { path = "../../crates/rt-ui-http" }
 rt-updater = { path = "../../crates/rt-updater" }
 ipico-core = { path = "../../crates/ipico-core" }
 rust-embed = { version = "8", optional = true }
-mime_guess = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

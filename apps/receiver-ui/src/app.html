@@ -2,7 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem("rusty-timer-theme");
+          if (saved === "light" || saved === "dark") {
+            document.documentElement.style.colorScheme = saved;
+          }
+        } catch {}
+      })();
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 pub mod admin;
 pub mod export;
 pub mod forwarder_config;
@@ -6,5 +8,6 @@ pub mod logs;
 pub mod metrics;
 pub mod races;
 pub mod reads;
+pub mod response;
 pub mod sse;
 pub mod streams;

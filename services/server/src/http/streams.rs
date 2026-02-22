@@ -1,3 +1,4 @@
+use super::response::{bad_request, conflict, internal_error, not_found};
 use crate::state::{AppState, ForwarderCommand};
 use axum::{
     extract::{Path, State},
@@ -5,7 +6,6 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -40,15 +40,7 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -59,17 +51,7 @@ pub async fn patch_stream(
 ) -> impl IntoResponse {
     let display_alias = match body.get("display_alias").and_then(|v| v.as_str()) {
         Some(s) => s.to_owned(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: "display_alias is required".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        None => return bad_request("display_alias is required"),
     };
     match sqlx::query!(
         "UPDATE streams SET display_alias = $1 WHERE stream_id = $2 RETURNING stream_id",
@@ -96,24 +78,8 @@ pub async fn patch_stream(
             )
                 .into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(HttpErrorEnvelope {
-                code: "NOT_FOUND".to_owned(),
-                message: "stream not found".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Ok(None) => not_found("stream not found"),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -145,34 +111,10 @@ pub async fn reset_epoch(
                     return StatusCode::NO_CONTENT.into_response();
                 }
             }
-            (
-                StatusCode::CONFLICT,
-                Json(HttpErrorEnvelope {
-                    code: "CONFLICT".to_owned(),
-                    message: "forwarder not connected".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
+            conflict("forwarder not connected")
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(HttpErrorEnvelope {
-                code: "NOT_FOUND".to_owned(),
-                message: "stream not found".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Ok(None) => not_found("stream not found"),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -188,28 +130,8 @@ pub async fn list_epochs(
 
     match stream {
         Ok(Some(_)) => {}
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "stream not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Ok(None) => return not_found("stream not found"),
+        Err(e) => return internal_error(e),
     }
 
     // Query distinct epochs with metadata
@@ -250,14 +172,6 @@ pub async fn list_epochs(
                 .collect();
             (StatusCode::OK, Json(serde_json::json!(epochs))).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
