@@ -692,6 +692,61 @@ async fn test_list_epochs_returns_epochs_with_metadata() {
 }
 
 #[tokio::test]
+async fn list_epochs_includes_mapped_epoch_without_events() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epochs-mapped-empty", "10.52.0.1:10000").await;
+    insert_event(&pool, stream_id, 1, 1).await;
+
+    let race_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO races (name) VALUES ($1) RETURNING race_id",
+    )
+    .bind("Mapped Empty Epoch")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO stream_epoch_races (stream_id, stream_epoch, race_id) VALUES ($1, $2, $3)",
+    )
+    .bind(stream_id)
+    .bind(3_i64)
+    .bind(race_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let resp = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/epochs",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let epochs = body.as_array().expect("response must be an array");
+    assert_eq!(epochs.len(), 2, "event-backed + mapped-empty epoch");
+
+    let e1 = epochs.iter().find(|e| e["epoch"] == 1).expect("epoch 1");
+    let e3 = epochs.iter().find(|e| e["epoch"] == 3).expect("epoch 3");
+
+    assert_eq!(e1["event_count"], 1);
+    assert!(e1["first_event_at"].is_string());
+    assert!(e1["last_event_at"].is_string());
+    assert_eq!(e1["is_current"], true);
+
+    assert_eq!(e3["event_count"], 0);
+    assert!(e3["first_event_at"].is_null());
+    assert!(e3["last_event_at"].is_null());
+    assert_eq!(e3["is_current"], false);
+}
+
+#[tokio::test]
 async fn test_list_epochs_empty_stream() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

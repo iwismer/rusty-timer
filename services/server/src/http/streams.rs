@@ -134,18 +134,27 @@ pub async fn list_epochs(
         Err(e) => return internal_error(e),
     }
 
-    // Query distinct epochs with metadata
+    // Query distinct epochs from both events and epoch-race mappings with metadata.
     let rows = sqlx::query(
-        r#"SELECT e.stream_epoch AS epoch,
-                  COUNT(*) AS event_count,
+        r#"SELECT epochs.epoch AS epoch,
+                  COUNT(e.stream_id) AS event_count,
                   MIN(e.received_at) AS first_event_at,
                   MAX(e.received_at) AS last_event_at,
-                  (e.stream_epoch = s.stream_epoch) AS is_current
-           FROM events e
-           JOIN streams s ON s.stream_id = e.stream_id
-           WHERE e.stream_id = $1
-           GROUP BY e.stream_epoch, s.stream_epoch
-           ORDER BY e.stream_epoch ASC"#,
+                  (epochs.epoch = s.stream_epoch) AS is_current
+           FROM (
+               SELECT DISTINCT stream_epoch AS epoch
+               FROM events
+               WHERE stream_id = $1
+               UNION
+               SELECT stream_epoch AS epoch
+               FROM stream_epoch_races
+               WHERE stream_id = $1
+           ) AS epochs
+           JOIN streams s ON s.stream_id = $1
+           LEFT JOIN events e
+             ON e.stream_id = $1 AND e.stream_epoch = epochs.epoch
+           GROUP BY epochs.epoch, s.stream_epoch
+           ORDER BY epochs.epoch ASC"#,
     )
     .bind(stream_id)
     .fetch_all(&state.pool)
@@ -158,14 +167,16 @@ pub async fn list_epochs(
                 .map(|r| {
                     let epoch: i64 = r.get("epoch");
                     let event_count: i64 = r.get("event_count");
-                    let first_event_at: chrono::DateTime<chrono::Utc> = r.get("first_event_at");
-                    let last_event_at: chrono::DateTime<chrono::Utc> = r.get("last_event_at");
+                    let first_event_at: Option<chrono::DateTime<chrono::Utc>> =
+                        r.get("first_event_at");
+                    let last_event_at: Option<chrono::DateTime<chrono::Utc>> =
+                        r.get("last_event_at");
                     let is_current: bool = r.get("is_current");
                     serde_json::json!({
                         "epoch": epoch,
                         "event_count": event_count,
-                        "first_event_at": first_event_at.to_rfc3339(),
-                        "last_event_at": last_event_at.to_rfc3339(),
+                        "first_event_at": first_event_at.map(|ts| ts.to_rfc3339()),
+                        "last_event_at": last_event_at.map(|ts| ts.to_rfc3339()),
                         "is_current": is_current,
                     })
                 })
