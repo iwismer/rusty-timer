@@ -6,5 +6,6 @@ pub mod logs;
 pub mod metrics;
 pub mod races;
 pub mod reads;
+pub mod response;
 pub mod sse;
 pub mod streams;

@@ -1,3 +1,4 @@
+use super::response::{bad_request, internal_error, not_found};
 use crate::repo::races as repo;
 use crate::state::AppState;
 use axum::{
@@ -6,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use uuid::Uuid;
 
 pub async fn list_races(State(state): State<AppState>) -> impl IntoResponse {
@@ -26,15 +26,7 @@ pub async fn list_races(State(state): State<AppState>) -> impl IntoResponse {
                 .collect();
             (StatusCode::OK, Json(serde_json::json!({ "races": races }))).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -46,29 +38,11 @@ pub async fn create_race(
         Some(s) => {
             let trimmed = s.trim();
             if trimmed.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(HttpErrorEnvelope {
-                        code: "BAD_REQUEST".to_owned(),
-                        message: "name is required".to_owned(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
+                return bad_request("name is required");
             }
             trimmed.to_owned()
         }
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: "name is required".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        None => return bad_request("name is required"),
     };
 
     match repo::create_race(&state.pool, &name).await {
@@ -83,15 +57,7 @@ pub async fn create_race(
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -101,24 +67,8 @@ pub async fn delete_race(
 ) -> impl IntoResponse {
     match repo::delete_race(&state.pool, race_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(HttpErrorEnvelope {
-                code: "NOT_FOUND".to_owned(),
-                message: "race not found".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Ok(false) => not_found("race not found"),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -128,59 +78,19 @@ pub async fn list_participants(
 ) -> impl IntoResponse {
     // Check race exists
     match repo::race_exists(&state.pool, race_id).await {
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "race not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Ok(false) => return not_found("race not found"),
+        Err(e) => return internal_error(e),
         Ok(true) => {}
     }
 
     let participants = match repo::list_participants(&state.pool, race_id).await {
         Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     let unmatched = match repo::list_unmatched_chips(&state.pool, race_id).await {
         Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     let participants_json: Vec<serde_json::Value> = participants
@@ -224,28 +134,8 @@ pub async fn upload_participants(
 ) -> impl IntoResponse {
     // Check race exists
     match repo::race_exists(&state.pool, race_id).await {
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "race not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Ok(false) => return not_found("race not found"),
+        Err(e) => return internal_error(e),
         Ok(true) => {}
     }
 
@@ -257,27 +147,11 @@ pub async fn upload_participants(
     let parsed = match timer_core::util::io::parse_participant_bytes(&bytes) {
         Ok(parsed) => parsed,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: format!("invalid participant file: {}", e),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return bad_request(format!("invalid participant file: {}", e));
         }
     };
     if parsed.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(HttpErrorEnvelope {
-                code: "BAD_REQUEST".to_owned(),
-                message: "participant file has no valid rows".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return bad_request("participant file has no valid rows");
     }
 
     let tuples: Vec<(i32, String, String, String, Option<String>)> = parsed
@@ -312,15 +186,7 @@ pub async fn upload_participants(
             Json(serde_json::json!({ "imported": count })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -331,28 +197,8 @@ pub async fn upload_chips(
 ) -> impl IntoResponse {
     // Check race exists
     match repo::race_exists(&state.pool, race_id).await {
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "race not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Ok(false) => return not_found("race not found"),
+        Err(e) => return internal_error(e),
         Ok(true) => {}
     }
 
@@ -364,27 +210,11 @@ pub async fn upload_chips(
     let parsed = match timer_core::util::io::parse_bibchip_bytes(&bytes) {
         Ok(parsed) => parsed,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: format!("invalid bibchip file: {}", e),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return bad_request(format!("invalid bibchip file: {}", e));
         }
     };
     if parsed.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(HttpErrorEnvelope {
-                code: "BAD_REQUEST".to_owned(),
-                message: "bibchip file has no valid rows".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return bad_request("bibchip file has no valid rows");
     }
 
     let tuples: Vec<(String, i32)> = parsed.into_iter().map(|c| (c.id, c.bib)).collect();
@@ -397,15 +227,7 @@ pub async fn upload_chips(
             Json(serde_json::json!({ "imported": count })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -413,33 +235,9 @@ async fn extract_file_bytes(multipart: &mut Multipart) -> Result<Vec<u8>, Respon
     match multipart.next_field().await {
         Ok(Some(field)) => match field.bytes().await {
             Ok(bytes) => Ok(bytes.to_vec()),
-            Err(e) => Err((
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: format!("failed to read file: {}", e),
-                    details: None,
-                }),
-            )
-                .into_response()),
+            Err(e) => Err(bad_request(format!("failed to read file: {}", e))),
         },
-        Ok(None) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(HttpErrorEnvelope {
-                code: "BAD_REQUEST".to_owned(),
-                message: "no file uploaded".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response()),
-        Err(e) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(HttpErrorEnvelope {
-                code: "BAD_REQUEST".to_owned(),
-                message: format!("multipart error: {}", e),
-                details: None,
-            }),
-        )
-            .into_response()),
+        Ok(None) => Err(bad_request("no file uploaded")),
+        Err(e) => Err(bad_request(format!("multipart error: {}", e))),
     }
 }

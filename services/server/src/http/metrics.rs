@@ -1,3 +1,4 @@
+use super::response::{internal_error, not_found};
 use crate::{
     repo::events::{count_unique_chips, fetch_stream_metrics},
     state::AppState,
@@ -8,7 +9,6 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use uuid::Uuid;
 
 pub async fn get_metrics(
@@ -17,28 +17,8 @@ pub async fn get_metrics(
 ) -> impl IntoResponse {
     let metrics = match fetch_stream_metrics(&state.pool, stream_id).await {
         Ok(Some(m)) => m,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "stream not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Ok(None) => return not_found("stream not found"),
+        Err(e) => return internal_error(e),
     };
 
     let epoch =
@@ -48,43 +28,13 @@ pub async fn get_metrics(
             .await
         {
             Ok(Some(epoch)) => epoch,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(HttpErrorEnvelope {
-                        code: "NOT_FOUND".to_owned(),
-                        message: "stream not found".to_owned(),
-                        details: None,
-                    }),
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(HttpErrorEnvelope {
-                        code: "INTERNAL_ERROR".to_owned(),
-                        message: e.to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response()
-            }
+            Ok(None) => return not_found("stream not found"),
+            Err(e) => return internal_error(e),
         };
 
     let unique_chips = match count_unique_chips(&state.pool, stream_id, epoch).await {
         Ok(count) => count,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     (

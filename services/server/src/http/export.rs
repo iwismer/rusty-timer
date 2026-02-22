@@ -1,12 +1,11 @@
+use super::response::{internal_error, not_found};
 use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use uuid::Uuid;
 
 /// `GET /api/v1/streams/{stream_id}/export.txt`
@@ -26,28 +25,8 @@ pub async fn export_raw(
     .await;
 
     match exists {
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "stream not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
+        Ok(None) => return not_found("stream not found"),
         Ok(Some(_)) => {}
     }
 
@@ -61,15 +40,7 @@ pub async fn export_raw(
     .await;
 
     match rows {
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
         Ok(rows) => {
             let mut buf = String::new();
             for row in &rows {
@@ -106,28 +77,8 @@ pub async fn export_csv(
     .await;
 
     match exists {
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "stream not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
+        Ok(None) => return not_found("stream not found"),
         Ok(Some(_)) => {}
     }
 
@@ -142,15 +93,7 @@ pub async fn export_csv(
     .await;
 
     match rows {
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
         Ok(rows) => {
             let mut buf =
                 String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");

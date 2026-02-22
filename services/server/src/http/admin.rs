@@ -1,3 +1,4 @@
+use super::response::{bad_request, conflict, internal_error, not_found};
 use crate::dashboard_events::DashboardEvent;
 use crate::state::AppState;
 use axum::{
@@ -8,7 +9,6 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
-use rt_protocol::HttpErrorEnvelope;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -40,15 +40,7 @@ pub async fn list_tokens(State(state): State<AppState>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -67,24 +59,8 @@ pub async fn revoke_token(
             state.logger.log(format!("token {token_id} revoked"));
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(HttpErrorEnvelope {
-                code: "NOT_FOUND".to_owned(),
-                message: "token not found or already revoked".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Ok(None) => not_found("token not found or already revoked"),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -101,29 +77,13 @@ pub async fn create_token(
 ) -> impl IntoResponse {
     // Validate device_type
     if body.device_type != "forwarder" && body.device_type != "receiver" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(HttpErrorEnvelope {
-                code: "BAD_REQUEST".to_owned(),
-                message: "device_type must be \"forwarder\" or \"receiver\"".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return bad_request("device_type must be \"forwarder\" or \"receiver\"");
     }
 
     // Validate device_id
     let device_id = body.device_id.trim().to_owned();
     if device_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(HttpErrorEnvelope {
-                code: "BAD_REQUEST".to_owned(),
-                message: "device_id must not be empty".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return bad_request("device_id must not be empty");
     }
 
     // Generate or use provided token
@@ -131,15 +91,7 @@ pub async fn create_token(
         Some(t) => {
             let trimmed = t.trim();
             if trimmed.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(HttpErrorEnvelope {
-                        code: "BAD_REQUEST".to_owned(),
-                        message: "token must not be empty or whitespace".to_owned(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
+                return bad_request("token must not be empty or whitespace");
             }
             trimmed.to_owned()
         }
@@ -179,26 +131,10 @@ pub async fn create_token(
         Err(e) => {
             if let Some(db_err) = e.as_database_error() {
                 if db_err.is_unique_violation() {
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(HttpErrorEnvelope {
-                            code: "CONFLICT".to_owned(),
-                            message: "a token with this value already exists".to_owned(),
-                            details: None,
-                        }),
-                    )
-                        .into_response();
+                    return conflict("a token with this value already exists");
                 }
             }
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
+            internal_error(e)
         }
     }
 }
@@ -209,47 +145,21 @@ pub async fn delete_stream(
 ) -> impl IntoResponse {
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     if let Err(e) = sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!("DELETE FROM stream_metrics WHERE stream_id = $1", stream_id)
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!(
@@ -259,15 +169,7 @@ pub async fn delete_stream(
     .execute(&mut *tx)
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     match sqlx::query!("DELETE FROM streams WHERE stream_id = $1", stream_id)
@@ -276,123 +178,49 @@ pub async fn delete_stream(
     {
         Ok(result) => {
             if result.rows_affected() == 0 {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(HttpErrorEnvelope {
-                        code: "NOT_FOUND".to_owned(),
-                        message: "stream not found".to_owned(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
+                return not_found("stream not found");
             }
             if let Err(e) = tx.commit().await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(HttpErrorEnvelope {
-                        code: "INTERNAL_ERROR".to_owned(),
-                        message: e.to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
+                return internal_error(e);
             }
             let _ = state.dashboard_tx.send(DashboardEvent::Resync);
             state.logger.log(format!("stream {stream_id} deleted"));
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
 pub async fn delete_all_streams(State(state): State<AppState>) -> impl IntoResponse {
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     if let Err(e) = sqlx::query!("DELETE FROM events").execute(&mut *tx).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!("DELETE FROM stream_metrics")
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!("DELETE FROM receiver_cursors")
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!("DELETE FROM streams").execute(&mut *tx).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = tx.commit().await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     let _ = state.dashboard_tx.send(DashboardEvent::Resync);
@@ -403,56 +231,22 @@ pub async fn delete_all_streams(State(state): State<AppState>) -> impl IntoRespo
 pub async fn delete_all_events(State(state): State<AppState>) -> impl IntoResponse {
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     if let Err(e) = sqlx::query!("DELETE FROM events").execute(&mut *tx).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!("DELETE FROM receiver_cursors")
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = tx.commit().await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     state.logger.log("all events deleted");
@@ -465,32 +259,14 @@ pub async fn delete_stream_events(
 ) -> impl IntoResponse {
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     if let Err(e) = sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!(
@@ -500,27 +276,11 @@ pub async fn delete_stream_events(
     .execute(&mut *tx)
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = tx.commit().await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     state
@@ -534,30 +294,12 @@ pub async fn delete_epoch_events(
     Path((stream_id, epoch)): Path<(Uuid, i64)>,
 ) -> impl IntoResponse {
     if epoch < 1 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(HttpErrorEnvelope {
-                code: "BAD_REQUEST".to_owned(),
-                message: "epoch must be >= 1".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return bad_request("epoch must be >= 1");
     }
 
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     if let Err(e) = sqlx::query!(
@@ -568,15 +310,7 @@ pub async fn delete_epoch_events(
     .execute(&mut *tx)
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!(
@@ -586,27 +320,11 @@ pub async fn delete_epoch_events(
     .execute(&mut *tx)
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = tx.commit().await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     state.logger.log(format!(
@@ -624,15 +342,7 @@ pub async fn delete_all_cursors(State(state): State<AppState>) -> impl IntoRespo
             state.logger.log("all receiver cursors cleared");
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -664,15 +374,7 @@ pub async fn list_cursors(State(state): State<AppState>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -693,15 +395,7 @@ pub async fn delete_receiver_cursors(
                 .log(format!("cursors cleared for receiver {receiver_id}"));
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -723,71 +417,29 @@ pub async fn delete_receiver_stream_cursor(
             ));
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
 pub async fn delete_all_races(State(state): State<AppState>) -> impl IntoResponse {
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     if let Err(e) = sqlx::query!("DELETE FROM forwarder_races")
         .execute(&mut *tx)
         .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = sqlx::query!("DELETE FROM races").execute(&mut *tx).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     if let Err(e) = tx.commit().await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     let _ = state.dashboard_tx.send(DashboardEvent::Resync);

@@ -1,3 +1,4 @@
+use super::response::{bad_request, internal_error, not_found};
 use crate::repo::forwarder_races;
 use crate::repo::reads::{self, DedupMode};
 use crate::state::AppState;
@@ -7,7 +8,6 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
@@ -48,17 +48,7 @@ pub async fn get_stream_reads(
 ) -> impl IntoResponse {
     let dedup_mode = match DedupMode::parse(&params.dedup) {
         Some(m) => m,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: "invalid dedup mode; use none|first|last".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        None => return bad_request("invalid dedup mode; use none|first|last"),
     };
 
     // Look up forwarder_id for race assignment
@@ -68,58 +58,18 @@ pub async fn get_stream_reads(
         .await
     {
         Ok(Some(row)) => row.get::<String, _>("forwarder_id"),
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "stream not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Ok(None) => return not_found("stream not found"),
+        Err(e) => return internal_error(e),
     };
 
     let race_id = match forwarder_races::get_forwarder_race(&state.pool, &forwarder_id).await {
         Ok(race_id) => race_id,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     let all_reads = match reads::fetch_stream_reads(&state.pool, stream_id, race_id).await {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     let mut deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
@@ -139,47 +89,17 @@ pub async fn get_forwarder_reads(
 ) -> impl IntoResponse {
     let dedup_mode = match DedupMode::parse(&params.dedup) {
         Some(m) => m,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: "invalid dedup mode; use none|first|last".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        None => return bad_request("invalid dedup mode; use none|first|last"),
     };
 
     let race_id = match forwarder_races::get_forwarder_race(&state.pool, &forwarder_id).await {
         Ok(race_id) => race_id,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     let all_reads = match reads::fetch_forwarder_reads(&state.pool, &forwarder_id, race_id).await {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Err(e) => return internal_error(e),
     };
 
     let mut deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
