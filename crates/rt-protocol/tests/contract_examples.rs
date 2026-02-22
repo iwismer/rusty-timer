@@ -146,6 +146,46 @@ fn receiver_ack_round_trip() {
 }
 
 #[test]
+fn receiver_hello_v11_race_current_round_trip() {
+    let msg = round_trip("contracts/ws/v1.1/examples/receiver_hello_v11_race_current.json");
+    match msg {
+        WsMessage::ReceiverHelloV11(inner) => {
+            assert!(!inner.receiver_id.is_empty());
+            assert!(matches!(
+                inner.selection,
+                rt_protocol::ReceiverSelection::Race { .. }
+            ));
+        }
+        other => panic!("Expected ReceiverHelloV11, got {:?}", other),
+    }
+}
+
+#[test]
+fn receiver_set_selection_round_trip() {
+    let msg = round_trip("contracts/ws/v1.1/examples/receiver_set_selection.json");
+    match msg {
+        WsMessage::ReceiverSetSelection(inner) => {
+            assert!(matches!(
+                inner.selection,
+                rt_protocol::ReceiverSelection::Race { .. }
+            ));
+        }
+        other => panic!("Expected ReceiverSetSelection, got {:?}", other),
+    }
+}
+
+#[test]
+fn receiver_selection_applied_round_trip() {
+    let msg = round_trip("contracts/ws/v1.1/examples/receiver_selection_applied.json");
+    match msg {
+        WsMessage::ReceiverSelectionApplied(inner) => {
+            assert!(inner.resolved_target_count > 0);
+        }
+        other => panic!("Expected ReceiverSelectionApplied, got {:?}", other),
+    }
+}
+
+#[test]
 fn heartbeat_round_trip() {
     let msg = round_trip("contracts/ws/v1/examples/heartbeat.json");
     match msg {
