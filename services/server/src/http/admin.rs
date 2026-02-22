@@ -1,4 +1,4 @@
-use super::response::{bad_request, conflict, internal_error, not_found};
+use super::response::{bad_request, conflict, internal_error, not_found, HttpResult};
 use crate::dashboard_events::DashboardEvent;
 use crate::state::AppState;
 use axum::{
@@ -11,7 +11,125 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::fmt::Display;
 use uuid::Uuid;
+
+type AdminTx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+
+async fn begin_tx_or_500(pool: &sqlx::PgPool) -> HttpResult<AdminTx<'_>> {
+    pool.begin().await.map_err(internal_error)
+}
+
+fn exec_or_500<T, E>(result: Result<T, E>) -> HttpResult<T>
+where
+    E: Display,
+{
+    result.map_err(internal_error)
+}
+
+async fn commit_or_500(tx: AdminTx<'_>) -> HttpResult {
+    tx.commit().await.map_err(internal_error)
+}
+
+async fn delete_stream_graph(tx: &mut AdminTx<'_>, stream_id: Option<Uuid>) -> HttpResult<u64> {
+    match stream_id {
+        Some(stream_id) => {
+            exec_or_500(
+                sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
+                    .execute(&mut **tx)
+                    .await,
+            )?;
+            exec_or_500(
+                sqlx::query!("DELETE FROM stream_metrics WHERE stream_id = $1", stream_id)
+                    .execute(&mut **tx)
+                    .await,
+            )?;
+            exec_or_500(
+                sqlx::query!(
+                    "DELETE FROM receiver_cursors WHERE stream_id = $1",
+                    stream_id
+                )
+                .execute(&mut **tx)
+                .await,
+            )?;
+            let result = exec_or_500(
+                sqlx::query!("DELETE FROM streams WHERE stream_id = $1", stream_id)
+                    .execute(&mut **tx)
+                    .await,
+            )?;
+            Ok(result.rows_affected())
+        }
+        None => {
+            exec_or_500(sqlx::query!("DELETE FROM events").execute(&mut **tx).await)?;
+            exec_or_500(
+                sqlx::query!("DELETE FROM stream_metrics")
+                    .execute(&mut **tx)
+                    .await,
+            )?;
+            exec_or_500(
+                sqlx::query!("DELETE FROM receiver_cursors")
+                    .execute(&mut **tx)
+                    .await,
+            )?;
+            let result = exec_or_500(sqlx::query!("DELETE FROM streams").execute(&mut **tx).await)?;
+            Ok(result.rows_affected())
+        }
+    }
+}
+
+async fn delete_events_and_cursors(
+    tx: &mut AdminTx<'_>,
+    stream_id: Option<Uuid>,
+    epoch: Option<i64>,
+) -> HttpResult {
+    match (stream_id, epoch) {
+        (Some(stream_id), Some(epoch)) => {
+            exec_or_500(
+                sqlx::query!(
+                    "DELETE FROM events WHERE stream_id = $1 AND stream_epoch = $2",
+                    stream_id,
+                    epoch
+                )
+                .execute(&mut **tx)
+                .await,
+            )?;
+            exec_or_500(
+                sqlx::query!(
+                    "DELETE FROM receiver_cursors WHERE stream_id = $1",
+                    stream_id
+                )
+                .execute(&mut **tx)
+                .await,
+            )?;
+        }
+        (Some(stream_id), None) => {
+            exec_or_500(
+                sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
+                    .execute(&mut **tx)
+                    .await,
+            )?;
+            exec_or_500(
+                sqlx::query!(
+                    "DELETE FROM receiver_cursors WHERE stream_id = $1",
+                    stream_id
+                )
+                .execute(&mut **tx)
+                .await,
+            )?;
+        }
+        (None, None) => {
+            exec_or_500(sqlx::query!("DELETE FROM events").execute(&mut **tx).await)?;
+            exec_or_500(
+                sqlx::query!("DELETE FROM receiver_cursors")
+                    .execute(&mut **tx)
+                    .await,
+            )?;
+        }
+        (None, Some(_)) => {}
+    }
+
+    Ok(())
+}
 
 pub async fn list_tokens(State(state): State<AppState>) -> impl IntoResponse {
     let rows = sqlx::query!(
@@ -143,84 +261,39 @@ pub async fn delete_stream(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let mut tx = match state.pool.begin().await {
+    let mut tx = match begin_tx_or_500(&state.pool).await {
         Ok(tx) => tx,
-        Err(e) => return internal_error(e),
+        Err(response) => return response,
     };
 
-    if let Err(e) = sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
-        .execute(&mut *tx)
-        .await
-    {
-        return internal_error(e);
-    }
+    let deleted_streams = match delete_stream_graph(&mut tx, Some(stream_id)).await {
+        Ok(rows_affected) => rows_affected,
+        Err(response) => return response,
+    };
 
-    if let Err(e) = sqlx::query!("DELETE FROM stream_metrics WHERE stream_id = $1", stream_id)
-        .execute(&mut *tx)
-        .await
-    {
-        return internal_error(e);
+    if deleted_streams == 0 {
+        return not_found("stream not found");
     }
-
-    if let Err(e) = sqlx::query!(
-        "DELETE FROM receiver_cursors WHERE stream_id = $1",
-        stream_id
-    )
-    .execute(&mut *tx)
-    .await
-    {
-        return internal_error(e);
+    if let Err(response) = commit_or_500(tx).await {
+        return response;
     }
-
-    match sqlx::query!("DELETE FROM streams WHERE stream_id = $1", stream_id)
-        .execute(&mut *tx)
-        .await
-    {
-        Ok(result) => {
-            if result.rows_affected() == 0 {
-                return not_found("stream not found");
-            }
-            if let Err(e) = tx.commit().await {
-                return internal_error(e);
-            }
-            let _ = state.dashboard_tx.send(DashboardEvent::Resync);
-            state.logger.log(format!("stream {stream_id} deleted"));
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => internal_error(e),
-    }
+    let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+    state.logger.log(format!("stream {stream_id} deleted"));
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn delete_all_streams(State(state): State<AppState>) -> impl IntoResponse {
-    let mut tx = match state.pool.begin().await {
+    let mut tx = match begin_tx_or_500(&state.pool).await {
         Ok(tx) => tx,
-        Err(e) => return internal_error(e),
+        Err(response) => return response,
     };
 
-    if let Err(e) = sqlx::query!("DELETE FROM events").execute(&mut *tx).await {
-        return internal_error(e);
+    if let Err(response) = delete_stream_graph(&mut tx, None).await {
+        return response;
     }
 
-    if let Err(e) = sqlx::query!("DELETE FROM stream_metrics")
-        .execute(&mut *tx)
-        .await
-    {
-        return internal_error(e);
-    }
-
-    if let Err(e) = sqlx::query!("DELETE FROM receiver_cursors")
-        .execute(&mut *tx)
-        .await
-    {
-        return internal_error(e);
-    }
-
-    if let Err(e) = sqlx::query!("DELETE FROM streams").execute(&mut *tx).await {
-        return internal_error(e);
-    }
-
-    if let Err(e) = tx.commit().await {
-        return internal_error(e);
+    if let Err(response) = commit_or_500(tx).await {
+        return response;
     }
 
     let _ = state.dashboard_tx.send(DashboardEvent::Resync);
@@ -229,24 +302,17 @@ pub async fn delete_all_streams(State(state): State<AppState>) -> impl IntoRespo
 }
 
 pub async fn delete_all_events(State(state): State<AppState>) -> impl IntoResponse {
-    let mut tx = match state.pool.begin().await {
+    let mut tx = match begin_tx_or_500(&state.pool).await {
         Ok(tx) => tx,
-        Err(e) => return internal_error(e),
+        Err(response) => return response,
     };
 
-    if let Err(e) = sqlx::query!("DELETE FROM events").execute(&mut *tx).await {
-        return internal_error(e);
+    if let Err(response) = delete_events_and_cursors(&mut tx, None, None).await {
+        return response;
     }
 
-    if let Err(e) = sqlx::query!("DELETE FROM receiver_cursors")
-        .execute(&mut *tx)
-        .await
-    {
-        return internal_error(e);
-    }
-
-    if let Err(e) = tx.commit().await {
-        return internal_error(e);
+    if let Err(response) = commit_or_500(tx).await {
+        return response;
     }
 
     state.logger.log("all events deleted");
@@ -257,30 +323,17 @@ pub async fn delete_stream_events(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let mut tx = match state.pool.begin().await {
+    let mut tx = match begin_tx_or_500(&state.pool).await {
         Ok(tx) => tx,
-        Err(e) => return internal_error(e),
+        Err(response) => return response,
     };
 
-    if let Err(e) = sqlx::query!("DELETE FROM events WHERE stream_id = $1", stream_id)
-        .execute(&mut *tx)
-        .await
-    {
-        return internal_error(e);
+    if let Err(response) = delete_events_and_cursors(&mut tx, Some(stream_id), None).await {
+        return response;
     }
 
-    if let Err(e) = sqlx::query!(
-        "DELETE FROM receiver_cursors WHERE stream_id = $1",
-        stream_id
-    )
-    .execute(&mut *tx)
-    .await
-    {
-        return internal_error(e);
-    }
-
-    if let Err(e) = tx.commit().await {
-        return internal_error(e);
+    if let Err(response) = commit_or_500(tx).await {
+        return response;
     }
 
     state
@@ -297,34 +350,17 @@ pub async fn delete_epoch_events(
         return bad_request("epoch must be >= 1");
     }
 
-    let mut tx = match state.pool.begin().await {
+    let mut tx = match begin_tx_or_500(&state.pool).await {
         Ok(tx) => tx,
-        Err(e) => return internal_error(e),
+        Err(response) => return response,
     };
 
-    if let Err(e) = sqlx::query!(
-        "DELETE FROM events WHERE stream_id = $1 AND stream_epoch = $2",
-        stream_id,
-        epoch
-    )
-    .execute(&mut *tx)
-    .await
-    {
-        return internal_error(e);
+    if let Err(response) = delete_events_and_cursors(&mut tx, Some(stream_id), Some(epoch)).await {
+        return response;
     }
 
-    if let Err(e) = sqlx::query!(
-        "DELETE FROM receiver_cursors WHERE stream_id = $1",
-        stream_id
-    )
-    .execute(&mut *tx)
-    .await
-    {
-        return internal_error(e);
-    }
-
-    if let Err(e) = tx.commit().await {
-        return internal_error(e);
+    if let Err(response) = commit_or_500(tx).await {
+        return response;
     }
 
     state.logger.log(format!(
@@ -422,24 +458,25 @@ pub async fn delete_receiver_stream_cursor(
 }
 
 pub async fn delete_all_races(State(state): State<AppState>) -> impl IntoResponse {
-    let mut tx = match state.pool.begin().await {
+    let mut tx = match begin_tx_or_500(&state.pool).await {
         Ok(tx) => tx,
-        Err(e) => return internal_error(e),
+        Err(response) => return response,
     };
 
-    if let Err(e) = sqlx::query!("DELETE FROM forwarder_races")
-        .execute(&mut *tx)
-        .await
-    {
-        return internal_error(e);
+    if let Err(response) = exec_or_500(
+        sqlx::query!("DELETE FROM forwarder_races")
+            .execute(&mut *tx)
+            .await,
+    ) {
+        return response;
     }
 
-    if let Err(e) = sqlx::query!("DELETE FROM races").execute(&mut *tx).await {
-        return internal_error(e);
+    if let Err(response) = exec_or_500(sqlx::query!("DELETE FROM races").execute(&mut *tx).await) {
+        return response;
     }
 
-    if let Err(e) = tx.commit().await {
-        return internal_error(e);
+    if let Err(response) = commit_or_500(tx).await {
+        return response;
     }
 
     let _ = state.dashboard_tx.send(DashboardEvent::Resync);

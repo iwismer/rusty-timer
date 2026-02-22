@@ -7,7 +7,7 @@ use rt_protocol::HttpErrorEnvelope;
 use std::fmt::Display;
 
 pub type HttpResponse = Response;
-pub type HttpResult<T = ()> = Result<T, Response>;
+pub type HttpResult<T = ()> = Result<T, HttpResponse>;
 
 pub(crate) fn json_error(
     status: StatusCode,
