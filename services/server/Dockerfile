@@ -41,7 +41,7 @@ RUN npm ci --workspace apps/shared-ui --workspace apps/server-ui \
 # ---------------------------------------------------------------------------
 # Stage 2: Rust builder
 # ---------------------------------------------------------------------------
-FROM rust:1.89.0-bookworm AS rust-builder
+FROM rust:1.93.1-bookworm AS rust-builder
 
 WORKDIR /build
 
