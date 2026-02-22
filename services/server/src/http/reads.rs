@@ -1,4 +1,4 @@
-use super::response::{bad_request, internal_error, not_found};
+use super::response::{bad_request, internal_error, not_found, HttpResponse};
 use crate::repo::forwarder_races;
 use crate::repo::reads::{self, DedupMode};
 use crate::state::AppState;
@@ -46,39 +46,7 @@ pub async fn get_stream_reads(
     Path(stream_id): Path<Uuid>,
     Query(params): Query<ReadsQuery>,
 ) -> impl IntoResponse {
-    let dedup_mode = match DedupMode::parse(&params.dedup) {
-        Some(m) => m,
-        None => return bad_request("invalid dedup mode; use none|first|last"),
-    };
-
-    // Look up forwarder_id for race assignment
-    let forwarder_id = match sqlx::query("SELECT forwarder_id FROM streams WHERE stream_id = $1")
-        .bind(stream_id)
-        .fetch_optional(&state.pool)
-        .await
-    {
-        Ok(Some(row)) => row.get::<String, _>("forwarder_id"),
-        Ok(None) => return not_found("stream not found"),
-        Err(e) => return internal_error(e),
-    };
-
-    let race_id = match forwarder_races::get_forwarder_race(&state.pool, &forwarder_id).await {
-        Ok(race_id) => race_id,
-        Err(e) => return internal_error(e),
-    };
-
-    let all_reads = match reads::fetch_stream_reads(&state.pool, stream_id, race_id).await {
-        Ok(r) => r,
-        Err(e) => return internal_error(e),
-    };
-
-    let mut deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
-    if params.order == "desc" {
-        deduped.reverse();
-    }
-    let (page, total) = reads::paginate(deduped, params.limit, params.offset);
-
-    build_reads_response(page, total, params.limit, params.offset)
+    get_reads(&state, params, ReadsFetchStrategy::Stream { stream_id }).await
 }
 
 /// GET /api/v1/forwarders/:forwarder_id/reads
@@ -87,9 +55,43 @@ pub async fn get_forwarder_reads(
     Path(forwarder_id): Path<String>,
     Query(params): Query<ReadsQuery>,
 ) -> impl IntoResponse {
+    get_reads(
+        &state,
+        params,
+        ReadsFetchStrategy::Forwarder { forwarder_id },
+    )
+    .await
+}
+
+enum ReadsFetchStrategy {
+    Stream { stream_id: Uuid },
+    Forwarder { forwarder_id: String },
+}
+
+async fn get_reads(
+    state: &AppState,
+    params: ReadsQuery,
+    strategy: ReadsFetchStrategy,
+) -> HttpResponse {
     let dedup_mode = match DedupMode::parse(&params.dedup) {
         Some(m) => m,
         None => return bad_request("invalid dedup mode; use none|first|last"),
+    };
+
+    let forwarder_id = match &strategy {
+        ReadsFetchStrategy::Stream { stream_id } => {
+            // Look up forwarder_id for race assignment
+            match sqlx::query("SELECT forwarder_id FROM streams WHERE stream_id = $1")
+                .bind(stream_id)
+                .fetch_optional(&state.pool)
+                .await
+            {
+                Ok(Some(row)) => row.get::<String, _>("forwarder_id"),
+                Ok(None) => return not_found("stream not found"),
+                Err(e) => return internal_error(e),
+            }
+        }
+        ReadsFetchStrategy::Forwarder { forwarder_id } => forwarder_id.clone(),
     };
 
     let race_id = match forwarder_races::get_forwarder_race(&state.pool, &forwarder_id).await {
@@ -97,9 +99,19 @@ pub async fn get_forwarder_reads(
         Err(e) => return internal_error(e),
     };
 
-    let all_reads = match reads::fetch_forwarder_reads(&state.pool, &forwarder_id, race_id).await {
-        Ok(r) => r,
-        Err(e) => return internal_error(e),
+    let all_reads = match strategy {
+        ReadsFetchStrategy::Stream { stream_id } => {
+            match reads::fetch_stream_reads(&state.pool, stream_id, race_id).await {
+                Ok(r) => r,
+                Err(e) => return internal_error(e),
+            }
+        }
+        ReadsFetchStrategy::Forwarder { forwarder_id } => {
+            match reads::fetch_forwarder_reads(&state.pool, &forwarder_id, race_id).await {
+                Ok(r) => r,
+                Err(e) => return internal_error(e),
+            }
+        }
     };
 
     let mut deduped = reads::apply_dedup(all_reads, dedup_mode, params.window_secs);
@@ -116,7 +128,7 @@ fn build_reads_response(
     total: usize,
     limit: usize,
     offset: usize,
-) -> axum::response::Response {
+) -> HttpResponse {
     let reads_json: Vec<serde_json::Value> = page
         .iter()
         .map(|r| {

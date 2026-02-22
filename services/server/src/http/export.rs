@@ -1,4 +1,4 @@
-use super::response::{internal_error, not_found};
+use super::response::{internal_error, not_found, HttpResult};
 use crate::state::AppState;
 use axum::{
     body::Body,
@@ -8,6 +8,21 @@ use axum::{
 };
 use uuid::Uuid;
 
+async fn ensure_stream_exists(pool: &sqlx::PgPool, stream_id: Uuid) -> HttpResult {
+    let exists = sqlx::query!(
+        "SELECT 1 AS one FROM streams WHERE stream_id = $1",
+        stream_id
+    )
+    .fetch_optional(pool)
+    .await;
+
+    match exists {
+        Err(e) => Err(internal_error(e)),
+        Ok(None) => Err(not_found("stream not found")),
+        Ok(Some(_)) => Ok(()),
+    }
+}
+
 /// `GET /api/v1/streams/{stream_id}/export.txt`
 ///
 /// Streams canonical deduplicated events as bare `raw_read_line` values,
@@ -16,18 +31,8 @@ pub async fn export_raw(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Verify stream exists
-    let exists = sqlx::query!(
-        "SELECT 1 AS one FROM streams WHERE stream_id = $1",
-        stream_id
-    )
-    .fetch_optional(&state.pool)
-    .await;
-
-    match exists {
-        Err(e) => return internal_error(e),
-        Ok(None) => return not_found("stream not found"),
-        Ok(Some(_)) => {}
+    if let Err(response) = ensure_stream_exists(&state.pool, stream_id).await {
+        return response;
     }
 
     let rows = sqlx::query!(
@@ -68,18 +73,8 @@ pub async fn export_csv(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Verify stream exists
-    let exists = sqlx::query!(
-        "SELECT 1 AS one FROM streams WHERE stream_id = $1",
-        stream_id
-    )
-    .fetch_optional(&state.pool)
-    .await;
-
-    match exists {
-        Err(e) => return internal_error(e),
-        Ok(None) => return not_found("stream not found"),
-        Ok(Some(_)) => {}
+    if let Err(response) = ensure_stream_exists(&state.pool, stream_id).await {
+        return response;
     }
 
     let rows = sqlx::query!(

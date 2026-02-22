@@ -6,11 +6,14 @@ use axum::{
 use rt_protocol::HttpErrorEnvelope;
 use std::fmt::Display;
 
+pub type HttpResponse = Response;
+pub type HttpResult<T = ()> = Result<T, Response>;
+
 pub(crate) fn json_error(
     status: StatusCode,
     code: impl Into<String>,
     message: impl Into<String>,
-) -> Response {
+) -> HttpResponse {
     (
         status,
         Json(HttpErrorEnvelope {
@@ -22,7 +25,7 @@ pub(crate) fn json_error(
         .into_response()
 }
 
-pub fn internal_error(err: impl Display) -> Response {
+pub fn internal_error(err: impl Display) -> HttpResponse {
     json_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "INTERNAL_ERROR",
@@ -30,19 +33,19 @@ pub fn internal_error(err: impl Display) -> Response {
     )
 }
 
-pub fn bad_request(message: impl Into<String>) -> Response {
+pub fn bad_request(message: impl Into<String>) -> HttpResponse {
     json_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message)
 }
 
-pub fn not_found(message: impl Into<String>) -> Response {
+pub fn not_found(message: impl Into<String>) -> HttpResponse {
     json_error(StatusCode::NOT_FOUND, "NOT_FOUND", message)
 }
 
-pub fn conflict(message: impl Into<String>) -> Response {
+pub fn conflict(message: impl Into<String>) -> HttpResponse {
     json_error(StatusCode::CONFLICT, "CONFLICT", message)
 }
 
-pub fn gateway_timeout(message: impl Into<String>) -> Response {
+pub fn gateway_timeout(message: impl Into<String>) -> HttpResponse {
     json_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT", message)
 }
 
