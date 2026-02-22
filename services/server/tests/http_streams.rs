@@ -128,7 +128,6 @@ async fn test_list_streams_after_forwarder_connect() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-list".to_owned(),
         reader_ips: vec!["10.10.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -170,7 +169,6 @@ async fn test_patch_stream_rename() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-rename".to_owned(),
         reader_ips: vec!["10.20.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -244,7 +242,6 @@ async fn test_get_metrics_for_stream() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-metrics".to_owned(),
         reader_ips: vec!["10.30.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -379,7 +376,6 @@ async fn test_forwarder_display_name_in_streams_list() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-dn".to_owned(),
         reader_ips: vec!["10.40.0.1".to_owned()],
-        resume: vec![],
         display_name: Some("Start Line".to_owned()),
     }))
     .await
@@ -413,7 +409,6 @@ async fn test_forwarder_display_name_on_event_batch_created_stream() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-dn-batch".to_owned(),
         reader_ips: vec![],
-        resume: vec![],
         display_name: Some("Start Line".to_owned()),
     }))
     .await
@@ -468,7 +463,6 @@ async fn test_forwarder_display_name_cleared_when_hello_omits_value() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-dn-clear".to_owned(),
         reader_ips: vec!["10.42.0.1".to_owned()],
-        resume: vec![],
         display_name: Some("Start Line".to_owned()),
     }))
     .await
@@ -479,7 +473,6 @@ async fn test_forwarder_display_name_cleared_when_hello_omits_value() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-dn-clear".to_owned(),
         reader_ips: vec!["10.42.0.1".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -525,7 +518,6 @@ async fn test_forwarder_display_name_refreshes_all_forwarder_streams() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-dn-refresh-all".to_owned(),
         reader_ips: vec!["10.43.0.1".to_owned(), "10.43.0.2".to_owned()],
-        resume: vec![],
         display_name: Some("Start Line".to_owned()),
     }))
     .await
@@ -537,7 +529,6 @@ async fn test_forwarder_display_name_refreshes_all_forwarder_streams() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-dn-refresh-all".to_owned(),
         reader_ips: vec!["10.43.0.1".to_owned()],
-        resume: vec![],
         display_name: Some("Finish Line".to_owned()),
     }))
     .await

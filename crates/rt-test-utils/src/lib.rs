@@ -42,7 +42,6 @@ mod tests {
         let hello = WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-test-001".to_owned(),
             reader_ips: vec!["192.168.1.10".to_owned()],
-            resume: vec![],
             display_name: None,
         });
         client.send_message(&hello).await.unwrap();
@@ -98,7 +97,6 @@ mod tests {
         let hello = WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-test-001".to_owned(),
             reader_ips: vec!["192.168.1.10".to_owned()],
-            resume: vec![],
             display_name: None,
         });
         client.send_message(&hello).await.unwrap();
@@ -181,7 +179,6 @@ mod tests {
         let hello = WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-roundtrip".to_owned(),
             reader_ips: vec!["10.0.0.1".to_owned()],
-            resume: vec![],
             display_name: None,
         });
         client.send_message(&hello).await.unwrap();
@@ -204,7 +201,6 @@ mod tests {
         let hello1 = WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-001".to_owned(),
             reader_ips: vec![],
-            resume: vec![],
             display_name: None,
         });
         let hello2 = WsMessage::ReceiverHello(ReceiverHello {
@@ -243,7 +239,6 @@ mod tests {
         let hello = WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-multi".to_owned(),
             reader_ips: vec!["10.0.0.1".to_owned(), "10.0.0.2".to_owned()],
-            resume: vec![],
             display_name: None,
         });
         client.send_message(&hello).await.unwrap();

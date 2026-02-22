@@ -47,7 +47,6 @@ async fn test_receiver_resume_from_cursor() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-resume".to_owned(),
         reader_ips: vec!["10.2.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -138,7 +137,6 @@ async fn test_receiver_no_cursor_gets_all() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-all".to_owned(),
         reader_ips: vec!["10.3.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: None,
     }))
     .await
@@ -202,4 +200,105 @@ async fn test_receiver_no_cursor_gets_all() {
         Ok(Err(e)) => panic!("{}", e),
         Err(_) => panic!("timeout waiting for replay events"),
     }
+}
+
+/// Test that large backlog replay is chunked into multiple receiver batches.
+#[tokio::test]
+async fn test_receiver_large_backlog_replay_is_chunked() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state, None))
+            .await
+            .unwrap();
+    });
+
+    insert_token(&pool, "fwd-chunk", "forwarder", b"fwd-chunk-token").await;
+    insert_token(&pool, "rcv-chunk", "receiver", b"rcv-chunk-token").await;
+
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-chunk-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-chunk".to_owned(),
+        reader_ips: vec!["10.4.0.1:10000".to_owned()],
+        display_name: None,
+    }))
+    .await
+    .unwrap();
+    let fwd_session = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("{:?}", other),
+    };
+
+    let events: Vec<ReadEvent> = (1..=600u64)
+        .map(|seq| ReadEvent {
+            forwarder_id: "fwd-chunk".to_owned(),
+            reader_ip: "10.4.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq,
+            reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
+            raw_read_line: format!("CHUNK_LINE_{}", seq),
+            read_type: "RAW".to_owned(),
+        })
+        .collect();
+
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "large-batch".to_owned(),
+        events,
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-chunk-token")
+        .await
+        .unwrap();
+    rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
+        receiver_id: "rcv-chunk".to_owned(),
+        resume: vec![ResumeCursor {
+            forwarder_id: "fwd-chunk".to_owned(),
+            reader_ip: "10.4.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            last_seq: 0,
+        }],
+    }))
+    .await
+    .unwrap();
+    match rcv.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(_) => {}
+        other => panic!("expected Heartbeat, got {:?}", other),
+    }
+
+    let mut batch_count = 0usize;
+    let mut seqs: Vec<u64> = Vec::new();
+    while seqs.len() < 600 {
+        match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+            Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+                batch_count += 1;
+                seqs.extend(batch.events.iter().map(|e| e.seq));
+            }
+            Ok(Ok(other)) => panic!("expected ReceiverEventBatch, got {:?}", other),
+            Ok(Err(e)) => panic!("{}", e),
+            Err(_) => panic!("timeout waiting for chunked replay"),
+        }
+    }
+
+    assert!(
+        batch_count >= 2,
+        "expected replay to be split into multiple batches"
+    );
+    assert_eq!(seqs.len(), 600);
+    assert_eq!(seqs.first().copied(), Some(1));
+    assert_eq!(seqs.last().copied(), Some(600));
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]));
 }

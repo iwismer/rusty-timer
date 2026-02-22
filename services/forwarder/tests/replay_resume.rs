@@ -136,3 +136,19 @@ fn replay_cursor_advances_after_ack() {
     let total2: usize = result2.iter().map(|b| b.events.len()).sum();
     assert_eq!(total2, 0, "nothing pending after full ack");
 }
+
+/// Test: ack cursor never regresses to an older epoch/seq tuple.
+#[test]
+fn ack_cursor_does_not_regress() {
+    let (mut j, _f) = make_journal();
+    j.ensure_stream_state("192.168.2.50", 1).unwrap();
+
+    // Advance to epoch 2 and ack through seq 5.
+    j.update_ack_cursor("192.168.2.50", 2, 5).unwrap();
+
+    // Apply an older cursor update; this must be ignored.
+    j.update_ack_cursor("192.168.2.50", 1, 999).unwrap();
+
+    let (epoch, seq) = j.ack_cursor("192.168.2.50").unwrap();
+    assert_eq!((epoch, seq), (2, 5));
+}

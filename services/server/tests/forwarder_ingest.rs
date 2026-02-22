@@ -43,7 +43,6 @@ async fn test_first_insert_stores_event_and_acks() {
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-001".to_owned(),
             reader_ips: vec!["192.168.1.10:10000".to_owned()],
-            resume: vec![],
             display_name: None,
         }))
         .await
@@ -107,7 +106,6 @@ async fn test_identical_retransmit_no_dup() {
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-002".to_owned(),
             reader_ips: vec!["192.168.1.20:10000".to_owned()],
-            resume: vec![],
             display_name: None,
         }))
         .await
@@ -185,7 +183,6 @@ async fn test_mismatched_payload_rejected() {
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-003".to_owned(),
             reader_ips: vec!["192.168.1.30:10000".to_owned()],
-            resume: vec![],
             display_name: None,
         }))
         .await
@@ -270,7 +267,6 @@ async fn test_first_connection_wins() {
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-dup".to_owned(),
             reader_ips: vec!["10.0.0.1:10000".to_owned()],
-            resume: vec![],
             display_name: None,
         }))
         .await
@@ -287,7 +283,6 @@ async fn test_first_connection_wins() {
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-dup".to_owned(),
             reader_ips: vec!["10.0.0.1:10000".to_owned()],
-            resume: vec![],
             display_name: None,
         }))
         .await
@@ -327,7 +322,6 @@ async fn test_invalid_token_rejected() {
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd-unknown".to_owned(),
             reader_ips: vec![],
-            resume: vec![],
             display_name: None,
         }))
         .await
@@ -366,7 +360,6 @@ async fn test_path_unsafe_forwarder_id_rejected() {
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: "fwd/bad".to_owned(),
             reader_ips: vec![],
-            resume: vec![],
             display_name: None,
         }))
         .await

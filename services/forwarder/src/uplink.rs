@@ -5,15 +5,14 @@
 //!
 //! # Protocol
 //! 1. Connect to `server_url` (ws:// or wss://)
-//! 2. Send `ForwarderHello` with advisory `forwarder_id` and resume cursors
+//! 2. Send `ForwarderHello` with advisory `forwarder_id` and reader IPs
 //! 3. Receive `Heartbeat` — extract `session_id` and `device_id`
 //! 4. Send `ForwarderEventBatch` messages; receive `ForwarderAck` per batch
 //! 5. Track `session_id` for all subsequent messages
 
 use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{
-    EpochResetCommand, ForwarderAck, ForwarderEventBatch, ForwarderHello, ReadEvent, ResumeCursor,
-    WsMessage,
+    EpochResetCommand, ForwarderAck, ForwarderEventBatch, ForwarderHello, ReadEvent, WsMessage,
 };
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
@@ -105,7 +104,6 @@ impl UplinkSession {
         let hello = WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: cfg.forwarder_id.clone(),
             reader_ips: vec![],
-            resume: vec![],
             display_name: cfg.display_name.clone(),
         });
         session.send_ws_message(&hello).await?;
@@ -139,11 +137,10 @@ impl UplinkSession {
         Ok(session)
     }
 
-    /// Connect with explicit resume cursors (for reconnect-replay scenarios).
-    pub async fn connect_with_resume(
+    /// Connect with explicit reader IPs for the hello handshake.
+    pub async fn connect_with_readers(
         cfg: UplinkConfig,
         reader_ips: Vec<String>,
-        resume: Vec<ResumeCursor>,
     ) -> Result<Self, UplinkError> {
         use tokio_tungstenite::connect_async;
 
@@ -162,7 +159,6 @@ impl UplinkSession {
         let hello = WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: cfg.forwarder_id.clone(),
             reader_ips,
-            resume,
             display_name: cfg.display_name.clone(),
         });
         session.send_ws_message(&hello).await?;

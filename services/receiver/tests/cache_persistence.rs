@@ -126,6 +126,25 @@ fn cursor_epoch_advance() {
     db.save_cursor("f", "192.168.1.100:10000", 2, 5).unwrap();
     assert_eq!(db.load_cursors().unwrap()[0].stream_epoch, 2);
 }
+
+#[test]
+fn cursor_upsert_does_not_regress() {
+    let db = Db::open_in_memory().unwrap();
+
+    db.save_cursor("f", "192.168.1.100:10000", 2, 5).unwrap();
+
+    // Same stream, older epoch: must be ignored.
+    db.save_cursor("f", "192.168.1.100:10000", 1, 999).unwrap();
+
+    // Same epoch, older seq: must be ignored.
+    db.save_cursor("f", "192.168.1.100:10000", 2, 4).unwrap();
+
+    let c = db.load_cursors().unwrap();
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].stream_epoch, 2);
+    assert_eq!(c[0].last_seq, 5);
+}
+
 #[test]
 fn cursors_as_resume_list() {
     let db = Db::open_in_memory().unwrap();

@@ -15,7 +15,7 @@ use forwarder::ui_events::ForwarderUiEvent;
 use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkError, UplinkSession};
 use forwarder::uplink_replay::should_reconnect_after_replay_send;
 use ipico_core::read::ChipRead;
-use rt_protocol::{ReadEvent, ResumeCursor, WsMessage};
+use rt_protocol::{ReadEvent, WsMessage};
 use rt_ui_log::UiLogLevel;
 use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
@@ -92,6 +92,14 @@ fn append_read_to_journal(
         )
         .map_err(|e| JournalAppendError::Insert(e.to_string()))?;
     Ok((epoch, seq))
+}
+
+fn chunk_for_replay(events: Vec<ReadEvent>, max_events_per_batch: u32) -> Vec<Vec<ReadEvent>> {
+    let chunk_size = max_events_per_batch.max(1) as usize;
+    events
+        .chunks(chunk_size)
+        .map(std::borrow::ToOwned::to_owned)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -467,59 +475,38 @@ async fn run_uplink(
             return;
         }
 
-        // Build resume cursors from journal state
-        let resume_cursors: Vec<ResumeCursor> = {
-            let j = journal.lock().await;
-            reader_ips
-                .iter()
-                .filter_map(|ip| match j.ack_cursor(ip) {
-                    Ok((acked_epoch, acked_seq)) if acked_epoch > 0 => Some(ResumeCursor {
-                        forwarder_id: forwarder_id.clone(),
-                        reader_ip: ip.clone(),
-                        stream_epoch: acked_epoch as u64,
-                        last_seq: acked_seq as u64,
-                    }),
-                    _ => None,
-                })
-                .collect()
-        };
-
         logger.log(format!("uplink connecting to {}", ws_url));
 
-        let mut session = match UplinkSession::connect_with_resume(
-            uplink_cfg.clone(),
-            reader_ips.clone(),
-            resume_cursors,
-        )
-        .await
-        {
-            Ok(s) => {
-                logger.log(format!("uplink connected (session {})", s.session_id()));
-                status.set_uplink_connected(true).await;
-                backoff_secs = 1;
-                s
-            }
-            Err(e) => {
-                logger.log_at(
-                    UiLogLevel::Warn,
-                    format!(
-                        "uplink connect failed: {}; retrying in {}s",
-                        e, backoff_secs
-                    ),
-                );
-                let delay = Duration::from_secs(backoff_secs);
-                tokio::select! {
-                    _ = sleep(delay) => {}
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
-                            return;
+        let mut session =
+            match UplinkSession::connect_with_readers(uplink_cfg.clone(), reader_ips.clone()).await
+            {
+                Ok(s) => {
+                    logger.log(format!("uplink connected (session {})", s.session_id()));
+                    status.set_uplink_connected(true).await;
+                    backoff_secs = 1;
+                    s
+                }
+                Err(e) => {
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!(
+                            "uplink connect failed: {}; retrying in {}s",
+                            e, backoff_secs
+                        ),
+                    );
+                    let delay = Duration::from_secs(backoff_secs);
+                    tokio::select! {
+                        _ = sleep(delay) => {}
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                return;
+                            }
                         }
                     }
+                    backoff_secs = (backoff_secs * 2).min(30);
+                    continue;
                 }
-                backoff_secs = (backoff_secs * 2).min(30);
-                continue;
-            }
-        };
+            };
 
         // Replay unacked events from journal
         let replay_results = {
@@ -547,7 +534,7 @@ async fn run_uplink(
 
         // Send replayed events
         let mut reconnect_after_replay = false;
-        for (stream_key, stream_epoch, events) in replay_results {
+        'replay: for (stream_key, _stream_epoch, events) in replay_results {
             if events.is_empty() {
                 continue;
             }
@@ -573,76 +560,89 @@ async fn run_uplink(
                 ),
             );
 
-            let send_result = session.send_batch(read_events).await;
-            reconnect_after_replay = should_reconnect_after_replay_send(&send_result);
+            for replay_chunk in chunk_for_replay(read_events, cfg.uplink.batch_max_events) {
+                let send_result = session.send_batch(replay_chunk).await;
+                reconnect_after_replay = should_reconnect_after_replay_send(&send_result);
 
-            match send_result {
-                Ok(SendBatchResult::Ack(ack)) => {
-                    let mut j = journal.lock().await;
-                    for entry in &ack.entries {
-                        if let Err(e) = j.update_ack_cursor(
-                            &entry.reader_ip,
-                            entry.stream_epoch as i64,
-                            entry.last_seq as i64,
-                        ) {
-                            warn!(error = %e, "failed to update ack cursor");
+                match send_result {
+                    Ok(SendBatchResult::Ack(ack)) => {
+                        let mut j = journal.lock().await;
+                        for entry in &ack.entries {
+                            if let Err(e) = j.update_ack_cursor(
+                                &entry.reader_ip,
+                                entry.stream_epoch as i64,
+                                entry.last_seq as i64,
+                            ) {
+                                warn!(error = %e, "failed to update ack cursor");
+                            }
                         }
                     }
-                }
-                Ok(SendBatchResult::EpochReset(cmd)) => {
-                    logger.log(format!(
-                        "epoch reset for {}; bumping journal and reconnecting",
-                        cmd.reader_ip
-                    ));
-                    let mut j = journal.lock().await;
-                    if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                    Ok(SendBatchResult::EpochReset(cmd)) => {
+                        logger.log(format!(
+                            "epoch reset for {}; bumping journal and reconnecting",
+                            cmd.reader_ip
+                        ));
+                        let mut j = journal.lock().await;
+                        if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                            logger.log_at(
+                                UiLogLevel::Warn,
+                                format!("failed to bump epoch in journal: {}", e),
+                            );
+                        }
+                        break 'replay;
+                    }
+                    Ok(SendBatchResult::ConfigGet(req)) => {
+                        let msg = WsMessage::ConfigGetRequest(req);
+                        if let Err(e) = handle_config_message(
+                            &mut session,
+                            msg,
+                            &config_state,
+                            &subsystem,
+                            &ui_tx,
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "config get handler failed during replay");
+                            reconnect_after_replay = true;
+                            break 'replay;
+                        }
+                    }
+                    Ok(SendBatchResult::ConfigSet(req)) => {
+                        let msg = WsMessage::ConfigSetRequest(req);
+                        if let Err(e) = handle_config_message(
+                            &mut session,
+                            msg,
+                            &config_state,
+                            &subsystem,
+                            &ui_tx,
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "config set handler failed during replay");
+                            reconnect_after_replay = true;
+                            break 'replay;
+                        }
+                    }
+                    Ok(SendBatchResult::Restart(req)) => {
+                        if let Err(e) =
+                            handle_restart_message(&mut session, req, &restart_signal).await
+                        {
+                            warn!(error = %e, "restart handler failed during replay");
+                            reconnect_after_replay = true;
+                            break 'replay;
+                        }
+                    }
+                    Err(e) => {
                         logger.log_at(
                             UiLogLevel::Warn,
-                            format!("failed to bump epoch in journal: {}", e),
+                            format!("replay send failed: {}; reconnecting", e),
                         );
                     }
-                    break;
                 }
-                Ok(SendBatchResult::ConfigGet(req)) => {
-                    let msg = WsMessage::ConfigGetRequest(req);
-                    if let Err(e) =
-                        handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
-                            .await
-                    {
-                        warn!(error = %e, "config get handler failed during replay");
-                        reconnect_after_replay = true;
-                        break;
-                    }
-                }
-                Ok(SendBatchResult::ConfigSet(req)) => {
-                    let msg = WsMessage::ConfigSetRequest(req);
-                    if let Err(e) =
-                        handle_config_message(&mut session, msg, &config_state, &subsystem, &ui_tx)
-                            .await
-                    {
-                        warn!(error = %e, "config set handler failed during replay");
-                        reconnect_after_replay = true;
-                        break;
-                    }
-                }
-                Ok(SendBatchResult::Restart(req)) => {
-                    if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await
-                    {
-                        warn!(error = %e, "restart handler failed during replay");
-                        reconnect_after_replay = true;
-                        break;
-                    }
-                }
-                Err(e) => {
-                    logger.log_at(
-                        UiLogLevel::Warn,
-                        format!("replay send failed: {}; reconnecting", e),
-                    );
-                }
-            }
 
-            if reconnect_after_replay {
-                break;
+                if reconnect_after_replay {
+                    break 'replay;
+                }
             }
         }
 
@@ -1461,6 +1461,46 @@ mod tests {
             Message::Text(text) => serde_json::from_str(&text).expect("parse ws json"),
             other => panic!("expected text ws frame, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn chunk_for_replay_splits_into_bounded_batches() {
+        let events: Vec<ReadEvent> = (1..=5)
+            .map(|seq| ReadEvent {
+                forwarder_id: "fwd".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                stream_epoch: 1,
+                seq,
+                reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
+                raw_read_line: format!("LINE_{seq}"),
+                read_type: "RAW".to_owned(),
+            })
+            .collect();
+
+        let chunks = chunk_for_replay(events, 2);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), 2);
+        assert_eq!(chunks[1].len(), 2);
+        assert_eq!(chunks[2].len(), 1);
+    }
+
+    #[test]
+    fn chunk_for_replay_treats_zero_max_as_one() {
+        let events: Vec<ReadEvent> = (1..=3)
+            .map(|seq| ReadEvent {
+                forwarder_id: "fwd".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                stream_epoch: 1,
+                seq,
+                reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
+                raw_read_line: format!("LINE_{seq}"),
+                read_type: "RAW".to_owned(),
+            })
+            .collect();
+
+        let chunks = chunk_for_replay(events, 0);
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|chunk| chunk.len() == 1));
     }
 
     #[test]

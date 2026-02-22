@@ -108,7 +108,6 @@ async fn get_forwarder_config_returns_bad_gateway_when_forwarder_disconnects_bef
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-cfg-proxy".to_owned(),
         reader_ips: vec!["10.10.0.1:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await
@@ -174,7 +173,6 @@ async fn get_forwarder_config_returns_bad_gateway_when_forwarder_reports_config_
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-cfg-proxy-error".to_owned(),
         reader_ips: vec!["10.10.0.2:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await
@@ -248,7 +246,6 @@ async fn get_forwarder_config_returns_gateway_timeout_when_forwarder_never_repli
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-cfg-proxy-timeout".to_owned(),
         reader_ips: vec!["10.10.0.3:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await
@@ -312,7 +309,6 @@ async fn set_forwarder_config_returns_bad_request_for_forwarder_validation_error
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-cfg-set-validation".to_owned(),
         reader_ips: vec!["10.10.0.4:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await
@@ -380,7 +376,6 @@ async fn set_forwarder_config_returns_bad_gateway_for_forwarder_internal_error()
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-cfg-set-internal".to_owned(),
         reader_ips: vec!["10.10.0.5:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await
@@ -448,7 +443,6 @@ async fn control_restart_device_proxies_as_config_set_control_action() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-control-proxy".to_owned(),
         reader_ips: vec!["10.10.0.6:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await
@@ -525,7 +519,6 @@ async fn control_restart_device_preserves_forwarder_403_status() {
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-control-403".to_owned(),
         reader_ips: vec!["10.10.0.8:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await
@@ -604,7 +597,6 @@ async fn control_restart_device_returns_bad_gateway_when_forwarder_disconnects_b
     fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
         forwarder_id: "fwd-control-disconnect".to_owned(),
         reader_ips: vec!["10.10.0.7:10000".to_owned()],
-        resume: vec![],
         display_name: Some("Proxy Target".to_owned()),
     }))
     .await

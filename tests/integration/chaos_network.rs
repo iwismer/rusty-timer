@@ -56,7 +56,6 @@ async fn connect_forwarder(
     token: &str,
     forwarder_id: &str,
     reader_ips: Vec<String>,
-    resume: Vec<ResumeCursor>,
 ) -> (MockWsClient, String) {
     let mut client = MockWsClient::connect_with_token(fwd_url, token)
         .await
@@ -65,7 +64,6 @@ async fn connect_forwarder(
         .send_message(&WsMessage::ForwarderHello(ForwarderHello {
             forwarder_id: forwarder_id.to_owned(),
             reader_ips,
-            resume,
             display_name: None,
         }))
         .await
@@ -107,7 +105,6 @@ async fn chaos_network_flap_events_not_lost() {
             "fwd-chaos-token-01",
             "fwd-chaos-01",
             vec!["10.50.50.1".to_owned()],
-            vec![],
         )
         .await;
 
@@ -144,20 +141,13 @@ async fn chaos_network_flap_events_not_lost() {
         .unwrap();
     assert_eq!(count, 3, "all events sent before flap must be in DB");
 
-    // Session 2: reconnect with resume cursor at seq=0 (pretend we had none acked).
-    // Send the same 3 events again (retransmit) — must NOT create duplicates.
+    // Session 2: reconnect and retransmit the same events — must NOT create duplicates.
     {
         let (mut client, session_id) = connect_forwarder(
             &fwd_url,
             "fwd-chaos-token-01",
             "fwd-chaos-01",
             vec!["10.50.50.1".to_owned()],
-            vec![ResumeCursor {
-                forwarder_id: "fwd-chaos-01".to_owned(),
-                reader_ip: "10.50.50.1".to_owned(),
-                stream_epoch: 1,
-                last_seq: 0,
-            }],
         )
         .await;
 
@@ -231,12 +221,6 @@ async fn chaos_network_rapid_reconnects_no_duplication() {
             "fwd-chaos-token-02",
             "fwd-chaos-02",
             vec!["10.60.60.1".to_owned()],
-            vec![ResumeCursor {
-                forwarder_id: "fwd-chaos-02".to_owned(),
-                reader_ip: "10.60.60.1".to_owned(),
-                stream_epoch: 1,
-                last_seq: 0,
-            }],
         )
         .await;
 
@@ -316,7 +300,6 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
         "fwd-chaos-token-03",
         "fwd-chaos-03",
         vec!["10.70.70.1".to_owned()],
-        vec![],
     )
     .await;
 
@@ -485,7 +468,6 @@ async fn chaos_two_streams_independent_under_flap() {
             "fwd-chaos-token-04",
             "fwd-chaos-04",
             vec!["10.80.80.1".to_owned(), "10.80.80.2".to_owned()],
-            vec![],
         )
         .await;
 
@@ -541,20 +523,6 @@ async fn chaos_two_streams_independent_under_flap() {
             "fwd-chaos-token-04",
             "fwd-chaos-04",
             vec!["10.80.80.1".to_owned(), "10.80.80.2".to_owned()],
-            vec![
-                ResumeCursor {
-                    forwarder_id: "fwd-chaos-04".to_owned(),
-                    reader_ip: "10.80.80.1".to_owned(),
-                    stream_epoch: 1,
-                    last_seq: 3,
-                },
-                ResumeCursor {
-                    forwarder_id: "fwd-chaos-04".to_owned(),
-                    reader_ip: "10.80.80.2".to_owned(),
-                    stream_epoch: 1,
-                    last_seq: 3,
-                },
-            ],
         )
         .await;
 

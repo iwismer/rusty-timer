@@ -71,11 +71,7 @@
         "kind":         { "const": "forwarder_hello" },
         "forwarder_id": { "type": "string", "description": "Advisory; must match token claims if present." },
         "reader_ips":   { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-        "resume": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/ResumeCursor" },
-          "default": []
-        }
+        "display_name": { "type": "string" }
       }
     },
 
@@ -193,7 +189,7 @@
 
     "EpochResetCommand": {
       "type": "object",
-      "description": "Server -> Forwarder. Instructs the forwarder to start a new epoch for the specified stream. Unacked backlog from older epochs remains replayable. Forwarder confirms by sending a new forwarder_hello with updated epoch.",
+      "description": "Server -> Forwarder. Instructs the forwarder to start a new epoch for the specified stream. Unacked backlog from older epochs remains replayable. Forwarder applies the new epoch before sending subsequent events.",
       "required": ["kind", "session_id", "forwarder_id", "reader_ip", "new_stream_epoch"],
       "additionalProperties": false,
       "properties": {

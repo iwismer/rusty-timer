@@ -1,5 +1,6 @@
 use rt_protocol::ResumeCursor;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -130,6 +131,25 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: u64, seq: u64) -> DbResult<()> {
+        let existing: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT stream_epoch, acked_through_seq FROM cursors WHERE forwarder_id = ?1 AND reader_ip = ?2",
+                rusqlite::params![fwd, ip],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+
+        if let Some((current_epoch, current_seq)) = existing {
+            let new_epoch = epoch as i64;
+            let new_seq = seq as i64;
+            let is_stale =
+                new_epoch < current_epoch || (new_epoch == current_epoch && new_seq < current_seq);
+            if is_stale {
+                return Ok(());
+            }
+        }
+
         self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch as i64, seq as i64])?;
         Ok(())
     }

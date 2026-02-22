@@ -299,19 +299,42 @@ pub async fn fetch_events_after_cursor(
     after_epoch: i64,
     after_seq: i64,
 ) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
-    let rows = sqlx::query_as!(
-        crate::repo::EventRow,
+    fetch_events_after_cursor_limited(pool, stream_id, after_epoch, after_seq, i64::MAX).await
+}
+
+pub async fn fetch_events_after_cursor_limited(
+    pool: &PgPool,
+    stream_id: Uuid,
+    after_epoch: i64,
+    after_seq: i64,
+    limit: i64,
+) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
+    let rows = sqlx::query(
         r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
                   s.forwarder_id, s.reader_ip
            FROM events e
            JOIN streams s ON s.stream_id = e.stream_id
            WHERE e.stream_id = $1 AND (e.stream_epoch > $2 OR (e.stream_epoch = $2 AND e.seq > $3))
-           ORDER BY e.stream_epoch ASC, e.seq ASC"#,
-        stream_id,
-        after_epoch,
-        after_seq
+           ORDER BY e.stream_epoch ASC, e.seq ASC
+           LIMIT $4"#,
     )
+    .bind(stream_id)
+    .bind(after_epoch)
+    .bind(after_seq)
+    .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows)
+
+    Ok(rows
+        .into_iter()
+        .map(|r| crate::repo::EventRow {
+            stream_epoch: r.get("stream_epoch"),
+            seq: r.get("seq"),
+            reader_timestamp: r.get("reader_timestamp"),
+            raw_read_line: r.get("raw_read_line"),
+            read_type: r.get("read_type"),
+            forwarder_id: r.get("forwarder_id"),
+            reader_ip: r.get("reader_ip"),
+        })
+        .collect())
 }

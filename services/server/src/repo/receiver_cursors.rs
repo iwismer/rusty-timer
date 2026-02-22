@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub async fn upsert_cursor(
@@ -8,11 +8,34 @@ pub async fn upsert_cursor(
     stream_epoch: i64,
     last_seq: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query!(
+    let existing = sqlx::query(
+        "SELECT stream_epoch, last_seq FROM receiver_cursors WHERE receiver_id = $1 AND stream_id = $2",
+    )
+    .bind(receiver_id)
+    .bind(stream_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = existing {
+        let current_epoch: i64 = row.get("stream_epoch");
+        let current_seq: i64 = row.get("last_seq");
+        let is_stale = stream_epoch < current_epoch
+            || (stream_epoch == current_epoch && last_seq < current_seq);
+        if is_stale {
+            return Ok(());
+        }
+    }
+
+    sqlx::query(
         r#"INSERT INTO receiver_cursors (receiver_id, stream_id, stream_epoch, last_seq, updated_at) VALUES ($1, $2, $3, $4, now())
            ON CONFLICT (receiver_id, stream_id) DO UPDATE SET stream_epoch = EXCLUDED.stream_epoch, last_seq = EXCLUDED.last_seq, updated_at = now()"#,
-        receiver_id, stream_id, stream_epoch, last_seq
-    ).execute(pool).await?;
+    )
+    .bind(receiver_id)
+    .bind(stream_id)
+    .bind(stream_epoch)
+    .bind(last_seq)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

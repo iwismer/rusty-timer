@@ -1,7 +1,7 @@
 use crate::{
     auth::{extract_bearer, validate_token},
     repo::{
-        events::fetch_events_after_cursor,
+        events::fetch_events_after_cursor_limited,
         receiver_cursors::{fetch_cursor, upsert_cursor},
     },
     state::AppState,
@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
+const REPLAY_BATCH_LIMIT: i64 = 500;
 
 pub async fn ws_receiver_handler(
     ws: WebSocketUpgrade,
@@ -355,37 +356,48 @@ async fn replay_backlog(
     session_id: &str,
     sub: &mut StreamSub,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let events =
-        fetch_events_after_cursor(&state.pool, sub.stream_id, sub.last_epoch, sub.last_seq).await?;
-    if events.is_empty() {
-        return Ok(());
+    loop {
+        let events = fetch_events_after_cursor_limited(
+            &state.pool,
+            sub.stream_id,
+            sub.last_epoch,
+            sub.last_seq,
+            REPLAY_BATCH_LIMIT,
+        )
+        .await?;
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let read_events: Vec<ReadEvent> = events
+            .iter()
+            .map(|e| ReadEvent {
+                forwarder_id: e.forwarder_id.clone(),
+                reader_ip: e.reader_ip.clone(),
+                stream_epoch: e.stream_epoch as u64,
+                seq: e.seq as u64,
+                reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
+                raw_read_line: e.raw_read_line.clone(),
+                read_type: e.read_type.clone(),
+            })
+            .collect();
+
+        if let Some(last) = events.last() {
+            sub.last_epoch = last.stream_epoch;
+            sub.last_seq = last.seq;
+        }
+
+        let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+            session_id: session_id.to_owned(),
+            events: read_events,
+        });
+        let json = serde_json::to_string(&batch)?;
+        socket.send(Message::Text(json)).await?;
+
+        if events.len() < REPLAY_BATCH_LIMIT as usize {
+            return Ok(());
+        }
     }
-
-    let read_events: Vec<ReadEvent> = events
-        .iter()
-        .map(|e| ReadEvent {
-            forwarder_id: e.forwarder_id.clone(),
-            reader_ip: e.reader_ip.clone(),
-            stream_epoch: e.stream_epoch as u64,
-            seq: e.seq as u64,
-            reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
-            raw_read_line: e.raw_read_line.clone(),
-            read_type: e.read_type.clone(),
-        })
-        .collect();
-
-    if let Some(last) = events.last() {
-        sub.last_epoch = last.stream_epoch;
-        sub.last_seq = last.seq;
-    }
-
-    let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
-        session_id: session_id.to_owned(),
-        events: read_events,
-    });
-    let json = serde_json::to_string(&batch)?;
-    socket.send(Message::Text(json)).await?;
-    Ok(())
 }
 
 async fn handle_receiver_ack(

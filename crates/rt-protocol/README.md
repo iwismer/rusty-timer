@@ -15,7 +15,7 @@ Defines the frozen v1 protocol types shared between the forwarder, server, and r
 ### Shared sub-types
 
 - **`ReadEvent`** -- A single chip-read event carried in event batches.
-- **`ResumeCursor`** -- Resume position for a (stream, epoch) pair, used in hello messages.
+- **`ResumeCursor`** -- Resume position for a (stream, epoch) pair, used by receiver hello.
 - **`AckEntry`** -- High-water mark for a (stream, epoch) pair in ack messages.
 - **`StreamRef`** -- Immutable stream identity (forwarder_id + reader_ip).
 
