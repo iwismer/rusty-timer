@@ -2,7 +2,7 @@
   "name": "rusty-timer",
   "engines": {
     "node": ">=24",
-    "npm": ">=10"
+    "npm": ">=11"
   },
   "private": true,
   "scripts": {
