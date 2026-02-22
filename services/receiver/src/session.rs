@@ -28,27 +28,28 @@ fn apply_batch_counts(
     stream_counts: &crate::cache::StreamCounts,
     events: &[ReadEvent],
 ) -> Vec<crate::ui_events::StreamCountUpdate> {
-    let mut per_epoch_counts: HashMap<(String, String, u64), u64> = HashMap::new();
+    let mut per_epoch_seqs: HashMap<(String, String, u64), HashSet<u64>> = HashMap::new();
     for event in events {
-        *per_epoch_counts
+        let seqs = per_epoch_seqs
             .entry((
                 event.forwarder_id.clone(),
                 event.reader_ip.clone(),
                 event.stream_epoch,
             ))
-            .or_insert(0) += 1;
+            .or_default();
+        let _ = seqs.insert(event.seq);
     }
 
-    for ((forwarder_id, reader_ip, stream_epoch), n) in &per_epoch_counts {
-        stream_counts.record(
+    for ((forwarder_id, reader_ip, stream_epoch), seqs) in &per_epoch_seqs {
+        stream_counts.record_batch(
             &crate::cache::StreamKey::new(forwarder_id.as_str(), reader_ip.as_str()),
             *stream_epoch,
-            *n,
+            seqs.iter().copied(),
         );
     }
 
     let mut touched_streams: HashSet<(String, String)> = HashSet::new();
-    for (forwarder_id, reader_ip, _) in per_epoch_counts.keys() {
+    for (forwarder_id, reader_ip, _) in per_epoch_seqs.keys() {
         let _ = touched_streams.insert((forwarder_id.clone(), reader_ip.clone()));
     }
 
@@ -192,5 +193,39 @@ mod tests {
         assert_eq!(counts.total, 2);
         assert_eq!(counts.current_epoch, 10);
         assert_eq!(counts.epoch, 1);
+    }
+
+    #[test]
+    fn apply_batch_counts_is_idempotent_for_replayed_batch() {
+        let stream_counts = crate::cache::StreamCounts::new();
+        let events = vec![
+            read_event("f1", "10.0.0.1", 3, 10),
+            read_event("f1", "10.0.0.1", 3, 11),
+        ];
+
+        let first = apply_batch_counts(&stream_counts, &events);
+        let second = apply_batch_counts(&stream_counts, &events);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].reads_total, 2);
+        assert_eq!(first[0].reads_epoch, 2);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].reads_total, 2);
+        assert_eq!(second[0].reads_epoch, 2);
+    }
+
+    #[test]
+    fn apply_batch_counts_counts_unique_seqs_not_seq_values() {
+        let stream_counts = crate::cache::StreamCounts::new();
+        let events = vec![
+            read_event("f1", "10.0.0.1", 5, 100),
+            read_event("f1", "10.0.0.1", 5, 101),
+            read_event("f1", "10.0.0.1", 5, 101),
+        ];
+
+        let updates = apply_batch_counts(&stream_counts, &events);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].reads_total, 2);
+        assert_eq!(updates[0].reads_epoch, 2);
     }
 }

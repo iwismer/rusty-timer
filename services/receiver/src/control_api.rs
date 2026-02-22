@@ -1105,9 +1105,10 @@ mod tests {
             .expect("replace subscriptions");
         }
 
-        state
-            .stream_counts
-            .record(&crate::cache::StreamKey::new("f1", "10.0.0.1"), 7, 9);
+        let key = crate::cache::StreamKey::new("f1", "10.0.0.1");
+        for seq in 1..=9 {
+            state.stream_counts.record(&key, 7, seq);
+        }
 
         let response = state.build_streams_response().await;
         let stream = response

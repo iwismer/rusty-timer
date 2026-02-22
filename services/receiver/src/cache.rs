@@ -1,5 +1,5 @@
 use rt_protocol::ReadEvent;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tracing::debug;
@@ -11,6 +11,7 @@ pub struct Counts {
     pub total: u64,
     pub epoch: u64,
     pub current_epoch: u64,
+    max_seen_seq_by_epoch: HashMap<u64, u64>,
 }
 
 /// Thread-safe container for per-stream read counts.
@@ -26,22 +27,54 @@ impl StreamCounts {
         }
     }
 
-    /// Record `n` reads for a given stream at the specified epoch.
-    /// If the epoch has advanced, the epoch counter resets.
-    pub fn record(&self, key: &StreamKey, stream_epoch: u64, n: u64) {
+    /// Record one observed sequence number for a given stream/epoch.
+    pub fn record(&self, key: &StreamKey, stream_epoch: u64, seq: u64) {
+        self.record_batch(key, stream_epoch, std::iter::once(seq));
+    }
+
+    /// Record a batch of observed sequence numbers for a given stream/epoch.
+    pub fn record_batch<I>(&self, key: &StreamKey, stream_epoch: u64, seqs: I)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let unique_seqs: HashSet<u64> = seqs.into_iter().collect();
+        if unique_seqs.is_empty() {
+            return;
+        }
+
         let mut inner = self.inner.write().unwrap();
         let counts = inner.entry(key.clone()).or_default();
-        counts.total += n;
+
+        let previous_max = counts
+            .max_seen_seq_by_epoch
+            .get(&stream_epoch)
+            .copied()
+            .unwrap_or(0);
+        let new_unique = unique_seqs
+            .iter()
+            .filter(|&&seq| seq > previous_max)
+            .count() as u64;
+
+        let batch_max = unique_seqs.iter().copied().max().unwrap_or(previous_max);
+        counts
+            .max_seen_seq_by_epoch
+            .insert(stream_epoch, previous_max.max(batch_max));
+
+        if new_unique == 0 {
+            return;
+        }
+
+        counts.total += new_unique;
         match stream_epoch.cmp(&counts.current_epoch) {
             std::cmp::Ordering::Greater => {
                 counts.current_epoch = stream_epoch;
-                counts.epoch = n;
+                counts.epoch = new_unique;
             }
             std::cmp::Ordering::Equal => {
-                counts.epoch += n;
+                counts.epoch += new_unique;
             }
             std::cmp::Ordering::Less => {
-                // Stale epoch reads still contribute to total, but not the active epoch counter.
+                // Stale epoch reads contribute to total, but not the active epoch counter.
             }
         }
     }
@@ -52,6 +85,10 @@ impl StreamCounts {
 
     pub fn snapshot(&self) -> HashMap<StreamKey, Counts> {
         self.inner.read().unwrap().clone()
+    }
+
+    pub fn retain_keys(&self, keep: &HashSet<StreamKey>) {
+        self.inner.write().unwrap().retain(|k, _| keep.contains(k));
     }
 }
 
@@ -192,13 +229,13 @@ mod tests {
         b.remove(&k);
     }
     #[test]
-    fn stream_counts_record_increments_total_and_epoch() {
+    fn stream_counts_record_counts_first_observed_seq_once() {
         let sc = StreamCounts::new();
         let k = StreamKey::new("f", "i");
         sc.record(&k, 1, 5);
         let c = sc.get(&k).unwrap();
-        assert_eq!(c.total, 5);
-        assert_eq!(c.epoch, 5);
+        assert_eq!(c.total, 1);
+        assert_eq!(c.epoch, 1);
         assert_eq!(c.current_epoch, 1);
     }
     #[test]
@@ -208,8 +245,8 @@ mod tests {
         sc.record(&k, 1, 10);
         sc.record(&k, 2, 3);
         let c = sc.get(&k).unwrap();
-        assert_eq!(c.total, 13);
-        assert_eq!(c.epoch, 3);
+        assert_eq!(c.total, 2);
+        assert_eq!(c.epoch, 1);
         assert_eq!(c.current_epoch, 2);
     }
     #[test]
@@ -224,19 +261,45 @@ mod tests {
         sc.record(&k, 10, 4);
         sc.record(&k, 9, 7);
         let c = sc.get(&k).unwrap();
-        assert_eq!(c.total, 11);
-        assert_eq!(c.epoch, 4);
+        assert_eq!(c.total, 2);
+        assert_eq!(c.epoch, 1);
         assert_eq!(c.current_epoch, 10);
     }
     #[test]
-    fn stream_counts_same_epoch_accumulates_epoch_counter() {
+    fn stream_counts_same_epoch_accumulates_only_new_unique_seqs() {
         let sc = StreamCounts::new();
         let k = StreamKey::new("f", "i");
         sc.record(&k, 3, 2);
         sc.record(&k, 3, 5);
         let c = sc.get(&k).unwrap();
-        assert_eq!(c.total, 7);
-        assert_eq!(c.epoch, 7);
+        assert_eq!(c.total, 2);
+        assert_eq!(c.epoch, 2);
         assert_eq!(c.current_epoch, 3);
+    }
+    #[test]
+    fn stream_counts_duplicate_seq_is_idempotent() {
+        let sc = StreamCounts::new();
+        let k = StreamKey::new("f", "i");
+        sc.record(&k, 4, 9);
+        sc.record(&k, 4, 9);
+        let c = sc.get(&k).unwrap();
+        assert_eq!(c.total, 1);
+        assert_eq!(c.epoch, 1);
+        assert_eq!(c.current_epoch, 4);
+    }
+    #[test]
+    fn stream_counts_retain_keys_prunes_removed_streams() {
+        let sc = StreamCounts::new();
+        let keep = StreamKey::new("f1", "10.0.0.1");
+        let drop = StreamKey::new("f2", "10.0.0.2");
+        sc.record(&keep, 1, 1);
+        sc.record(&drop, 1, 1);
+
+        let mut keep_set = HashSet::new();
+        let _ = keep_set.insert(keep.clone());
+        sc.retain_keys(&keep_set);
+
+        assert!(sc.get(&keep).is_some());
+        assert!(sc.get(&drop).is_none());
     }
 }
