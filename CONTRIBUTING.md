@@ -4,7 +4,7 @@
 
 - Rust 1.89.0 (see `rust-toolchain.toml`)
 - Docker (for server and integration tests)
-- Node.js 24.x and npm 10.x
+- Node.js 24.x and npm 11.x
 
 JavaScript toolchain pinning:
 - `package.json` pins expected Node/npm via `engines`
