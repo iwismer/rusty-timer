@@ -1,7 +1,7 @@
 use server::repo::{receiver_cursors, stream_epoch_races};
 use sqlx::{PgPool, Row};
-use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
+use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
