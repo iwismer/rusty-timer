@@ -49,3 +49,54 @@ impl ClientConnector {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ClientConnector;
+    use crate::models::Message;
+    use tokio::net::TcpStream;
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn begin_accepts_connection_and_dispatches_client_message() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let connector = ClientConnector::new(0, tx).await;
+        let listen_addr = connector.listen_stream.local_addr().unwrap();
+
+        let task = tokio::spawn(connector.begin());
+        let stream = TcpStream::connect(("127.0.0.1", listen_addr.port()))
+            .await
+            .expect("connect");
+        let local_addr = stream.local_addr().expect("local_addr");
+
+        let msg = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("recv timeout")
+            .expect("message");
+        match msg {
+            Message::CLIENT(client) => assert_eq!(client.get_addr(), local_addr),
+            other => panic!("expected CLIENT message, got: {:?}", other),
+        }
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn begin_returns_when_client_bus_is_unavailable() {
+        let (tx, rx) = mpsc::channel(1);
+        let connector = ClientConnector::new(0, tx).await;
+        let listen_addr = connector.listen_stream.local_addr().unwrap();
+        drop(rx);
+
+        let task = tokio::spawn(connector.begin());
+        let _stream = TcpStream::connect(("127.0.0.1", listen_addr.port()))
+            .await
+            .expect("connect");
+
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("connector should return quickly")
+            .expect("join should succeed");
+    }
+}

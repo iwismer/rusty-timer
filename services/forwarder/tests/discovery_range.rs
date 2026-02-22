@@ -125,13 +125,16 @@ fn range_with_invalid_end_returns_error() {
 
 #[test]
 fn port_zero_is_valid() {
-    let result = expand_target("192.168.1.1:0");
-    // Port 0 is technically valid (OS-assigned), should parse
-    assert!(result.is_ok());
+    let result = expand_target("192.168.1.1:0").expect("should parse");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].ip, "192.168.1.1");
+    assert_eq!(result[0].port, 0);
 }
 
 #[test]
 fn port_max_is_valid() {
-    let result = expand_target("192.168.1.1:65535");
-    assert!(result.is_ok());
+    let result = expand_target("192.168.1.1:65535").expect("should parse");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].ip, "192.168.1.1");
+    assert_eq!(result[0].port, u16::MAX);
 }
