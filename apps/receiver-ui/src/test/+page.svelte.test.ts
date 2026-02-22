@@ -41,6 +41,16 @@ vi.mock("$lib/sse", () => ({
   destroySSE: vi.fn(),
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("receiver page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -116,6 +126,59 @@ describe("receiver page", () => {
           replay_policy: "live_only",
         }),
       );
+    });
+    expect(apiMocks.putSelection).toHaveBeenLastCalledWith({
+      selection: {
+        mode: "race",
+        race_id: "",
+        epoch_scope: "all",
+      },
+      replay_policy: "live_only",
+    });
+  });
+
+  it("does not expose targeted replay option in receiver scope", async () => {
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    expect(replayPolicySelect).toHaveTextContent("Resume");
+    expect(replayPolicySelect).toHaveTextContent("Live only");
+    expect(replayPolicySelect).not.toHaveTextContent("Targeted replay");
+  });
+
+  it("applies latest selection after in-flight request settles", async () => {
+    const firstApply = deferred<void>();
+    apiMocks.putSelection.mockReset();
+    apiMocks.putSelection
+      .mockReturnValueOnce(firstApply.promise)
+      .mockResolvedValue(undefined);
+
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "live_only" },
+    });
+
+    firstApply.resolve();
+
+    await waitFor(() => {
+      expect(apiMocks.putSelection).toHaveBeenCalledTimes(2);
+    });
+    expect(apiMocks.putSelection).toHaveBeenLastCalledWith({
+      selection: {
+        mode: "race",
+        race_id: "",
+        epoch_scope: "current",
+      },
+      replay_policy: "live_only",
     });
   });
 });

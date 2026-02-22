@@ -22,6 +22,7 @@
     StreamsResponse,
     LogsResponse,
   } from "$lib/api";
+  type SupportedReplayPolicy = "resume" | "live_only";
 
   let profile = $state<Profile | null>(null);
   let status = $state<StatusResponse | null>(null);
@@ -51,8 +52,15 @@
   );
   let raceIdDraft = $state("");
   let epochScopeDraft = $state<EpochScope>("current");
-  let replayPolicyDraft = $state<ReplayPolicy>("resume");
+  let replayPolicyDraft = $state<SupportedReplayPolicy>("resume");
   let selectionBusy = $state(false);
+  let selectionApplyQueued = $state(false);
+
+  function normalizeReplayPolicy(
+    replayPolicy: ReplayPolicy,
+  ): SupportedReplayPolicy {
+    return replayPolicy === "live_only" ? "live_only" : "resume";
+  }
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
     return `${forwarder_id}/${reader_ip}`;
@@ -143,7 +151,7 @@
       races = nextRaces.races;
       if (nextSelection) {
         selectionMode = nextSelection.selection.mode;
-        replayPolicyDraft = nextSelection.replay_policy;
+        replayPolicyDraft = normalizeReplayPolicy(nextSelection.replay_policy);
         if (nextSelection.selection.mode === "manual") {
           selectedStreams = nextSelection.selection.streams;
           raceIdDraft = "";
@@ -199,14 +207,16 @@
   }
 
   async function applySelection(): Promise<void> {
-    if (selectionBusy) {
-      return;
-    }
+    selectionApplyQueued = true;
+    if (selectionBusy) return;
 
     selectionBusy = true;
     error = null;
     try {
-      await api.putSelection(selectionPayload());
+      while (selectionApplyQueued) {
+        selectionApplyQueued = false;
+        await api.putSelection(selectionPayload());
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -237,7 +247,7 @@
 
   function handleReplayPolicyChange(event: Event): void {
     replayPolicyDraft = (event.currentTarget as HTMLSelectElement)
-      .value as ReplayPolicy;
+      .value as SupportedReplayPolicy;
     void applySelection();
   }
 
@@ -603,7 +613,6 @@
             >
               <option value="resume">Resume</option>
               <option value="live_only">Live only</option>
-              <option value="targeted">Targeted replay</option>
             </select>
           </label>
         </div>
