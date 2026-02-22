@@ -1800,8 +1800,9 @@ async fn config_json_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
-async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
-    State(state): State<AppState<J>>,
+async fn post_config_section_handler<J: JournalAccess + Send + 'static>(
+    section: &'static str,
+    state: AppState<J>,
     body: Bytes,
 ) -> Response {
     let cs = match get_config_state(&state) {
@@ -1818,229 +1819,76 @@ async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    match apply_section_update("general", &payload, &cs, &state.subsystem, &state.ui_tx).await {
+    match apply_section_update(section, &payload, &cs, &state.subsystem, &state.ui_tx).await {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
         Err((status_code, body)) => json_response(
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             body,
         ),
     }
+}
+
+async fn post_config_general_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    post_config_section_handler("general", state, body).await
 }
 
 async fn post_config_server_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("server", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("server", state, body).await
 }
 
 async fn post_config_auth_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("auth", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("auth", state, body).await
 }
 
 async fn post_config_journal_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("journal", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("journal", state, body).await
 }
 
 async fn post_config_uplink_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("uplink", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("uplink", state, body).await
 }
 
 async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("status_http", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("status_http", state, body).await
 }
 
 async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("readers", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("readers", state, body).await
 }
 
 async fn post_config_control_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("control", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("control", state, body).await
 }
 
 async fn post_config_update_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
 ) -> Response {
-    let cs = match get_config_state(&state) {
-        Some(cs) => cs,
-        None => return config_not_available(),
-    };
-    let payload: serde_json::Value = match parse_json_body(&body) {
-        Ok(v) => v,
-        Err(err) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
-        }
-    };
-
-    match apply_section_update("update", &payload, &cs, &state.subsystem, &state.ui_tx).await {
-        Ok(()) => json_response(StatusCode::OK, serde_json::json!({"ok": true}).to_string()),
-        Err((status_code, body)) => json_response(
-            StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            body,
-        ),
-    }
+    post_config_section_handler("update", state, body).await
 }
 
 fn apply_via_restart_enabled() -> bool {
