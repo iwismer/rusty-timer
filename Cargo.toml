@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/emulator",
     "crates/ipico-core",
+    "crates/rt-ui-http",
     "crates/rt-protocol",
     "crates/rt-test-utils",
     "crates/timer-core",

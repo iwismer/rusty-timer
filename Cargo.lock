@@ -986,10 +986,10 @@ dependencies = [
  "chrono",
  "futures-util",
  "ipico-core",
- "mime_guess",
  "reqwest",
  "rt-protocol",
  "rt-test-utils",
+ "rt-ui-http",
  "rt-ui-log",
  "rt-updater",
  "rusqlite",
@@ -2251,10 +2251,10 @@ dependencies = [
  "dirs",
  "futures-util",
  "http-body-util",
- "mime_guess",
  "reqwest",
  "rt-protocol",
  "rt-test-utils",
+ "rt-ui-http",
  "rt-ui-log",
  "rt-updater",
  "rusqlite",
@@ -2472,6 +2472,15 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "uuid",
+]
+
+[[package]]
+name = "rt-ui-http"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "mime_guess",
+ "rust-embed",
 ]
 
 [[package]]
