@@ -38,59 +38,33 @@
 }
 
 :root {
-  --surface-0: #ffffff;
-  --surface-1: #f8f9fa;
-  --surface-2: #f0f1f3;
-  --surface-3: #e4e6e9;
+  color-scheme: light dark;
 
-  --border: #dde0e4;
-  --border-strong: #c0c4ca;
+  --surface-0: light-dark(#ffffff, #0f1114);
+  --surface-1: light-dark(#f8f9fa, #161921);
+  --surface-2: light-dark(#f0f1f3, #1e222c);
+  --surface-3: light-dark(#e4e6e9, #282d3a);
 
-  --text-primary: #1a1d23;
-  --text-secondary: #4a5060;
-  --text-muted: #7c8494;
+  --border: light-dark(#dde0e4, #2e3443);
+  --border-strong: light-dark(#c0c4ca, #404858);
 
-  --status-ok: #117a3e;
-  --status-ok-bg: #e6f4ec;
-  --status-ok-border: #a3d9b8;
-  --status-warn: #8a6d00;
-  --status-warn-bg: #fef7e0;
-  --status-warn-border: #f0d460;
-  --status-err: #c42b2b;
-  --status-err-bg: #fde8e8;
-  --status-err-border: #f0a0a0;
+  --text-primary: light-dark(#1a1d23, #e8eaef);
+  --text-secondary: light-dark(#4a5060, #a0a8b8);
+  --text-muted: light-dark(#7c8494, #6b7385);
 
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-bg: #eff4ff;
-}
+  --status-ok: light-dark(#117a3e, #3ccc6e);
+  --status-ok-bg: light-dark(#e6f4ec, #0f2918);
+  --status-ok-border: light-dark(#a3d9b8, #1a4d2e);
+  --status-warn: light-dark(#8a6d00, #f0c030);
+  --status-warn-bg: light-dark(#fef7e0, #2a2310);
+  --status-warn-border: light-dark(#f0d460, #4d3f1a);
+  --status-err: light-dark(#c42b2b, #f06060);
+  --status-err-bg: light-dark(#fde8e8, #2a1010);
+  --status-err-border: light-dark(#f0a0a0, #4d1a1a);
 
-.dark {
-  --surface-0: #0f1114;
-  --surface-1: #161921;
-  --surface-2: #1e222c;
-  --surface-3: #282d3a;
-
-  --border: #2e3443;
-  --border-strong: #404858;
-
-  --text-primary: #e8eaef;
-  --text-secondary: #a0a8b8;
-  --text-muted: #6b7385;
-
-  --status-ok: #3ccc6e;
-  --status-ok-bg: #0f2918;
-  --status-ok-border: #1a4d2e;
-  --status-warn: #f0c030;
-  --status-warn-bg: #2a2310;
-  --status-warn-border: #4d3f1a;
-  --status-err: #f06060;
-  --status-err-bg: #2a1010;
-  --status-err-border: #4d1a1a;
-
-  --accent: #5b8def;
-  --accent-hover: #7ba3ff;
-  --accent-bg: #1a2540;
+  --accent: light-dark(#2563eb, #5b8def);
+  --accent-hover: light-dark(#1d4ed8, #7ba3ff);
+  --accent-bg: light-dark(#eff4ff, #1a2540);
 }
 
 html {
