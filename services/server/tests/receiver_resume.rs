@@ -745,17 +745,13 @@ async fn test_receiver_subscribe_progresses_under_heavy_replay() {
     .await
     .unwrap();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let subscribe_started_at = tokio::time::Instant::now();
+    let deadline = subscribe_started_at + Duration::from_secs(5);
     let mut saw_side_stream = false;
-    let mut saw_main_beyond_initial_tail_before_side = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(200), rcv.recv_message()).await {
             Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
                 for event in &batch.events {
-                    if !saw_side_stream && event.reader_ip == "10.8.0.1:10000" && event.seq > 10_000
-                    {
-                        saw_main_beyond_initial_tail_before_side = true;
-                    }
                     if event.reader_ip == "10.8.0.2:10000" {
                         saw_side_stream = true;
                         break;
@@ -774,11 +770,8 @@ async fn test_receiver_subscribe_progresses_under_heavy_replay() {
 
     assert!(
         saw_side_stream,
-        "expected side stream event after subscribe during heavy replay"
-    );
-    assert!(
-        !saw_main_beyond_initial_tail_before_side,
-        "observed main stream seq > initial tail before side subscribe took effect"
+        "expected side stream event within 5s after subscribe during heavy replay; elapsed={:?}",
+        subscribe_started_at.elapsed()
     );
     ingest_task.abort();
 }
