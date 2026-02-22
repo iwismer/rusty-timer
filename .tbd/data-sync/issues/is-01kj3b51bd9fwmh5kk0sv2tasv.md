@@ -3,9 +3,9 @@ type: is
 id: is-01kj3b51bd9fwmh5kk0sv2tasv
 title: "Task 1: Add v1.1 protocol types in rt-protocol"
 kind: task
-status: open
+status: closed
 priority: 2
-version: 5
+version: 7
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -19,6 +19,8 @@ dependencies:
     target: is-01kj3cbah43ftbdwp9n400knzp
 parent_id: is-01kj3b514za6r2c96xxn5w3wcn
 created_at: 2026-02-22T18:52:52.460Z
-updated_at: 2026-02-22T19:13:48.471Z
+updated_at: 2026-02-22T20:01:16.320Z
+closed_at: 2026-02-22T20:01:16.318Z
+close_reason: Completed in commit 823dd57 with independent review approval.
 ---
 From implementation plan Task 1 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md).

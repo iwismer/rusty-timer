@@ -3,9 +3,9 @@ type: is
 id: is-01kj3b51rxjtqqpmgdk16mrxs3
 title: "Task 3: Implement server repo layer for epoch mappings and per-epoch cursors"
 kind: task
-status: open
+status: closed
 priority: 2
-version: 5
+version: 7
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -19,6 +19,8 @@ dependencies:
     target: is-01kj3cbah43ftbdwp9n400knzp
 parent_id: is-01kj3b514za6r2c96xxn5w3wcn
 created_at: 2026-02-22T18:52:52.891Z
-updated_at: 2026-02-22T19:13:48.671Z
+updated_at: 2026-02-22T20:08:43.013Z
+closed_at: 2026-02-22T20:08:43.011Z
+close_reason: Completed atomically with rt-xg7a in commit ffb6c35; independently reviewed and approved.
 ---
 From implementation plan Task 3 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md).

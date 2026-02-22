@@ -3,9 +3,9 @@ type: is
 id: is-01kj3cb9wf1c337r4zrzs2zp36
 title: "Task 4a: Add epoch-race mapping HTTP endpoints and route wiring"
 kind: task
-status: open
+status: closed
 priority: 2
-version: 2
+version: 4
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -13,6 +13,8 @@ dependencies:
     target: is-01kj3cba3gg7rwr954jybfg9ed
 parent_id: is-01kj3b51z5zywpj98a4c3f4h3m
 created_at: 2026-02-22T19:13:46.381Z
-updated_at: 2026-02-22T19:13:47.886Z
+updated_at: 2026-02-22T20:13:26.246Z
+closed_at: 2026-02-22T20:13:26.244Z
+close_reason: Implemented in commit bd4a0be
 ---
 Split from Task 4 in docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md: add mapping endpoints in services/server/src/http/stream_epoch_races.rs and route/module wiring.
