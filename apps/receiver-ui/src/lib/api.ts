@@ -21,6 +21,13 @@ export interface StreamEntry {
   reads_epoch?: number;
 }
 
+export interface StreamCountUpdate {
+  forwarder_id: string;
+  reader_ip: string;
+  reads_total: number;
+  reads_epoch: number;
+}
+
 export interface StreamsResponse {
   streams: StreamEntry[];
   degraded: boolean;

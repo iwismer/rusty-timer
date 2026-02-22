@@ -32,11 +32,17 @@ impl StreamCounts {
         let mut inner = self.inner.write().unwrap();
         let counts = inner.entry(key.clone()).or_default();
         counts.total += n;
-        if stream_epoch > counts.current_epoch {
-            counts.current_epoch = stream_epoch;
-            counts.epoch = n;
-        } else {
-            counts.epoch += n;
+        match stream_epoch.cmp(&counts.current_epoch) {
+            std::cmp::Ordering::Greater => {
+                counts.current_epoch = stream_epoch;
+                counts.epoch = n;
+            }
+            std::cmp::Ordering::Equal => {
+                counts.epoch += n;
+            }
+            std::cmp::Ordering::Less => {
+                // Stale epoch reads still contribute to total, but not the active epoch counter.
+            }
         }
     }
 
@@ -210,5 +216,27 @@ mod tests {
     fn stream_counts_get_returns_none_for_unknown() {
         let sc = StreamCounts::new();
         assert!(sc.get(&StreamKey::new("x", "y")).is_none());
+    }
+    #[test]
+    fn stream_counts_stale_epoch_does_not_change_epoch_counter() {
+        let sc = StreamCounts::new();
+        let k = StreamKey::new("f", "i");
+        sc.record(&k, 10, 4);
+        sc.record(&k, 9, 7);
+        let c = sc.get(&k).unwrap();
+        assert_eq!(c.total, 11);
+        assert_eq!(c.epoch, 4);
+        assert_eq!(c.current_epoch, 10);
+    }
+    #[test]
+    fn stream_counts_same_epoch_accumulates_epoch_counter() {
+        let sc = StreamCounts::new();
+        let k = StreamKey::new("f", "i");
+        sc.record(&k, 3, 2);
+        sc.record(&k, 3, 5);
+        let c = sc.get(&k).unwrap();
+        assert_eq!(c.total, 7);
+        assert_eq!(c.epoch, 7);
+        assert_eq!(c.current_epoch, 3);
     }
 }

@@ -1091,6 +1091,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn build_streams_response_includes_reads_fields_for_subscribed_streams() {
+        let db = Db::open_in_memory().expect("open in-memory db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        {
+            let mut db = state.db.lock().await;
+            db.replace_subscriptions(&[crate::db::Subscription {
+                forwarder_id: "f1".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                local_port_override: None,
+            }])
+            .expect("replace subscriptions");
+        }
+
+        state
+            .stream_counts
+            .record(&crate::cache::StreamKey::new("f1", "10.0.0.1"), 7, 9);
+
+        let response = state.build_streams_response().await;
+        let stream = response
+            .streams
+            .iter()
+            .find(|s| s.forwarder_id == "f1" && s.reader_ip == "10.0.0.1")
+            .expect("stream exists");
+
+        assert_eq!(stream.reads_total, Some(9));
+        assert_eq!(stream.reads_epoch, Some(9));
+    }
+
     #[test]
     fn update_check_init_error_maps_to_http_500() {
         let (status_code, status) = update_check_init_error_status("boom".to_owned());

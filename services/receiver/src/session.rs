@@ -1,6 +1,7 @@
 use crate::db::Db;
 use futures_util::{SinkExt, StreamExt};
-use rt_protocol::{AckEntry, ReceiverAck, ReceiverHello, WsMessage};
+use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, ReceiverHello, WsMessage};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
@@ -22,6 +23,56 @@ pub struct Session {
     pub session_id: String,
     pub device_id: String,
 }
+
+fn apply_batch_counts(
+    stream_counts: &crate::cache::StreamCounts,
+    events: &[ReadEvent],
+) -> Vec<crate::ui_events::StreamCountUpdate> {
+    let mut per_epoch_counts: HashMap<(String, String, u64), u64> = HashMap::new();
+    for event in events {
+        *per_epoch_counts
+            .entry((
+                event.forwarder_id.clone(),
+                event.reader_ip.clone(),
+                event.stream_epoch,
+            ))
+            .or_insert(0) += 1;
+    }
+
+    for ((forwarder_id, reader_ip, stream_epoch), n) in &per_epoch_counts {
+        stream_counts.record(
+            &crate::cache::StreamKey::new(forwarder_id.as_str(), reader_ip.as_str()),
+            *stream_epoch,
+            *n,
+        );
+    }
+
+    let mut touched_streams: HashSet<(String, String)> = HashSet::new();
+    for (forwarder_id, reader_ip, _) in per_epoch_counts.keys() {
+        let _ = touched_streams.insert((forwarder_id.clone(), reader_ip.clone()));
+    }
+
+    let mut updates = Vec::with_capacity(touched_streams.len());
+    for (forwarder_id, reader_ip) in touched_streams {
+        let key = crate::cache::StreamKey::new(forwarder_id.as_str(), reader_ip.as_str());
+        if let Some(counts) = stream_counts.get(&key) {
+            updates.push(crate::ui_events::StreamCountUpdate {
+                forwarder_id,
+                reader_ip,
+                reads_total: counts.total,
+                reads_epoch: counts.epoch,
+            });
+        }
+    }
+
+    updates.sort_by(|a, b| {
+        a.forwarder_id
+            .cmp(&b.forwarder_id)
+            .then(a.reader_ip.cmp(&b.reader_ip))
+    });
+    updates
+}
+
 pub async fn connect(url: &str, rid: &str, db: &Db) -> Result<Session, SessionError> {
     let resume = db.load_resume_cursors().map_err(SessionError::Db)?;
     info!(rid, url, n = resume.len(), "connecting");
@@ -54,6 +105,7 @@ pub async fn run_session_loop<S>(
     db: Arc<Mutex<Db>>,
     event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
     stream_counts: crate::cache::StreamCounts,
+    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), SessionError>
 where
@@ -74,12 +126,13 @@ where
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
                                 for e in &b.events { let _ = event_tx.send(e.clone()); }
-                                {
-                                    let mut bc: std::collections::HashMap<(String,String,u64),u64> = std::collections::HashMap::new();
-                                    for e in &b.events { *bc.entry((e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch)).or_insert(0) += 1; }
-                                    for ((f,i,ep),n) in &bc { stream_counts.record(&crate::cache::StreamKey::new(f.as_str(),i.as_str()),*ep,*n); }
+                                let updates = apply_batch_counts(&stream_counts, &b.events);
+                                if !updates.is_empty() {
+                                    let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamCountsUpdated {
+                                        updates,
+                                    });
                                 }
-                                let mut hw: std::collections::HashMap<(String,String,u64),u64> = std::collections::HashMap::new();
+                                let mut hw: HashMap<(String,String,u64),u64> = HashMap::new();
                                 for e in &b.events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();
                                 { let d=db.lock().await; for((f,i,ep),ls) in &hw { if let Err(e)=d.save_cursor(f,i,*ep,*ls){error!(error=%e);} acks.push(AckEntry{forwarder_id:f.clone(),reader_ip:i.clone(),stream_epoch:*ep,last_seq:*ls}); } }
@@ -100,4 +153,44 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_event(forwarder_id: &str, reader_ip: &str, stream_epoch: u64, seq: u64) -> ReadEvent {
+        ReadEvent {
+            forwarder_id: forwarder_id.to_owned(),
+            reader_ip: reader_ip.to_owned(),
+            stream_epoch,
+            seq,
+            reader_timestamp: "2026-01-01T00:00:00.000Z".to_owned(),
+            raw_read_line: format!("raw-{seq}"),
+            read_type: "RAW".to_owned(),
+        }
+    }
+
+    #[test]
+    fn apply_batch_counts_handles_mixed_epochs_without_inflating_current_epoch() {
+        let stream_counts = crate::cache::StreamCounts::new();
+        let events = vec![
+            read_event("f1", "10.0.0.1", 10, 100),
+            read_event("f1", "10.0.0.1", 9, 50),
+        ];
+
+        let updates = apply_batch_counts(&stream_counts, &events);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].forwarder_id, "f1");
+        assert_eq!(updates[0].reader_ip, "10.0.0.1");
+        assert_eq!(updates[0].reads_total, 2);
+        assert_eq!(updates[0].reads_epoch, 1);
+
+        let counts = stream_counts
+            .get(&crate::cache::StreamKey::new("f1", "10.0.0.1"))
+            .unwrap();
+        assert_eq!(counts.total, 2);
+        assert_eq!(counts.current_epoch, 10);
+        assert_eq!(counts.epoch, 1);
+    }
 }

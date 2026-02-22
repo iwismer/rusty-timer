@@ -330,6 +330,7 @@ async fn main() {
                                                 let db_arc = Arc::clone(&state.db);
                                                 let bus = event_bus.clone();
                                                 let counts = state.stream_counts.clone();
+                                                let ui_tx = state.ui_tx.clone();
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
@@ -339,6 +340,7 @@ async fn main() {
                                                         db_arc,
                                                         event_tx,
                                                         counts,
+                                                        ui_tx,
                                                         cancel_rx,
                                                     )
                                                     .await;

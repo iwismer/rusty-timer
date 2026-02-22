@@ -13,6 +13,7 @@
   } from "@rusty-timer/shared-ui";
   import type {
     Profile,
+    StreamCountUpdate,
     StatusResponse,
     StreamsResponse,
     LogsResponse,
@@ -42,6 +43,33 @@
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
     return `${forwarder_id}/${reader_ip}`;
+  }
+
+  function applyStreamCountUpdates(updates: StreamCountUpdate[]) {
+    if (!streams || updates.length === 0) {
+      return;
+    }
+
+    const updatesByKey = new Map(
+      updates.map((u) => [streamKey(u.forwarder_id, u.reader_ip), u]),
+    );
+
+    streams = {
+      ...streams,
+      streams: streams.streams.map((stream) => {
+        const update = updatesByKey.get(
+          streamKey(stream.forwarder_id, stream.reader_ip),
+        );
+        if (!update) {
+          return stream;
+        }
+        return {
+          ...stream,
+          reads_total: update.reads_total,
+          reads_epoch: update.reads_epoch,
+        };
+      }),
+    };
   }
 
   async function toggleSubscription(
@@ -250,6 +278,9 @@
           updateVersion = null;
           updateStatus = null;
         }
+      },
+      onStreamCountsUpdated: (updates) => {
+        applyStreamCountUpdates(updates);
       },
     });
   });

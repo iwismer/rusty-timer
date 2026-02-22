@@ -2,6 +2,14 @@ use crate::control_api::{ConnectionState, StreamEntry};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
+pub struct StreamCountUpdate {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub reads_total: u64,
+    pub reads_epoch: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReceiverUiEvent {
     StatusChanged {
@@ -18,6 +26,9 @@ pub enum ReceiverUiEvent {
     },
     UpdateStatusChanged {
         status: rt_updater::UpdateStatus,
+    },
+    StreamCountsUpdated {
+        updates: Vec<StreamCountUpdate>,
     },
 }
 
@@ -71,5 +82,23 @@ mod tests {
         assert_eq!(json["type"], "update_status_changed");
         assert_eq!(json["status"]["status"], "available");
         assert_eq!(json["status"]["version"], "1.2.3");
+    }
+
+    #[test]
+    fn stream_counts_updated_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::StreamCountsUpdated {
+            updates: vec![StreamCountUpdate {
+                forwarder_id: "f1".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                reads_total: 42,
+                reads_epoch: 7,
+            }],
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "stream_counts_updated");
+        assert_eq!(json["updates"][0]["forwarder_id"], "f1");
+        assert_eq!(json["updates"][0]["reader_ip"], "10.0.0.1");
+        assert_eq!(json["updates"][0]["reads_total"], 42);
+        assert_eq!(json["updates"][0]["reads_epoch"], 7);
     }
 }

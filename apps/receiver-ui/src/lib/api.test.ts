@@ -229,6 +229,7 @@ describe("sse client", () => {
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
       onUpdateStatusChanged: vi.fn(),
+      onStreamCountsUpdated: vi.fn(),
     };
 
     initSSE(callbacks);
@@ -242,6 +243,45 @@ describe("sse client", () => {
       status: "available",
       version: "1.2.3",
     });
+    destroySSE();
+    vi.unstubAllGlobals();
+  });
+
+  it("forwards stream_counts_updated event payload", async () => {
+    const { initSSE, destroySSE } = await import("./sse");
+    const callbacks = {
+      onStatusChanged: vi.fn(),
+      onStreamsSnapshot: vi.fn(),
+      onLogEntry: vi.fn(),
+      onResync: vi.fn(),
+      onConnectionChange: vi.fn(),
+      onUpdateStatusChanged: vi.fn(),
+      onStreamCountsUpdated: vi.fn(),
+    };
+
+    initSSE(callbacks);
+    expect(MockEventSource.lastInstance).not.toBeNull();
+
+    MockEventSource.lastInstance!.emit("stream_counts_updated", {
+      updates: [
+        {
+          forwarder_id: "f1",
+          reader_ip: "10.0.0.1",
+          reads_total: 15,
+          reads_epoch: 3,
+        },
+      ],
+    });
+
+    expect(callbacks.onStreamCountsUpdated).toHaveBeenCalledWith([
+      {
+        forwarder_id: "f1",
+        reader_ip: "10.0.0.1",
+        reads_total: 15,
+        reads_epoch: 3,
+      },
+    ]);
+
     destroySSE();
     vi.unstubAllGlobals();
   });

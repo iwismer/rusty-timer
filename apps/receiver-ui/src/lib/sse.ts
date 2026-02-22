@@ -1,6 +1,7 @@
 import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
 import type {
   StatusResponse,
+  StreamCountUpdate,
   StreamsResponse,
   UpdateStatusResponse,
 } from "./api";
@@ -12,6 +13,7 @@ export type SseCallbacks = {
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
   onUpdateStatusChanged: (status: UpdateStatusResponse) => void;
+  onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
 };
 
 let handle: SseHandle | null = null;
@@ -44,6 +46,9 @@ export function initSSE(callbacks: SseCallbacks): void {
       },
       update_status_changed: (data: any) => {
         callbacks.onUpdateStatusChanged(data.status);
+      },
+      stream_counts_updated: (data: any) => {
+        callbacks.onStreamCountsUpdated(data.updates ?? []);
       },
     },
     (connected) => {
