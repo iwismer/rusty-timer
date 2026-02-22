@@ -224,7 +224,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 events: events_to_send,
             });
             if let Ok(json) = serde_json::to_string(&batch) {
-                if socket.send(Message::Text(json)).await.is_err() {
+                if socket.send(Message::Text(json.into())).await.is_err() {
                     break;
                 }
             }
@@ -405,7 +405,7 @@ async fn replay_backlog(
             events: read_events,
         });
         let json = serde_json::to_string(&batch)?;
-        socket.send(Message::Text(json)).await?;
+        socket.send(Message::Text(json.into())).await?;
 
         if !cursor_gt(through_epoch, through_seq, sub.last_epoch, sub.last_seq) {
             return Ok(());

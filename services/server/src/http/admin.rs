@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::RngCore;
+use rand::TryRngCore;
 use rt_protocol::HttpErrorEnvelope;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -216,7 +216,9 @@ pub async fn create_token(
         }
         None => {
             let mut bytes = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            rand::rngs::OsRng
+                .try_fill_bytes(&mut bytes)
+                .expect("OS RNG should not fail");
             URL_SAFE_NO_PAD.encode(bytes)
         }
     };

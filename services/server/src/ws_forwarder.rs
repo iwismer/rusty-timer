@@ -411,7 +411,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                     ForwarderCommand::EpochReset(epoch_cmd) => {
                         let msg = WsMessage::EpochResetCommand(epoch_cmd);
                         if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() { break; }
+                            if socket.send(Message::Text(json.into())).await.is_err() { break; }
                         }
                     }
                     ForwarderCommand::ConfigGet { request_id, reply } => {
@@ -419,7 +419,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             request_id: request_id.clone(),
                         });
                         if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() {
+                            if socket.send(Message::Text(json.into())).await.is_err() {
                                 break;
                             }
                         }
@@ -432,7 +432,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             payload,
                         });
                         if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() {
+                            if socket.send(Message::Text(json.into())).await.is_err() {
                                 break;
                             }
                         }
@@ -443,7 +443,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             request_id: request_id.clone(),
                         });
                         if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() {
+                            if socket.send(Message::Text(json.into())).await.is_err() {
                                 break;
                             }
                         }
@@ -599,7 +599,7 @@ async fn handle_event_batch(
         entries,
     });
     if let Ok(json) = serde_json::to_string(&ack) {
-        socket.send(Message::Text(json)).await?;
+        socket.send(Message::Text(json.into())).await?;
     }
 
     for (stream_id, new_epoch) in epoch_transitions {
