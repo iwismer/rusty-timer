@@ -2200,7 +2200,8 @@ target = "192.168.1.100:10000"
             }),
         );
 
-        let (_http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
+        let (http_status, body) = result.expect_err("non-zero exit must return an HTTP error");
+        assert_eq!(http_status, 403);
         assert!(body.contains("sudo: a password is required"));
     }
 
