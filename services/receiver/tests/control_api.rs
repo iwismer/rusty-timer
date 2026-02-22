@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use receiver::control_api::{build_router, AppState, ConnectionState};
 use receiver::Db;
+use rt_updater::UpdateMode;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -87,6 +88,7 @@ async fn put_profile_stores_and_get_returns_it() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(val["server_url"], "wss://s.com");
     assert_eq!(val["token"], "tok");
+    assert_eq!(val["update_mode"], "check-and-download");
 }
 #[tokio::test]
 async fn put_profile_updates_existing() {
@@ -96,7 +98,29 @@ async fn put_profile_updates_existing() {
     put_json(
         app.clone(),
         "/api/v1/profile",
-        json!({"server_url":"wss://old","token":"t1"}),
+        json!({"server_url":"wss://old","token":"t1","update_mode":"disabled"}),
+    )
+    .await;
+    put_json(
+        app.clone(),
+        "/api/v1/profile",
+        json!({"server_url":"wss://new","token":"t2","update_mode":"check-only"}),
+    )
+    .await;
+    let (_, val) = get_json(app, "/api/v1/profile").await;
+    assert_eq!(val["server_url"], "wss://new");
+    assert_eq!(val["update_mode"], "check-only");
+}
+
+#[tokio::test]
+async fn put_profile_omitted_update_mode_preserves_existing() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+    put_json(
+        app.clone(),
+        "/api/v1/profile",
+        json!({"server_url":"wss://old","token":"t1","update_mode":"check-only"}),
     )
     .await;
     put_json(
@@ -107,6 +131,37 @@ async fn put_profile_updates_existing() {
     .await;
     let (_, val) = get_json(app, "/api/v1/profile").await;
     assert_eq!(val["server_url"], "wss://new");
+    assert_eq!(val["update_mode"], "check-only");
+}
+
+#[tokio::test]
+async fn put_profile_rejects_invalid_update_mode() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+    let status = put_json(
+        app,
+        "/api/v1/profile",
+        json!({"server_url":"wss://s.com","token":"tok","update_mode":"bogus"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn put_profile_updates_in_memory_update_mode() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    let status = put_json(
+        app,
+        "/api/v1/profile",
+        json!({"server_url":"wss://s.com","token":"tok","update_mode":"check-only"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(*state.update_mode.read().await, UpdateMode::CheckOnly);
 }
 #[tokio::test]
 async fn get_streams_returns_empty_list() {
@@ -128,7 +183,7 @@ async fn get_streams_degraded_when_disconnected_with_profile() {
         .db
         .lock()
         .await
-        .save_profile("wss://s.com", "tok")
+        .save_profile("wss://s.com", "tok", "check-and-download")
         .unwrap();
     *state.upstream_url.write().await = Some("wss://s.com".to_owned());
     let (_, val) = get_json(build_router(state), "/api/v1/streams").await;

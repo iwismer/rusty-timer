@@ -16,9 +16,8 @@ pub enum ReceiverUiEvent {
     LogEntry {
         entry: String,
     },
-    UpdateAvailable {
-        version: String,
-        current_version: String,
+    UpdateStatusChanged {
+        status: rt_updater::UpdateStatus,
     },
 }
 
@@ -62,14 +61,15 @@ mod tests {
     }
 
     #[test]
-    fn update_available_serializes_with_type_tag() {
-        let event = ReceiverUiEvent::UpdateAvailable {
-            version: "1.2.3".to_owned(),
-            current_version: "1.0.0".to_owned(),
+    fn update_status_changed_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::UpdateStatusChanged {
+            status: rt_updater::UpdateStatus::Available {
+                version: "1.2.3".to_owned(),
+            },
         };
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "update_available");
-        assert_eq!(json["version"], "1.2.3");
-        assert_eq!(json["current_version"], "1.0.0");
+        assert_eq!(json["type"], "update_status_changed");
+        assert_eq!(json["status"]["status"], "available");
+        assert_eq!(json["status"]["version"], "1.2.3");
     }
 }

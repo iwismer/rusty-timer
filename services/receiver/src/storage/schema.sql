@@ -8,8 +8,9 @@
 -- At startup, run PRAGMA integrity_check; exit if result != 'ok'.
 
 CREATE TABLE IF NOT EXISTS profile (
-    server_url TEXT NOT NULL,
-    token      TEXT NOT NULL
+    server_url  TEXT NOT NULL,
+    token       TEXT NOT NULL,
+    update_mode TEXT NOT NULL DEFAULT 'check-and-download'
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (

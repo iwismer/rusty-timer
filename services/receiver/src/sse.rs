@@ -19,7 +19,7 @@ pub async fn receiver_sse(
                 ReceiverUiEvent::StatusChanged { .. } => "status_changed",
                 ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
                 ReceiverUiEvent::LogEntry { .. } => "log_entry",
-                ReceiverUiEvent::UpdateAvailable { .. } => "update_available",
+                ReceiverUiEvent::UpdateStatusChanged { .. } => "update_status_changed",
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),

@@ -904,7 +904,9 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    status_server.set_update_mode(cfg.update.mode).await;
     let logger = status_server.logger();
+
     // Collect enabled reader endpoints
     let mut all_readers: Vec<(String, u16)> = Vec::new(); // (addr, local_port)
     let mut fanout_addrs: Vec<(String, u16, SocketAddr)> = Vec::new(); // (ip, port, fanout_addr)
@@ -1039,8 +1041,14 @@ async fn main() {
     // Spawn background update check
     {
         let ss = status_server.clone();
+        let update_mode = cfg.update.mode;
         let lg = logger.clone();
         tokio::spawn(async move {
+            if update_mode == rt_updater::UpdateMode::Disabled {
+                lg.log("auto-update disabled by configuration");
+                return;
+            }
+
             let checker = match rt_updater::UpdateChecker::new(
                 "iwismer",
                 "rusty-timer",
@@ -1049,7 +1057,10 @@ async fn main() {
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!(error = %e, "failed to create update checker");
+                    lg.log_at(
+                        UiLogLevel::Warn,
+                        format!("failed to create update checker: {e}"),
+                    );
                     return;
                 }
             };
@@ -1057,40 +1068,37 @@ async fn main() {
             let status = checker.check().await;
             match status {
                 Ok(rt_updater::UpdateStatus::Available { ref version }) => {
-                    warn!(
-                        current = env!("CARGO_PKG_VERSION"),
-                        available = %version,
-                        "update available — POST /update/apply to install"
-                    );
-                    lg.log(format!("update available: {}", version));
+                    lg.log(format!("Update v{version} available"));
                     ss.set_update_status(rt_updater::UpdateStatus::Available {
                         version: version.clone(),
                     })
                     .await;
 
-                    match checker.download(version).await {
-                        Ok(path) => {
-                            lg.log(format!("update {} downloaded and staged", version));
-                            ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
-                                version: version.clone(),
-                            })
-                            .await;
-                            ss.set_staged_update_path(path).await;
-                        }
-                        Err(e) => {
-                            lg.log_at(UiLogLevel::Warn, format!("update download failed: {}", e));
-                            ss.set_update_status(rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            })
-                            .await;
+                    if update_mode == rt_updater::UpdateMode::CheckAndDownload {
+                        match checker.download(version).await {
+                            Ok(path) => {
+                                lg.log(format!("Update v{version} downloaded and staged"));
+                                ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
+                                    version: version.clone(),
+                                })
+                                .await;
+                                ss.set_staged_update_path(path).await;
+                            }
+                            Err(e) => {
+                                lg.log_at(UiLogLevel::Warn, format!("update download failed: {e}"));
+                                ss.set_update_status(rt_updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                })
+                                .await;
+                            }
                         }
                     }
                 }
                 Ok(_) => {
-                    info!("no updates available");
+                    lg.log("forwarder is up to date");
                 }
                 Err(e) => {
-                    lg.log_at(UiLogLevel::Warn, format!("update check failed: {}", e));
+                    lg.log_at(UiLogLevel::Warn, format!("update check failed: {e}"));
                     ss.set_update_status(rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     })
@@ -1359,6 +1367,9 @@ mod tests {
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
+            },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
@@ -1815,6 +1826,9 @@ token_file = "/tmp/test-token"
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
             },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
+            },
             readers: vec![],
         };
 
@@ -2041,6 +2055,9 @@ token_file = "/tmp/test-token"
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
             },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -2148,6 +2165,9 @@ token_file = "/tmp/test-token"
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
+            },
+            update: forwarder::config::UpdateConfig {
+                mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![],
         };

@@ -1,3 +1,5 @@
+import type { UpdateStatusResponse } from "./update-flow";
+
 export interface ConfigApi {
   getConfig(): Promise<ConfigLoadResult>;
   saveSection(
@@ -7,6 +9,7 @@ export interface ConfigApi {
   restartService(): Promise<ConfigActionResult>;
   restartDevice(): Promise<ConfigActionResult>;
   shutdownDevice(): Promise<ConfigActionResult>;
+  checkForUpdate?(): Promise<UpdateStatusResponse>;
 }
 
 export interface ConfigLoadResult {

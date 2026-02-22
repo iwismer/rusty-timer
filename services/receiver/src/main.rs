@@ -47,13 +47,26 @@ async fn main() {
     // -------------------------------------------------------------------------
     // 4. Load profile and restore subscriptions
     // -------------------------------------------------------------------------
+    let update_mode: rt_updater::UpdateMode;
     {
         let db = state.db.lock().await;
-        if let Ok(Some(profile)) = db.load_profile() {
-            *state.upstream_url.write().await = Some(profile.server_url.clone());
-            info!(url = %profile.server_url, "restored profile");
+        let profile = db.load_profile().ok().flatten();
+        if let Some(ref p) = profile {
+            *state.upstream_url.write().await = Some(p.server_url.clone());
+            info!(url = %p.server_url, "restored profile");
         }
+        update_mode = profile
+            .as_ref()
+            .and_then(|p| {
+                serde_json::from_value::<rt_updater::UpdateMode>(serde_json::Value::String(
+                    p.update_mode.clone(),
+                ))
+                .ok()
+            })
+            .unwrap_or_default();
     }
+
+    *state.update_mode.write().await = update_mode;
 
     let event_bus = EventBus::new();
 
@@ -91,6 +104,11 @@ async fn main() {
     {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
+            if update_mode == rt_updater::UpdateMode::Disabled {
+                state.logger.log("auto-update disabled by configuration");
+                return;
+            }
+
             let checker = match rt_updater::UpdateChecker::new(
                 "iwismer",
                 "rusty-timer",
@@ -99,55 +117,85 @@ async fn main() {
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!(error = %e, "failed to create update checker");
+                    state.logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("failed to create update checker: {e}"),
+                    );
                     return;
                 }
             };
 
             match checker.check().await {
                 Ok(rt_updater::UpdateStatus::Available { ref version }) => {
-                    info!(
-                        current = env!("CARGO_PKG_VERSION"),
-                        available = %version,
-                        "update available"
-                    );
+                    state.logger.log(format!("Update v{version} available"));
                     *state.update_status.write().await = rt_updater::UpdateStatus::Available {
                         version: version.clone(),
                     };
+                    let _ = state
+                        .ui_tx
+                        .send(receiver::ReceiverUiEvent::UpdateStatusChanged {
+                            status: rt_updater::UpdateStatus::Available {
+                                version: version.clone(),
+                            },
+                        });
 
-                    match checker.download(version).await {
-                        Ok(path) => {
-                            info!(version = %version, "update downloaded and staged");
-                            *state.update_status.write().await =
-                                rt_updater::UpdateStatus::Downloaded {
-                                    version: version.clone(),
-                                };
-                            *state.staged_update_path.write().await = Some(path);
+                    if update_mode == rt_updater::UpdateMode::CheckAndDownload {
+                        match checker.download(version).await {
+                            Ok(path) => {
+                                state
+                                    .logger
+                                    .log(format!("Update v{version} downloaded and staged"));
+                                *state.update_status.write().await =
+                                    rt_updater::UpdateStatus::Downloaded {
+                                        version: version.clone(),
+                                    };
+                                *state.staged_update_path.write().await = Some(path);
 
-                            let _ = state
-                                .ui_tx
-                                .send(receiver::ReceiverUiEvent::UpdateAvailable {
-                                    version: version.clone(),
-                                    current_version: env!("CARGO_PKG_VERSION").to_owned(),
-                                });
-                            state.logger.log(format!("Update v{version} available"));
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "update download failed");
-                            *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
+                                let _ = state.ui_tx.send(
+                                    receiver::ReceiverUiEvent::UpdateStatusChanged {
+                                        status: rt_updater::UpdateStatus::Downloaded {
+                                            version: version.clone(),
+                                        },
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                state.logger.log_at(
+                                    UiLogLevel::Warn,
+                                    format!("update download failed: {e}"),
+                                );
+                                *state.update_status.write().await =
+                                    rt_updater::UpdateStatus::Failed {
+                                        error: e.to_string(),
+                                    };
+                                let _ = state.ui_tx.send(
+                                    receiver::ReceiverUiEvent::UpdateStatusChanged {
+                                        status: rt_updater::UpdateStatus::Failed {
+                                            error: e.to_string(),
+                                        },
+                                    },
+                                );
+                            }
                         }
                     }
                 }
                 Ok(_) => {
-                    info!("receiver is up to date");
+                    state.logger.log("receiver is up to date");
                 }
                 Err(e) => {
-                    warn!(error = %e, "update check failed");
+                    state
+                        .logger
+                        .log_at(UiLogLevel::Warn, format!("update check failed: {e}"));
                     *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
                         error: e.to_string(),
                     };
+                    let _ = state
+                        .ui_tx
+                        .send(receiver::ReceiverUiEvent::UpdateStatusChanged {
+                            status: rt_updater::UpdateStatus::Failed {
+                                error: e.to_string(),
+                            },
+                        });
                 }
             }
         });

@@ -32,6 +32,7 @@ pub struct ForwarderConfig {
     pub status_http: StatusHttpConfig,
     pub uplink: UplinkConfig,
     pub control: ControlConfig,
+    pub update: UpdateConfig,
     pub readers: Vec<ReaderConfig>,
 }
 
@@ -65,6 +66,11 @@ pub struct ControlConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpdateConfig {
+    pub mode: rt_updater::UpdateMode,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReaderConfig {
     pub target: String,
     pub enabled: bool,
@@ -86,6 +92,7 @@ pub struct RawConfig {
     pub status_http: Option<RawStatusHttpConfig>,
     pub uplink: Option<RawUplinkConfig>,
     pub control: Option<RawControlConfig>,
+    pub update: Option<RawUpdateConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
 }
 
@@ -121,6 +128,11 @@ pub struct RawUplinkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawControlConfig {
     pub allow_power_actions: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawUpdateConfig {
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +248,28 @@ pub fn load_config_from_str(
         },
     };
 
+    // Update defaults
+    let update = match raw.update {
+        Some(u) => {
+            let mode = match u.mode {
+                Some(m) => serde_json::from_value::<rt_updater::UpdateMode>(
+                    serde_json::Value::String(m.clone()),
+                )
+                .map_err(|_| {
+                    ConfigError::InvalidValue(format!(
+                        "update.mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'",
+                        m
+                    ))
+                })?,
+                None => rt_updater::UpdateMode::default(),
+            };
+            UpdateConfig { mode }
+        }
+        None => UpdateConfig {
+            mode: rt_updater::UpdateMode::default(),
+        },
+    };
+
     // Validate readers
     let raw_readers = raw
         .readers
@@ -269,6 +303,7 @@ pub fn load_config_from_str(
         status_http,
         uplink,
         control,
+        update,
         readers,
     })
 }
@@ -306,4 +341,77 @@ fn read_token_file(path: &str) -> Result<String, ConfigError> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::Io(format!("reading token file '{}': {}", path, e)))?;
     Ok(content.trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns (toml_string, _tempdir_guard). The caller must hold `_tempdir_guard`
+    /// alive so the token file is not deleted before config parsing reads it.
+    fn minimal_toml(extra: &str) -> (String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "test-token\n").expect("write token");
+        let toml = format!(
+            r#"
+schema_version = 1
+
+[server]
+base_url = "wss://example.com"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "192.168.1.100"
+
+{extra}
+"#,
+            token_path.display()
+        );
+        (toml, dir)
+    }
+
+    #[test]
+    fn update_section_defaults_to_check_and_download_when_absent() {
+        let (toml, _dir) = minimal_toml("");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.update.mode, rt_updater::UpdateMode::CheckAndDownload);
+    }
+
+    #[test]
+    fn update_section_parses_disabled() {
+        let (toml, _dir) = minimal_toml("[update]\nmode = \"disabled\"");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.update.mode, rt_updater::UpdateMode::Disabled);
+    }
+
+    #[test]
+    fn update_section_parses_check_only() {
+        let (toml, _dir) = minimal_toml("[update]\nmode = \"check-only\"");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.update.mode, rt_updater::UpdateMode::CheckOnly);
+    }
+
+    #[test]
+    fn update_section_parses_check_and_download() {
+        let (toml, _dir) = minimal_toml("[update]\nmode = \"check-and-download\"");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.update.mode, rt_updater::UpdateMode::CheckAndDownload);
+    }
+
+    #[test]
+    fn update_section_rejects_invalid_mode() {
+        let (toml, _dir) = minimal_toml("[update]\nmode = \"yolo\"");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(err.to_string().contains("update.mode"), "error: {err}");
+    }
+
+    #[test]
+    fn update_section_defaults_mode_when_section_present_but_mode_absent() {
+        let (toml, _dir) = minimal_toml("[update]");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.update.mode, rt_updater::UpdateMode::CheckAndDownload);
+    }
 }

@@ -10,6 +10,7 @@
     toUplinkPayload,
     toStatusHttpPayload,
     toControlPayload,
+    toUpdatePayload,
     toReadersPayload,
     validateGeneral,
     validateServer,
@@ -61,6 +62,9 @@
   let uplinkBatchFlushMs = $state("");
   let uplinkBatchMaxEvents = $state("");
   let statusHttpBind = $state("");
+  let updateMode = $state("");
+  let checkingUpdate = $state(false);
+  let checkMessage = $state<string | null>(null);
   let persistedAllowPowerActions = $state(false);
   let controlAllowPowerActions = $state(false);
   let readers: ReaderEntry[] = $state([]);
@@ -175,6 +179,7 @@
     uplinkBatchFlushMs = form.uplinkBatchFlushMs;
     uplinkBatchMaxEvents = form.uplinkBatchMaxEvents;
     statusHttpBind = form.statusHttpBind;
+    updateMode = form.updateMode;
     persistedAllowPowerActions = form.controlAllowPowerActions;
     controlAllowPowerActions = form.controlAllowPowerActions;
     readers = form.readers.map((reader) => ({ ...reader }));
@@ -192,6 +197,7 @@
       uplinkBatchFlushMs,
       uplinkBatchMaxEvents,
       statusHttpBind,
+      updateMode,
       controlAllowPowerActions,
       readers: readers.map((reader) => ({ ...reader })),
     };
@@ -269,6 +275,30 @@
   }
   function saveReaders() {
     saveSectionWithValidation("readers", validateReaders, toReadersPayload);
+  }
+
+  function saveUpdate() {
+    saveSectionWithValidation("update", null, toUpdatePayload);
+  }
+
+  async function handleCheckUpdate() {
+    if (!configApi.checkForUpdate) return;
+    checkingUpdate = true;
+    checkMessage = null;
+    try {
+      const result = await configApi.checkForUpdate();
+      if (result.status === "up_to_date") {
+        checkMessage = "Up to date.";
+      } else if (result.status === "available" || result.status === "downloaded") {
+        checkMessage = null;
+      } else if (result.status === "failed") {
+        checkMessage = result.error ?? "Update check failed.";
+      }
+    } catch (e) {
+      checkMessage = String(e);
+    } finally {
+      checkingUpdate = false;
+    }
   }
 
   function addReader() {
@@ -349,6 +379,8 @@
     "w-full px-2 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary focus:outline-none focus:border-accent";
   const saveBtnClass =
     "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+  const secondaryBtnClass =
+    "mt-2 px-3 py-1.5 text-xs font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
   const dangerousActionBtnClass =
     "px-3 py-1.5 text-xs font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
   const hintClass = "text-xs text-text-muted mt-1";
@@ -791,6 +823,50 @@
               >
                 {sectionMessages["status_http"].text}
               </p>
+            {/if}
+          </Card>
+
+          <!-- Update -->
+          <Card title="Update">
+            <label class="block text-sm font-medium text-text-secondary">
+              Update Mode
+              <select bind:value={updateMode} class="mt-1 {selectClass}">
+                <option value="">Default (automatic)</option>
+                <option value="check-and-download">Automatic (check and download)</option>
+                <option value="check-only">Check Only (notify but don't download)</option>
+                <option value="disabled">Disabled</option>
+              </select>
+              <p class={hintClass}>How the forwarder checks for and applies updates. Default if unset: automatic.</p>
+            </label>
+            <div class="flex items-center gap-2">
+              <button
+                class={saveBtnClass}
+                onclick={saveUpdate}
+                disabled={savingSection["update"]}
+              >
+                {savingSection["update"] ? "Saving..." : "Save Update"}
+              </button>
+              {#if configApi.checkForUpdate}
+                <button
+                  class={secondaryBtnClass}
+                  onclick={handleCheckUpdate}
+                  disabled={checkingUpdate}
+                >
+                  {checkingUpdate ? "Checking..." : "Check Now"}
+                </button>
+              {/if}
+            </div>
+            {#if sectionMessages["update"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['update'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["update"].text}
+              </p>
+            {/if}
+            {#if checkMessage}
+              <p class="text-xs mt-1 m-0 text-text-muted">{checkMessage}</p>
             {/if}
           </Card>
         </div>

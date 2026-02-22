@@ -24,6 +24,7 @@ describe("api client", () => {
       makeResponse(200, {
         server_url: "wss://s.com",
         token: "tok",
+        update_mode: "check-and-download",
       }),
     );
     const p = await getProfile();
@@ -40,6 +41,7 @@ describe("api client", () => {
     await putProfile({
       server_url: "wss://s.com",
       token: "t",
+      update_mode: "check-and-download",
     });
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/profile",
@@ -149,6 +151,33 @@ describe("api client", () => {
     });
     await expect(applyUpdate()).rejects.toThrow("apply update -> 500");
   });
+
+  it("checkForUpdate calls POST /api/v1/update/check", async () => {
+    const { checkForUpdate } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { status: "up_to_date" }));
+    const result = await checkForUpdate();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/update/check",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result.status).toBe("up_to_date");
+  });
+
+  it("downloadUpdate returns failed status payload on 409", async () => {
+    const { downloadUpdate } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(409, { status: "failed", error: "no update available" }),
+    );
+    const result = await downloadUpdate();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/update/download",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result).toEqual({
+      status: "failed",
+      error: "no update available",
+    });
+  });
 });
 
 class MockEventSource {
@@ -191,7 +220,7 @@ describe("sse client", () => {
     );
   });
 
-  it("forwards update_available event payload", async () => {
+  it("forwards update_status_changed event payload", async () => {
     const { initSSE, destroySSE } = await import("./sse");
     const callbacks = {
       onStatusChanged: vi.fn(),
@@ -199,18 +228,20 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateAvailable: vi.fn(),
+      onUpdateStatusChanged: vi.fn(),
     };
 
     initSSE(callbacks);
     expect(MockEventSource.lastInstance).not.toBeNull();
 
-    MockEventSource.lastInstance!.emit("update_available", {
-      version: "1.2.3",
-      current_version: "1.0.0",
+    MockEventSource.lastInstance!.emit("update_status_changed", {
+      status: { status: "available", version: "1.2.3" },
     });
 
-    expect(callbacks.onUpdateAvailable).toHaveBeenCalledWith("1.2.3", "1.0.0");
+    expect(callbacks.onUpdateStatusChanged).toHaveBeenCalledWith({
+      status: "available",
+      version: "1.2.3",
+    });
     destroySSE();
     vi.unstubAllGlobals();
   });

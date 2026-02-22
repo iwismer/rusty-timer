@@ -15,6 +15,7 @@ export interface ForwarderConfigFormState {
   uplinkBatchFlushMs: string;
   uplinkBatchMaxEvents: string;
   statusHttpBind: string;
+  updateMode: string;
   controlAllowPowerActions: boolean;
   readers: ReaderEntry[];
 }
@@ -36,6 +37,7 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
   const journal = asRecord(cfg.journal);
   const uplink = asRecord(cfg.uplink);
   const statusHttp = asRecord(cfg.status_http);
+  const update = asRecord(cfg.update);
   const control = asRecord(cfg.control);
 
   const rawReaders = Array.isArray(cfg.readers) ? cfg.readers : [];
@@ -67,6 +69,7 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
     uplinkBatchMaxEvents:
       uplink.batch_max_events != null ? String(uplink.batch_max_events) : "",
     statusHttpBind: asString(statusHttp.bind),
+    updateMode: asString(update.mode),
     controlAllowPowerActions: control.allow_power_actions === true,
     readers,
   };
@@ -128,6 +131,12 @@ export function toControlPayload(
   form: ForwarderConfigFormState,
 ): Record<string, unknown> {
   return { allow_power_actions: form.controlAllowPowerActions };
+}
+
+export function toUpdatePayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
+  return { mode: form.updateMode || null };
 }
 
 export function toReadersPayload(

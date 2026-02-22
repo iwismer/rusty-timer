@@ -44,6 +44,9 @@ export interface ForwarderConfig {
     batch_flush_ms?: number;
     batch_max_events?: number;
   };
+  update?: {
+    mode?: string;
+  };
   readers?: Array<{
     target?: string;
     enabled?: boolean;
@@ -132,4 +135,19 @@ export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
 export async function applyUpdate(): Promise<void> {
   const resp = await fetch("/update/apply", { method: "POST" });
   if (resp.status !== 200) throw new Error(`apply update -> ${resp.status}`);
+}
+
+export async function checkForUpdate(): Promise<UpdateStatusResponse> {
+  return apiFetch<UpdateStatusResponse>("/update/check", {
+    method: "POST",
+  });
+}
+
+export async function downloadUpdate(): Promise<UpdateStatusResponse> {
+  const resp = await fetch("/update/download", { method: "POST" });
+  if (resp.status !== 200 && resp.status !== 409) {
+    const text = await resp.text();
+    throw new Error(`download update -> ${resp.status}: ${text}`);
+  }
+  return (await resp.json()) as UpdateStatusResponse;
 }

@@ -1,5 +1,5 @@
 import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
-import type { ReaderStatus } from "./api";
+import type { ReaderStatus, UpdateStatusResponse } from "./api";
 
 export type ForwarderSseCallbacks = {
   onStatusChanged: (data: {
@@ -11,7 +11,7 @@ export type ForwarderSseCallbacks = {
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
-  onUpdateAvailable: (version: string, currentVersion: string) => void;
+  onUpdateStatusChanged: (status: UpdateStatusResponse) => void;
 };
 
 let handle: SseHandle | null = null;
@@ -38,8 +38,8 @@ export function initSSE(callbacks: ForwarderSseCallbacks): void {
       resync: () => {
         callbacks.onResync();
       },
-      update_available: (data: any) => {
-        callbacks.onUpdateAvailable(data.version, data.current_version);
+      update_status_changed: (data: any) => {
+        callbacks.onUpdateStatusChanged(data.status);
       },
     },
     (connected) => {

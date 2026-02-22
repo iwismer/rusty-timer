@@ -43,6 +43,7 @@ async function mockReceiverApi(
         body: JSON.stringify({
           server_url: "wss://example.com/ws/v1/receivers",
           token: "token",
+          update_mode: "check-and-download",
         }),
       });
       return;
@@ -68,6 +69,22 @@ async function mockReceiverApi(
         degraded: false,
         upstream_error: null,
       }),
+    });
+  });
+
+  await page.route("**/api/v1/update/check", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "up_to_date" }),
+    });
+  });
+
+  await page.route("**/api/v1/update/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "up_to_date" }),
     });
   });
 }
@@ -268,5 +285,92 @@ test.describe("profile page", () => {
     await expect(
       page.getByText("Port override must be in range 1-65535."),
     ).toHaveCount(0);
+  });
+
+  test("renders update mode select with default value", async ({ page }) => {
+    await page.goto("/");
+    const select = page.locator('[data-testid="update-mode-select"]');
+    await expect(select).toBeVisible();
+    await expect(select).toHaveValue("check-and-download");
+  });
+
+  test("check now button triggers update check", async ({ page }) => {
+    await page.goto("/");
+    const btn = page.locator('[data-testid="check-update-btn"]');
+    await expect(btn).toBeVisible();
+    await btn.click();
+    await expect(page.getByText("Up to date.")).toBeVisible();
+  });
+
+  test("check now shows download banner when update is available", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/update/check", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "available", version: "2.0.0" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator('[data-testid="check-update-btn"]').click();
+    await expect(page.locator('[data-testid="update-banner"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="download-update-btn"]'),
+    ).toBeVisible();
+    await expect(page.getByText("Update v2.0.0 available")).toBeVisible();
+  });
+
+  test("download button transitions banner to apply state", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/update/check", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "available", version: "2.0.0" }),
+      });
+    });
+
+    await page.route("**/api/v1/update/download", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "downloaded", version: "2.0.0" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.locator('[data-testid="check-update-btn"]').click();
+    await expect(
+      page.locator('[data-testid="download-update-btn"]'),
+    ).toBeVisible();
+
+    await page.locator('[data-testid="download-update-btn"]').click();
+    await expect(
+      page.locator('[data-testid="apply-update-btn"]'),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Update v2.0.0 ready to install"),
+    ).toBeVisible();
+  });
+
+  test("banner appears on load when update is already available", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/update/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "available", version: "3.0.0" }),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.locator('[data-testid="update-banner"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="download-update-btn"]'),
+    ).toBeVisible();
   });
 });

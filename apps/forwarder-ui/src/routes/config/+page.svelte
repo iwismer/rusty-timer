@@ -38,6 +38,9 @@
     async shutdownDevice() {
       return runControlAction(() => api.shutdownDevice());
     },
+    async checkForUpdate() {
+      return api.checkForUpdate();
+    },
   };
 </script>
 
