@@ -219,6 +219,15 @@
     );
   }
 
+  function confirmDeleteAllTokens() {
+    showConfirm(
+      "Delete All Tokens",
+      "This will permanently delete ALL device tokens (active and revoked). Connected devices will lose access. This cannot be undone.",
+      "Delete All",
+      () => api.deleteAllTokens(),
+    );
+  }
+
   // ----- Create token actions -----
   async function handleCreateToken() {
     creating = true;
@@ -614,6 +623,16 @@
             {/each}
           </tbody>
         </table>
+      {/if}
+      {#if tokens.length > 0}
+        <div class="mt-4 pt-4 border-t border-border">
+          <button
+            onclick={confirmDeleteAllTokens}
+            class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err text-white border-none cursor-pointer hover:opacity-80"
+          >
+            Delete All Tokens
+          </button>
+        </div>
       {/if}
     </Card>
   </div>
