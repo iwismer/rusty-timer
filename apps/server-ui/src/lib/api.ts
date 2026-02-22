@@ -507,6 +507,18 @@ export interface UploadResult {
   imported: number;
 }
 
+export interface StreamEpochRaceMapping {
+  stream_id: string;
+  forwarder_id: string;
+  reader_ip: string;
+  stream_epoch: number;
+  race_id: string | null;
+}
+
+export interface RaceStreamEpochMappingsResponse {
+  mappings: StreamEpochRaceMapping[];
+}
+
 // ----- Race API -----
 
 /** GET /api/v1/races */
@@ -527,6 +539,35 @@ export async function deleteRace(raceId: string): Promise<void> {
   return apiFetch<void>(`/api/v1/races/${encodeURIComponent(raceId)}`, {
     method: "DELETE",
   });
+}
+
+/** PUT /api/v1/streams/{streamId}/epochs/{epoch}/race */
+export async function setStreamEpochRace(
+  streamId: string,
+  epoch: number,
+  raceId: string | null,
+): Promise<{
+  stream_id: string;
+  stream_epoch: number;
+  race_id: string | null;
+}> {
+  return apiFetch<{
+    stream_id: string;
+    stream_epoch: number;
+    race_id: string | null;
+  }>(`/api/v1/streams/${encodeURIComponent(streamId)}/epochs/${epoch}/race`, {
+    method: "PUT",
+    body: JSON.stringify({ race_id: raceId }),
+  });
+}
+
+/** GET /api/v1/races/{raceId}/stream-epochs */
+export async function getRaceStreamEpochMappings(
+  raceId: string,
+): Promise<RaceStreamEpochMappingsResponse> {
+  return apiFetch<RaceStreamEpochMappingsResponse>(
+    `/api/v1/races/${encodeURIComponent(raceId)}/stream-epochs`,
+  );
 }
 
 /** GET /api/v1/races/{raceId}/participants */

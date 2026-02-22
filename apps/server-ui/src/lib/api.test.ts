@@ -557,4 +557,60 @@ describe("server_api client", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
   });
+
+  it("setStreamEpochRace sends PUT /api/v1/streams/{id}/epochs/{epoch}/race", async () => {
+    const { setStreamEpochRace } = await import("./api");
+    const payload = {
+      stream_id: "abc-123",
+      stream_epoch: 2,
+      race_id: "race-9",
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+
+    const result = await setStreamEpochRace("abc-123", 2, "race-9");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/streams/abc-123/epochs/2/race"),
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.race_id).toBe("race-9");
+    expect(result.stream_epoch).toBe(2);
+    expect(result.race_id).toBe("race-9");
+  });
+
+  it("getRaceStreamEpochMappings calls GET /api/v1/races/{id}/stream-epochs", async () => {
+    const { getRaceStreamEpochMappings } = await import("./api");
+    const payload = {
+      mappings: [
+        {
+          stream_id: "abc-123",
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          stream_epoch: 1,
+          race_id: "race-1",
+        },
+      ],
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+
+    const result = await getRaceStreamEpochMappings("race-1");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/races/race-1/stream-epochs"),
+      expect.any(Object),
+    );
+    expect(result.mappings).toHaveLength(1);
+    expect(result.mappings[0].stream_id).toBe("abc-123");
+    expect(result.mappings[0].stream_epoch).toBe(1);
+  });
+
+  it("setStreamEpochRace throws on 404", async () => {
+    const { setStreamEpochRace } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(404, { code: "NOT_FOUND", message: "stream not found" }),
+    );
+    await expect(setStreamEpochRace("bad-id", 7, "race-1")).rejects.toThrow();
+  });
 });

@@ -34,6 +34,19 @@
   let readsOffset = $state(0);
   let readsOrder: SortOrder = $state("desc");
   const readsRequestGate = createLatestRequestGate();
+  type EpochRaceRow = {
+    epoch: number;
+    event_count: number;
+    is_current: boolean;
+    selected_race_id: string | null;
+    saved_race_id: string | null;
+    pending: boolean;
+    status: "saved" | "error";
+  };
+  let epochRaceRows = $state<EpochRaceRow[]>([]);
+  let epochRaceRowsLoading = $state(false);
+  let epochRaceRowsError: string | null = $state(null);
+  let epochRaceLoadVersion = 0;
 
   let streamId = $derived($page.params.streamId!);
   let stream = $derived(
@@ -50,6 +63,10 @@
 
   $effect(() => {
     void maybeFetchMetrics(streamId);
+  });
+
+  $effect(() => {
+    void loadEpochRaceRows(streamId, $racesStore);
   });
 
   function maybeFetchMetrics(id: string): void {
@@ -189,6 +206,120 @@
 
   function handleReadsParamsChange() {
     void loadReads(streamId, true);
+  }
+
+  async function loadEpochRaceRows(
+    id: string,
+    races: typeof $racesStore,
+  ): Promise<void> {
+    const currentVersion = ++epochRaceLoadVersion;
+    epochRaceRowsLoading = true;
+    epochRaceRowsError = null;
+
+    try {
+      const epochs = await api.getStreamEpochs(id);
+      const savedRaceByEpoch = new Map<number, string | null>(
+        epochs.map((epochInfo) => [epochInfo.epoch, null]),
+      );
+
+      if (races.length > 0) {
+        const mappingResponses = await Promise.all(
+          races.map(async (race) => {
+            try {
+              return await api.getRaceStreamEpochMappings(race.race_id);
+            } catch {
+              return { mappings: [] };
+            }
+          }),
+        );
+
+        for (const response of mappingResponses) {
+          for (const mapping of response.mappings) {
+            if (mapping.stream_id !== id) continue;
+            if (!savedRaceByEpoch.has(mapping.stream_epoch)) continue;
+            savedRaceByEpoch.set(mapping.stream_epoch, mapping.race_id);
+          }
+        }
+      }
+
+      if (currentVersion !== epochRaceLoadVersion) return;
+
+      epochRaceRows = epochs.map((epochInfo) => {
+        const savedRaceId = savedRaceByEpoch.get(epochInfo.epoch) ?? null;
+        return {
+          epoch: epochInfo.epoch,
+          event_count: epochInfo.event_count,
+          is_current: epochInfo.is_current,
+          selected_race_id: savedRaceId,
+          saved_race_id: savedRaceId,
+          pending: false,
+          status: "saved",
+        };
+      });
+    } catch (e) {
+      if (currentVersion !== epochRaceLoadVersion) return;
+      epochRaceRows = [];
+      epochRaceRowsError = String(e);
+    } finally {
+      if (currentVersion === epochRaceLoadVersion) {
+        epochRaceRowsLoading = false;
+      }
+    }
+  }
+
+  function isEpochRowDirty(row: EpochRaceRow): boolean {
+    return row.selected_race_id !== row.saved_race_id;
+  }
+
+  function updateEpochRaceRow(
+    epoch: number,
+    update: (row: EpochRaceRow) => EpochRaceRow,
+  ): void {
+    epochRaceRows = epochRaceRows.map((row) =>
+      row.epoch === epoch ? update(row) : row,
+    );
+  }
+
+  function onEpochRaceSelectChange(epoch: number, raceId: string | null): void {
+    updateEpochRaceRow(epoch, (row) => ({
+      ...row,
+      selected_race_id: raceId,
+      status: "saved",
+    }));
+  }
+
+  async function handleSaveEpochRace(epoch: number): Promise<void> {
+    const row = epochRaceRows.find((candidate) => candidate.epoch === epoch);
+    if (!row || !isEpochRowDirty(row) || row.pending) return;
+
+    updateEpochRaceRow(epoch, (current) => ({
+      ...current,
+      pending: true,
+      status: "saved",
+    }));
+
+    try {
+      await api.setStreamEpochRace(streamId, epoch, row.selected_race_id);
+      updateEpochRaceRow(epoch, (current) => ({
+        ...current,
+        saved_race_id: current.selected_race_id,
+        pending: false,
+        status: "saved",
+      }));
+    } catch {
+      updateEpochRaceRow(epoch, (current) => ({
+        ...current,
+        pending: false,
+        status: "error",
+      }));
+    }
+  }
+
+  function epochRowStatusText(row: EpochRaceRow): string {
+    if (row.pending) return "Saving...";
+    if (row.status === "error") return "Error";
+    if (isEpochRowDirty(row)) return "Unsaved";
+    return "Saved";
   }
 </script>
 
@@ -408,6 +539,107 @@
           bind:order={readsOrder}
           onParamsChange={handleReadsParamsChange}
         />
+      </Card>
+    </div>
+
+    <div class="mb-6">
+      <Card title="Epoch Race Mapping">
+        {#if epochRaceRowsLoading}
+          <p class="text-sm text-text-muted italic m-0">Loading epochs...</p>
+        {:else if epochRaceRowsError}
+          <p class="text-sm text-status-err m-0">
+            Failed to load epoch mappings.
+          </p>
+        {:else if epochRaceRows.length === 0}
+          <p class="text-sm text-text-muted m-0">
+            No epochs available for mapping.
+          </p>
+        {:else}
+          <div class="overflow-x-auto rounded-md border border-border">
+            <table class="w-full text-sm border-collapse">
+              <thead class="bg-surface-1">
+                <tr>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
+                    Epoch
+                  </th>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
+                    Events
+                  </th>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
+                    Race
+                  </th>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
+                    Save
+                  </th>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
+                    Status
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each epochRaceRows as row (row.epoch)}
+                  <tr class="border-b border-border">
+                    <td class="px-3 py-2 font-mono">
+                      {row.epoch}{row.is_current ? " (current)" : ""}
+                    </td>
+                    <td class="px-3 py-2 font-mono">
+                      {row.event_count.toLocaleString()}
+                    </td>
+                    <td class="px-3 py-2">
+                      <select
+                        data-testid={`epoch-race-select-${row.epoch}`}
+                        value={row.selected_race_id ?? ""}
+                        disabled={row.pending}
+                        onchange={(e) => {
+                          const value = e.currentTarget.value;
+                          onEpochRaceSelectChange(row.epoch, value || null);
+                        }}
+                        class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary disabled:opacity-50"
+                      >
+                        <option value="">No race</option>
+                        {#each $racesStore as race (race.race_id)}
+                          <option value={race.race_id}>{race.name}</option>
+                        {/each}
+                      </select>
+                    </td>
+                    <td class="px-3 py-2">
+                      <button
+                        data-testid={`epoch-race-save-${row.epoch}`}
+                        onclick={() => void handleSaveEpochRace(row.epoch)}
+                        disabled={!isEpochRowDirty(row) || row.pending}
+                        class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {row.pending ? "Saving..." : "Save"}
+                      </button>
+                    </td>
+                    <td class="px-3 py-2">
+                      <span
+                        data-testid={`epoch-race-state-${row.epoch}`}
+                        class="text-xs {epochRowStatusText(row) === 'Error'
+                          ? 'text-status-err'
+                          : epochRowStatusText(row) === 'Saved'
+                            ? 'text-status-ok'
+                            : 'text-text-muted'}"
+                      >
+                        {epochRowStatusText(row)}
+                      </span>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
       </Card>
     </div>
 
