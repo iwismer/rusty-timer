@@ -54,7 +54,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::streams::list_epochs),
         )
         .route(
-            "/api/v1/streams/:stream_id/epochs/:epoch/race",
+            "/api/v1/streams/{stream_id}/epochs/{epoch}/race",
             axum::routing::put(http::stream_epoch_races::put_stream_epoch_race),
         )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
@@ -156,11 +156,11 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             post(http::races::upload_chips),
         )
         .route(
-            "/api/v1/races/:race_id/stream-epochs",
+            "/api/v1/races/{race_id}/stream-epochs",
             get(http::stream_epoch_races::list_stream_epochs_for_race),
         )
         .route(
-            "/api/v1/races/:race_id/streams/:stream_id/epochs/activate-next",
+            "/api/v1/races/{race_id}/streams/{stream_id}/epochs/activate-next",
             post(http::stream_epoch_races::activate_next_stream_epoch_for_race),
         );
 
