@@ -1171,7 +1171,6 @@ fn power_action_auth_failed(detail: &str) -> bool {
         || lower.contains("access denied")
         || lower.contains("permission denied")
         || lower.contains("a password is required")
-        || lower.contains("polkit")
 }
 
 #[cfg(not(unix))]
@@ -2165,6 +2164,26 @@ target = "192.168.1.100:10000"
         assert!(body
             .to_ascii_lowercase()
             .contains("interactive authentication required"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_command_result_returns_500_on_non_auth_polkit_error() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let result = map_power_action_command_result(
+            "poweroff",
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"polkit daemon unavailable".to_vec(),
+            }),
+        );
+
+        let (http_status, body) =
+            result.expect_err("non-auth polkit failures must return an HTTP error");
+        assert_eq!(http_status, 500);
+        assert!(body.contains("polkit daemon unavailable"));
     }
 
     #[cfg(unix)]
