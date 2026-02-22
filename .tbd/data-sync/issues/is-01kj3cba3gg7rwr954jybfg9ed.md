@@ -5,7 +5,7 @@ title: "Task 4b: Implement activate-next transactional flow and forwarder comman
 kind: task
 status: closed
 priority: 2
-version: 4
+version: 7
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -13,8 +13,8 @@ dependencies:
     target: is-01kj3cbaad3td1qmrv2k5jaakd
 parent_id: is-01kj3b51z5zywpj98a4c3f4h3m
 created_at: 2026-02-22T19:13:46.606Z
-updated_at: 2026-02-22T20:13:26.447Z
-closed_at: 2026-02-22T20:13:26.445Z
-close_reason: Implemented in commit bd4a0be
+updated_at: 2026-02-22T20:26:28.047Z
+closed_at: 2026-02-22T20:26:28.044Z
+close_reason: Implemented in bd4a0be; semantics/test fixes in 48359aa and 7bc4e96; independently reviewed approved.
 ---
 Split from Task 4: activate-next semantics, transaction boundaries, and command emission behavior.
