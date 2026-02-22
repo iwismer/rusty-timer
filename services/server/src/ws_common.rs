@@ -93,7 +93,6 @@ mod tests {
         let hello = WsMessage::ForwarderHello(rt_protocol::ForwarderHello {
             forwarder_id: "fwd-1".to_owned(),
             reader_ips: vec!["10.0.0.1:10000".to_owned()],
-            resume: vec![],
             display_name: None,
         });
         let hello_json = serde_json::to_string(&hello).expect("serialize hello");
