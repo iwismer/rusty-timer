@@ -222,7 +222,7 @@
   function confirmDeleteAllTokens() {
     showConfirm(
       "Delete All Tokens",
-      "This will permanently delete ALL device tokens (active and revoked). Connected devices will lose access. This cannot be undone.",
+      "This will permanently delete ALL device tokens (active and revoked). Existing WS sessions may stay connected, but deleted tokens cannot reconnect. This cannot be undone.",
       "Delete All",
       () => api.deleteAllTokens(),
     );
