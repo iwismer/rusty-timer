@@ -1,8 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
 use rt_protocol::WsMessage;
+use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::MaybeTlsStream;
 
 type WsStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 

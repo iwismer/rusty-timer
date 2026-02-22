@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use emulator::server::{is_delay, is_file, is_port, EmulatorConfig, ReadType};
+use emulator::server::{EmulatorConfig, ReadType, is_delay, is_file, is_port};
 use std::convert::TryFrom;
 use tracing::info;
 

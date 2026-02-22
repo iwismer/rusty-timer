@@ -50,10 +50,10 @@ fn find_all_sse_event_data(collected: &str, event_name: &str) -> Vec<String> {
                 data = Some(rest);
             }
         }
-        if name == Some(event_name) {
-            if let Some(d) = data {
-                out.push(d.to_owned());
-            }
+        if name == Some(event_name)
+            && let Some(d) = data
+        {
+            out.push(d.to_owned());
         }
     }
     out
@@ -577,10 +577,10 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_display_name
                 collected.push_str(&text);
                 for data in find_all_sse_event_data(&collected, "stream_updated") {
                     let payload: serde_json::Value = serde_json::from_str(&data).unwrap();
-                    if payload["forwarder_display_name"] == "Finish Line" {
-                        if let Some(id) = payload["stream_id"].as_str() {
-                            updated_ids.insert(id.to_owned());
-                        }
+                    if payload["forwarder_display_name"] == "Finish Line"
+                        && let Some(id) = payload["stream_id"].as_str()
+                    {
+                        updated_ids.insert(id.to_owned());
                     }
                 }
             }
@@ -677,10 +677,10 @@ async fn test_sse_emits_stream_updated_for_all_forwarder_streams_on_initial_hell
                 collected.push_str(&text);
                 for data in find_all_sse_event_data(&collected, "stream_updated") {
                     let payload: serde_json::Value = serde_json::from_str(&data).unwrap();
-                    if payload["forwarder_display_name"] == "Finish Line" {
-                        if let Some(id) = payload["stream_id"].as_str() {
-                            updated_ids.insert(id.to_owned());
-                        }
+                    if payload["forwarder_display_name"] == "Finish Line"
+                        && let Some(id) = payload["stream_id"].as_str()
+                    {
+                        updated_ids.insert(id.to_owned());
                     }
                 }
 

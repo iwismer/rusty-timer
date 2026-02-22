@@ -15,15 +15,15 @@
 use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse};
 use rt_protocol::StreamInfo;
-use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
+use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ impl AppState {
                     streams: vec![],
                     degraded: true,
                     upstream_error: Some("failed to load subscriptions".to_owned()),
-                }
+                };
             }
         };
         drop(db);
@@ -650,7 +650,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use rt_updater::workflow::{run_check, run_download, Checker};
+    use rt_updater::workflow::{Checker, run_check, run_download};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};

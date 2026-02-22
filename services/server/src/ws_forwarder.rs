@@ -2,9 +2,9 @@ use crate::{
     auth::validate_token,
     dashboard_events::{DashboardEvent, OptionalStringPatch},
     repo::events::{
-        count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
+        IngestResult, count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
         fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
-        upsert_stream, IngestResult,
+        upsert_stream,
     },
     state::{AppState, ForwarderCommand, ForwarderProxyReply},
     ws_common::{
@@ -13,13 +13,13 @@ use crate::{
 };
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
     response::IntoResponse,
 };
-use rt_protocol::{error_codes, AckEntry, ForwarderAck, WsMessage};
+use rt_protocol::{AckEntry, ForwarderAck, WsMessage, error_codes};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -361,14 +361,13 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         current_display_name.as_deref(),
                                     )
                                     .await
+                                        && !stream_map.contains_key(reader_ip)
                                     {
-                                        if !stream_map.contains_key(reader_ip) {
-                                            stream_map.insert(reader_ip.clone(), sid);
-                                            let _ = set_stream_online(&state.pool, sid, true).await;
-                                            state.get_or_create_broadcast(sid).await;
-                                            publish_stream_created(&state, sid).await;
-                                            state.logger.log(format!("stream created: {device_id}/{reader_ip}"));
-                                        }
+                                        stream_map.insert(reader_ip.clone(), sid);
+                                        let _ = set_stream_online(&state.pool, sid, true).await;
+                                        state.get_or_create_broadcast(sid).await;
+                                        publish_stream_created(&state, sid).await;
+                                        state.logger.log(format!("stream created: {device_id}/{reader_ip}"));
                                     }
                                 }
                                 if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
@@ -410,18 +409,20 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 match cmd {
                     ForwarderCommand::EpochReset(epoch_cmd) => {
                         let msg = WsMessage::EpochResetCommand(epoch_cmd);
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() { break; }
+                        if let Ok(json) = serde_json::to_string(&msg)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                     }
                     ForwarderCommand::ConfigGet { request_id, reply } => {
                         let msg = WsMessage::ConfigGetRequest(rt_protocol::ConfigGetRequest {
                             request_id: request_id.clone(),
                         });
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() {
-                                break;
-                            }
+                        if let Ok(json) = serde_json::to_string(&msg)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                         pending_config_gets.insert(request_id, (Instant::now(), reply));
                     }
@@ -431,10 +432,10 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             section,
                             payload,
                         });
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() {
-                                break;
-                            }
+                        if let Ok(json) = serde_json::to_string(&msg)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                         pending_config_sets.insert(request_id, (Instant::now(), reply));
                     }
@@ -442,10 +443,10 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         let msg = WsMessage::RestartRequest(rt_protocol::RestartRequest {
                             request_id: request_id.clone(),
                         });
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json)).await.is_err() {
-                                break;
-                            }
+                        if let Ok(json) = serde_json::to_string(&msg)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                         pending_restarts.insert(request_id, (Instant::now(), reply));
                     }
@@ -599,7 +600,7 @@ async fn handle_event_batch(
         entries,
     });
     if let Ok(json) = serde_json::to_string(&ack) {
-        socket.send(Message::Text(json)).await?;
+        socket.send(Message::Text(json.into())).await?;
     }
 
     for (stream_id, new_epoch) in epoch_transitions {

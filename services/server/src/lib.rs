@@ -13,11 +13,11 @@ pub use state::AppState;
 use std::path::PathBuf;
 
 use axum::{
+    Router,
     extract::Request,
     http::{Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, patch, post},
-    Router,
 };
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
@@ -30,45 +30,45 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         .route("/readyz", get(health::readyz))
         .route("/api/v1/streams", get(http::streams::list_streams))
         .route(
-            "/api/v1/streams/:stream_id",
+            "/api/v1/streams/{stream_id}",
             patch(http::streams::patch_stream),
         )
         .route(
-            "/api/v1/streams/:stream_id/metrics",
+            "/api/v1/streams/{stream_id}/metrics",
             get(http::metrics::get_metrics),
         )
         .route(
-            "/api/v1/streams/:stream_id/export.txt",
+            "/api/v1/streams/{stream_id}/export.txt",
             get(http::export::export_raw),
         )
         .route(
-            "/api/v1/streams/:stream_id/export.csv",
+            "/api/v1/streams/{stream_id}/export.csv",
             get(http::export::export_csv),
         )
         .route(
-            "/api/v1/streams/:stream_id/reset-epoch",
+            "/api/v1/streams/{stream_id}/reset-epoch",
             post(http::streams::reset_epoch),
         )
         .route(
-            "/api/v1/streams/:stream_id/epochs",
+            "/api/v1/streams/{stream_id}/epochs",
             get(http::streams::list_epochs),
         )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
         .route("/api/v1/logs", get(http::logs::get_logs))
         .route(
-            "/api/v1/forwarders/:forwarder_id/config",
+            "/api/v1/forwarders/{forwarder_id}/config",
             get(http::forwarder_config::get_forwarder_config),
         )
         .route(
-            "/api/v1/forwarders/:forwarder_id/config/:section",
+            "/api/v1/forwarders/{forwarder_id}/config/{section}",
             post(http::forwarder_config::set_forwarder_config),
         )
         .route(
-            "/api/v1/forwarders/:forwarder_id/control/:action",
+            "/api/v1/forwarders/{forwarder_id}/control/{action}",
             post(http::forwarder_config::control_forwarder),
         )
         .route(
-            "/api/v1/forwarders/:forwarder_id/restart",
+            "/api/v1/forwarders/{forwarder_id}/restart",
             post(http::forwarder_config::restart_forwarder),
         )
         .route(
@@ -76,16 +76,16 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::forwarder_races::list_forwarder_races),
         )
         .route(
-            "/api/v1/forwarders/:forwarder_id/race",
+            "/api/v1/forwarders/{forwarder_id}/race",
             get(http::forwarder_races::get_forwarder_race)
                 .put(http::forwarder_races::set_forwarder_race),
         )
         .route(
-            "/api/v1/streams/:stream_id/reads",
+            "/api/v1/streams/{stream_id}/reads",
             get(http::reads::get_stream_reads),
         )
         .route(
-            "/api/v1/forwarders/:forwarder_id/reads",
+            "/api/v1/forwarders/{forwarder_id}/reads",
             get(http::reads::get_forwarder_reads),
         )
         .route(
@@ -95,7 +95,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
                 .delete(http::admin::delete_all_tokens),
         )
         .route(
-            "/api/v1/admin/tokens/:token_id/revoke",
+            "/api/v1/admin/tokens/{token_id}/revoke",
             post(http::admin::revoke_token),
         )
         .route(
@@ -103,7 +103,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             delete(http::admin::delete_all_streams),
         )
         .route(
-            "/api/v1/admin/streams/:stream_id",
+            "/api/v1/admin/streams/{stream_id}",
             delete(http::admin::delete_stream),
         )
         .route(
@@ -111,11 +111,11 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             delete(http::admin::delete_all_events),
         )
         .route(
-            "/api/v1/admin/streams/:stream_id/events",
+            "/api/v1/admin/streams/{stream_id}/events",
             delete(http::admin::delete_stream_events),
         )
         .route(
-            "/api/v1/admin/streams/:stream_id/epochs/:epoch/events",
+            "/api/v1/admin/streams/{stream_id}/epochs/{epoch}/events",
             delete(http::admin::delete_epoch_events),
         )
         .route(
@@ -123,11 +123,11 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::admin::list_cursors).delete(http::admin::delete_all_cursors),
         )
         .route(
-            "/api/v1/admin/receiver-cursors/:receiver_id",
+            "/api/v1/admin/receiver-cursors/{receiver_id}",
             delete(http::admin::delete_receiver_cursors),
         )
         .route(
-            "/api/v1/admin/receiver-cursors/:receiver_id/:stream_id",
+            "/api/v1/admin/receiver-cursors/{receiver_id}/{stream_id}",
             delete(http::admin::delete_receiver_stream_cursor),
         )
         .route("/api/v1/admin/races", delete(http::admin::delete_all_races))
@@ -136,19 +136,19 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::races::list_races).post(http::races::create_race),
         )
         .route(
-            "/api/v1/races/:race_id",
+            "/api/v1/races/{race_id}",
             axum::routing::delete(http::races::delete_race),
         )
         .route(
-            "/api/v1/races/:race_id/participants",
+            "/api/v1/races/{race_id}/participants",
             get(http::races::list_participants),
         )
         .route(
-            "/api/v1/races/:race_id/participants/upload",
+            "/api/v1/races/{race_id}/participants/upload",
             post(http::races::upload_participants),
         )
         .route(
-            "/api/v1/races/:race_id/chips/upload",
+            "/api/v1/races/{race_id}/chips/upload",
             post(http::races::upload_chips),
         );
 

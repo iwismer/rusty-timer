@@ -100,13 +100,46 @@ impl UpdateChecker {
         &self,
         version: &str,
     ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+        self.download_with_optional_stage_root(version, None).await
+    }
+
+    /// Download the release matching `version` and stage it under `stage_root`.
+    ///
+    /// This avoids relying on process-wide environment mutation for stage-dir
+    /// selection in multi-threaded applications.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the release cannot be found, downloaded, or verified.
+    pub async fn download_with_stage_root(
+        &self,
+        version: &str,
+        stage_root: &Path,
+    ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+        self.download_with_optional_stage_root(version, Some(stage_root.to_path_buf()))
+            .await
+    }
+
+    async fn download_with_optional_stage_root(
+        &self,
+        version: &str,
+        stage_root_override: Option<PathBuf>,
+    ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         let owner = self.repo_owner.clone();
         let name = self.repo_name.clone();
         let service = self.service_name.clone();
         let version = version.to_owned();
 
-        tokio::task::spawn_blocking(move || download_blocking(&owner, &name, &service, &version))
-            .await?
+        tokio::task::spawn_blocking(move || {
+            download_blocking(
+                &owner,
+                &name,
+                &service,
+                &version,
+                stage_root_override.as_deref(),
+            )
+        })
+        .await?
     }
 
     /// Replace the running binary with the staged binary and exit the process.
@@ -140,14 +173,21 @@ fn parse_version_from_tag(tag: &str, service_name: &str) -> Option<Version> {
     Version::parse(version_str).ok()
 }
 
-fn stage_root_dir(exe_dir: &Path) -> PathBuf {
-    stage_root_dir_from(std::env::var_os("RT_UPDATER_STAGE_DIR"), exe_dir)
-}
-
 fn stage_root_dir_from(env_value: Option<std::ffi::OsString>, exe_dir: &Path) -> PathBuf {
     match env_value {
         Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => exe_dir.to_path_buf(),
+    }
+}
+
+fn stage_root_dir_from_with_override(
+    stage_root_override: Option<&Path>,
+    env_value: Option<std::ffi::OsString>,
+    exe_dir: &Path,
+) -> PathBuf {
+    match stage_root_override {
+        Some(path) => path.to_path_buf(),
+        None => stage_root_dir_from(env_value, exe_dir),
     }
 }
 
@@ -176,10 +216,10 @@ fn check_blocking(
     // Find the latest release whose tag matches our service prefix.
     let mut best: Option<(Version, String)> = None;
     for release in &releases {
-        if let Some(ver) = parse_version_from_tag(&release.version, service_name) {
-            if best.as_ref().is_none_or(|(v, _)| ver > *v) {
-                best = Some((ver, release.version.clone()));
-            }
+        if let Some(ver) = parse_version_from_tag(&release.version, service_name)
+            && best.as_ref().is_none_or(|(v, _)| ver > *v)
+        {
+            best = Some((ver, release.version.clone()));
         }
     }
 
@@ -202,6 +242,7 @@ fn download_blocking(
     repo_name: &str,
     service_name: &str,
     version: &str,
+    stage_root_override: Option<&Path>,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let tag = format!("{service_name}-v{version}");
     let target = self_update::get_target();
@@ -228,7 +269,11 @@ fn download_blocking(
     let exe_dir = current_exe
         .parent()
         .ok_or("cannot determine executable directory")?;
-    let stage_root = stage_root_dir(exe_dir);
+    let stage_root = stage_root_dir_from_with_override(
+        stage_root_override,
+        std::env::var_os("RT_UPDATER_STAGE_DIR"),
+        exe_dir,
+    );
     std::fs::create_dir_all(&stage_root)?;
     let tmp_dir = tempfile::tempdir_in(&stage_root)?;
     let tmp_archive = tmp_dir.path().join(&asset.name);
@@ -338,12 +383,11 @@ fn find_extracted_binary(
     for entry in std::fs::read_dir(extract_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name == service_name || name == exe_name {
-                    return Ok(path);
-                }
-            }
+        if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && (name == service_name || name == exe_name)
+        {
+            return Ok(path);
         }
     }
 
@@ -438,6 +482,16 @@ mod tests {
         let exe_dir = Path::new("/usr/local/bin");
         let stage_dir = stage_root_dir_from(None, exe_dir);
         assert_eq!(stage_dir, exe_dir);
+    }
+
+    #[test]
+    fn staging_dir_uses_explicit_override_over_env() {
+        let stage_dir = stage_root_dir_from_with_override(
+            Some(Path::new("/var/lib/rusty-timer")),
+            Some(OsString::from("/tmp/ignored-by-override")),
+            Path::new("/usr/local/bin"),
+        );
+        assert_eq!(stage_dir, PathBuf::from("/var/lib/rusty-timer"));
     }
 
     fn release_asset(name: &str) -> self_update::update::ReleaseAsset {

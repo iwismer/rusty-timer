@@ -44,7 +44,7 @@ pub async fn send_reads(
 }
 
 pub async fn run(config: EmulatorConfig) {
-    use futures::{future::select_all, future::FutureExt, pin_mut};
+    use futures::{future::FutureExt, future::select_all, pin_mut};
     use std::future::Future;
     use std::io::BufRead;
     use std::path::Path;
@@ -95,7 +95,7 @@ mod tests {
     use ipico_core::read::ChipRead;
     use std::convert::TryFrom;
     use tokio::sync::mpsc;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn send_reads_loops_file_with_restamped_timestamps() {

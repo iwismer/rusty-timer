@@ -30,9 +30,9 @@ pub fn build_authenticated_request(
     url.into_client_request()
         .and_then(|mut r| {
             let hv = header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| {
-                tokio_tungstenite::tungstenite::Error::Http(
+                tokio_tungstenite::tungstenite::Error::Http(Box::new(
                     tokio_tungstenite::tungstenite::http::Response::new(Some(e.to_string().into())),
-                )
+                ))
             })?;
             r.headers_mut().insert(header::AUTHORIZATION, hv);
             Ok(r)

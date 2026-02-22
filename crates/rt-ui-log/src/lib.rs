@@ -94,12 +94,12 @@ impl<T: Clone + Send> UiLogger<T> {
             UiLogLevel::Warn => tracing::warn!("{}", entry),
             UiLogLevel::Error => tracing::error!("{}", entry),
         }
-        if let Some(ref buf) = self.buffer {
-            if let Ok(mut entries) = buf.write() {
-                entries.push_back(entry.clone());
-                while entries.len() > self.max_entries {
-                    entries.pop_front();
-                }
+        if let Some(ref buf) = self.buffer
+            && let Ok(mut entries) = buf.write()
+        {
+            entries.push_back(entry.clone());
+            while entries.len() > self.max_entries {
+                entries.pop_front();
             }
         }
         let _ = self.tx.send((self.map_fn)(entry));

@@ -19,11 +19,22 @@ pub trait Checker: Send + Sync {
 /// Adapter for using the real `UpdateChecker` in the shared workflow.
 pub struct RealChecker {
     inner: UpdateChecker,
+    stage_root_override: Option<PathBuf>,
 }
 
 impl RealChecker {
     pub fn new(inner: UpdateChecker) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            stage_root_override: None,
+        }
+    }
+
+    pub fn with_stage_root(inner: UpdateChecker, stage_root: PathBuf) -> Self {
+        Self {
+            inner,
+            stage_root_override: Some(stage_root),
+        }
     }
 }
 
@@ -39,10 +50,17 @@ impl Checker for RealChecker {
         version: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<PathBuf, String>> + Send + 'a>> {
         Box::pin(async move {
-            self.inner
-                .download(version)
-                .await
-                .map_err(|e| e.to_string())
+            if let Some(stage_root) = self.stage_root_override.as_deref() {
+                self.inner
+                    .download_with_stage_root(version, stage_root)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                self.inner
+                    .download(version)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
         })
     }
 }

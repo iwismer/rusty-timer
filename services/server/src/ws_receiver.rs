@@ -10,12 +10,12 @@ use crate::{
     },
 };
 use axum::extract::{
-    ws::{Message, WebSocket, WebSocketUpgrade},
     State,
+    ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use rt_protocol::{error_codes, ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage};
+use rt_protocol::{ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage, error_codes};
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -223,10 +223,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 session_id: session_id.clone(),
                 events: events_to_send,
             });
-            if let Ok(json) = serde_json::to_string(&batch) {
-                if socket.send(Message::Text(json)).await.is_err() {
-                    break;
-                }
+            if let Ok(json) = serde_json::to_string(&batch)
+                && socket.send(Message::Text(json.into())).await.is_err()
+            {
+                break;
             }
             continue;
         }
@@ -405,7 +405,7 @@ async fn replay_backlog(
             events: read_events,
         });
         let json = serde_json::to_string(&batch)?;
-        socket.send(Message::Text(json)).await?;
+        socket.send(Message::Text(json.into())).await?;
 
         if !cursor_gt(through_epoch, through_seq, sub.last_epoch, sub.last_seq) {
             return Ok(());

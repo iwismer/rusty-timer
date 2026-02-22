@@ -1,14 +1,14 @@
-use super::response::{bad_request, conflict, internal_error, not_found, HttpResult};
+use super::response::{HttpResult, bad_request, conflict, internal_error, not_found};
 use crate::dashboard_events::DashboardEvent;
 use crate::state::AppState;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::RngCore;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::TryRngCore;
 use rt_protocol::HttpErrorEnvelope;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -216,7 +216,9 @@ pub async fn create_token(
         }
         None => {
             let mut bytes = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            rand::rngs::OsRng
+                .try_fill_bytes(&mut bytes)
+                .expect("OS RNG should not fail");
             URL_SAFE_NO_PAD.encode(bytes)
         }
     };
@@ -248,10 +250,10 @@ pub async fn create_token(
                 .into_response()
         }
         Err(e) => {
-            if let Some(db_err) = e.as_database_error() {
-                if db_err.is_unique_violation() {
-                    return conflict("a token with this value already exists");
-                }
+            if let Some(db_err) = e.as_database_error()
+                && db_err.is_unique_violation()
+            {
+                return conflict("a token with this value already exists");
             }
             internal_error(e)
         }

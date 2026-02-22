@@ -24,8 +24,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::{watch, Mutex, Notify};
-use tokio::time::{sleep, Duration};
+use tokio::sync::{Mutex, Notify, watch};
+use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -1054,20 +1054,18 @@ async fn main() {
     // All worker tasks started — mark subsystem ready
     status_server.set_ready().await;
 
-    if std::env::var_os("RT_UPDATER_STAGE_DIR").is_none() {
-        let default_stage_dir = "/var/lib/rusty-timer";
-        std::env::set_var("RT_UPDATER_STAGE_DIR", default_stage_dir);
-        info!(
-            stage_dir = default_stage_dir,
-            "configured updater stage directory"
-        );
-    }
+    let updater_stage_root = forwarder::updater_stage_root_dir();
+    info!(
+        stage_dir = %updater_stage_root.display(),
+        "configured updater stage directory"
+    );
 
     // Spawn background update check
     {
         let ss = status_server.clone();
         let update_mode = cfg.update.mode;
         let lg = logger.clone();
+        let updater_stage_root = updater_stage_root.clone();
         tokio::spawn(async move {
             if update_mode == rt_updater::UpdateMode::Disabled {
                 lg.log("auto-update disabled by configuration");
@@ -1100,7 +1098,10 @@ async fn main() {
                     .await;
 
                     if update_mode == rt_updater::UpdateMode::CheckAndDownload {
-                        match checker.download(version).await {
+                        match checker
+                            .download_with_stage_root(version, updater_stage_root.as_path())
+                            .await
+                        {
                             Ok(path) => {
                                 lg.log(format!("Update v{version} downloaded and staged"));
                                 ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
@@ -1142,7 +1143,7 @@ async fn main() {
     let restart_requested;
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
@@ -2272,7 +2273,7 @@ token_file = "/tmp/test-token"
                     forwarder::ui_events::ForwarderUiEvent::LogEntry { entry }
                         if entry.contains("uplink connect failed") =>
                     {
-                        break entry
+                        break entry;
                     }
                     _ => continue,
                 }

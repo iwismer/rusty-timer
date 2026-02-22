@@ -2,7 +2,7 @@ use crate::db::Db;
 use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{AckEntry, ReceiverAck, ReceiverHello, WsMessage};
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 #[derive(Debug, thiserror::Error)]

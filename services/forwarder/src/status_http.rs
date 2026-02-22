@@ -27,14 +27,14 @@
 //! No authentication in v1.
 
 use crate::storage::journal::Journal;
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
-use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
+use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::future::Future;
@@ -716,12 +716,12 @@ pub async fn apply_section_update(
         "journal" => {
             let sqlite_path = optional_string_field(payload, "sqlite_path")?;
             let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
-            if let Some(pct) = prune_watermark_pct {
-                if pct > 100 {
-                    return Err(bad_request_error(
-                        "prune_watermark_pct must be between 0 and 100",
-                    ));
-                }
+            if let Some(pct) = prune_watermark_pct
+                && pct > 100
+            {
+                return Err(bad_request_error(
+                    "prune_watermark_pct must be between 0 and 100",
+                ));
             }
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.journal = Some(crate::config::RawJournalConfig {
@@ -734,12 +734,13 @@ pub async fn apply_section_update(
         }
         "uplink" => {
             let batch_mode = optional_string_field(payload, "batch_mode")?;
-            if let Some(ref mode) = batch_mode {
-                if mode != "immediate" && mode != "batched" {
-                    return Err(bad_request_error(
-                        "batch_mode must be \"immediate\" or \"batched\"",
-                    ));
-                }
+            if let Some(ref mode) = batch_mode
+                && mode != "immediate"
+                && mode != "batched"
+            {
+                return Err(bad_request_error(
+                    "batch_mode must be \"immediate\" or \"batched\"",
+                ));
             }
             let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
             let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
@@ -1558,7 +1559,7 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use std::time::Duration;
-    use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+    use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
     let rx = state.ui_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
@@ -1767,7 +1768,7 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
         "forwarder",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealChecker::new(c),
+        Ok(c) => RealChecker::with_stage_root(c, crate::updater_stage_root_dir()),
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
@@ -1850,7 +1851,7 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
         "forwarder",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealChecker::new(c),
+        Ok(c) => RealChecker::with_stage_root(c, crate::updater_stage_root_dir()),
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
@@ -1916,7 +1917,7 @@ async fn post_config_section_handler<J: JournalAccess + Send + 'static>(
             return json_response(
                 StatusCode::BAD_REQUEST,
                 serde_json::json!({"ok": false, "error": err}).to_string(),
-            )
+            );
         }
     };
 
@@ -2027,11 +2028,11 @@ fn schedule_process_restart() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rt_updater::workflow::{run_check, run_download, Checker};
+    use rt_updater::workflow::{Checker, run_check, run_download};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     struct FakeChecker {
         check_result: Result<UpdateStatus, String>,
@@ -2555,9 +2556,10 @@ target = "192.168.1.100:10000"
 
         let (http_status, body) = result.expect_err("auth failures must return an HTTP error");
         assert_eq!(http_status, 403);
-        assert!(body
-            .to_ascii_lowercase()
-            .contains("interactive authentication required"));
+        assert!(
+            body.to_ascii_lowercase()
+                .contains("interactive authentication required")
+        );
     }
 
     #[cfg(unix)]

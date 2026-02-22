@@ -25,7 +25,7 @@ fn error_json(code: &str, message: &str, retryable: bool) -> Option<String> {
 
 pub async fn send_ws_error(socket: &mut WebSocket, code: &str, message: &str, retryable: bool) {
     if let Some(json) = error_json(code, message, retryable) {
-        let _ = socket.send(Message::Text(json)).await;
+        let _ = socket.send(Message::Text(json.into())).await;
     }
 }
 
@@ -39,14 +39,14 @@ fn heartbeat_json(session_id: &str, device_id: &str) -> Option<String> {
 
 pub async fn send_heartbeat(socket: &mut WebSocket, session_id: &str, device_id: &str) -> bool {
     if let Some(json) = heartbeat_json(session_id, device_id) {
-        return socket.send(Message::Text(json)).await.is_ok();
+        return socket.send(Message::Text(json.into())).await.is_ok();
     }
     true
 }
 
 fn parse_text_message(msg: Option<Result<Message, axum::Error>>) -> Result<String, ()> {
     match msg {
-        Some(Ok(Message::Text(text))) => Ok(text),
+        Some(Ok(Message::Text(text))) => Ok(text.to_string()),
         _ => Err(()),
     }
 }
@@ -109,7 +109,7 @@ mod tests {
     fn recv_text_with_timeout_helper_handles_timeout_and_malformed_paths() {
         assert_eq!(parse_text_message(None), Err(()));
         assert_eq!(
-            parse_text_message(Some(Ok(Message::Ping(vec![1, 2])))),
+            parse_text_message(Some(Ok(Message::Ping(vec![1, 2].into())))),
             Err(())
         );
 
