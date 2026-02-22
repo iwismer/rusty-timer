@@ -168,6 +168,13 @@ async fn main() {
                                     rt_updater::UpdateStatus::Failed {
                                         error: e.to_string(),
                                     };
+                                let _ = state.ui_tx.send(
+                                    receiver::ReceiverUiEvent::UpdateStatusChanged {
+                                        status: rt_updater::UpdateStatus::Failed {
+                                            error: e.to_string(),
+                                        },
+                                    },
+                                );
                             }
                         }
                     }

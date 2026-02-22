@@ -74,6 +74,8 @@
         updateStatus = "downloaded";
       } else if (result.status === "failed") {
         error = result.error ?? "Download failed.";
+      } else {
+        error = "No downloadable update available.";
       }
     } catch (e) {
       error = String(e);

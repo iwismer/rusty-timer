@@ -144,7 +144,10 @@ export async function checkForUpdate(): Promise<UpdateStatusResponse> {
 }
 
 export async function downloadUpdate(): Promise<UpdateStatusResponse> {
-  return apiFetch<UpdateStatusResponse>("/update/download", {
-    method: "POST",
-  });
+  const resp = await fetch("/update/download", { method: "POST" });
+  if (resp.status !== 200 && resp.status !== 409) {
+    const text = await resp.text();
+    throw new Error(`download update -> ${resp.status}: ${text}`);
+  }
+  return (await resp.json()) as UpdateStatusResponse;
 }

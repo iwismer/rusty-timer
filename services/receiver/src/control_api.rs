@@ -529,16 +529,21 @@ async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoRespo
     ) {
         Ok(c) => RealUpdateChecker { inner: c },
         Err(e) => {
-            let status = rt_updater::UpdateStatus::Failed {
-                error: e.to_string(),
-            };
+            let (status_code, status) = update_check_init_error_status(e.to_string());
             *state.update_status.write().await = status.clone();
-            return Json(status).into_response();
+            return (status_code, Json(status)).into_response();
         }
     };
 
     let status = run_update_check_with_checker(&state, &checker, update_mode).await;
     Json(status).into_response()
+}
+
+fn update_check_init_error_status(error: String) -> (StatusCode, UpdateStatus) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        UpdateStatus::Failed { error },
+    )
 }
 
 trait UpdateCheckClient: Send + Sync {
@@ -670,6 +675,11 @@ async fn run_update_download_with_checker(
             Err(error) => {
                 let status = UpdateStatus::Failed { error };
                 *state.update_status.write().await = status.clone();
+                let _ = state
+                    .ui_tx
+                    .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
+                        status: status.clone(),
+                    });
                 Err(status)
             }
         },
@@ -1072,6 +1082,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_download_failure_emits_failed_event() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        *state.update_status.write().await = UpdateStatus::Available {
+            version: "2.0.0".to_owned(),
+        };
+        let mut rx = state.ui_tx.subscribe();
+
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Err("boom".to_owned()),
+            download_calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let status = run_update_download_with_checker(&state, &checker).await;
+        assert_eq!(
+            status,
+            Err(UpdateStatus::Failed {
+                error: "boom".to_owned()
+            })
+        );
+
+        let evt = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("timed out waiting for ui event")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ReceiverUiEvent::UpdateStatusChanged { status } => match status {
+                UpdateStatus::Failed { error } => assert_eq!(error, "boom"),
+                other => panic!("unexpected status: {other:?}"),
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn update_download_returns_conflict_when_up_to_date() {
         let temp = tempfile::tempdir().expect("tempdir");
         let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
@@ -1108,6 +1155,18 @@ mod tests {
             Ok(UpdateStatus::Downloaded {
                 version: "2.0.0".to_owned()
             })
+        );
+    }
+
+    #[test]
+    fn update_check_init_error_maps_to_http_500() {
+        let (status_code, status) = update_check_init_error_status("boom".to_owned());
+        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status,
+            UpdateStatus::Failed {
+                error: "boom".to_owned()
+            }
         );
     }
 }

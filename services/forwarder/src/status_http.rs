@@ -1732,6 +1732,9 @@ async fn run_update_download_with_checker(
             Err(error) => {
                 let status = UpdateStatus::Failed { error };
                 subsystem.lock().await.update_status = status.clone();
+                let _ = ui_tx.send(crate::ui_events::ForwarderUiEvent::UpdateStatusChanged {
+                    status: status.clone(),
+                });
                 Err(status)
             }
         },
@@ -2624,6 +2627,53 @@ target = "192.168.1.100:10000"
             server.subsystem.lock().await.staged_update_path,
             Some(std::path::PathBuf::from("/tmp/staged-forwarder"))
         );
+    }
+
+    #[tokio::test]
+    async fn update_download_failure_emits_failed_event() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .set_update_status(UpdateStatus::Available {
+                version: "2.0.0".to_owned(),
+            })
+            .await;
+        let mut rx = server.ui_tx.subscribe();
+
+        let checker = FakeChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Err("boom".to_owned()),
+            download_calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let status =
+            run_update_download_with_checker(&server.subsystem, &server.ui_tx, &checker).await;
+        assert_eq!(
+            status,
+            Err(UpdateStatus::Failed {
+                error: "boom".to_owned()
+            })
+        );
+
+        let evt = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("timed out waiting for ui event")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { status } => match status {
+                UpdateStatus::Failed { error } => assert_eq!(error, "boom"),
+                other => panic!("unexpected status: {other:?}"),
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]
