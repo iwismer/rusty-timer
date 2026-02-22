@@ -22,7 +22,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Dashboard builder (SvelteKit + adapter-static)
 # ---------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS dashboard-builder
+FROM node:24-bookworm-slim AS dashboard-builder
 
 WORKDIR /workspace
 
