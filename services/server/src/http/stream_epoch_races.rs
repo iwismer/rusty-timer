@@ -1,4 +1,4 @@
-use super::response::{bad_request, conflict, internal_error, not_found};
+use super::response::{bad_request, conflict, gateway_timeout, internal_error, not_found};
 use crate::state::{AppState, ForwarderCommand};
 use axum::{
     extract::{Path, State},
@@ -7,7 +7,10 @@ use axum::{
     Json,
 };
 use sqlx::Row;
+use std::time::Duration;
 use uuid::Uuid;
+
+const ACTIVATE_NEXT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn put_stream_epoch_race(
     State(state): State<AppState>,
@@ -212,12 +215,21 @@ pub async fn activate_next_stream_epoch_for_race(
         new_stream_epoch: next_epoch as u64,
     };
 
-    if sender
-        .send(ForwarderCommand::EpochReset(cmd))
-        .await
-        .is_err()
+    match tokio::time::timeout(
+        ACTIVATE_NEXT_SEND_TIMEOUT,
+        sender.send(ForwarderCommand::EpochReset(cmd)),
+    )
+    .await
     {
-        return conflict("forwarder not connected");
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            return conflict(
+                "race activation committed, but failed to deliver epoch reset command",
+            );
+        }
+        Err(_) => {
+            return gateway_timeout("forwarder command queue is saturated");
+        }
     }
 
     StatusCode::NO_CONTENT.into_response()

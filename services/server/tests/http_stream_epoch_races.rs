@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
     let app_state = server::AppState::new(pool);
+    make_server_with_state(app_state).await
+}
+
+async fn make_server_with_state(app_state: server::AppState) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -274,4 +278,63 @@ async fn activate_next_returns_409_when_forwarder_offline() {
     .await
     .unwrap();
     assert!(next_mapping.is_none());
+}
+
+#[tokio::test]
+async fn activate_next_returns_post_commit_conflict_when_forwarder_disconnects_during_send() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let app_state = server::AppState::new(pool.clone());
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<server::state::ForwarderCommand>(1);
+    drop(cmd_rx);
+    {
+        let mut senders = app_state.forwarder_command_senders.write().await;
+        senders.insert("fwd-closed-at-send".to_owned(), cmd_tx);
+    }
+
+    let addr = make_server_with_state(app_state).await;
+    let client = reqwest::Client::new();
+
+    let stream_id = insert_stream(&pool, "fwd-closed-at-send", "10.50.0.1:10000").await;
+    let race_id = create_race(&client, addr, "Closed During Send").await;
+
+    let map_resp = client
+        .put(format!(
+            "http://{addr}/api/v1/streams/{stream_id}/epochs/1/race"
+        ))
+        .json(&serde_json::json!({ "race_id": race_id.to_string() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(map_resp.status(), 200);
+
+    let activate_resp = client
+        .post(format!(
+            "http://{addr}/api/v1/races/{race_id}/streams/{stream_id}/epochs/activate-next"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(activate_resp.status(), 409);
+    let body: Value = activate_resp.json().await.unwrap();
+    assert_eq!(body["code"], "CONFLICT");
+    assert_eq!(
+        body["message"],
+        "race activation committed, but failed to deliver epoch reset command"
+    );
+
+    let mapped_race = sqlx::query(
+        "SELECT race_id FROM stream_epoch_races WHERE stream_id = $1 AND stream_epoch = $2",
+    )
+    .bind(stream_id)
+    .bind(2_i64)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mapped_race_id: Uuid = mapped_race.get("race_id");
+    assert_eq!(mapped_race_id, race_id);
 }
