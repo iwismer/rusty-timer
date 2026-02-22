@@ -7,21 +7,30 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot, watch};
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-async fn run_raw_ws_server_once<F, Fut>(handler: F) -> std::net::SocketAddr
+async fn run_raw_ws_server_once<F, Fut>(handler: F) -> (std::net::SocketAddr, JoinHandle<()>)
 where
     F: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
         handler(ws).await;
     });
-    addr
+    (addr, task)
+}
+
+async fn join_server_task(task: JoinHandle<()>) {
+    timeout(Duration::from_secs(1), task)
+        .await
+        .expect("server task timed out")
+        .expect("server task panicked");
 }
 
 #[tokio::test]
@@ -39,7 +48,7 @@ async fn connect_returns_session_on_heartbeat_first_message() {
 
 #[tokio::test]
 async fn connect_errors_when_first_message_is_non_text() {
-    let addr = run_raw_ws_server_once(|mut ws| async move {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
         let _ = ws.next().await;
         ws.send(Message::Binary(vec![0xde, 0xad].into()))
             .await
@@ -51,11 +60,12 @@ async fn connect_errors_when_first_message_is_non_text() {
     let result = connect(&format!("ws://{addr}"), "rcv-002", &db).await;
 
     assert!(matches!(result, Err(SessionError::UnexpectedFirstMessage)));
+    join_server_task(task).await;
 }
 
 #[tokio::test]
 async fn connect_errors_when_server_closes_before_heartbeat() {
-    let addr = run_raw_ws_server_once(|mut ws| async move {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
         let _ = ws.next().await;
         ws.send(Message::Close(None)).await.unwrap();
     })
@@ -65,6 +75,7 @@ async fn connect_errors_when_server_closes_before_heartbeat() {
     let result = connect(&format!("ws://{addr}"), "rcv-003", &db).await;
 
     assert!(matches!(result, Err(SessionError::ConnectionClosed)));
+    join_server_task(task).await;
 }
 
 #[tokio::test]
@@ -100,7 +111,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
     ];
 
     let (ack_tx, ack_rx) = oneshot::channel();
-    let addr = run_raw_ws_server_once(move |mut ws| {
+    let (addr, task) = run_raw_ws_server_once(move |mut ws| {
         let events = events.clone();
         async move {
             let msg = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
@@ -177,11 +188,12 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
 
     let cursors = db.lock().await.load_resume_cursors().unwrap();
     assert_eq!(cursors.len(), 2);
+    join_server_task(task).await;
 }
 
 #[tokio::test]
 async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
-    let addr = run_raw_ws_server_once(|mut ws| async move {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
         let msg = WsMessage::Error(ErrorMessage {
             code: "PROTOCOL_ERROR".to_owned(),
             message: "fatal".to_owned(),
@@ -202,11 +214,12 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
 
     let result = run_session_loop(ws, "session-2".to_owned(), db, event_tx, shutdown_rx).await;
     assert!(matches!(result, Err(SessionError::ConnectionClosed)));
+    join_server_task(task).await;
 }
 
 #[tokio::test]
 async fn run_session_loop_exits_ok_on_retryable_error() {
-    let addr = run_raw_ws_server_once(|mut ws| async move {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
         let msg = WsMessage::Error(ErrorMessage {
             code: "INTERNAL_ERROR".to_owned(),
             message: "retry".to_owned(),
@@ -227,12 +240,13 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
 
     let result = run_session_loop(ws, "session-3".to_owned(), db, event_tx, shutdown_rx).await;
     assert!(result.is_ok());
+    join_server_task(task).await;
 }
 
 #[tokio::test]
 async fn run_session_loop_replies_to_ping_with_pong() {
     let (pong_tx, pong_rx) = oneshot::channel();
-    let addr = run_raw_ws_server_once(|mut ws| async move {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
         ws.send(Message::Ping(vec![1, 2, 3].into())).await.unwrap();
         let incoming = ws.next().await.unwrap().unwrap();
         match incoming {
@@ -256,11 +270,12 @@ async fn run_session_loop_replies_to_ping_with_pong() {
 
     assert!(result.is_ok());
     assert_eq!(pong_rx.await.unwrap(), vec![1, 2, 3]);
+    join_server_task(task).await;
 }
 
 #[tokio::test]
 async fn run_session_loop_stops_on_shutdown_signal() {
-    let addr = run_raw_ws_server_once(|_ws| async move {
+    let (addr, task) = run_raw_ws_server_once(|_ws| async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     })
     .await;
@@ -284,4 +299,24 @@ async fn run_session_loop_stops_on_shutdown_signal() {
 
     let result = handle.await.unwrap();
     assert!(result.is_ok());
+    join_server_task(task).await;
+}
+
+#[tokio::test]
+async fn raw_ws_server_helper_exposes_handler_panic_via_join_handle() {
+    let (addr, task) = run_raw_ws_server_once(|_ws| async move {
+        panic!("intentional panic from handler");
+    })
+    .await;
+
+    let (_ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .expect("connect");
+    let join = timeout(Duration::from_secs(1), task)
+        .await
+        .expect("join timeout");
+    assert!(
+        join.is_err(),
+        "handler panic should propagate through JoinHandle"
+    );
 }
