@@ -494,6 +494,20 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let path = state.staged_update_path.read().await.clone();
     match path {
         Some(path) => {
+            // Detect a missing staged file synchronously so the status update is
+            // immediate and reliable (avoids Windows blocking-thread startup
+            // latency causing the test to race against a fixed timeout).
+            if !path.exists() {
+                tracing::error!(path = %path.display(), "staged file not found");
+                *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
+                    error: format!("staged file not found: {}", path.display()),
+                };
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "failed"})),
+                )
+                    .into_response();
+            }
             let state_clone = Arc::clone(&state);
             // Send response before exiting
             tokio::spawn(async move {
