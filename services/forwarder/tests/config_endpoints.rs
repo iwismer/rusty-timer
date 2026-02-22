@@ -1959,3 +1959,66 @@ target = "192.168.1.100:10000"
         body
     );
 }
+
+#[tokio::test]
+async fn control_action_errors_are_written_to_ui_logs() {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[control]
+allow_power_actions = false
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    let addr = server.local_addr();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _) = http_post(addr, "/api/v1/control/shutdown-device", "{}").await;
+    assert_eq!(status, 403);
+
+    let (logs_status, logs_response) = http_get(addr, "/api/v1/logs").await;
+    assert_eq!(logs_status, 200);
+    let logs_json: serde_json::Value =
+        serde_json::from_str(response_body(&logs_response)).expect("parse logs JSON");
+    let entries = logs_json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    let has_control_error = entries.iter().any(|entry| {
+        entry
+            .as_str()
+            .is_some_and(|line| line.contains("control action 'shutdown_device' failed"))
+    });
+    assert!(
+        has_control_error,
+        "control failure should be present in UI logs, got: {}",
+        logs_json
+    );
+}
