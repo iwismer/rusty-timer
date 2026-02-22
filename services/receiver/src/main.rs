@@ -5,7 +5,7 @@ use receiver::db::Db;
 use receiver::local_proxy::LocalProxy;
 use receiver::ports::{PortAssignment, resolve_ports, stream_key};
 use rt_ui_log::UiLogLevel;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
@@ -257,6 +257,11 @@ async fn main() {
                 };
                 if current_subs != last_subs {
                     reconcile_proxies(&current_subs, &mut proxies, &event_bus, &state.logger).await;
+                    let keep: HashSet<receiver::StreamKey> = current_subs
+                        .iter()
+                        .map(|s| receiver::StreamKey::new(&s.forwarder_id, &s.reader_ip))
+                        .collect();
+                    state.stream_counts.retain_keys(&keep);
                     state.logger.log(format!("Subscriptions changed ({} streams)", current_subs.len()));
                     state.emit_streams_snapshot().await;
                     last_subs = current_subs;
@@ -325,10 +330,54 @@ async fn main() {
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
 
+                                                // Send ReceiverSubscribe for streams not covered by resume cursors.
+                                                let ws = {
+                                                    let db = state.db.lock().await;
+                                                    let new_streams = match load_new_streams_to_subscribe(&db) {
+                                                        Ok(streams) => streams,
+                                                        Err(e) => {
+                                                            state.logger.log_at(
+                                                                UiLogLevel::Error,
+                                                                format!("Failed to load subscriptions for ReceiverSubscribe: {e}"),
+                                                            );
+                                                            state.set_connection_state(ConnectionState::Disconnected).await;
+                                                            continue;
+                                                        }
+                                                    };
+
+                                                    if new_streams.is_empty() {
+                                                        ws
+                                                    } else {
+                                                        info!(n = new_streams.len(), "subscribing to new streams");
+                                                        let msg = rt_protocol::WsMessage::ReceiverSubscribe(
+                                                            rt_protocol::ReceiverSubscribe {
+                                                                session_id: session_id.clone(),
+                                                                streams: new_streams,
+                                                            },
+                                                        );
+                                                        use futures_util::SinkExt;
+                                                        use tokio_tungstenite::tungstenite::protocol::Message;
+                                                        let mut ws = ws;
+                                                        if let Err(e) = ws.send(Message::Text(
+                                                            serde_json::to_string(&msg).unwrap().into(),
+                                                        )).await {
+                                                            state.logger.log_at(
+                                                                UiLogLevel::Error,
+                                                                format!("Failed to send ReceiverSubscribe: {e}"),
+                                                            );
+                                                            state.set_connection_state(ConnectionState::Disconnected).await;
+                                                            continue;
+                                                        }
+                                                        ws
+                                                    }
+                                                };
+
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
                                                 let db_arc = Arc::clone(&state.db);
                                                 let bus = event_bus.clone();
+                                                let counts = state.stream_counts.clone();
+                                                let ui_tx = state.ui_tx.clone();
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
@@ -337,6 +386,8 @@ async fn main() {
                                                         session_id,
                                                         db_arc,
                                                         event_tx,
+                                                        counts,
+                                                        ui_tx,
                                                         cancel_rx,
                                                     )
                                                     .await;
@@ -419,6 +470,36 @@ async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
             return cs;
         }
     }
+}
+
+fn planned_new_streams(
+    subs: &[receiver::Subscription],
+    cursors: &[rt_protocol::ResumeCursor],
+) -> Vec<rt_protocol::StreamRef> {
+    let cursor_set: HashSet<(&str, &str)> = cursors
+        .iter()
+        .map(|c| (c.forwarder_id.as_str(), c.reader_ip.as_str()))
+        .collect();
+    subs.iter()
+        .filter(|s| !cursor_set.contains(&(s.forwarder_id.as_str(), s.reader_ip.as_str())))
+        .map(|s| rt_protocol::StreamRef {
+            forwarder_id: s.forwarder_id.clone(),
+            reader_ip: s.reader_ip.clone(),
+        })
+        .collect()
+}
+
+fn load_streams_to_subscribe_from_results(
+    subs: receiver::DbResult<Vec<receiver::Subscription>>,
+    cursors: receiver::DbResult<Vec<rt_protocol::ResumeCursor>>,
+) -> receiver::DbResult<Vec<rt_protocol::StreamRef>> {
+    let subs = subs?;
+    let cursors = cursors?;
+    Ok(planned_new_streams(&subs, &cursors))
+}
+
+fn load_new_streams_to_subscribe(db: &Db) -> receiver::DbResult<Vec<rt_protocol::StreamRef>> {
+    load_streams_to_subscribe_from_results(db.load_subscriptions(), db.load_resume_cursors())
 }
 
 // ---------------------------------------------------------------------------
@@ -626,5 +707,51 @@ async fn reconcile_proxies(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planned_new_streams_excludes_streams_with_resume_cursors() {
+        let subs = vec![
+            receiver::Subscription {
+                forwarder_id: "f1".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                local_port_override: None,
+            },
+            receiver::Subscription {
+                forwarder_id: "f2".to_owned(),
+                reader_ip: "10.0.0.2".to_owned(),
+                local_port_override: None,
+            },
+        ];
+        let cursors = vec![rt_protocol::ResumeCursor {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            stream_epoch: 3,
+            last_seq: 44,
+        }];
+
+        let result = planned_new_streams(&subs, &cursors);
+        assert_eq!(
+            result,
+            vec![rt_protocol::StreamRef {
+                forwarder_id: "f2".to_owned(),
+                reader_ip: "10.0.0.2".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn load_new_streams_to_subscribe_propagates_db_errors() {
+        let subs_err = receiver::DbError::Sqlite(rusqlite::Error::InvalidQuery);
+        let result = super::load_streams_to_subscribe_from_results(
+            Err(subs_err),
+            Ok(Vec::<rt_protocol::ResumeCursor>::new()),
+        );
+        assert!(result.is_err());
     }
 }
