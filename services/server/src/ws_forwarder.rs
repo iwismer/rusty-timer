@@ -568,12 +568,12 @@ async fn handle_event_batch(
                 }
             }
             IngestResult::IntegrityConflict => {
-                warn!(
-                    device_id = %device_id,
-                    reader_ip = %event.reader_ip,
-                    stream_epoch = event.stream_epoch,
-                    seq = event.seq,
-                    "integrity conflict: payload mismatch for existing event, keeping original"
+                state.logger.log_at(
+                    rt_ui_log::UiLogLevel::Warn,
+                    format!(
+                        "integrity conflict: {}/{} epoch={} seq={} — payload mismatch, keeping original",
+                        device_id, event.reader_ip, event.stream_epoch, event.seq,
+                    ),
                 );
                 let entry = high_water
                     .entry((event.reader_ip.clone(), event.stream_epoch))

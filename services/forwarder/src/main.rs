@@ -161,7 +161,10 @@ async fn run_reader(
             let mut j = journal.lock().await;
             let epoch = 1_i64;
             if let Err(e) = j.ensure_stream_state(&stream_key, epoch) {
-                warn!(reader_ip = %reader_ip, error = %e, "ensure_stream_state failed");
+                logger.log_at(
+                    UiLogLevel::Warn,
+                    format!("reader {} journal init failed: {}", reader_ip, e),
+                );
             }
         }
 
@@ -240,17 +243,26 @@ async fn run_reader(
             let (epoch, seq) = match append_result {
                 Ok(v) => v,
                 Err(JournalAppendError::StreamState(e)) => {
-                    error!(reader_ip = %reader_ip, error = %e, "failed to get epoch");
+                    logger.log_at(
+                        UiLogLevel::Error,
+                        format!("reader {} journal error (epoch): {}", reader_ip, e),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Err(JournalAppendError::NextSeq(e)) => {
-                    error!(reader_ip = %reader_ip, error = %e, "failed to get next_seq");
+                    logger.log_at(
+                        UiLogLevel::Error,
+                        format!("reader {} journal error (seq): {}", reader_ip, e),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
                 Err(JournalAppendError::Insert(e)) => {
-                    error!(reader_ip = %reader_ip, error = %e, "journal insert failed");
+                    logger.log_at(
+                        UiLogLevel::Error,
+                        format!("reader {} journal insert failed: {}", reader_ip, e),
+                    );
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
@@ -344,6 +356,7 @@ async fn handle_config_message(
                     config_state,
                     subsystem,
                     ui_tx,
+                    None,
                 )
                 .await
                 {
@@ -522,7 +535,10 @@ async fn run_uplink(
                         }
                     }
                     Err(e) => {
-                        warn!(reader_ip = %ip, error = %e, "replay engine error");
+                        logger.log_at(
+                            UiLogLevel::Warn,
+                            format!("replay error for reader {}: {}", ip, e),
+                        );
                     }
                 }
             }
@@ -580,7 +596,10 @@ async fn run_uplink(
                     ));
                     let mut j = journal.lock().await;
                     if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
-                        warn!(error = %e, "failed to bump epoch in journal");
+                        logger.log_at(
+                            UiLogLevel::Warn,
+                            format!("failed to bump epoch in journal: {}", e),
+                        );
                     }
                     break;
                 }
@@ -615,7 +634,10 @@ async fn run_uplink(
                     }
                 }
                 Err(e) => {
-                    warn!(error = %e, "send_batch (replay) failed, reconnecting");
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("replay send failed: {}; reconnecting", e),
+                    );
                 }
             }
 
@@ -754,7 +776,10 @@ async fn run_uplink(
                     ));
                     let mut j = journal.lock().await;
                     if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
-                        warn!(error = %e, "failed to bump epoch in journal");
+                        logger.log_at(
+                            UiLogLevel::Warn,
+                            format!("failed to bump epoch in journal: {}", e),
+                        );
                     }
                     break 'uplink;
                 }

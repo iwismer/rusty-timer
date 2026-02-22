@@ -112,6 +112,10 @@ allow_power_actions = false
 - `allow_power_actions = true`: enables `restart-device` and `shutdown-device` control actions.
 
 SBC provisioning via `deploy/sbc/rt-setup.sh` sets this to `true` by default.
+The setup script installs
+`/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules` when
+`[control].allow_power_actions = true`, and removes it when
+`[control].allow_power_actions = false`.
 
 ---
 
@@ -274,3 +278,4 @@ sudo systemctl restart rt-forwarder
 | "session already active" in logs | Duplicate forwarder connection | Check for multiple forwarder processes: `pgrep rt-forwarder` |
 | Events backlogged but not sent | Server unreachable | Normal; forwarder will replay when server reconnects |
 | High disk usage warning | Slow ack rate / high event volume | Check server connectivity; consider lower `prune_watermark_pct` |
+| "Interactive authentication required" from restart/shutdown controls | Missing or misconfigured polkit rule for `rt-forwarder` | Re-run `sudo bash deploy/sbc/rt-setup.sh` (installs `/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules` when enabled), then restart `rt-forwarder` |

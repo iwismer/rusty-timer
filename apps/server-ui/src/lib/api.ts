@@ -394,6 +394,11 @@ export async function createToken(
   });
 }
 
+/** DELETE /api/v1/admin/tokens — delete ALL device tokens, returns 204 */
+export async function deleteAllTokens(): Promise<void> {
+  return apiFetch<void>("/api/v1/admin/tokens", { method: "DELETE" });
+}
+
 /** DELETE /api/v1/admin/streams/{streamId} — cascade delete, returns 204 */
 export async function deleteStream(streamId: string): Promise<void> {
   return apiFetch<void>(`/api/v1/admin/streams/${streamId}`, {

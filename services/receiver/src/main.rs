@@ -77,7 +77,7 @@ async fn main() {
     };
     // Map from stream-key -> LocalProxy handle.
     let mut proxies: HashMap<String, LocalProxy> = HashMap::new();
-    reconcile_proxies(&initial_subs, &mut proxies, &event_bus).await;
+    reconcile_proxies(&initial_subs, &mut proxies, &event_bus, &state.logger).await;
 
     // -------------------------------------------------------------------------
     // 3. Start Axum control API on 127.0.0.1:9090
@@ -256,7 +256,7 @@ async fn main() {
                     db.load_subscriptions().unwrap_or_default()
                 };
                 if current_subs != last_subs {
-                    reconcile_proxies(&current_subs, &mut proxies, &event_bus).await;
+                    reconcile_proxies(&current_subs, &mut proxies, &event_bus, &state.logger).await;
                     state.logger.log(format!("Subscriptions changed ({} streams)", current_subs.len()));
                     state.emit_streams_snapshot().await;
                     last_subs = current_subs;
@@ -270,7 +270,7 @@ async fn main() {
                 match result {
                     ConnectionState::Connecting => {
                         // Cancel any existing session first.
-                        cancel_session(&mut session_task, &mut session_cancel_tx).await;
+                        cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
 
                         let url_opt = state.upstream_url.read().await.clone();
                         match url_opt {
@@ -345,7 +345,10 @@ async fn main() {
                                                             info!("WS session ended normally");
                                                         }
                                                         Err(e) => {
-                                                            error!(error = %e, "WS session error");
+                                                            st.logger.log_at(
+                                                                UiLogLevel::Error,
+                                                                format!("WS session error: {e}"),
+                                                            );
                                                         }
                                                     }
                                                     let should_disconnect = {
@@ -378,7 +381,7 @@ async fn main() {
 
                     ConnectionState::Disconnecting => {
                         info!("disconnecting: cancelling WS session");
-                        cancel_session(&mut session_task, &mut session_cancel_tx).await;
+                        cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
                         state.set_connection_state(ConnectionState::Disconnected).await;
                         state.emit_streams_snapshot().await;
                         info!("disconnected (local proxies remain open)");
@@ -396,7 +399,7 @@ async fn main() {
     // 8. Graceful shutdown — close WS session and release TCP ports
     // -------------------------------------------------------------------------
     state.logger.log("shutdown signal received");
-    cancel_session(&mut session_task, &mut session_cancel_tx).await;
+    cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");
         proxy.shutdown();
@@ -520,6 +523,7 @@ fn make_broadcast_sender(bus: &EventBus) -> tokio::sync::broadcast::Sender<rt_pr
 async fn cancel_session(
     task: &mut Option<tokio::task::JoinHandle<()>>,
     cancel_tx: &mut Option<watch::Sender<bool>>,
+    logger: &rt_ui_log::UiLogger<receiver::ReceiverUiEvent>,
 ) {
     // Signal the session loop to stop.
     if let Some(tx) = cancel_tx.take() {
@@ -531,8 +535,15 @@ async fn cancel_session(
         let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), handle);
         match timeout.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => warn!(error = %e, "session task panicked"),
-            Err(_) => warn!("session task did not exit in 5s; continuing"),
+            Ok(Err(e)) => {
+                logger.log_at(UiLogLevel::Warn, format!("session task panicked: {e}"));
+            }
+            Err(_) => {
+                logger.log_at(
+                    UiLogLevel::Warn,
+                    "session task did not exit in 5s; continuing",
+                );
+            }
         }
     }
 }
@@ -545,6 +556,7 @@ async fn reconcile_proxies(
     subs: &[Subscription],
     proxies: &mut HashMap<String, LocalProxy>,
     event_bus: &EventBus,
+    logger: &rt_ui_log::UiLogger<receiver::ReceiverUiEvent>,
 ) {
     let assignments = resolve_ports(subs);
 
@@ -583,11 +595,12 @@ async fn reconcile_proxies(
                 wanted,
                 collides_with,
             }) => {
-                warn!(
-                    key = %key,
-                    wanted = wanted,
-                    collides_with = %collides_with,
-                    "port collision — skipping proxy for this stream"
+                logger.log_at(
+                    UiLogLevel::Warn,
+                    format!(
+                        "port collision for {} (port {} used by {}) — skipping",
+                        key, wanted, collides_with,
+                    ),
                 );
                 continue;
             }
@@ -604,7 +617,13 @@ async fn reconcile_proxies(
                 proxies.insert(key, proxy);
             }
             Err(e) => {
-                error!(key = %key, port = port, error = %e, "failed to bind local proxy");
+                logger.log_at(
+                    UiLogLevel::Error,
+                    format!(
+                        "failed to bind local proxy for {} on port {}: {}",
+                        key, port, e
+                    ),
+                );
             }
         }
     }

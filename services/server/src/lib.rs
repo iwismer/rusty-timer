@@ -90,7 +90,9 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         )
         .route(
             "/api/v1/admin/tokens",
-            get(http::admin::list_tokens).post(http::admin::create_token),
+            get(http::admin::list_tokens)
+                .post(http::admin::create_token)
+                .delete(http::admin::delete_all_tokens),
         )
         .route(
             "/api/v1/admin/tokens/:token_id/revoke",
