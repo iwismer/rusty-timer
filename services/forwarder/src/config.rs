@@ -361,7 +361,7 @@ schema_version = 1
 base_url = "wss://example.com"
 
 [auth]
-token_file = "{}"
+token_file = '{}'
 
 [[readers]]
 target = "192.168.1.100"
