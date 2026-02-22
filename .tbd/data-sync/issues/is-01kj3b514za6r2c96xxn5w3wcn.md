@@ -5,7 +5,7 @@ title: "Spec: Race/Epoch Receiver Selection v1.1"
 kind: epic
 status: open
 priority: 2
-version: 15
+version: 16
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies: []
@@ -25,6 +25,6 @@ child_order_hints:
   - is-01kj3b53w4k77m4dwrm9hrx97y
   - is-01kj3b542wtv96m2e8t6jmsrec
 created_at: 2026-02-22T18:52:52.253Z
-updated_at: 2026-02-22T18:52:55.258Z
+updated_at: 2026-02-22T19:42:17.684Z
 ---
-Parent epic for beads derived from docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md
+Parent epic for beads derived from docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md. Product decision: receiver default selection is manual; race/current + resume is operator opt-in.

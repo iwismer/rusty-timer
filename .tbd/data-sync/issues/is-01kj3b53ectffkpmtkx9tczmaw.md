@@ -5,7 +5,7 @@ title: "Task 11: Add receiver UI selection controls plus component-level behavio
 kind: task
 status: open
 priority: 2
-version: 7
+version: 8
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -18,6 +18,6 @@ child_order_hints:
   - is-01kj3bmqvgssejwpsw9xczny6s
   - is-01kj3bmr21hx8q7yxg8j53q24q
 created_at: 2026-02-22T18:52:54.602Z
-updated_at: 2026-02-22T19:01:29.877Z
+updated_at: 2026-02-22T19:42:18.662Z
 ---
-From implementation plan Task 11 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md).
+From implementation plan Task 11 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md). Include receiver UI behavior/tests that default selection mode to manual and require explicit opt-in to race mode.
