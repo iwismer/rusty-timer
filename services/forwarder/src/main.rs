@@ -1056,7 +1056,8 @@ async fn main() {
 
     if std::env::var_os("RT_UPDATER_STAGE_DIR").is_none() {
         let default_stage_dir = "/var/lib/rusty-timer";
-        std::env::set_var("RT_UPDATER_STAGE_DIR", default_stage_dir);
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("RT_UPDATER_STAGE_DIR", default_stage_dir) };
         info!(
             stage_dir = default_stage_dir,
             "configured updater stage directory"
