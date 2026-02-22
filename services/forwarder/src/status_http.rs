@@ -1768,7 +1768,7 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
         "forwarder",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealChecker::new(c),
+        Ok(c) => RealChecker::with_stage_root(c, crate::updater_stage_root_dir()),
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),
@@ -1851,7 +1851,7 @@ async fn update_download_handler<J: JournalAccess + Send + 'static>(
         "forwarder",
         env!("CARGO_PKG_VERSION"),
     ) {
-        Ok(c) => RealChecker::new(c),
+        Ok(c) => RealChecker::with_stage_root(c, crate::updater_stage_root_dir()),
         Err(e) => {
             let status = rt_updater::UpdateStatus::Failed {
                 error: e.to_string(),

@@ -1054,21 +1054,18 @@ async fn main() {
     // All worker tasks started — mark subsystem ready
     status_server.set_ready().await;
 
-    if std::env::var_os("RT_UPDATER_STAGE_DIR").is_none() {
-        let default_stage_dir = "/var/lib/rusty-timer";
-        // TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("RT_UPDATER_STAGE_DIR", default_stage_dir) };
-        info!(
-            stage_dir = default_stage_dir,
-            "configured updater stage directory"
-        );
-    }
+    let updater_stage_root = forwarder::updater_stage_root_dir();
+    info!(
+        stage_dir = %updater_stage_root.display(),
+        "configured updater stage directory"
+    );
 
     // Spawn background update check
     {
         let ss = status_server.clone();
         let update_mode = cfg.update.mode;
         let lg = logger.clone();
+        let updater_stage_root = updater_stage_root.clone();
         tokio::spawn(async move {
             if update_mode == rt_updater::UpdateMode::Disabled {
                 lg.log("auto-update disabled by configuration");
@@ -1101,7 +1098,10 @@ async fn main() {
                     .await;
 
                     if update_mode == rt_updater::UpdateMode::CheckAndDownload {
-                        match checker.download(version).await {
+                        match checker
+                            .download_with_stage_root(version, updater_stage_root.as_path())
+                            .await
+                        {
                             Ok(path) => {
                                 lg.log(format!("Update v{version} downloaded and staged"));
                                 ss.set_update_status(rt_updater::UpdateStatus::Downloaded {
