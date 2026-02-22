@@ -1,10 +1,13 @@
 use crate::{
-    auth::{extract_bearer, validate_token},
+    auth::validate_token,
     repo::{
         events::fetch_events_after_cursor,
         receiver_cursors::{fetch_cursor, upsert_cursor},
     },
     state::AppState,
+    ws_common::{
+        extract_token_from_headers, recv_text_with_timeout, send_heartbeat, send_ws_error,
+    },
 };
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
@@ -12,7 +15,7 @@ use axum::extract::{
 };
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use rt_protocol::{error_codes, Heartbeat, ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage};
+use rt_protocol::{error_codes, ReadEvent, ReceiverAck, ReceiverEventBatch, WsMessage};
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -25,23 +28,8 @@ pub async fn ws_receiver_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| extract_bearer(v))
-        .map(|s| s.to_owned());
+    let token = extract_token_from_headers(&headers);
     ws.on_upgrade(move |socket| handle_receiver_socket(socket, state, token))
-}
-
-async fn send_ws_error(socket: &mut WebSocket, code: &str, message: &str, retryable: bool) {
-    let msg = WsMessage::Error(rt_protocol::ErrorMessage {
-        code: code.to_owned(),
-        message: message.to_owned(),
-        retryable,
-    });
-    if let Ok(json) = serde_json::to_string(&msg) {
-        let _ = socket.send(Message::Text(json)).await;
-    }
 }
 
 /// Per-stream subscription state.
@@ -92,8 +80,8 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     let device_id = claims.device_id.clone();
 
     // Wait for ReceiverHello
-    let hello = match tokio::time::timeout(SESSION_TIMEOUT, socket.recv()).await {
-        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<WsMessage>(&text) {
+    let hello = match recv_text_with_timeout(&mut socket, SESSION_TIMEOUT).await {
+        Ok(text) => match serde_json::from_str::<WsMessage>(&text) {
             Ok(WsMessage::ReceiverHello(hello)) => hello,
             Ok(_) => {
                 send_ws_error(
@@ -116,7 +104,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 return;
             }
         },
-        _ => {
+        Err(()) => {
             send_ws_error(
                 &mut socket,
                 error_codes::PROTOCOL_ERROR,
@@ -145,14 +133,8 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     ));
 
     // Send heartbeat with session_id
-    let hb_msg = WsMessage::Heartbeat(Heartbeat {
-        session_id: session_id.clone(),
-        device_id: device_id.clone(),
-    });
-    if let Ok(json) = serde_json::to_string(&hb_msg) {
-        if socket.send(Message::Text(json)).await.is_err() {
-            return;
-        }
+    if !send_heartbeat(&mut socket, &session_id, &device_id).await {
+        return;
     }
 
     let mut subscriptions: Vec<StreamSub> = Vec::new();
@@ -279,10 +261,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 }
             }
             _ = heartbeat_interval.tick() => {
-                let hb = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
-                if let Ok(json) = serde_json::to_string(&hb) {
-                    if socket.send(Message::Text(json)).await.is_err() { break; }
-                }
+                if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
             }
         }
     }

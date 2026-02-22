@@ -4,6 +4,7 @@ pub mod db;
 pub mod http;
 pub mod repo;
 pub mod state;
+mod ws_common;
 pub mod ws_forwarder;
 pub mod ws_receiver;
 
