@@ -1,3 +1,4 @@
+use super::response::{bad_request, internal_error, not_found};
 use crate::dashboard_events::DashboardEvent;
 use crate::repo::forwarder_races as repo;
 use crate::repo::races as race_repo;
@@ -8,7 +9,6 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use uuid::Uuid;
 
 /// GET /api/v1/forwarder-races
@@ -30,15 +30,7 @@ pub async fn list_forwarder_races(State(state): State<AppState>) -> impl IntoRes
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -56,15 +48,7 @@ pub async fn get_forwarder_race(
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -78,70 +62,22 @@ pub async fn set_forwarder_race(
         Some(serde_json::Value::Null) | None => None,
         Some(serde_json::Value::String(s)) => match s.parse::<Uuid>() {
             Ok(id) => Some(id),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(HttpErrorEnvelope {
-                        code: "BAD_REQUEST".to_owned(),
-                        message: "race_id must be a valid UUID or null".to_owned(),
-                        details: None,
-                    }),
-                )
-                    .into_response()
-            }
+            Err(_) => return bad_request("race_id must be a valid UUID or null"),
         },
-        Some(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: "race_id must be a string UUID or null".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        Some(_) => return bad_request("race_id must be a string UUID or null"),
     };
 
     // Validate race exists if assigning
     if let Some(rid) = race_id {
         match race_repo::race_exists(&state.pool, rid).await {
-            Ok(false) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(HttpErrorEnvelope {
-                        code: "NOT_FOUND".to_owned(),
-                        message: "race not found".to_owned(),
-                        details: None,
-                    }),
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(HttpErrorEnvelope {
-                        code: "INTERNAL_ERROR".to_owned(),
-                        message: e.to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response()
-            }
+            Ok(false) => return not_found("race not found"),
+            Err(e) => return internal_error(e),
             Ok(true) => {}
         }
     }
 
     if let Err(e) = repo::set_forwarder_race(&state.pool, &forwarder_id, race_id).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response();
+        return internal_error(e);
     }
 
     // Broadcast SSE event

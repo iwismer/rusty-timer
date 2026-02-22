@@ -1,5 +1,5 @@
 use crate::{
-    auth::{extract_bearer, validate_token},
+    auth::validate_token,
     dashboard_events::{DashboardEvent, OptionalStringPatch},
     repo::events::{
         count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
@@ -7,6 +7,9 @@ use crate::{
         upsert_stream, IngestResult,
     },
     state::{AppState, ForwarderCommand, ForwarderProxyReply},
+    ws_common::{
+        extract_token_from_headers, recv_text_with_timeout, send_heartbeat, send_ws_error,
+    },
 };
 use axum::{
     extract::{
@@ -16,7 +19,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use rt_protocol::{error_codes, AckEntry, ForwarderAck, Heartbeat, WsMessage};
+use rt_protocol::{error_codes, AckEntry, ForwarderAck, WsMessage};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -38,23 +41,8 @@ pub async fn ws_forwarder_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| extract_bearer(v))
-        .map(|s| s.to_owned());
+    let token = extract_token_from_headers(&headers);
     ws.on_upgrade(move |socket| handle_forwarder_socket(socket, state, token))
-}
-
-async fn send_ws_error(socket: &mut WebSocket, code: &str, message: &str, retryable: bool) {
-    let msg = WsMessage::Error(rt_protocol::ErrorMessage {
-        code: code.to_owned(),
-        message: message.to_owned(),
-        retryable,
-    });
-    if let Ok(json) = serde_json::to_string(&msg) {
-        let _ = socket.send(Message::Text(json)).await;
-    }
 }
 
 async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
@@ -144,8 +132,8 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     state.logger.log(format!("forwarder {device_id} connected"));
     let session_id = Uuid::new_v4().to_string();
 
-    let hello = match tokio::time::timeout(SESSION_TIMEOUT, socket.recv()).await {
-        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<WsMessage>(&text) {
+    let hello = match recv_text_with_timeout(&mut socket, SESSION_TIMEOUT).await {
+        Ok(text) => match serde_json::from_str::<WsMessage>(&text) {
             Ok(WsMessage::ForwarderHello(hello)) => hello,
             Ok(_) => {
                 send_ws_error(
@@ -170,7 +158,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 return;
             }
         },
-        _ => {
+        Err(()) => {
             send_ws_error(
                 &mut socket,
                 error_codes::PROTOCOL_ERROR,
@@ -257,15 +245,9 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         });
     }
 
-    let hb_msg = WsMessage::Heartbeat(Heartbeat {
-        session_id: session_id.clone(),
-        device_id: device_id.clone(),
-    });
-    if let Ok(json) = serde_json::to_string(&hb_msg) {
-        if socket.send(Message::Text(json)).await.is_err() {
-            state.unregister_forwarder(&device_id).await;
-            return;
-        }
+    if !send_heartbeat(&mut socket, &session_id, &device_id).await {
+        state.unregister_forwarder(&device_id).await;
+        return;
     }
 
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<ForwarderCommand>(8);
@@ -389,8 +371,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         }
                                     }
                                 }
-                                let hb = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
-                                if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
+                                if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::ConfigGetResponse(resp)) => {
@@ -423,8 +404,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
                 expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
                 expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
-                let hb = WsMessage::Heartbeat(Heartbeat { session_id: session_id.clone(), device_id: device_id.clone() });
-                if let Ok(json) = serde_json::to_string(&hb) { if socket.send(Message::Text(json)).await.is_err() { break; } }
+                if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
             }
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {

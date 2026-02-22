@@ -1,3 +1,4 @@
+use super::response::{bad_request, gateway_timeout, json_error, not_found};
 use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
 use axum::{
     extract::{Path, State},
@@ -5,7 +6,6 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use std::time::Duration;
 
 const CONFIG_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,17 +18,7 @@ pub async fn get_forwarder_config(
     let senders = state.forwarder_command_senders.read().await;
     let tx = match senders.get(&forwarder_id) {
         Some(tx) => tx.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "forwarder not connected".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        None => return not_found("forwarder not connected"),
     };
     drop(senders);
 
@@ -42,26 +32,10 @@ pub async fn get_forwarder_config(
     match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, tx.send(cmd)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "forwarder disconnected".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return not_found("forwarder disconnected");
         }
         Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(HttpErrorEnvelope {
-                    code: "TIMEOUT".to_owned(),
-                    message: "forwarder command queue is saturated".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return gateway_timeout("forwarder command queue is saturated");
         }
     }
 
@@ -76,46 +50,23 @@ pub async fn get_forwarder_config(
                 }))
                 .into_response()
             } else {
-                (
+                json_error(
                     StatusCode::BAD_GATEWAY,
-                    Json(HttpErrorEnvelope {
-                        code: "FORWARDER_CONFIG_ERROR".to_owned(),
-                        message: resp
-                            .error
-                            .unwrap_or_else(|| "forwarder failed to read config".to_owned()),
-                        details: None,
-                    }),
+                    "FORWARDER_CONFIG_ERROR",
+                    resp.error
+                        .unwrap_or_else(|| "forwarder failed to read config".to_owned()),
                 )
-                    .into_response()
             }
         }
-        Ok(Ok(ForwarderProxyReply::Timeout)) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond within timeout".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Ok(Err(_)) => (
+        Ok(Ok(ForwarderProxyReply::Timeout)) => {
+            gateway_timeout("forwarder did not respond within timeout")
+        }
+        Ok(Err(_)) => json_error(
             StatusCode::BAD_GATEWAY,
-            Json(HttpErrorEnvelope {
-                code: "FORWARDER_DISCONNECTED".to_owned(),
-                message: "forwarder disconnected before replying".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond within timeout".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
+            "FORWARDER_DISCONNECTED",
+            "forwarder disconnected before replying",
+        ),
+        Err(_) => gateway_timeout("forwarder did not respond within timeout"),
     }
 }
 
@@ -139,17 +90,7 @@ pub async fn control_forwarder(
         }
         "restart-device" => "restart_device",
         "shutdown-device" => "shutdown_device",
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(HttpErrorEnvelope {
-                    code: "BAD_REQUEST".to_owned(),
-                    message: "unknown control action".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        _ => return bad_request("unknown control action"),
     };
     let payload = serde_json::json!({ "action": action_value });
     send_config_set_command(&state, &forwarder_id, "control".to_owned(), payload).await
@@ -164,17 +105,7 @@ async fn send_config_set_command(
     let senders = state.forwarder_command_senders.read().await;
     let tx = match senders.get(forwarder_id) {
         Some(tx) => tx.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "forwarder not connected".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        None => return not_found("forwarder not connected"),
     };
     drop(senders);
 
@@ -190,26 +121,10 @@ async fn send_config_set_command(
     match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, tx.send(cmd)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "forwarder disconnected".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return not_found("forwarder disconnected");
         }
         Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(HttpErrorEnvelope {
-                    code: "TIMEOUT".to_owned(),
-                    message: "forwarder command queue is saturated".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return gateway_timeout("forwarder command queue is saturated");
         }
     }
 
@@ -238,33 +153,15 @@ async fn send_config_set_command(
             )
                 .into_response()
         }
-        Ok(Ok(ForwarderProxyReply::Timeout)) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond within timeout".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Ok(Err(_)) => (
+        Ok(Ok(ForwarderProxyReply::Timeout)) => {
+            gateway_timeout("forwarder did not respond within timeout")
+        }
+        Ok(Err(_)) => json_error(
             StatusCode::BAD_GATEWAY,
-            Json(HttpErrorEnvelope {
-                code: "FORWARDER_DISCONNECTED".to_owned(),
-                message: "forwarder disconnected before replying".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond within timeout".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
+            "FORWARDER_DISCONNECTED",
+            "forwarder disconnected before replying",
+        ),
+        Err(_) => gateway_timeout("forwarder did not respond within timeout"),
     }
 }
 
@@ -275,17 +172,7 @@ pub async fn restart_forwarder(
     let senders = state.forwarder_command_senders.read().await;
     let tx = match senders.get(&forwarder_id) {
         Some(tx) => tx.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "forwarder not connected".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
+        None => return not_found("forwarder not connected"),
     };
     drop(senders);
 
@@ -299,26 +186,10 @@ pub async fn restart_forwarder(
     match tokio::time::timeout(RESTART_REQUEST_TIMEOUT, tx.send(cmd)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "forwarder disconnected".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return not_found("forwarder disconnected");
         }
         Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(HttpErrorEnvelope {
-                    code: "TIMEOUT".to_owned(),
-                    message: "forwarder command queue is saturated".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response();
+            return gateway_timeout("forwarder command queue is saturated");
         }
     }
 
@@ -338,32 +209,14 @@ pub async fn restart_forwarder(
             )
                 .into_response()
         }
-        Ok(Ok(ForwarderProxyReply::Timeout)) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond within timeout".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Ok(Err(_)) => (
+        Ok(Ok(ForwarderProxyReply::Timeout)) => {
+            gateway_timeout("forwarder did not respond within timeout")
+        }
+        Ok(Err(_)) => json_error(
             StatusCode::BAD_GATEWAY,
-            Json(HttpErrorEnvelope {
-                code: "FORWARDER_DISCONNECTED".to_owned(),
-                message: "forwarder disconnected before replying".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(HttpErrorEnvelope {
-                code: "TIMEOUT".to_owned(),
-                message: "forwarder did not respond within timeout".to_owned(),
-                details: None,
-            }),
-        )
-            .into_response(),
+            "FORWARDER_DISCONNECTED",
+            "forwarder disconnected before replying",
+        ),
+        Err(_) => gateway_timeout("forwarder did not respond within timeout"),
     }
 }

@@ -1,13 +1,27 @@
+use super::response::{internal_error, not_found, HttpResult};
 use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use rt_protocol::HttpErrorEnvelope;
 use uuid::Uuid;
+
+async fn ensure_stream_exists(pool: &sqlx::PgPool, stream_id: Uuid) -> HttpResult {
+    let exists = sqlx::query!(
+        "SELECT 1 AS one FROM streams WHERE stream_id = $1",
+        stream_id
+    )
+    .fetch_optional(pool)
+    .await;
+
+    match exists {
+        Err(e) => Err(internal_error(e)),
+        Ok(None) => Err(not_found("stream not found")),
+        Ok(Some(_)) => Ok(()),
+    }
+}
 
 /// `GET /api/v1/streams/{stream_id}/export.txt`
 ///
@@ -17,38 +31,8 @@ pub async fn export_raw(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Verify stream exists
-    let exists = sqlx::query!(
-        "SELECT 1 AS one FROM streams WHERE stream_id = $1",
-        stream_id
-    )
-    .fetch_optional(&state.pool)
-    .await;
-
-    match exists {
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "stream not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Ok(Some(_)) => {}
+    if let Err(response) = ensure_stream_exists(&state.pool, stream_id).await {
+        return response;
     }
 
     let rows = sqlx::query!(
@@ -61,15 +45,7 @@ pub async fn export_raw(
     .await;
 
     match rows {
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
         Ok(rows) => {
             let mut buf = String::new();
             for row in &rows {
@@ -97,38 +73,8 @@ pub async fn export_csv(
     State(state): State<AppState>,
     Path(stream_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Verify stream exists
-    let exists = sqlx::query!(
-        "SELECT 1 AS one FROM streams WHERE stream_id = $1",
-        stream_id
-    )
-    .fetch_optional(&state.pool)
-    .await;
-
-    match exists {
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(HttpErrorEnvelope {
-                    code: "INTERNAL_ERROR".to_owned(),
-                    message: e.to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(HttpErrorEnvelope {
-                    code: "NOT_FOUND".to_owned(),
-                    message: "stream not found".to_owned(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-        Ok(Some(_)) => {}
+    if let Err(response) = ensure_stream_exists(&state.pool, stream_id).await {
+        return response;
     }
 
     let rows = sqlx::query!(
@@ -142,15 +88,7 @@ pub async fn export_csv(
     .await;
 
     match rows {
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(HttpErrorEnvelope {
-                code: "INTERNAL_ERROR".to_owned(),
-                message: e.to_string(),
-                details: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e),
         Ok(rows) => {
             let mut buf =
                 String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");
