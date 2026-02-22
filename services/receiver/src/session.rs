@@ -87,6 +87,7 @@ pub async fn connect(url: &str, rid: &str, db: &Db) -> Result<Session, SessionEr
     let m = ws.next().await.ok_or(SessionError::ConnectionClosed)??;
     let text = match m {
         Message::Text(t) => t,
+        Message::Close(_) => return Err(SessionError::ConnectionClosed),
         _ => return Err(SessionError::UnexpectedFirstMessage),
     };
     match serde_json::from_str::<WsMessage>(&text)? {

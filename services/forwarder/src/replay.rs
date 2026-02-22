@@ -89,3 +89,98 @@ impl Default for ReplayEngine {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ReplayEngine;
+    use crate::storage::journal::Journal;
+    use tempfile::NamedTempFile;
+
+    fn make_journal() -> (Journal, NamedTempFile) {
+        let file = NamedTempFile::new().expect("temp file");
+        let journal = Journal::open(file.path()).expect("open journal");
+        (journal, file)
+    }
+
+    #[test]
+    fn pending_events_groups_and_orders_epochs_when_ack_cursor_is_zero() {
+        let (mut journal, _file) = make_journal();
+        journal.ensure_stream_state("10.0.0.10:10000", 1).unwrap();
+
+        let seq1 = journal.next_seq("10.0.0.10:10000").unwrap();
+        journal
+            .insert_event("10.0.0.10:10000", 1, seq1, None, "epoch1-seq1", "RAW")
+            .unwrap();
+        let seq2 = journal.next_seq("10.0.0.10:10000").unwrap();
+        journal
+            .insert_event("10.0.0.10:10000", 1, seq2, None, "epoch1-seq2", "RAW")
+            .unwrap();
+
+        journal.bump_epoch("10.0.0.10:10000", 2).unwrap();
+        let seq3 = journal.next_seq("10.0.0.10:10000").unwrap();
+        journal
+            .insert_event("10.0.0.10:10000", 2, seq3, None, "epoch2-seq1", "RAW")
+            .unwrap();
+
+        let replay = ReplayEngine::new()
+            .pending_events(&journal, "10.0.0.10:10000")
+            .unwrap();
+
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].stream_epoch, 1);
+        assert_eq!(replay[1].stream_epoch, 2);
+        assert_eq!(replay[0].events.len(), 2);
+        assert_eq!(replay[1].events.len(), 1);
+        assert_eq!(replay[0].events[0].seq, 1);
+        assert_eq!(replay[0].events[1].seq, 2);
+        assert_eq!(replay[1].events[0].seq, 1);
+    }
+
+    #[test]
+    fn pending_events_includes_old_epoch_backlog_and_newer_epochs() {
+        let (mut journal, _file) = make_journal();
+        journal.ensure_stream_state("10.0.0.20:10000", 1).unwrap();
+
+        for _ in 0..3 {
+            let seq = journal.next_seq("10.0.0.20:10000").unwrap();
+            journal
+                .insert_event("10.0.0.20:10000", 1, seq, None, "epoch1", "RAW")
+                .unwrap();
+        }
+        journal.update_ack_cursor("10.0.0.20:10000", 1, 1).unwrap();
+
+        journal.bump_epoch("10.0.0.20:10000", 2).unwrap();
+        for _ in 0..2 {
+            let seq = journal.next_seq("10.0.0.20:10000").unwrap();
+            journal
+                .insert_event("10.0.0.20:10000", 2, seq, None, "epoch2", "RAW")
+                .unwrap();
+        }
+
+        let replay = ReplayEngine::new()
+            .pending_events(&journal, "10.0.0.20:10000")
+            .unwrap();
+
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].stream_epoch, 1);
+        assert_eq!(replay[0].events.len(), 2);
+        assert_eq!(replay[0].events[0].seq, 2);
+        assert_eq!(replay[0].events[1].seq, 3);
+        assert_eq!(replay[1].stream_epoch, 2);
+        assert_eq!(replay[1].events.len(), 2);
+        assert_eq!(replay[1].events[0].seq, 1);
+        assert_eq!(replay[1].events[1].seq, 2);
+    }
+
+    #[test]
+    fn pending_events_is_empty_for_initialized_stream_without_events() {
+        let (mut journal, _file) = make_journal();
+        journal.ensure_stream_state("10.0.0.30:10000", 1).unwrap();
+
+        let replay = ReplayEngine::new()
+            .pending_events(&journal, "10.0.0.30:10000")
+            .unwrap();
+
+        assert!(replay.is_empty());
+    }
+}

@@ -358,4 +358,22 @@ mod tests {
             ReadType::FSLS
         );
     }
+
+    #[test]
+    fn timestamp_time_string_is_zero_padded() {
+        let ts = Timestamp::new(1, 1, 2, 3, 4, 5, 6);
+        assert_eq!(ts.time_string(), "03:04:05.006");
+    }
+
+    #[test]
+    fn timestamp_time_string_formats_max_centisecond_as_990ms() {
+        let ts = Timestamp::new(1, 12, 30, 18, 45, 59, 990);
+        assert_eq!(ts.time_string(), "18:45:59.990");
+    }
+
+    #[test]
+    fn timestamp_display_uses_stable_iso_like_format() {
+        let ts = Timestamp::new(1, 1, 2, 3, 4, 5, 6);
+        assert_eq!(format!("{ts}"), "2001-01-02T03:04:05.006");
+    }
 }

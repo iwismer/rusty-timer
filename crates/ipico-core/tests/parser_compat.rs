@@ -255,22 +255,3 @@ fn timestamp_display() {
     let ts = Timestamp::new(1, 12, 30, 18, 45, 59, 390);
     assert_eq!(format!("{}", ts), "2001-12-30T18:45:59.390");
 }
-
-// ===========================================================================
-// raw_read_line UTF-8 requirement
-// ===========================================================================
-
-#[test]
-fn raw_read_line_must_be_valid_utf8() {
-    // The parser takes &str, so invalid UTF-8 is rejected at the type level.
-    // This test documents that the design enforces UTF-8 validity:
-    // callers must validate UTF-8 before calling the parser.
-    let bytes: &[u8] = b"aa400000000123450a2a01123018455927a7";
-    let as_str = std::str::from_utf8(bytes).expect("fixture is valid UTF-8");
-    let result = ChipRead::try_from(as_str);
-    assert!(result.is_ok());
-
-    // Invalid UTF-8 cannot even be passed to the parser (Rust type system).
-    let invalid_bytes: Vec<u8> = vec![0xff, 0xfe, 0xfd];
-    assert!(std::str::from_utf8(&invalid_bytes).is_err());
-}

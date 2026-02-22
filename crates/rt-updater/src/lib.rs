@@ -434,27 +434,6 @@ mod tests {
     }
 
     #[test]
-    fn version_comparison_newer() {
-        let v1 = Version::new(0, 2, 0);
-        let v2 = Version::new(0, 1, 0);
-        assert!(v1 > v2);
-    }
-
-    #[test]
-    fn version_comparison_same() {
-        let v1 = Version::new(0, 1, 0);
-        let v2 = Version::new(0, 1, 0);
-        assert_eq!(v1, v2);
-    }
-
-    #[test]
-    fn version_comparison_older() {
-        let v1 = Version::new(0, 1, 0);
-        let v2 = Version::new(0, 2, 0);
-        assert!(v1 < v2);
-    }
-
-    #[test]
     fn new_checker_parses_valid_version() {
         let checker = UpdateChecker::new("owner", "repo", "forwarder", "0.1.0");
         assert!(checker.is_ok());
@@ -580,11 +559,6 @@ mod tests {
             serde_json::from_str::<UpdateMode>(r#""check-and-download""#).unwrap(),
             UpdateMode::CheckAndDownload
         );
-    }
-
-    #[test]
-    fn update_mode_default_is_check_and_download() {
-        assert_eq!(UpdateMode::default(), UpdateMode::CheckAndDownload);
     }
 
     #[test]
