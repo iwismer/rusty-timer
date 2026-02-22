@@ -1,4 +1,4 @@
-name: Forwarder UI CI
+name: Forwarder Embed UI CI
 
 on:
   push:
@@ -6,29 +6,40 @@ on:
     paths:
       - "apps/forwarder-ui/**"
       - "apps/shared-ui/**"
+      - "services/forwarder/**"
       - "package-lock.json"
       - "package.json"
-      - ".github/workflows/forwarder-ui.yml"
+      - ".github/workflows/forwarder-embed-ui.yml"
   pull_request:
     branches: [master]
     paths:
       - "apps/forwarder-ui/**"
       - "apps/shared-ui/**"
+      - "services/forwarder/**"
       - "package-lock.json"
       - "package.json"
-      - ".github/workflows/forwarder-ui.yml"
+      - ".github/workflows/forwarder-embed-ui.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  test:
-    name: Forwarder UI Tests
+  forwarder-embed-ui:
+    name: Forwarder embed-ui build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -37,17 +48,8 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm ci
 
-      - name: Prettier check
-        run: npm run lint
-        working-directory: apps/forwarder-ui
-
-      - name: Svelte type check
-        run: npm run check
-        working-directory: apps/forwarder-ui
-
-      - name: Vitest
-        run: npm test
-        working-directory: apps/forwarder-ui
+      - name: Build and test forwarder with embedded UI
+        run: cargo test -p forwarder --features embed-ui --test ui_embed_fallback
