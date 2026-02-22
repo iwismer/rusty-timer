@@ -69,13 +69,22 @@ assert_eq "1" "$(bool_env_is_true '1')" "1 should be true"
 assert_eq "1" "$(bool_env_is_true 'yes')" "yes should be true"
 assert_eq "0" "$(bool_env_is_true 'no')" "no should be false"
 
-unset RT_SETUP_ALLOW_POWER_ACTIONS
-assert_eq "true" "$(allow_power_actions_toml_value)" "power actions should default to true for SBC setup"
-RT_SETUP_ALLOW_POWER_ACTIONS=0
-assert_eq "false" "$(allow_power_actions_toml_value)" "RT_SETUP_ALLOW_POWER_ACTIONS=0 should disable power actions"
-RT_SETUP_ALLOW_POWER_ACTIONS=true
-assert_eq "true" "$(allow_power_actions_toml_value)" "RT_SETUP_ALLOW_POWER_ACTIONS=true should enable power actions"
-unset RT_SETUP_ALLOW_POWER_ACTIONS
+unset RT_SETUP_ALLOW_POWER_ACTIONS || true
+assert_eq "true" "$(allow_power_actions_toml_value)" "allow_power_actions_toml_value should default to true when env unset"
+assert_eq "1" "$(expected_allow_power_actions_for_install "/tmp/does-not-exist.toml")" "missing config should expect power actions enabled by default"
+
+RT_SETUP_ALLOW_POWER_ACTIONS="false"
+assert_eq "false" "$(allow_power_actions_toml_value)" "allow_power_actions_toml_value should honor false override"
+assert_eq "0" "$(expected_allow_power_actions_for_install "/tmp/does-not-exist.toml")" "missing config should expect power actions disabled when override is false"
+
+RT_SETUP_ALLOW_POWER_ACTIONS="bogus"
+assert_eq "false" "$(allow_power_actions_toml_value)" "allow_power_actions_toml_value should fail safe to false on malformed override"
+assert_eq "0" "$(expected_allow_power_actions_for_install "/tmp/does-not-exist.toml")" "missing config should fail safe to disabled on malformed override"
+
+unset RT_SETUP_ALLOW_POWER_ACTIONS || true
+
+assert_eq "/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules" "${POWER_ACTIONS_POLKIT_RULES_PATH}" "polkit rules path constant should match expected location"
+assert_eq "/etc/sudoers.d/90-rt-forwarder-power-actions" "${POWER_ACTIONS_SUDOERS_PATH}" "legacy sudoers path constant should remain for cleanup"
 
 targets="$(reader_targets_from_env $'192.168.1.10:10000\n192.168.1.11:10000')"
 assert_eq $'192.168.1.10:10000\n192.168.1.11:10000' "${targets}" "newline reader list should be preserved"
@@ -103,9 +112,52 @@ assert_contains "${apply_script}" "TARGET_PATH=\"/usr/local/bin/rt-forwarder\"" 
 assert_contains "${apply_script}" "mv \"\${tmp_target}\" \"\${TARGET_PATH}\"" "apply helper should atomically promote binary"
 assert_contains "${apply_script}" "rm -f \"\${STAGED_PATH}\"" "apply helper should clean staged file"
 
-sudoers="$(render_power_actions_sudoers)"
-assert_contains "${sudoers}" "rt-forwarder" "sudoers should target the rt-forwarder user"
-assert_contains "${sudoers}" "systemctl --no-ask-password reboot" "sudoers should allow reboot action"
-assert_contains "${sudoers}" "systemctl --no-ask-password poweroff" "sudoers should allow poweroff action"
+polkit_rules="$(render_power_actions_polkit_rules)"
+assert_contains "${polkit_rules}" "subject.user == \"rt-forwarder\"" "polkit rules should target the rt-forwarder user"
+assert_contains "${polkit_rules}" "\"org.freedesktop.login1.reboot\"" "polkit rules should allow reboot"
+assert_contains "${polkit_rules}" "\"org.freedesktop.login1.reboot-multiple-sessions\"" "polkit rules should allow reboot with multiple sessions"
+assert_contains "${polkit_rules}" "\"org.freedesktop.login1.power-off\"" "polkit rules should allow power-off"
+assert_contains "${polkit_rules}" "\"org.freedesktop.login1.power-off-multiple-sessions\"" "polkit rules should allow power-off with multiple sessions"
+assert_contains "${polkit_rules}" "action.id == \"org.freedesktop.systemd1.manage-units\"" "polkit rules should conditionally allow manage-units"
+assert_contains "${polkit_rules}" "action.lookup(\"verb\") == \"start\"" "polkit rules should only allow start verb for manage-units"
+assert_contains "${polkit_rules}" "action.lookup(\"unit\") == \"reboot.target\"" "polkit rules should allow reboot target for manage-units"
+assert_contains "${polkit_rules}" "action.lookup(\"unit\") == \"poweroff.target\"" "polkit rules should allow poweroff target for manage-units"
+
+tmp_cfg="$(mktemp)"
+cat > "${tmp_cfg}" <<'EOF'
+[control]
+allow_power_actions = true
+EOF
+assert_eq "1" "$(config_allows_power_actions "${tmp_cfg}")" "config should enable power actions when control.allow_power_actions=true"
+
+cat > "${tmp_cfg}" <<'EOF'
+[control]
+allow_power_actions = false
+EOF
+assert_eq "0" "$(config_allows_power_actions "${tmp_cfg}")" "config should disable power actions when control.allow_power_actions=false"
+
+cat > "${tmp_cfg}" <<'EOF'
+[server]
+base_url = "https://example.com"
+EOF
+assert_eq "0" "$(config_allows_power_actions "${tmp_cfg}")" "config should default power actions to disabled when key is missing"
+
+cat > "${tmp_cfg}" <<'EOF'
+[control]
+allow_power_actions = maybe
+EOF
+assert_eq "0" "$(config_allows_power_actions "${tmp_cfg}")" "config should default power actions to disabled on parse failure"
+assert_eq "0" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should disable power actions on parse failure"
+
+rm -f "${tmp_cfg}"
+assert_eq "0" "$(config_allows_power_actions "${tmp_cfg}")" "missing config file should default power actions to disabled"
+assert_eq "1" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should enable power actions for missing config default path"
+
+cat > "${tmp_cfg}" <<'EOF'
+[server]
+base_url = "https://example.com"
+EOF
+assert_eq "0" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should disable power actions when key is missing"
+rm -f "${tmp_cfg}"
 
 echo "PASS: rt-setup helper tests"

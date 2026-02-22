@@ -1143,36 +1143,7 @@ async fn run_device_power_action(systemctl_action: &'static str) -> Result<(), (
 fn run_power_action_command(
     systemctl_action: &'static str,
 ) -> std::io::Result<std::process::Output> {
-    let direct_result = std::process::Command::new("systemctl")
-        .arg("--no-ask-password")
-        .arg(systemctl_action)
-        .output();
-    match direct_result {
-        Ok(output) if output.status.success() => Ok(output),
-        Ok(output) => {
-            if !power_action_auth_failed(&power_action_command_detail(&output)) {
-                return Ok(output);
-            }
-            match run_power_action_command_with_sudo(systemctl_action) {
-                Ok(sudo_output) => Ok(sudo_output),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(output),
-                Err(err) => Err(err),
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            run_power_action_command_with_sudo(systemctl_action)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-#[cfg(unix)]
-fn run_power_action_command_with_sudo(
-    systemctl_action: &'static str,
-) -> std::io::Result<std::process::Output> {
-    std::process::Command::new("sudo")
-        .arg("-n")
-        .arg("systemctl")
+    std::process::Command::new("systemctl")
         .arg("--no-ask-password")
         .arg(systemctl_action)
         .output()
@@ -2128,6 +2099,16 @@ target = "192.168.1.100:10000"
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn power_action_execution_does_not_use_sudo_fallback() {
+        let source = include_str!("status_http.rs");
+        assert!(
+            !source.contains("Command::new(\"sudo\")"),
+            "power actions must not invoke sudo fallback"
+        );
     }
 
     #[cfg(unix)]

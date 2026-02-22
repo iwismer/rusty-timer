@@ -25,6 +25,7 @@ FORWARDER_BIN_PATH="${INSTALL_DIR}/rt-forwarder"
 STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
+POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -225,14 +226,128 @@ WantedBy=multi-user.target
 EOF
 }
 
-render_power_actions_sudoers() {
+render_power_actions_polkit_rules() {
   cat <<EOF
-# Allow rt-forwarder to issue host reboot/poweroff from the forwarder UI.
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl --no-ask-password reboot
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl --no-ask-password poweroff
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password reboot
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password poweroff
+polkit.addRule(function(action, subject) {
+  if (subject.user == "${SERVICE_USER}") {
+    if (
+      action.id == "org.freedesktop.login1.reboot" ||
+      action.id == "org.freedesktop.login1.reboot-multiple-sessions" ||
+      action.id == "org.freedesktop.login1.power-off" ||
+      action.id == "org.freedesktop.login1.power-off-multiple-sessions"
+    ) {
+      return polkit.Result.YES;
+    }
+
+    if (action.id == "org.freedesktop.systemd1.manage-units") {
+      if (
+        action.lookup("verb") == "start" &&
+        (
+          action.lookup("unit") == "reboot.target" ||
+          action.lookup("unit") == "poweroff.target"
+        )
+      ) {
+        return polkit.Result.YES;
+      }
+    }
+  } else {
+    return polkit.Result.NOT_HANDLED;
+  }
+
+  return polkit.Result.NOT_HANDLED;
+});
 EOF
+}
+
+config_allows_power_actions() {
+  local state
+  state="$(config_power_actions_state "${1:-${CONFIG_DIR}/forwarder.toml}")"
+  if [[ "${state}" == "true" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+config_power_actions_state() {
+  local config_path="${1:-${CONFIG_DIR}/forwarder.toml}"
+  if [[ ! -f "${config_path}" ]]; then
+    printf 'missing_file\n'
+    return 0
+  fi
+
+  awk '
+    BEGIN {
+      in_control = 0
+      found = 0
+    }
+    {
+      line = $0
+      sub(/[[:space:]]*#.*/, "", line)
+
+      if (line ~ /^[[:space:]]*\[/) {
+        in_control = (line ~ /^[[:space:]]*\[control\][[:space:]]*$/)
+        next
+      }
+
+      if (!in_control) {
+        next
+      }
+
+      if (line ~ /^[[:space:]]*allow_power_actions[[:space:]]*=/) {
+        sub(/^[[:space:]]*allow_power_actions[[:space:]]*=[[:space:]]*/, "", line)
+        gsub(/[[:space:]]/, "", line)
+        line = tolower(line)
+        if (line == "true") {
+          print "true"
+        } else if (line == "false") {
+          print "false"
+        } else {
+          print "invalid"
+        }
+        found = 1
+        exit
+      }
+    }
+    END {
+      if (!found) {
+        print "missing_key"
+      }
+    }
+  ' "${config_path}"
+}
+
+expected_allow_power_actions_for_install() {
+  local config_path="${1:-${CONFIG_DIR}/forwarder.toml}"
+  local state
+  state="$(config_power_actions_state "${config_path}")"
+  case "${state}" in
+    true)
+      printf '1\n'
+      ;;
+    false|missing_key|invalid)
+      printf '0\n'
+      ;;
+    missing_file)
+      if [[ "$(allow_power_actions_toml_value)" == "true" ]]; then
+        printf '1\n'
+      else
+        printf '0\n'
+      fi
+      ;;
+    *)
+      printf '0\n'
+      ;;
+  esac
+}
+
+ensure_power_actions_prerequisites() {
+  local polkit_rules_dir
+  polkit_rules_dir="$(dirname "${POWER_ACTIONS_POLKIT_RULES_PATH}")"
+  if [[ ! -d "${polkit_rules_dir}" ]]; then
+    echo "Error: required polkit rules directory is missing: ${polkit_rules_dir}" >&2
+    exit 1
+  fi
 }
 
 install_verify_policy() {
@@ -282,6 +397,17 @@ ensure_prerequisites() {
   chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
   chmod 0750 "${CONFIG_DIR}"
   chown "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}"
+
+  local expect_allow_power_actions
+  expect_allow_power_actions="$(expected_allow_power_actions_for_install "${CONFIG_DIR}/forwarder.toml")"
+  if [[ "${expect_allow_power_actions}" == "1" ]]; then
+    local polkit_rules_dir
+    polkit_rules_dir="$(dirname "${POWER_ACTIONS_POLKIT_RULES_PATH}")"
+    if [[ ! -d "${polkit_rules_dir}" ]]; then
+      echo "Warning: power actions are currently expected to be enabled, but required polkit rules directory is missing: ${polkit_rules_dir}" >&2
+      echo "Warning: setup will fail during service install unless final configuration disables power actions or the directory is created." >&2
+    fi
+  fi
 }
 
 # ── Functions ────────────────────────────────────────────────────────
@@ -561,12 +687,18 @@ install_service() {
   # Write systemd unit file
   render_forwarder_systemd_unit > /etc/systemd/system/rt-forwarder.service
 
-  # Allow power-action UI endpoints to run reboot/poweroff non-interactively.
-  render_power_actions_sudoers > "${POWER_ACTIONS_SUDOERS_PATH}"
-  chmod 0440 "${POWER_ACTIONS_SUDOERS_PATH}"
-  chown root:root "${POWER_ACTIONS_SUDOERS_PATH}"
-  if command -v visudo >/dev/null 2>&1; then
-    visudo -cf "${POWER_ACTIONS_SUDOERS_PATH}" >/dev/null
+  # Always remove legacy sudoers policy; power actions are polkit-only.
+  rm -f "${POWER_ACTIONS_SUDOERS_PATH}"
+
+  local allow_power_actions
+  allow_power_actions="$(expected_allow_power_actions_for_install "${CONFIG_DIR}/forwarder.toml")"
+  if [[ "${allow_power_actions}" == "1" ]]; then
+    ensure_power_actions_prerequisites
+    render_power_actions_polkit_rules > "${POWER_ACTIONS_POLKIT_RULES_PATH}"
+    chmod 0644 "${POWER_ACTIONS_POLKIT_RULES_PATH}"
+    chown root:root "${POWER_ACTIONS_POLKIT_RULES_PATH}"
+  else
+    rm -f "${POWER_ACTIONS_POLKIT_RULES_PATH}"
   fi
 
   systemctl daemon-reload
