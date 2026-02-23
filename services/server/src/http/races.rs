@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use tracing::info;
 use uuid::Uuid;
 
 pub async fn list_races(State(state): State<AppState>) -> impl IntoResponse {
@@ -46,17 +47,20 @@ pub async fn create_race(
     };
 
     match repo::create_race(&state.pool, &name).await {
-        Ok(row) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({
-                "race_id": row.race_id.to_string(),
-                "name": row.name,
-                "created_at": row.created_at.to_rfc3339(),
-                "participant_count": row.participant_count,
-                "chip_count": row.chip_count,
-            })),
-        )
-            .into_response(),
+        Ok(row) => {
+            info!(race_id = %row.race_id, name = %row.name, "race created");
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "race_id": row.race_id.to_string(),
+                    "name": row.name,
+                    "created_at": row.created_at.to_rfc3339(),
+                    "participant_count": row.participant_count,
+                    "chip_count": row.chip_count,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -185,11 +189,14 @@ pub async fn upload_participants(
         .collect();
 
     match repo::replace_participants(&state.pool, race_id, &refs).await {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "imported": count })),
-        )
-            .into_response(),
+        Ok(count) => {
+            info!(race_id = %race_id, count = %count, "participants uploaded");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "imported": count })),
+            )
+                .into_response()
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -226,11 +233,14 @@ pub async fn upload_chips(
     let refs: Vec<(&str, i32)> = tuples.iter().map(|(id, bib)| (id.as_str(), *bib)).collect();
 
     match repo::replace_chips(&state.pool, race_id, &refs).await {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "imported": count })),
-        )
-            .into_response(),
+        Ok(count) => {
+            info!(race_id = %race_id, count = %count, "bibchips uploaded");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "imported": count })),
+            )
+                .into_response()
+        }
         Err(e) => internal_error(e),
     }
 }
