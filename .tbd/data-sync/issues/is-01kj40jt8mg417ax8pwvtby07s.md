@@ -3,9 +3,9 @@ type: is
 id: is-01kj40jt8mg417ax8pwvtby07s
 title: Add human-readable name field to epochs on stream details page
 kind: feature
-status: open
+status: closed
 priority: 3
-version: 5
+version: 7
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -17,6 +17,8 @@ dependencies:
     target: is-01kj4633xganepcdxs7ms2wvzz
 parent_id: is-01kj3b514za6r2c96xxn5w3wcn
 created_at: 2026-02-23T01:07:24.047Z
-updated_at: 2026-02-23T02:43:44.046Z
+updated_at: 2026-02-23T05:46:29.002Z
+closed_at: 2026-02-23T05:46:28.998Z
+close_reason: "Implemented backend + server-ui epoch naming with explicit row save; reviewed, validated, and CI green on PR #89."
 ---
 Allow users to assign a human-readable name to each epoch, displayed in the epochs table on the stream details page. No existing backend support found — requires: (1) new DB column or table for epoch metadata, (2) new API endpoints to set/get epoch names, (3) update EpochInfo type in Rust backend to include name field, (4) UI to display and edit epoch names inline in the epochs table.
