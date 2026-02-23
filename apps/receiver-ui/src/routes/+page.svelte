@@ -235,6 +235,9 @@
     streams = {
       ...streams,
       streams: streams.streams.map((stream) => {
+        if (!stream.subscribed) {
+          return stream;
+        }
         const update = updatesByKey.get(
           streamKey(stream.forwarder_id, stream.reader_ip),
         );
@@ -1040,7 +1043,7 @@
                         {" "}({stream.current_epoch_name.trim()}){/if}
                     </p>
                   {/if}
-                  {#if stream.reads_total !== undefined}
+                  {#if stream.subscribed && stream.reads_total !== undefined}
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                       reads: {stream.reads_total} total{#if stream.reads_epoch !== undefined},
                         {stream.reads_epoch} epoch{/if}

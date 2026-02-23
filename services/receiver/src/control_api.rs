@@ -168,7 +168,11 @@ impl AppState {
                 });
                 let sk =
                     crate::cache::StreamKey::new(si.forwarder_id.as_str(), si.reader_ip.as_str());
-                let counts = counts_snapshot.get(&sk);
+                let counts = if local.is_some() {
+                    counts_snapshot.get(&sk)
+                } else {
+                    None
+                };
                 streams.push(StreamEntry {
                     forwarder_id: si.forwarder_id.clone(),
                     reader_ip: si.reader_ip.clone(),
@@ -1674,6 +1678,55 @@ mod tests {
 
         assert_eq!(stream.reads_total, Some(9));
         assert_eq!(stream.reads_epoch, Some(9));
+    }
+
+    #[tokio::test]
+    async fn build_streams_response_excludes_reads_fields_for_unsubscribed_streams() {
+        let db = Db::open_in_memory().expect("open in-memory db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        let key = crate::cache::StreamKey::new("f1", "10.0.0.1");
+        for seq in 1..=5 {
+            state.stream_counts.record(&key, 3, seq);
+        }
+
+        let upstream_app = Router::new().route(
+            "/api/v1/streams",
+            get(|| async {
+                Json(serde_json::json!({
+                    "streams": [{
+                        "stream_id": "stream-1",
+                        "forwarder_id": "f1",
+                        "reader_ip": "10.0.0.1",
+                        "display_alias": "Finish",
+                        "stream_epoch": 3,
+                        "online": true,
+                        "current_epoch_name": "Heat 1"
+                    }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream listener");
+        let addr = listener.local_addr().expect("read upstream addr");
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app)
+                .await
+                .expect("serve upstream app");
+        });
+        *state.upstream_url.write().await = Some(format!("ws://{addr}"));
+        state.set_connection_state(ConnectionState::Connected).await;
+
+        let response = state.build_streams_response().await;
+        let stream = response
+            .streams
+            .iter()
+            .find(|s| s.forwarder_id == "f1" && s.reader_ip == "10.0.0.1")
+            .expect("unsubscribed upstream stream is present");
+        assert!(!stream.subscribed);
+        assert_eq!(stream.reads_total, None);
+        assert_eq!(stream.reads_epoch, None);
     }
 
     #[test]
