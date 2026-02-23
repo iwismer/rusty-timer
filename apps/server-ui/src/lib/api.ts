@@ -45,6 +45,7 @@ export interface EpochInfo {
   event_count: number;
   first_event_at: string | null;
   last_event_at: string | null;
+  name: string | null;
   is_current: boolean;
 }
 
@@ -558,6 +559,26 @@ export async function setStreamEpochRace(
   }>(`/api/v1/streams/${encodeURIComponent(streamId)}/epochs/${epoch}/race`, {
     method: "PUT",
     body: JSON.stringify({ race_id: raceId }),
+  });
+}
+
+/** PUT /api/v1/streams/{streamId}/epochs/{epoch}/name */
+export async function setStreamEpochName(
+  streamId: string,
+  epoch: number,
+  name: string | null,
+): Promise<{
+  stream_id: string;
+  stream_epoch: number;
+  name: string | null;
+}> {
+  return apiFetch<{
+    stream_id: string;
+    stream_epoch: number;
+    name: string | null;
+  }>(`/api/v1/streams/${encodeURIComponent(streamId)}/epochs/${epoch}/name`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
   });
 }
 

@@ -59,6 +59,7 @@ const epochs = [
     event_count: 6,
     first_event_at: "2026-02-22T12:00:00Z",
     last_event_at: "2026-02-22T12:30:00Z",
+    name: "Heat 1",
     is_current: true,
   },
 ];
@@ -168,6 +169,7 @@ describe("stream detail page activate-next", () => {
         event_count: 6,
         first_event_at: "2026-02-22T12:00:00Z",
         last_event_at: "2026-02-22T12:30:00Z",
+        name: "Heat 1",
         is_current: false,
       },
     ]);

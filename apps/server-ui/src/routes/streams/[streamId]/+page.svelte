@@ -38,6 +38,8 @@
     is_current: boolean;
     selected_race_id: string | null;
     saved_race_id: string | null;
+    selected_name: string;
+    saved_name: string | null;
     pending: boolean;
     status: "saved" | "error" | "incomplete";
   };
@@ -246,12 +248,15 @@
 
       epochRaceRows = epochs.map((epochInfo) => {
         const savedRaceId = savedRaceByEpoch.get(epochInfo.epoch) ?? null;
+        const normalizedSavedName = normalizeEpochName(epochInfo.name ?? "");
         return {
           epoch: epochInfo.epoch,
           event_count: epochInfo.event_count,
           is_current: epochInfo.is_current,
           selected_race_id: savedRaceId,
           saved_race_id: savedRaceId,
+          selected_name: normalizedSavedName ?? "",
+          saved_name: normalizedSavedName,
           pending: false,
           status: hasMappingFetchFailures ? "incomplete" : "saved",
         };
@@ -268,8 +273,17 @@
     }
   }
 
+  function normalizeEpochName(name: string): string | null {
+    const trimmed = name.trim();
+    return trimmed === "" ? null : trimmed;
+  }
+
   function isEpochRowDirty(row: EpochRaceRow): boolean {
-    return row.selected_race_id !== row.saved_race_id;
+    return (
+      row.selected_race_id !== row.saved_race_id ||
+      normalizeEpochName(row.selected_name) !==
+        normalizeEpochName(row.saved_name ?? "")
+    );
   }
 
   function updateEpochRaceRow(
@@ -290,9 +304,20 @@
     }));
   }
 
+  function onEpochNameInput(epoch: number, name: string): void {
+    epochAdvanceStatus = "idle";
+    updateEpochRaceRow(epoch, (row) => ({
+      ...row,
+      selected_name: name,
+      status: row.status === "incomplete" ? "incomplete" : "saved",
+    }));
+  }
+
   async function handleSaveEpochRace(epoch: number): Promise<void> {
     const row = epochRaceRows.find((candidate) => candidate.epoch === epoch);
     if (!row || !isEpochRowDirty(row) || row.pending) return;
+
+    const normalizedName = normalizeEpochName(row.selected_name);
 
     updateEpochRaceRow(epoch, (current) => ({
       ...current,
@@ -301,10 +326,23 @@
     }));
 
     try {
-      await api.setStreamEpochRace(streamId, epoch, row.selected_race_id);
+      const pendingSaves: Promise<unknown>[] = [];
+      if (row.selected_race_id !== row.saved_race_id) {
+        pendingSaves.push(
+          api.setStreamEpochRace(streamId, epoch, row.selected_race_id),
+        );
+      }
+      if (normalizedName !== row.saved_name) {
+        pendingSaves.push(
+          api.setStreamEpochName(streamId, epoch, normalizedName),
+        );
+      }
+      await Promise.all(pendingSaves);
       updateEpochRaceRow(epoch, (current) => ({
         ...current,
         saved_race_id: current.selected_race_id,
+        selected_name: normalizeEpochName(current.selected_name) ?? "",
+        saved_name: normalizeEpochName(current.selected_name),
         pending: false,
         status: "saved",
       }));
@@ -603,6 +641,11 @@
                   <th
                     class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
                   >
+                    Name
+                  </th>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
                     Save
                   </th>
                   <th
@@ -637,6 +680,18 @@
                           <option value={race.race_id}>{race.name}</option>
                         {/each}
                       </select>
+                    </td>
+                    <td class="px-3 py-2">
+                      <input
+                        data-testid={`epoch-name-input-${row.epoch}`}
+                        type="text"
+                        value={row.selected_name}
+                        disabled={row.pending}
+                        oninput={(e) => {
+                          onEpochNameInput(row.epoch, e.currentTarget.value);
+                        }}
+                        class="w-full min-w-40 text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary disabled:opacity-50"
+                      />
                     </td>
                     <td class="px-3 py-2">
                       <button

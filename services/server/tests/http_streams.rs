@@ -684,11 +684,13 @@ async fn test_list_epochs_returns_epochs_with_metadata() {
     );
     assert!(e1["first_event_at"].is_string());
     assert!(e1["last_event_at"].is_string());
+    assert!(e1["name"].is_null());
 
     assert_eq!(e2["event_count"], 1);
     assert_eq!(e2["is_current"], false);
     assert!(e2["first_event_at"].is_string());
     assert!(e2["last_event_at"].is_string());
+    assert!(e2["name"].is_null());
 }
 
 #[tokio::test]
@@ -739,11 +741,13 @@ async fn list_epochs_includes_mapped_epoch_without_events() {
     assert!(e1["first_event_at"].is_string());
     assert!(e1["last_event_at"].is_string());
     assert_eq!(e1["is_current"], true);
+    assert!(e1["name"].is_null());
 
     assert_eq!(e3["event_count"], 0);
     assert!(e3["first_event_at"].is_null());
     assert!(e3["last_event_at"].is_null());
     assert_eq!(e3["is_current"], false);
+    assert!(e3["name"].is_null());
 }
 
 #[tokio::test]
@@ -785,4 +789,197 @@ async fn test_list_epochs_not_found() {
     assert_eq!(resp.status(), 404);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn test_put_epoch_name_set_and_normalize() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epochs-name", "10.60.0.1:10000").await;
+    insert_event(&pool, stream_id, 2, 1).await;
+
+    let client = reqwest::Client::new();
+    let set_resp = client
+        .put(format!(
+            "http://{}/api/v1/streams/{}/epochs/{}/name",
+            addr, stream_id, 2
+        ))
+        .json(&serde_json::json!({ "name": "  Lap One  " }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set_resp.status(), 200);
+    let set_body: serde_json::Value = set_resp.json().await.unwrap();
+    assert_eq!(set_body["name"], "Lap One");
+
+    let list_resp = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/epochs",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+    assert_eq!(list_resp.status(), 200);
+    let list_body: serde_json::Value = list_resp.json().await.unwrap();
+    let epochs = list_body.as_array().expect("response must be an array");
+    let e2 = epochs.iter().find(|e| e["epoch"] == 2).expect("epoch 2");
+    assert_eq!(e2["name"], "Lap One");
+
+    let clear_resp = client
+        .put(format!(
+            "http://{}/api/v1/streams/{}/epochs/{}/name",
+            addr, stream_id, 2
+        ))
+        .json(&serde_json::json!({ "name": "   " }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clear_resp.status(), 200);
+    let clear_body: serde_json::Value = clear_resp.json().await.unwrap();
+    assert!(clear_body["name"].is_null());
+
+    let metadata_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM stream_epoch_metadata WHERE stream_id = $1 AND stream_epoch = $2",
+    )
+    .bind(stream_id)
+    .bind(2_i64)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(metadata_count, 0, "clear should remove durable metadata");
+}
+
+#[tokio::test]
+async fn test_put_epoch_name_clear_removes_metadata_only_epoch_from_list() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epochs-clear-phantom", "10.62.0.1:10000").await;
+    let client = reqwest::Client::new();
+
+    let set_resp = client
+        .put(format!(
+            "http://{}/api/v1/streams/{}/epochs/{}/name",
+            addr, stream_id, 9
+        ))
+        .json(&serde_json::json!({ "name": "Lap 9" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set_resp.status(), 200);
+
+    let listed_after_set = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/epochs",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+    assert_eq!(listed_after_set.status(), 200);
+    let listed_after_set_body: serde_json::Value = listed_after_set.json().await.unwrap();
+    let epochs_after_set = listed_after_set_body
+        .as_array()
+        .expect("response must be an array");
+    assert_eq!(
+        epochs_after_set.len(),
+        1,
+        "metadata-backed epoch should be listed"
+    );
+    assert_eq!(epochs_after_set[0]["epoch"], 9);
+    assert_eq!(epochs_after_set[0]["name"], "Lap 9");
+
+    let clear_resp = client
+        .put(format!(
+            "http://{}/api/v1/streams/{}/epochs/{}/name",
+            addr, stream_id, 9
+        ))
+        .json(&serde_json::json!({ "name": null }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clear_resp.status(), 200);
+
+    let listed_after_clear = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/epochs",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+    assert_eq!(listed_after_clear.status(), 200);
+    let listed_after_clear_body: serde_json::Value = listed_after_clear.json().await.unwrap();
+    let epochs_after_clear = listed_after_clear_body
+        .as_array()
+        .expect("response must be an array");
+    assert_eq!(
+        epochs_after_clear.len(),
+        0,
+        "clearing name should remove metadata-only epoch from list"
+    );
+
+    let metadata_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM stream_epoch_metadata WHERE stream_id = $1 AND stream_epoch = $2",
+    )
+    .bind(stream_id)
+    .bind(9_i64)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(metadata_count, 0, "clear should delete metadata row");
+}
+
+#[tokio::test]
+async fn test_put_epoch_name_not_found() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let client = reqwest::Client::new();
+    let fake_stream_id = "00000000-0000-0000-0000-000000000000";
+    let resp = client
+        .put(format!(
+            "http://{}/api/v1/streams/{}/epochs/{}/name",
+            addr, fake_stream_id, 1
+        ))
+        .json(&serde_json::json!({ "name": "Lap 1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn test_put_epoch_name_invalid_payload_returns_bad_request() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epochs-invalid", "10.61.0.1:10000").await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .put(format!(
+            "http://{}/api/v1/streams/{}/epochs/{}/name",
+            addr, stream_id, 1
+        ))
+        .json(&serde_json::json!({ "name": 123 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "BAD_REQUEST");
 }

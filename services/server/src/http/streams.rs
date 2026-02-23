@@ -137,6 +137,7 @@ pub async fn list_epochs(
     // Query distinct epochs from both events and epoch-race mappings with metadata.
     let rows = sqlx::query(
         r#"SELECT epochs.epoch AS epoch,
+                  em.name AS name,
                   COUNT(e.stream_id) AS event_count,
                   MIN(e.received_at) AS first_event_at,
                   MAX(e.received_at) AS last_event_at,
@@ -149,11 +150,17 @@ pub async fn list_epochs(
                SELECT stream_epoch AS epoch
                FROM stream_epoch_races
                WHERE stream_id = $1
+               UNION
+               SELECT stream_epoch AS epoch
+               FROM stream_epoch_metadata
+               WHERE stream_id = $1 AND name IS NOT NULL
            ) AS epochs
            JOIN streams s ON s.stream_id = $1
+           LEFT JOIN stream_epoch_metadata em
+             ON em.stream_id = $1 AND em.stream_epoch = epochs.epoch
            LEFT JOIN events e
              ON e.stream_id = $1 AND e.stream_epoch = epochs.epoch
-           GROUP BY epochs.epoch, s.stream_epoch
+           GROUP BY epochs.epoch, em.name, s.stream_epoch
            ORDER BY epochs.epoch ASC"#,
     )
     .bind(stream_id)
@@ -166,6 +173,7 @@ pub async fn list_epochs(
                 .into_iter()
                 .map(|r| {
                     let epoch: i64 = r.get("epoch");
+                    let name: Option<String> = r.get("name");
                     let event_count: i64 = r.get("event_count");
                     let first_event_at: Option<chrono::DateTime<chrono::Utc>> =
                         r.get("first_event_at");
@@ -174,6 +182,7 @@ pub async fn list_epochs(
                     let is_current: bool = r.get("is_current");
                     serde_json::json!({
                         "epoch": epoch,
+                        "name": name,
                         "event_count": event_count,
                         "first_event_at": first_event_at.map(|ts| ts.to_rfc3339()),
                         "last_event_at": last_event_at.map(|ts| ts.to_rfc3339()),
@@ -185,4 +194,69 @@ pub async fn list_epochs(
         }
         Err(e) => internal_error(e),
     }
+}
+
+pub async fn put_epoch_name(
+    State(state): State<AppState>,
+    Path((stream_id, epoch)): Path<(Uuid, i64)>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let normalized_name = match body.get("name") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(name)) => {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        Some(_) => return bad_request("name must be a string or null"),
+        None => return bad_request("name is required"),
+    };
+
+    let stream_exists = sqlx::query("SELECT 1 FROM streams WHERE stream_id = $1")
+        .bind(stream_id)
+        .fetch_optional(&state.pool)
+        .await;
+    match stream_exists {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found("stream not found"),
+        Err(e) => return internal_error(e),
+    }
+
+    let query_result = match normalized_name.clone() {
+        Some(name) => sqlx::query(
+            "INSERT INTO stream_epoch_metadata (stream_id, stream_epoch, name) VALUES ($1, $2, $3)
+                 ON CONFLICT (stream_id, stream_epoch) DO UPDATE
+                 SET name = EXCLUDED.name",
+        )
+        .bind(stream_id)
+        .bind(epoch)
+        .bind(name)
+        .execute(&state.pool)
+        .await,
+        None => {
+            sqlx::query(
+                "DELETE FROM stream_epoch_metadata WHERE stream_id = $1 AND stream_epoch = $2",
+            )
+            .bind(stream_id)
+            .bind(epoch)
+            .execute(&state.pool)
+            .await
+        }
+    };
+    if let Err(e) = query_result {
+        return internal_error(e);
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "stream_id": stream_id,
+            "stream_epoch": epoch,
+            "name": normalized_name,
+        })),
+    )
+        .into_response()
 }

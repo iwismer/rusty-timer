@@ -58,6 +58,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::streams::list_epochs),
         )
         .route(
+            "/api/v1/streams/{stream_id}/epochs/{epoch}/name",
+            axum::routing::put(http::streams::put_epoch_name),
+        )
+        .route(
             "/api/v1/streams/{stream_id}/epochs/{epoch}/race",
             axum::routing::put(http::stream_epoch_races::put_stream_epoch_race),
         )

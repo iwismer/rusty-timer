@@ -26,6 +26,7 @@ vi.mock("$lib/api", async () => {
     getStreamEpochs: vi.fn(),
     getRaceStreamEpochMappings: vi.fn(),
     setStreamEpochRace: vi.fn(),
+    setStreamEpochName: vi.fn(),
     setForwarderRace: vi.fn(),
     activateNextStreamEpochForRace: vi.fn(),
   };
@@ -77,6 +78,7 @@ const epochs = [
     event_count: 4,
     first_event_at: "2026-02-22T11:00:00Z",
     last_event_at: "2026-02-22T11:30:00Z",
+    name: "Warmup",
     is_current: false,
   },
   {
@@ -84,6 +86,7 @@ const epochs = [
     event_count: 6,
     first_event_at: "2026-02-22T12:00:00Z",
     last_event_at: "2026-02-22T12:30:00Z",
+    name: null,
     is_current: true,
   },
 ];
@@ -134,6 +137,11 @@ describe("stream detail page epoch race mapping", () => {
       stream_id: "abc-123",
       stream_epoch: 1,
       race_id: "race-1",
+    });
+    vi.mocked(api.setStreamEpochName).mockResolvedValue({
+      stream_id: "abc-123",
+      stream_epoch: 1,
+      name: "Warmup",
     });
     vi.mocked(api.activateNextStreamEpochForRace).mockResolvedValue();
 
@@ -200,6 +208,33 @@ describe("stream detail page epoch race mapping", () => {
 
     const select = await screen.findByTestId("epoch-race-select-1");
     expect(select).toHaveValue("race-2");
+    expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent("Saved");
+    expect(screen.getByTestId("epoch-race-save-1")).toBeDisabled();
+  });
+
+  it("treats whitespace-padded saved names as clean on initial load", async () => {
+    vi.mocked(api.getStreamEpochs).mockResolvedValue([
+      {
+        epoch: 1,
+        event_count: 4,
+        first_event_at: "2026-02-22T11:00:00Z",
+        last_event_at: "2026-02-22T11:30:00Z",
+        name: "  Warmup  ",
+        is_current: false,
+      },
+      {
+        epoch: 2,
+        event_count: 6,
+        first_event_at: "2026-02-22T12:00:00Z",
+        last_event_at: "2026-02-22T12:30:00Z",
+        name: null,
+        is_current: true,
+      },
+    ]);
+
+    render(Page);
+
+    await screen.findByTestId("epoch-name-input-1");
     expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent("Saved");
     expect(screen.getByTestId("epoch-race-save-1")).toBeDisabled();
   });
@@ -288,6 +323,51 @@ describe("stream detail page epoch race mapping", () => {
     });
   });
 
+  it("saves normalized epoch name when row Save is clicked", async () => {
+    render(Page);
+
+    const nameInput = await screen.findByTestId("epoch-name-input-1");
+    await fireEvent.input(nameInput, { target: { value: "  Finals  " } });
+    await fireEvent.click(screen.getByTestId("epoch-race-save-1"));
+
+    await waitFor(() => {
+      expect(api.setStreamEpochName).toHaveBeenCalledWith(
+        "abc-123",
+        1,
+        "Finals",
+      );
+    });
+  });
+
+  it("does not call race mapping API when only name changed", async () => {
+    render(Page);
+
+    const nameInput = await screen.findByTestId("epoch-name-input-1");
+    await fireEvent.input(nameInput, { target: { value: "Finals" } });
+    await fireEvent.click(screen.getByTestId("epoch-race-save-1"));
+
+    await waitFor(() => {
+      expect(api.setStreamEpochName).toHaveBeenCalledWith(
+        "abc-123",
+        1,
+        "Finals",
+      );
+    });
+    expect(api.setStreamEpochRace).not.toHaveBeenCalled();
+  });
+
+  it("normalizes blank epoch name to null on Save", async () => {
+    render(Page);
+
+    const nameInput = await screen.findByTestId("epoch-name-input-1");
+    await fireEvent.input(nameInput, { target: { value: "   " } });
+    await fireEvent.click(screen.getByTestId("epoch-race-save-1"));
+
+    await waitFor(() => {
+      expect(api.setStreamEpochName).toHaveBeenCalledWith("abc-123", 1, null);
+    });
+  });
+
   it("shows success state after row save succeeds", async () => {
     render(Page);
 
@@ -373,6 +453,7 @@ describe("stream detail page epoch race mapping", () => {
           event_count: 0,
           first_event_at: null,
           last_event_at: null,
+          name: null,
           is_current: true,
         },
       ]);

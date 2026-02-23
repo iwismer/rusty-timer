@@ -14,6 +14,10 @@ const EPOCH_RACE_MIGRATION_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/migrations/0007_stream_epoch_races_and_receiver_epoch_cursors.sql"
 );
+const EPOCH_METADATA_MIGRATION_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/migrations/0008_stream_epoch_metadata.sql"
+);
 
 fn read_migration() -> String {
     std::fs::read_to_string(MIGRATION_PATH)
@@ -29,6 +33,12 @@ fn read_index_migration() -> String {
 fn read_epoch_race_migration() -> String {
     std::fs::read_to_string(EPOCH_RACE_MIGRATION_PATH).expect(
         "Migration file should exist at services/server/migrations/0007_stream_epoch_races_and_receiver_epoch_cursors.sql",
+    )
+}
+
+fn read_epoch_metadata_migration() -> String {
+    std::fs::read_to_string(EPOCH_METADATA_MIGRATION_PATH).expect(
+        "Migration file should exist at services/server/migrations/0008_stream_epoch_metadata.sql",
     )
 }
 
@@ -468,5 +478,27 @@ fn migration_changes_receiver_cursors_pk_to_include_epoch() {
     assert!(
         sql.contains("PRIMARY KEY (receiver_id, stream_id, stream_epoch)"),
         "0007 migration must set receiver_cursors PK (receiver_id, stream_id, stream_epoch)"
+    );
+}
+
+#[test]
+fn migration_creates_stream_epoch_metadata_table() {
+    let sql = read_epoch_metadata_migration();
+    assert!(
+        sql.contains("CREATE TABLE stream_epoch_metadata"),
+        "0008 migration must define stream_epoch_metadata table"
+    );
+}
+
+#[test]
+fn migration_stream_epoch_metadata_has_expected_pk_and_name_column() {
+    let sql = read_epoch_metadata_migration();
+    assert!(
+        sql.contains("PRIMARY KEY (stream_id, stream_epoch)"),
+        "0008 migration must define stream_epoch_metadata PK (stream_id, stream_epoch)"
+    );
+    assert!(
+        sql.contains("name TEXT"),
+        "0008 migration must define nullable name column"
     );
 }
