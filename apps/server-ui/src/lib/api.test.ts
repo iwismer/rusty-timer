@@ -613,4 +613,44 @@ describe("server_api client", () => {
     );
     await expect(setStreamEpochRace("bad-id", 7, "race-1")).rejects.toThrow();
   });
+
+  it("activateNextStreamEpochForRace sends POST /api/v1/races/{id}/streams/{streamId}/epochs/activate-next", async () => {
+    const { activateNextStreamEpochForRace } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+
+    await expect(
+      activateNextStreamEpochForRace("race-1", "abc-123"),
+    ).resolves.toBeUndefined();
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/races/race-1/streams/abc-123/epochs/activate-next",
+      ),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("activateNextStreamEpochForRace URL-encodes race and stream IDs", async () => {
+    const { activateNextStreamEpochForRace } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+
+    await activateNextStreamEpochForRace("race/1", "abc/123");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/races/race%2F1/streams/abc%2F123/epochs/activate-next",
+      ),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 });

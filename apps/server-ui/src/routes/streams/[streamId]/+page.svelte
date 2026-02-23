@@ -41,6 +41,9 @@
     selected_race_id: string | null;
     saved_race_id: string | null;
     pending: boolean;
+    activate_pending: boolean;
+    activate_request_token: number | null;
+    activate_status: "idle" | "error";
     status: "saved" | "error" | "incomplete";
   };
   let epochRaceRows = $state<EpochRaceRow[]>([]);
@@ -48,6 +51,7 @@
   let epochRaceRowsError: string | null = $state(null);
   let epochRaceRowsHydrationIncomplete = $state(false);
   let epochRaceLoadVersion = 0;
+  let epochRaceActivateRequestCounter = 0;
 
   let streamId = $derived($page.params.streamId!);
   let stream = $derived(
@@ -255,6 +259,9 @@
           selected_race_id: savedRaceId,
           saved_race_id: savedRaceId,
           pending: false,
+          activate_pending: false,
+          activate_request_token: null,
+          activate_status: "idle",
           status: hasMappingFetchFailures ? "incomplete" : "saved",
         };
       });
@@ -286,6 +293,9 @@
   function onEpochRaceSelectChange(epoch: number, raceId: string | null): void {
     updateEpochRaceRow(epoch, (row) => ({
       ...row,
+      activate_pending: false,
+      activate_request_token: null,
+      activate_status: "idle",
       selected_race_id: raceId,
       status: row.status === "incomplete" ? "incomplete" : "saved",
     }));
@@ -298,6 +308,7 @@
     updateEpochRaceRow(epoch, (current) => ({
       ...current,
       pending: true,
+      activate_status: "idle",
       status: "saved",
     }));
 
@@ -318,9 +329,58 @@
     }
   }
 
+  async function handleActivateNextEpoch(epoch: number): Promise<void> {
+    const row = epochRaceRows.find((candidate) => candidate.epoch === epoch);
+    const raceId = row?.saved_race_id ?? null;
+    if (
+      !row ||
+      !raceId ||
+      isEpochRowDirty(row) ||
+      row.pending ||
+      row.activate_pending
+    ) {
+      return;
+    }
+    const requestToken = ++epochRaceActivateRequestCounter;
+
+    updateEpochRaceRow(epoch, (current) => ({
+      ...current,
+      activate_pending: true,
+      activate_request_token: requestToken,
+      activate_status: "idle",
+    }));
+
+    try {
+      await api.activateNextStreamEpochForRace(raceId, streamId);
+      updateEpochRaceRow(epoch, (current) => ({
+        ...(current.activate_request_token !== requestToken
+          ? current
+          : {
+              ...current,
+              activate_pending: false,
+              activate_request_token: null,
+              activate_status: "idle",
+            }),
+      }));
+    } catch {
+      updateEpochRaceRow(epoch, (current) => ({
+        ...(current.activate_request_token !== requestToken
+          ? current
+          : {
+              ...current,
+              activate_pending: false,
+              activate_request_token: null,
+              activate_status: "error",
+            }),
+      }));
+    }
+  }
+
   function epochRowStatusText(row: EpochRaceRow): string {
     if (row.pending) return "Saving...";
+    if (row.activate_pending) return "Activating...";
     if (row.status === "error") return "Error";
+    if (row.activate_status === "error") return "Activate failed";
     if (isEpochRowDirty(row)) return "Unsaved";
     if (row.status === "incomplete") return "Unverified";
     return "Saved";
@@ -592,6 +652,11 @@
                   <th
                     class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
                   >
+                    Activate
+                  </th>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
                     Status
                   </th>
                 </tr>
@@ -630,6 +695,21 @@
                         class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {row.pending ? "Saving..." : "Save"}
+                      </button>
+                    </td>
+                    <td class="px-3 py-2">
+                      <button
+                        data-testid={`epoch-race-activate-next-${row.epoch}`}
+                        onclick={() => void handleActivateNextEpoch(row.epoch)}
+                        disabled={row.pending ||
+                          row.activate_pending ||
+                          isEpochRowDirty(row) ||
+                          !row.saved_race_id}
+                        class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {row.activate_pending
+                          ? "Activating..."
+                          : "Activate Next"}
                       </button>
                     </td>
                     <td class="px-3 py-2">

@@ -570,6 +570,17 @@ export async function getRaceStreamEpochMappings(
   );
 }
 
+/** POST /api/v1/races/{raceId}/streams/{streamId}/epochs/activate-next */
+export async function activateNextStreamEpochForRace(
+  raceId: string,
+  streamId: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/races/${encodeURIComponent(raceId)}/streams/${encodeURIComponent(streamId)}/epochs/activate-next`,
+    { method: "POST" },
+  );
+}
+
 /** GET /api/v1/races/{raceId}/participants */
 export async function getParticipants(
   raceId: string,
