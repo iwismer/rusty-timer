@@ -269,6 +269,53 @@ describe("receiver page", () => {
     });
   });
 
+  it("adds a targeted replay row when add row is clicked", async () => {
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    expect(screen.getByTestId("targeted-row-stream-0")).toBeInTheDocument();
+    expect(screen.queryByTestId("targeted-row-stream-1")).toBeNull();
+
+    const addRowButton = await screen.findByTestId("add-targeted-row-btn");
+    await fireEvent.click(addRowButton);
+
+    expect(screen.getByTestId("targeted-row-stream-1")).toBeInTheDocument();
+    expect(screen.getByTestId("targeted-row-epoch-1")).toBeInTheDocument();
+    expect(screen.getByTestId("targeted-row-from-seq-1")).toBeInTheDocument();
+    expect(screen.getByTestId("remove-targeted-row-1")).toBeInTheDocument();
+  });
+
+  it("removes a targeted replay row when remove is clicked", async () => {
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    const addRowButton = await screen.findByTestId("add-targeted-row-btn");
+    await fireEvent.click(addRowButton);
+    expect(screen.getByTestId("targeted-row-stream-1")).toBeInTheDocument();
+
+    const removeSecondRowButton = await screen.findByTestId(
+      "remove-targeted-row-1",
+    );
+    await fireEvent.click(removeSecondRowButton);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("targeted-row-stream-1")).toBeNull();
+    });
+    expect(screen.getByTestId("targeted-row-stream-0")).toBeInTheDocument();
+  });
+
   it("applies latest selection after in-flight request settles", async () => {
     const firstApply = deferred<void>();
     apiMocks.putSelection.mockReset();
