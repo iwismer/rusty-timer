@@ -23,7 +23,9 @@
       "Bash(gh pr checks:*)",
       "Bash(tbd sync:*)",
       "Bash(tbd status:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(tbd ready:*)",
+      "Bash(tbd blocked:*)"
     ]
   }
 }
