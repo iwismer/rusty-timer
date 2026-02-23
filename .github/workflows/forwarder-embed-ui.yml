@@ -53,7 +53,7 @@ jobs:
 
       - name: Install Rollup Linux optional dependency workaround
         if: runner.os == 'Linux'
-        run: npm install --no-save @rollup/rollup-linux-x64-gnu
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu
 
       - name: Build and test forwarder with embedded UI
         run: cargo test -p forwarder --features embed-ui --test ui_embed_fallback
