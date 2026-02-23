@@ -5,9 +5,10 @@ title: "[Track H] ReaderStatus interface missing current_epoch_name field — op
 kind: task
 status: open
 priority: 2
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8ys91pgjb7mw2e1qc456
 created_at: 2026-02-23T13:38:40.309Z
-updated_at: 2026-02-23T13:38:40.309Z
+updated_at: 2026-02-23T13:52:58.518Z
 ---

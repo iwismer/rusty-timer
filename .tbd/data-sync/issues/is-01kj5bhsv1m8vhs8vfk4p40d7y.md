@@ -5,9 +5,10 @@ title: "[Track E] No rollback path documented for migration 0007 receiver_cursor
 kind: bug
 status: open
 priority: 1
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8y6cq49qakqd7ekv2hcj
 created_at: 2026-02-23T13:38:19.614Z
-updated_at: 2026-02-23T13:38:19.614Z
+updated_at: 2026-02-23T13:52:57.564Z
 ---

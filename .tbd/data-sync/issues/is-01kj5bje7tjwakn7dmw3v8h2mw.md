@@ -5,9 +5,10 @@ title: "[Track H] resetEpoch() response (new_epoch) discarded — operator gets 
 kind: task
 status: open
 priority: 3
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8ys91pgjb7mw2e1qc456
 created_at: 2026-02-23T13:38:40.505Z
-updated_at: 2026-02-23T13:38:40.505Z
+updated_at: 2026-02-23T13:52:58.705Z
 ---

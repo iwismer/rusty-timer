@@ -5,9 +5,10 @@ title: "[Track J] No troubleshooting guidance for selection validation errors (4
 kind: task
 status: open
 priority: 2
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8z5wm1p5ztc6c2dnhgeq
 created_at: 2026-02-23T13:38:41.085Z
-updated_at: 2026-02-23T13:38:41.085Z
+updated_at: 2026-02-23T13:52:59.680Z
 ---

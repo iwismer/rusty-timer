@@ -5,9 +5,10 @@ title: "[Track D] Percent-encoding validation rejects valid paths (status_http.r
 kind: bug
 status: open
 priority: 1
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8y01f4fn741cd7jsbpq8
 created_at: 2026-02-23T13:38:18.775Z
-updated_at: 2026-02-23T13:38:18.775Z
+updated_at: 2026-02-23T13:52:56.785Z
 ---

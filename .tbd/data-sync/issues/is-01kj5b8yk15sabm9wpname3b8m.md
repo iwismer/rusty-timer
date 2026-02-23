@@ -5,9 +5,10 @@ title: "Track G: Server UI (SvelteKit) review (PR #89)"
 kind: task
 status: open
 priority: 2
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8qc8vt6ecm216tkhw2ht
 created_at: 2026-02-23T13:33:29.568Z
-updated_at: 2026-02-23T13:33:29.568Z
+updated_at: 2026-02-23T13:52:41.239Z
 ---

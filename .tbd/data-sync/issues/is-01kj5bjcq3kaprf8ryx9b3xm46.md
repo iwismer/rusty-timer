@@ -5,9 +5,10 @@ title: "[Track B] Migrations 0007/0008 CREATE TABLE statements lack IF NOT EXIST
 kind: task
 status: open
 priority: 2
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8y6cq49qakqd7ekv2hcj
 created_at: 2026-02-23T13:38:38.945Z
-updated_at: 2026-02-23T13:38:38.945Z
+updated_at: 2026-02-23T13:52:57.752Z
 ---

@@ -5,9 +5,10 @@ title: "[Track E] sqlx offline cache not updated after migrations 0007/0008 — 
 kind: bug
 status: open
 priority: 1
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8y6cq49qakqd7ekv2hcj
 created_at: 2026-02-23T13:38:19.076Z
-updated_at: 2026-02-23T13:38:19.076Z
+updated_at: 2026-02-23T13:52:57.175Z
 ---

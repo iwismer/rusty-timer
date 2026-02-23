@@ -5,9 +5,10 @@ title: "[Track E] Migration 0007 receiver_cursors PRIMARY KEY change lacks idemp
 kind: bug
 status: open
 priority: 1
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8y6cq49qakqd7ekv2hcj
 created_at: 2026-02-23T13:38:19.355Z
-updated_at: 2026-02-23T13:38:19.355Z
+updated_at: 2026-02-23T13:52:57.371Z
 ---

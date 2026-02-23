@@ -5,9 +5,10 @@ title: "[Track C] State transition edge cases untested — no tests for replace-
 kind: task
 status: open
 priority: 2
-version: 1
+version: 2
 labels: []
 dependencies: []
+parent_id: is-01kj5b8xsnnzzwzb6t4nbpbnw5
 created_at: 2026-02-23T13:38:39.145Z
-updated_at: 2026-02-23T13:38:39.145Z
+updated_at: 2026-02-23T13:52:55.993Z
 ---
