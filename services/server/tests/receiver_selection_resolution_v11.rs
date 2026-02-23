@@ -878,3 +878,259 @@ async fn test_race_selection_applied_warns_when_current_scope_resolves_no_stream
         other => panic!("expected selection_applied, got {:?}", other),
     }
 }
+
+/// Regression: Race/Current + LiveOnly with a new receiver (no stored cursors,
+/// no prior events) should still deliver live events sent after connect.
+#[tokio::test]
+async fn test_race_current_live_only_delivers_events_when_no_prior_events_exist() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-race", "receiver", b"rcv-race-token").await;
+
+    let race_id = insert_race(&pool, "live-only-no-events").await;
+    map_epoch(&pool, "10.30.0.1:10000", 1, &race_id).await;
+
+    // --- receiver connects BEFORE any events have been ingested ---
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-race-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-race".to_owned(),
+        selection: ReceiverSelection::Race {
+            race_id,
+            epoch_scope: EpochScope::Current,
+        },
+        replay_policy: ReplayPolicy::LiveOnly,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    // heartbeat + selection_applied
+    let _ = rcv.recv_message().await.unwrap();
+    match rcv.recv_message().await.unwrap() {
+        WsMessage::ReceiverSelectionApplied(applied) => {
+            assert_eq!(applied.resolved_target_count, 1);
+        }
+        other => panic!("expected selection_applied, got {:?}", other),
+    }
+
+    // No events should arrive yet (nothing has been sent)
+    match tokio::time::timeout(Duration::from_millis(200), rcv.recv_message()).await {
+        Err(_) => {} // timeout = correct
+        Ok(Ok(other)) => panic!("expected nothing, got {:?}", other),
+        Ok(Err(_)) => {}
+    }
+
+    // --- forwarder sends the very first event ---
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "first".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-23T12:00:00.000Z".to_owned(),
+            raw_read_line: "FIRST_EVER".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap(); // forwarder ack
+
+    // receiver MUST get the live event
+    match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+        Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+            assert_eq!(batch.events.len(), 1);
+            assert_eq!(batch.events[0].raw_read_line, "FIRST_EVER");
+        }
+        Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
+        Ok(Err(e)) => panic!("recv error: {}", e),
+        Err(_) => panic!(
+            "timeout waiting for live event — Race/Current LiveOnly failed with no prior events"
+        ),
+    }
+}
+
+/// Regression: Race/Current + LiveOnly after epoch bump — the stream_epoch in
+/// the DB is advanced (epoch 2) but the forwarder is still sending epoch 1
+/// events. A new LiveOnly receiver should still receive those stale-epoch
+/// events rather than silently filtering them.
+#[tokio::test]
+async fn test_race_current_live_only_delivers_stale_epoch_events_when_stream_epoch_advanced() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-race", "receiver", b"rcv-race-token").await;
+
+    // Seed one epoch-1 event so the stream is established
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session.clone(),
+        batch_id: "seed".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
+            raw_read_line: "SEED_E1".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    // Simulate stream_epoch being advanced ahead of real events (e.g. via epoch
+    // reset command that hasn't been processed by the forwarder yet).
+    sqlx::query(
+        "UPDATE streams SET stream_epoch = 2 WHERE forwarder_id = 'fwd-race' AND reader_ip = '10.30.0.1:10000'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Map epoch 2 to the race (Current scope will match since stream_epoch = 2)
+    let race_id = insert_race(&pool, "stale-epoch-live-only").await;
+    map_epoch(&pool, "10.30.0.1:10000", 2, &race_id).await;
+
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-race-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-race".to_owned(),
+        selection: ReceiverSelection::Race {
+            race_id,
+            epoch_scope: EpochScope::Current,
+        },
+        replay_policy: ReplayPolicy::LiveOnly,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    let _ = rcv.recv_message().await.unwrap();
+    match rcv.recv_message().await.unwrap() {
+        WsMessage::ReceiverSelectionApplied(applied) => {
+            assert_eq!(applied.resolved_target_count, 1);
+        }
+        other => panic!("expected selection_applied, got {:?}", other),
+    }
+
+    // Forwarder sends an epoch 1 event (still at old epoch)
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "stale".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 2,
+            reader_timestamp: "2026-02-23T10:00:01.000Z".to_owned(),
+            raw_read_line: "STALE_E1_LIVE".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    // The receiver should get the event even though it's at a stale epoch,
+    // because the LiveOnly cursor should be based on the DB tail (epoch 1),
+    // not the stream's current_stream_epoch (epoch 2).
+    match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+        Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+            assert_eq!(batch.events.len(), 1);
+            assert_eq!(batch.events[0].raw_read_line, "STALE_E1_LIVE");
+        }
+        Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
+        Ok(Err(e)) => panic!("recv error: {}", e),
+        Err(_) => panic!(
+            "timeout — LiveOnly receiver did not receive stale-epoch event after stream_epoch advance"
+        ),
+    }
+}
+
+/// Regression: LiveOnly + stream_epoch advanced to 2 with NO events at all in
+/// the DB. The forwarder is still sending epoch 1 events. Without the fix, the
+/// LiveOnly fallback cursor of (current_stream_epoch, 0) = (2, 0) would filter
+/// all epoch 1 events, causing "no reads at all".
+#[tokio::test]
+async fn test_live_only_no_events_stale_epoch_cursor_does_not_filter_old_epoch() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-race", "receiver", b"rcv-race-token").await;
+
+    // Advance stream_epoch to 2 WITHOUT any events existing.
+    // This can happen if an epoch reset was triggered but the forwarder hasn't
+    // sent any events with the new epoch yet.
+    sqlx::query(
+        "UPDATE streams SET stream_epoch = 2 WHERE forwarder_id = 'fwd-race' AND reader_ip = '10.30.0.1:10000'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let race_id = insert_race(&pool, "no-events-stale").await;
+    map_epoch(&pool, "10.30.0.1:10000", 2, &race_id).await;
+
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-race-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-race".to_owned(),
+        selection: ReceiverSelection::Race {
+            race_id,
+            epoch_scope: EpochScope::Current,
+        },
+        replay_policy: ReplayPolicy::LiveOnly,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    let _ = rcv.recv_message().await.unwrap();
+    match rcv.recv_message().await.unwrap() {
+        WsMessage::ReceiverSelectionApplied(applied) => {
+            assert_eq!(applied.resolved_target_count, 1);
+        }
+        other => panic!("expected selection_applied, got {:?}", other),
+    }
+
+    // Forwarder sends event at epoch 1 (hasn't processed epoch reset yet)
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "old-epoch".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-23T12:00:00.000Z".to_owned(),
+            raw_read_line: "OLD_EPOCH_EVENT".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+        Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+            assert_eq!(batch.events.len(), 1);
+            assert_eq!(batch.events[0].raw_read_line, "OLD_EPOCH_EVENT");
+        }
+        Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
+        Ok(Err(e)) => panic!("recv error: {}", e),
+        Err(_) => panic!(
+            "timeout — LiveOnly cursor filtered stale-epoch events when no events existed in DB"
+        ),
+    }
+}

@@ -1051,7 +1051,11 @@ async fn compute_selection_start_cursor(
         }
         ReplayPolicy::LiveOnly | ReplayPolicy::Targeted => {
             let tail = fetch_max_event_cursor(&state.pool, target.stream_id).await?;
-            Ok(tail.unwrap_or((target.current_stream_epoch, 0)))
+            // When no events exist yet, use (1, 0) rather than
+            // (current_stream_epoch, 0).  If the stream_epoch was advanced
+            // ahead of actual event ingestion the higher fallback would
+            // silently filter every stale-epoch event via cursor_gt.
+            Ok(tail.unwrap_or((1, 0)))
         }
     }
 }

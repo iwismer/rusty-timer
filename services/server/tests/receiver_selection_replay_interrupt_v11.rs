@@ -138,6 +138,76 @@ async fn live_only_policy_skips_backfill_on_connect() {
     }
 }
 
+/// Regression: LiveOnly with a brand-new receiver (no stored cursors) and
+/// no pre-existing events in the DB should still deliver live events that
+/// arrive after the receiver connects.
+#[tokio::test]
+async fn live_only_delivers_events_when_no_prior_events_exist() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-new", "receiver", b"rcv-new-token").await;
+
+    // --- receiver connects BEFORE any events have been ingested ---
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-new-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-new".to_owned(),
+        selection: ReceiverSelection::Manual {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-ri".to_owned(),
+                reader_ip: "10.40.0.1:10000".to_owned(),
+            }],
+        },
+        replay_policy: ReplayPolicy::LiveOnly,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    // heartbeat + selection_applied
+    let _ = rcv.recv_message().await.unwrap();
+    let _ = rcv.recv_message().await.unwrap();
+
+    // No backfill expected (no events exist at all)
+    match tokio::time::timeout(Duration::from_millis(200), rcv.recv_message()).await {
+        Err(_) => {} // timeout = correct
+        Ok(Ok(other)) => panic!("expected nothing, got {:?}", other),
+        Ok(Err(_)) => {}
+    }
+
+    // --- forwarder sends the very first event ---
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "first".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-ri".to_owned(),
+            reader_ip: "10.40.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-23T12:00:00.000Z".to_owned(),
+            raw_read_line: "FIRST_EVER".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap(); // forwarder ack
+
+    // receiver MUST get the live event
+    match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+        Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+            assert_eq!(batch.events.len(), 1);
+            assert_eq!(batch.events[0].raw_read_line, "FIRST_EVER");
+        }
+        Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
+        Ok(Err(e)) => panic!("recv error: {}", e),
+        Err(_) => panic!("timeout waiting for live event — LiveOnly failed with no prior events"),
+    }
+}
+
 #[tokio::test]
 async fn targeted_policy_replays_only_explicit_stream_epochs() {
     let (pool, addr) = start_server().await;
