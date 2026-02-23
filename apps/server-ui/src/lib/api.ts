@@ -138,6 +138,11 @@ export function epochExportCsvUrl(streamId: string, epoch: number): string {
   return `${BASE}/api/v1/streams/${streamId}/epochs/${epoch}/export.csv`;
 }
 
+/** Returns the href for the per-epoch export.txt download (no fetch needed — direct link). */
+export function epochExportTxtUrl(streamId: string, epoch: number): string {
+  return `${BASE}/api/v1/streams/${streamId}/epochs/${epoch}/export.txt`;
+}
+
 /** POST /api/v1/streams/{stream_id}/reset-epoch
  *  Resolves on 204. Throws on 404, 409, or 5xx. */
 export async function resetEpoch(streamId: string): Promise<void> {

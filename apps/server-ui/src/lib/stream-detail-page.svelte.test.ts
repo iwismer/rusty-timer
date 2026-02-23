@@ -739,32 +739,48 @@ describe("stream detail page epoch race mapping", () => {
     });
   });
 
-  it("renders Export CSV links for each epoch row", async () => {
+  it("renders Export CSV and TXT links for each epoch row", async () => {
     render(Page);
 
-    const link1 = await screen.findByTestId("epoch-export-csv-1");
-    const link2 = screen.getByTestId("epoch-export-csv-2");
+    const csvLink1 = await screen.findByTestId("epoch-export-csv-1");
+    const csvLink2 = screen.getByTestId("epoch-export-csv-2");
+    const txtLink1 = screen.getByTestId("epoch-export-txt-1");
+    const txtLink2 = screen.getByTestId("epoch-export-txt-2");
 
-    expect(link1).toBeInTheDocument();
-    expect(link2).toBeInTheDocument();
+    expect(csvLink1).toBeInTheDocument();
+    expect(csvLink2).toBeInTheDocument();
+    expect(txtLink1).toBeInTheDocument();
+    expect(txtLink2).toBeInTheDocument();
 
-    expect(link1.tagName).toBe("A");
-    expect(link2.tagName).toBe("A");
+    expect(csvLink1.tagName).toBe("A");
+    expect(csvLink2.tagName).toBe("A");
+    expect(txtLink1.tagName).toBe("A");
+    expect(txtLink2.tagName).toBe("A");
 
-    expect(link1).toHaveTextContent("CSV");
-    expect(link2).toHaveTextContent("CSV");
+    expect(csvLink1).toHaveTextContent("CSV");
+    expect(csvLink2).toHaveTextContent("CSV");
+    expect(txtLink1).toHaveTextContent("TXT");
+    expect(txtLink2).toHaveTextContent("TXT");
 
     // Verify hrefs point to the per-epoch export endpoint
-    expect(link1.getAttribute("href")).toContain(
+    expect(csvLink1.getAttribute("href")).toContain(
       "/api/v1/streams/abc-123/epochs/1/export.csv",
     );
-    expect(link2.getAttribute("href")).toContain(
+    expect(csvLink2.getAttribute("href")).toContain(
       "/api/v1/streams/abc-123/epochs/2/export.csv",
+    );
+    expect(txtLink1.getAttribute("href")).toContain(
+      "/api/v1/streams/abc-123/epochs/1/export.txt",
+    );
+    expect(txtLink2.getAttribute("href")).toContain(
+      "/api/v1/streams/abc-123/epochs/2/export.txt",
     );
 
     // Verify download attribute is present
-    expect(link1).toHaveAttribute("download");
-    expect(link2).toHaveAttribute("download");
+    expect(csvLink1).toHaveAttribute("download");
+    expect(csvLink2).toHaveAttribute("download");
+    expect(txtLink1).toHaveAttribute("download");
+    expect(txtLink2).toHaveAttribute("download");
   });
 
   it("does not overwrite dirty current-epoch rows during metrics-driven count updates", async () => {
