@@ -198,17 +198,21 @@ describe("api client", () => {
   it("putSelection sends PUT body", async () => {
     const { putSelection } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(204, null));
-    await putSelection({
+    const payload = {
       selection: {
         mode: "race",
         race_id: "race-1",
         epoch_scope: "current",
       },
       replay_policy: "live_only",
-    });
+    } as const;
+    await putSelection(payload);
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/selection",
-      expect.objectContaining({ method: "PUT" }),
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
     );
   });
 

@@ -181,4 +181,38 @@ describe("receiver page", () => {
       replay_policy: "live_only",
     });
   });
+
+  it("retries queued latest selection after in-flight request fails", async () => {
+    const firstApply = deferred<void>();
+    apiMocks.putSelection.mockReset();
+    apiMocks.putSelection
+      .mockReturnValueOnce(firstApply.promise)
+      .mockResolvedValue(undefined);
+
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "live_only" },
+    });
+
+    firstApply.reject(new Error("network error"));
+
+    await waitFor(() => {
+      expect(apiMocks.putSelection).toHaveBeenCalledTimes(2);
+    });
+    expect(apiMocks.putSelection).toHaveBeenLastCalledWith({
+      selection: {
+        mode: "race",
+        race_id: "",
+        epoch_scope: "current",
+      },
+      replay_policy: "live_only",
+    });
+  });
 });

@@ -212,16 +212,20 @@
 
     selectionBusy = true;
     error = null;
-    try {
-      while (selectionApplyQueued) {
-        selectionApplyQueued = false;
+    while (selectionApplyQueued) {
+      selectionApplyQueued = false;
+      try {
         await api.putSelection(selectionPayload());
+        error = null;
+      } catch (e) {
+        error = String(e);
+        if (!selectionApplyQueued) {
+          break;
+        }
       }
-    } catch (e) {
-      error = String(e);
-    } finally {
-      selectionBusy = false;
     }
+
+    selectionBusy = false;
   }
 
   function handleSelectionModeChange(event: Event): void {
