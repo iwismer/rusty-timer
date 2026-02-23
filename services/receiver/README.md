@@ -133,6 +133,13 @@ for that stream (see Port assignment below).
 Duplicate `(forwarder_id, reader_ip)` pairs in the same request are rejected
 with `400 Bad Request`.
 
+## Selection mode and replay behavior (v1.1)
+
+- The receiver default selection mode is `manual`.
+- The receiver default replay behavior is `resume`.
+- `race/current` selection is explicit opt-in behavior and is not enabled by default.
+- Targeted replay can be operated from the receiver UI, where saves are explicit per-row actions.
+
 ## Port assignment
 
 Each subscribed stream is re-exposed as a TCP listener on localhost. The local
