@@ -41,11 +41,12 @@
     selected_race_id: string | null;
     saved_race_id: string | null;
     pending: boolean;
-    status: "saved" | "error";
+    status: "saved" | "error" | "incomplete";
   };
   let epochRaceRows = $state<EpochRaceRow[]>([]);
   let epochRaceRowsLoading = $state(false);
   let epochRaceRowsError: string | null = $state(null);
+  let epochRaceRowsHydrationIncomplete = $state(false);
   let epochRaceLoadVersion = 0;
 
   let streamId = $derived($page.params.streamId!);
@@ -215,6 +216,7 @@
     const currentVersion = ++epochRaceLoadVersion;
     epochRaceRowsLoading = true;
     epochRaceRowsError = null;
+    epochRaceRowsHydrationIncomplete = false;
 
     try {
       const epochs = await api.getStreamEpochs(id);
@@ -222,19 +224,18 @@
         epochs.map((epochInfo) => [epochInfo.epoch, null]),
       );
 
+      let hasMappingFetchFailures = false;
       if (races.length > 0) {
-        const mappingResponses = await Promise.all(
-          races.map(async (race) => {
-            try {
-              return await api.getRaceStreamEpochMappings(race.race_id);
-            } catch {
-              return { mappings: [] };
-            }
-          }),
+        const mappingResponses = await Promise.allSettled(
+          races.map((race) => api.getRaceStreamEpochMappings(race.race_id)),
         );
 
         for (const response of mappingResponses) {
-          for (const mapping of response.mappings) {
+          if (response.status !== "fulfilled") {
+            hasMappingFetchFailures = true;
+            continue;
+          }
+          for (const mapping of response.value.mappings) {
             if (mapping.stream_id !== id) continue;
             if (!savedRaceByEpoch.has(mapping.stream_epoch)) continue;
             savedRaceByEpoch.set(mapping.stream_epoch, mapping.race_id);
@@ -243,6 +244,7 @@
       }
 
       if (currentVersion !== epochRaceLoadVersion) return;
+      epochRaceRowsHydrationIncomplete = hasMappingFetchFailures;
 
       epochRaceRows = epochs.map((epochInfo) => {
         const savedRaceId = savedRaceByEpoch.get(epochInfo.epoch) ?? null;
@@ -253,13 +255,14 @@
           selected_race_id: savedRaceId,
           saved_race_id: savedRaceId,
           pending: false,
-          status: "saved",
+          status: hasMappingFetchFailures ? "incomplete" : "saved",
         };
       });
     } catch (e) {
       if (currentVersion !== epochRaceLoadVersion) return;
       epochRaceRows = [];
       epochRaceRowsError = String(e);
+      epochRaceRowsHydrationIncomplete = false;
     } finally {
       if (currentVersion === epochRaceLoadVersion) {
         epochRaceRowsLoading = false;
@@ -319,6 +322,7 @@
     if (row.pending) return "Saving...";
     if (row.status === "error") return "Error";
     if (isEpochRowDirty(row)) return "Unsaved";
+    if (row.status === "incomplete") return "Unverified";
     return "Saved";
   }
 </script>
@@ -555,6 +559,12 @@
             No epochs available for mapping.
           </p>
         {:else}
+          {#if epochRaceRowsHydrationIncomplete}
+            <p class="text-sm text-status-err mb-3 m-0">
+              Some race mappings could not be loaded. Epoch status is unverified
+              until reloaded or explicitly saved.
+            </p>
+          {/if}
           <div class="overflow-x-auto rounded-md border border-border">
             <table class="w-full text-sm border-collapse">
               <thead class="bg-surface-1">

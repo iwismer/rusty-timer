@@ -140,6 +140,55 @@ describe("stream detail page epoch race mapping", () => {
     expect(api.setStreamEpochRace).toHaveBeenCalledWith("abc-123", 1, "race-1");
   });
 
+  it("hydrates epoch rows with existing saved mappings", async () => {
+    vi.mocked(api.getRaceStreamEpochMappings).mockImplementation(
+      async (raceId: string) => {
+        if (raceId === "race-2") {
+          return {
+            mappings: [
+              {
+                stream_id: "abc-123",
+                forwarder_id: "fwd-1",
+                reader_ip: "10.0.0.1:10000",
+                stream_epoch: 1,
+                race_id: "race-2",
+              },
+            ],
+          };
+        }
+        return { mappings: [] };
+      },
+    );
+
+    render(Page);
+
+    const select = await screen.findByTestId("epoch-race-select-1");
+    expect(select).toHaveValue("race-2");
+    expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent("Saved");
+    expect(screen.getByTestId("epoch-race-save-1")).toBeDisabled();
+  });
+
+  it("does not show fully saved status when hydration has partial mapping fetch failures", async () => {
+    vi.mocked(api.getRaceStreamEpochMappings).mockImplementation(
+      async (raceId: string) => {
+        if (raceId === "race-1") {
+          throw new Error("mapping fetch failed");
+        }
+        return { mappings: [] };
+      },
+    );
+
+    render(Page);
+
+    await screen.findByTestId("epoch-race-select-1");
+    expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
+      "Unverified",
+    );
+    expect(screen.getByTestId("epoch-race-state-2")).toHaveTextContent(
+      "Unverified",
+    );
+  });
+
   it("shows pending state while row save is in flight", async () => {
     const pending = deferred<{
       stream_id: string;
