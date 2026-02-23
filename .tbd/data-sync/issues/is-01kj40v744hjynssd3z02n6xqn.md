@@ -1,0 +1,15 @@
+---
+type: is
+id: is-01kj40v744hjynssd3z02n6xqn
+title: Remove seqnum entry from replay targets row when replay policy is 'replay' — should replay entire epoch
+kind: bug
+status: open
+priority: 2
+version: 1
+spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
+labels: []
+dependencies: []
+parent_id: is-01kj3b514za6r2c96xxn5w3wcn
+created_at: 2026-02-23T01:11:59.362Z
+updated_at: 2026-02-23T01:11:59.362Z
+---
