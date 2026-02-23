@@ -22,7 +22,16 @@
     StreamsResponse,
     LogsResponse,
   } from "$lib/api";
-  type SupportedReplayPolicy = "resume" | "live_only";
+  type TargetedRowDraft = {
+    streamKey: string;
+    streamEpoch: string;
+    fromSeq: string;
+  };
+  type TargetedRowErrors = {
+    streamKey?: string;
+    streamEpoch?: string;
+    fromSeq?: string;
+  };
 
   let profile = $state<Profile | null>(null);
   let status = $state<StatusResponse | null>(null);
@@ -52,14 +61,106 @@
   );
   let raceIdDraft = $state("");
   let epochScopeDraft = $state<EpochScope>("current");
-  let replayPolicyDraft = $state<SupportedReplayPolicy>("resume");
+  let replayPolicyDraft = $state<ReplayPolicy>("resume");
+  let targetedRows = $state<TargetedRowDraft[]>([
+    { streamKey: "", streamEpoch: "", fromSeq: "" },
+  ]);
+  let targetedRowErrors = $state<Record<number, TargetedRowErrors>>({});
   let selectionBusy = $state(false);
   let selectionApplyQueued = $state(false);
 
-  function normalizeReplayPolicy(
-    replayPolicy: ReplayPolicy,
-  ): SupportedReplayPolicy {
-    return replayPolicy === "live_only" ? "live_only" : "resume";
+  function normalizeReplayPolicy(replayPolicy: ReplayPolicy): ReplayPolicy {
+    if (replayPolicy === "live_only") {
+      return "live_only";
+    }
+    if (replayPolicy === "targeted") {
+      return "targeted";
+    }
+    return "resume";
+  }
+
+  function rowFromReplayTarget(target: api.ReplayTarget): TargetedRowDraft {
+    return {
+      streamKey: streamKey(target.forwarder_id, target.reader_ip),
+      streamEpoch: String(target.stream_epoch),
+      fromSeq:
+        target.from_seq === undefined
+          ? ""
+          : String(Math.max(0, target.from_seq)),
+    };
+  }
+
+  function parseStreamKey(value: string): api.StreamRef | null {
+    const separator = value.indexOf("/");
+    if (separator <= 0 || separator === value.length - 1) {
+      return null;
+    }
+    const forwarder_id = value.slice(0, separator).trim();
+    const reader_ip = value.slice(separator + 1).trim();
+    if (!forwarder_id || !reader_ip) {
+      return null;
+    }
+    return { forwarder_id, reader_ip };
+  }
+
+  function parseNonNegativeInt(raw: string): number | null {
+    const trimmed = raw.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function validateTargetedRows(): {
+    replayTargets: api.ReplayTarget[];
+    errors: Record<number, TargetedRowErrors>;
+  } {
+    const replayTargets: api.ReplayTarget[] = [];
+    const errors: Record<number, TargetedRowErrors> = {};
+
+    targetedRows.forEach((row, index) => {
+      const rowErrors: TargetedRowErrors = {};
+      const parsedStream = parseStreamKey(row.streamKey);
+      if (!parsedStream) {
+        rowErrors.streamKey = "Select a stream.";
+      }
+
+      const epoch = parseNonNegativeInt(row.streamEpoch);
+      if (epoch === null) {
+        rowErrors.streamEpoch = row.streamEpoch.trim()
+          ? "Stream epoch must be a non-negative integer."
+          : "Stream epoch is required.";
+      }
+
+      const trimmedFromSeq = row.fromSeq.trim();
+      let fromSeq: number | undefined;
+      if (trimmedFromSeq) {
+        const parsedFromSeq = parseNonNegativeInt(trimmedFromSeq);
+        if (parsedFromSeq === null) {
+          rowErrors.fromSeq = "From seq must be a non-negative integer.";
+        } else {
+          fromSeq = parsedFromSeq;
+        }
+      }
+
+      if (rowErrors.streamKey || rowErrors.streamEpoch || rowErrors.fromSeq) {
+        errors[index] = rowErrors;
+        return;
+      }
+
+      replayTargets.push({
+        forwarder_id: parsedStream!.forwarder_id,
+        reader_ip: parsedStream!.reader_ip,
+        stream_epoch: epoch!,
+        ...(fromSeq !== undefined ? { from_seq: fromSeq } : {}),
+      });
+    });
+
+    return { replayTargets, errors };
   }
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
@@ -152,6 +253,13 @@
       if (nextSelection) {
         selectionMode = nextSelection.selection.mode;
         replayPolicyDraft = normalizeReplayPolicy(nextSelection.replay_policy);
+        targetedRows =
+          nextSelection.replay_policy === "targeted" &&
+          nextSelection.replay_targets &&
+          nextSelection.replay_targets.length > 0
+            ? nextSelection.replay_targets.map(rowFromReplayTarget)
+            : [{ streamKey: "", streamEpoch: "", fromSeq: "" }];
+        targetedRowErrors = {};
         if (nextSelection.selection.mode === "manual") {
           selectedStreams = nextSelection.selection.streams;
           raceIdDraft = "";
@@ -186,6 +294,11 @@
   }
 
   function selectionPayload(): api.ReceiverSetSelection {
+    const replay_targets =
+      replayPolicyDraft === "targeted"
+        ? validateTargetedRows().replayTargets
+        : undefined;
+
     if (selectionMode === "manual") {
       return {
         selection: {
@@ -193,6 +306,7 @@
           streams: selectedStreams,
         },
         replay_policy: replayPolicyDraft,
+        ...(replayPolicyDraft === "targeted" ? { replay_targets } : {}),
       };
     }
 
@@ -203,6 +317,7 @@
         epoch_scope: epochScopeDraft,
       },
       replay_policy: replayPolicyDraft,
+      ...(replayPolicyDraft === "targeted" ? { replay_targets } : {}),
     };
   }
 
@@ -214,6 +329,31 @@
     error = null;
     while (selectionApplyQueued) {
       selectionApplyQueued = false;
+      if (replayPolicyDraft === "targeted") {
+        const validation = validateTargetedRows();
+        targetedRowErrors = validation.errors;
+        if (
+          Object.keys(validation.errors).length > 0 ||
+          validation.replayTargets.length === 0
+        ) {
+          if (validation.replayTargets.length === 0) {
+            targetedRowErrors = {
+              ...(Object.keys(validation.errors).length > 0
+                ? validation.errors
+                : { 0: {} }),
+              0: {
+                ...(validation.errors[0] ?? {}),
+                streamKey:
+                  validation.errors[0]?.streamKey ??
+                  "Add at least one valid replay target.",
+              },
+            };
+          }
+          continue;
+        }
+      } else {
+        targetedRowErrors = {};
+      }
       try {
         await api.putSelection(selectionPayload());
         error = null;
@@ -251,7 +391,48 @@
 
   function handleReplayPolicyChange(event: Event): void {
     replayPolicyDraft = (event.currentTarget as HTMLSelectElement)
-      .value as SupportedReplayPolicy;
+      .value as ReplayPolicy;
+    void applySelection();
+  }
+
+  function handleTargetedStreamChange(index: number, event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    targetedRows = targetedRows.map((row, rowIndex) =>
+      rowIndex === index ? { ...row, streamKey: value } : row,
+    );
+    void applySelection();
+  }
+
+  function handleTargetedEpochBlur(index: number, event: Event): void {
+    const value = (event.currentTarget as HTMLInputElement).value.trim();
+    targetedRows = targetedRows.map((row, rowIndex) =>
+      rowIndex === index ? { ...row, streamEpoch: value } : row,
+    );
+    void applySelection();
+  }
+
+  function handleTargetedFromSeqBlur(index: number, event: Event): void {
+    const value = (event.currentTarget as HTMLInputElement).value.trim();
+    targetedRows = targetedRows.map((row, rowIndex) =>
+      rowIndex === index ? { ...row, fromSeq: value } : row,
+    );
+    void applySelection();
+  }
+
+  function addTargetedRow(): void {
+    targetedRows = [
+      ...targetedRows,
+      { streamKey: "", streamEpoch: "", fromSeq: "" },
+    ];
+    targetedRowErrors = {};
+  }
+
+  function removeTargetedRow(index: number): void {
+    targetedRows = targetedRows.filter((_, rowIndex) => rowIndex !== index);
+    if (targetedRows.length === 0) {
+      targetedRows = [{ streamKey: "", streamEpoch: "", fromSeq: "" }];
+    }
+    targetedRowErrors = {};
     void applySelection();
   }
 
@@ -358,6 +539,7 @@
   }
 
   onMount(() => {
+    void loadAll();
     initSSE({
       onStatusChanged: (s) => {
         status = s;
@@ -617,8 +799,111 @@
             >
               <option value="resume">Resume</option>
               <option value="live_only">Live only</option>
+              <option value="targeted">Targeted replay</option>
             </select>
           </label>
+
+          {#if replayPolicyDraft === "targeted"}
+            <div class="border border-border rounded-md p-3 bg-surface-0">
+              <div class="flex items-center justify-between mb-2">
+                <p class="text-xs font-semibold text-text-primary m-0">
+                  Replay Targets
+                </p>
+                <button
+                  data-testid="add-targeted-row-btn"
+                  class={btnSecondary}
+                  onclick={addTargetedRow}
+                  disabled={selectionBusy}
+                >
+                  Add Row
+                </button>
+              </div>
+
+              <div class="grid gap-2">
+                {#each targetedRows as row, index}
+                  <div
+                    class="grid gap-2 md:grid-cols-[2fr_1fr_1fr_auto] items-start"
+                  >
+                    <select
+                      data-testid={"targeted-row-stream-" + index}
+                      class={inputClass}
+                      value={row.streamKey}
+                      onchange={(event) =>
+                        handleTargetedStreamChange(index, event)}
+                      disabled={selectionBusy}
+                    >
+                      <option value="">Select stream...</option>
+                      {#each streams?.streams ?? [] as stream}
+                        <option
+                          value={streamKey(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                          )}
+                        >
+                          {stream.display_alias ??
+                            `${stream.forwarder_id} / ${stream.reader_ip}`}
+                        </option>
+                      {/each}
+                    </select>
+
+                    <input
+                      data-testid={"targeted-row-epoch-" + index}
+                      type="number"
+                      min="0"
+                      class={inputClass}
+                      value={row.streamEpoch}
+                      onblur={(event) => handleTargetedEpochBlur(index, event)}
+                      placeholder="Stream epoch"
+                      disabled={selectionBusy}
+                    />
+
+                    <input
+                      data-testid={"targeted-row-from-seq-" + index}
+                      type="number"
+                      min="0"
+                      class={inputClass}
+                      value={row.fromSeq}
+                      onblur={(event) =>
+                        handleTargetedFromSeqBlur(index, event)}
+                      placeholder="From seq"
+                      disabled={selectionBusy}
+                    />
+
+                    <button
+                      data-testid={"remove-targeted-row-" + index}
+                      class={btnSecondary}
+                      onclick={() => removeTargetedRow(index)}
+                      disabled={selectionBusy}
+                    >
+                      Remove
+                    </button>
+
+                    {#if targetedRowErrors[index]}
+                      <p
+                        data-testid={"targeted-row-error-" + index}
+                        class="md:col-span-4 text-xs text-status-err m-0"
+                      >
+                        {#if targetedRowErrors[index].streamKey}
+                          {targetedRowErrors[index].streamKey}
+                        {/if}
+                        {#if targetedRowErrors[index].streamEpoch}
+                          {targetedRowErrors[index].streamKey ? " " : ""}
+                          {targetedRowErrors[index].streamEpoch}
+                        {/if}
+                        {#if targetedRowErrors[index].fromSeq}
+                          {targetedRowErrors[index].streamKey ||
+                          targetedRowErrors[index].streamEpoch
+                            ? " "
+                            : ""}
+                          {targetedRowErrors[index].fromSeq}
+                        {/if}
+                      </p>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
         </div>
       </section>
     </Card>

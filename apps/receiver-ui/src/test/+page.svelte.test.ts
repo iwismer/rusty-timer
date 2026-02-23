@@ -137,7 +137,7 @@ describe("receiver page", () => {
     });
   });
 
-  it("does not expose targeted replay option in receiver scope", async () => {
+  it("shows targeted replay option", async () => {
     render(Page);
 
     const replayPolicySelect = await screen.findByTestId(
@@ -145,7 +145,128 @@ describe("receiver page", () => {
     );
     expect(replayPolicySelect).toHaveTextContent("Resume");
     expect(replayPolicySelect).toHaveTextContent("Live only");
-    expect(replayPolicySelect).not.toHaveTextContent("Targeted replay");
+    expect(replayPolicySelect).toHaveTextContent("Targeted replay");
+  });
+
+  it("renders targeted row stream select as dropdown with known stream options", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+          display_alias: "Finish",
+        },
+        {
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    const streamSelect = await screen.findByTestId("targeted-row-stream-0");
+    expect(streamSelect.tagName).toBe("SELECT");
+    await waitFor(() => {
+      expect(streamSelect).toHaveTextContent("Finish");
+      expect(streamSelect).toHaveTextContent("fwd-2 / 10.0.0.2:10000");
+    });
+  });
+
+  it("shows inline row validation errors and does not submit targeted payload when invalid", async () => {
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    apiMocks.putSelection.mockClear();
+    const streamSelect = await screen.findByTestId("targeted-row-stream-0");
+    await fireEvent.change(streamSelect, { target: { value: "" } });
+
+    const epochInput = await screen.findByTestId("targeted-row-epoch-0");
+    await fireEvent.input(epochInput, { target: { value: "" } });
+    await fireEvent.blur(epochInput);
+
+    expect(await screen.findByTestId("targeted-row-error-0")).toHaveTextContent(
+      "Select a stream",
+    );
+    expect(await screen.findByTestId("targeted-row-error-0")).toHaveTextContent(
+      "Stream epoch is required",
+    );
+    expect(apiMocks.putSelection).not.toHaveBeenCalled();
+  });
+
+  it("serializes valid targeted rows into replay_targets payload", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+          display_alias: "Finish",
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    const streamSelect = await screen.findByTestId("targeted-row-stream-0");
+    await waitFor(() => {
+      expect(streamSelect).toHaveTextContent("Finish");
+    });
+    await fireEvent.change(streamSelect, {
+      target: { value: "fwd-1/10.0.0.1:10000" },
+    });
+
+    const epochInput = await screen.findByTestId("targeted-row-epoch-0");
+    await fireEvent.input(epochInput, { target: { value: "3" } });
+    await fireEvent.blur(epochInput);
+
+    const fromSeqInput = await screen.findByTestId("targeted-row-from-seq-0");
+    await fireEvent.input(fromSeqInput, { target: { value: "12" } });
+    await fireEvent.blur(fromSeqInput);
+
+    await waitFor(() => {
+      expect(apiMocks.putSelection).toHaveBeenCalledWith({
+        selection: { mode: "manual", streams: [] },
+        replay_policy: "targeted",
+        replay_targets: [
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            stream_epoch: 3,
+            from_seq: 12,
+          },
+        ],
+      });
+    });
   });
 
   it("applies latest selection after in-flight request settles", async () => {
