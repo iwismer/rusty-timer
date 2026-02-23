@@ -53,7 +53,11 @@ Assumptions:
   - Click `Connect`.
   - Normally, server URL and token are already configured.
   - Only if connection does not work: verify/fix server URL and token, save, then connect again.
+  - Receiver selection mode defaults to `manual`.
   - Subscribe to required streams and note the local port for each subscribed stream.
+  - Use `Mode: Race` only when you intentionally want auto-selection for the active race context (operator opt-in; not default).
+  - In `Mode: Race`, set `Epoch Scope` to `Current` or `All` based on replay needs.
+  - In the stream list, confirm each selected stream shows the expected current `stream epoch` and epoch name (when present).
   - Confirm Receiver UI is not marked `(degraded)` and every subscribed stream shows a usable local port.
   - If `(degraded)` appears or a stream has a port collision, set a unique port override for the affected stream and re-check.
 
@@ -88,3 +92,10 @@ Assumptions:
 - Wrong or mixed race data:
   - Confirm correct race assignment per forwarder in `Streams`.
   - Confirm epoch reset was done for all active streams before race start.
+  - In Receiver UI, verify whether `Mode` is `Manual` or `Race`; switch back to `Manual` if auto-selection is not desired.
+  - If `Mode` is `Race`, verify `Epoch Scope` is set to the intended value (`Current` or `All`).
+  - Verify the stream entry shows the expected `stream epoch` and epoch name for the race in progress.
+
+- Replay requested for one stream but multiple streams replay:
+  - Use targeted replay for a single selected stream context.
+  - Confirm the selected stream matches `forwarder_id + reader_ip + stream epoch` before replaying.

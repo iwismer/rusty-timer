@@ -124,11 +124,15 @@ docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.pro
 
 ```bash
 # List all streams and their online status.
-curl http://localhost:8080/api/v1/streams | jq '.streams[] | {forwarder_id, reader_ip, online, stream_epoch}'
+curl http://localhost:8080/api/v1/streams | jq '.streams[] | {forwarder_id, reader_ip, online, stream_epoch, current_epoch_name}'
 
 # Get metrics for a specific stream.
 curl http://localhost:8080/api/v1/streams/{stream_id}/metrics | jq .
 ```
+
+Operational note:
+- Receiver UI now displays current `stream epoch` and current epoch name from stream metadata when available.
+- Operators use this metadata to verify manual selection and targeted replay scope.
 
 ---
 
@@ -196,6 +200,11 @@ After reset:
 - `stream_epoch` increments by 1.
 - New events from the forwarder start at `seq=1` in the new epoch.
 - Unacked events from the old epoch remain replayable until drained.
+
+Replay semantics:
+- Standard replay uses receiver cursor state and may replay across all subscribed streams.
+- Targeted replay should be treated as stream-context scoped: `forwarder_id + reader_ip + stream_epoch`.
+- Epoch name changes do not reset `stream_epoch` and do not alter replay cursors.
 
 ---
 
