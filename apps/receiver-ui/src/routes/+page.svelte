@@ -801,7 +801,7 @@
   </div>
 
   <div class="mb-6">
-    <Card title="Selection">
+    <Card title="Race & Mode Selection">
       <section data-testid="selection-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
@@ -844,11 +844,12 @@
                 onchange={handleEpochScopeChange}
                 disabled={selectionBusy}
               >
-                <option value="current">Current</option>
+                <option value="current">Current and future</option>
                 <option value="all">All</option>
               </select>
               <p class="text-xs text-text-muted mt-1 m-0">
-                Current: replay only the current epoch. All: replay all epochs
+                Current and future: replay the current epoch and continue
+                receiving as the epoch advances. All: replay all epochs
                 available for the race.
               </p>
             </label>
