@@ -83,6 +83,11 @@ struct TargetedReplaySelection {
     through_seq: i64,
 }
 
+enum ApplySelectionOutcome {
+    Applied,
+    Replaced(PendingSelection),
+}
+
 fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
     (left_epoch, left_seq) > (right_epoch, right_seq)
 }
@@ -435,7 +440,7 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
     }
 
     let mut subscriptions: Vec<StreamSub> = Vec::new();
-    if let Err(e) = apply_receiver_selection(
+    if let Err(e) = apply_receiver_selection_until_stable(
         &mut socket,
         &state,
         &device_id,
@@ -528,7 +533,7 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
                                 }
                             }
                             Ok(WsMessage::ReceiverSetSelection(set_selection)) => {
-                                if let Err(e) = apply_receiver_selection(
+                                if let Err(e) = apply_receiver_selection_until_stable(
                                     &mut socket,
                                     &state,
                                     &device_id,
@@ -576,7 +581,7 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
         .log(format!("receiver {device_id} v1.1 session ended"));
 }
 
-async fn apply_receiver_selection(
+async fn apply_receiver_selection_until_stable(
     socket: &mut WebSocket,
     state: &AppState,
     device_id: &str,
@@ -584,6 +589,32 @@ async fn apply_receiver_selection(
     pending: PendingSelection,
     subscriptions: &mut Vec<StreamSub>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut next_pending = Some(pending);
+    while let Some(current) = next_pending.take() {
+        match apply_receiver_selection(socket, state, device_id, session_id, current, subscriptions)
+            .await?
+        {
+            ApplySelectionOutcome::Applied => return Ok(()),
+            ApplySelectionOutcome::Replaced(replacement) => {
+                info!(
+                    device_id = %device_id,
+                    "selection changed during replay; restarting with latest selection"
+                );
+                next_pending = Some(replacement);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn apply_receiver_selection(
+    socket: &mut WebSocket,
+    state: &AppState,
+    device_id: &str,
+    session_id: &str,
+    pending: PendingSelection,
+    subscriptions: &mut Vec<StreamSub>,
+) -> Result<ApplySelectionOutcome, Box<dyn std::error::Error + Send + Sync>> {
     let PendingSelection {
         selection,
         replay_policy,
@@ -620,19 +651,27 @@ async fn apply_receiver_selection(
 
     if replay_policy == ReplayPolicy::Resume {
         for sub in &mut next_subscriptions {
-            replay_backlog(socket, state, session_id, sub).await?;
+            if let Some(replacement) =
+                replay_backlog_interruptible(socket, state, device_id, session_id, sub).await?
+            {
+                return Ok(ApplySelectionOutcome::Replaced(replacement));
+            }
         }
     } else if replay_policy == ReplayPolicy::Targeted {
         let targeted_replay =
             snapshot_targeted_replay_bounds(state, targeted_replay_selections).await?;
-        replay_targeted_backlog(
+        if let Some(replacement) = replay_targeted_backlog(
             socket,
             state,
+            device_id,
             session_id,
             &targeted_replay,
             &mut next_subscriptions,
         )
-        .await?;
+        .await?
+        {
+            return Ok(ApplySelectionOutcome::Replaced(replacement));
+        }
     }
 
     *subscriptions = next_subscriptions;
@@ -654,7 +693,7 @@ async fn apply_receiver_selection(
         targets = subscriptions.len(),
         "applied receiver selection"
     );
-    Ok(())
+    Ok(ApplySelectionOutcome::Applied)
 }
 
 async fn snapshot_targeted_replay_bounds(
@@ -942,13 +981,84 @@ async fn replay_backlog(
     }
 }
 
+async fn replay_backlog_interruptible(
+    socket: &mut WebSocket,
+    state: &AppState,
+    device_id: &str,
+    session_id: &str,
+    sub: &mut StreamSub,
+) -> Result<Option<PendingSelection>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some((through_epoch, through_seq)) =
+        fetch_max_event_cursor(&state.pool, sub.stream_id).await?
+    else {
+        return Ok(None);
+    };
+    if !cursor_gt(through_epoch, through_seq, sub.last_epoch, sub.last_seq) {
+        return Ok(None);
+    }
+
+    loop {
+        let events = fetch_events_after_cursor_through_cursor_limited(
+            &state.pool,
+            sub.stream_id,
+            sub.last_epoch,
+            sub.last_seq,
+            through_epoch,
+            through_seq,
+            REPLAY_BATCH_LIMIT,
+        )
+        .await?;
+        if events.is_empty() {
+            return Ok(None);
+        }
+
+        let read_events: Vec<ReadEvent> = events
+            .iter()
+            .map(|e| ReadEvent {
+                forwarder_id: e.forwarder_id.clone(),
+                reader_ip: e.reader_ip.clone(),
+                stream_epoch: e.stream_epoch as u64,
+                seq: e.seq as u64,
+                reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
+                raw_read_line: e.raw_read_line.clone(),
+                read_type: e.read_type.clone(),
+            })
+            .collect();
+
+        if let Some(last) = events.last() {
+            sub.last_epoch = last.stream_epoch;
+            sub.last_seq = last.seq;
+        }
+
+        let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+            session_id: session_id.to_owned(),
+            events: read_events,
+        });
+        let json = serde_json::to_string(&batch)?;
+        socket.send(Message::Text(json.into())).await?;
+
+        if let Some(replacement) = poll_replay_control_messages(socket, state, device_id).await? {
+            return Ok(Some(replacement));
+        }
+
+        if !cursor_gt(through_epoch, through_seq, sub.last_epoch, sub.last_seq) {
+            return Ok(None);
+        }
+
+        if events.len() < REPLAY_BATCH_LIMIT as usize {
+            return Ok(None);
+        }
+    }
+}
+
 async fn replay_targeted_backlog(
     socket: &mut WebSocket,
     state: &AppState,
+    device_id: &str,
     session_id: &str,
     targets: &[TargetedReplaySelection],
     subscriptions: &mut [StreamSub],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<PendingSelection>, Box<dyn std::error::Error + Send + Sync>> {
     for target in targets {
         if target.through_epoch < target.stream_epoch
             || (target.through_epoch == target.stream_epoch && target.through_seq < target.from_seq)
@@ -990,6 +1100,11 @@ async fn replay_targeted_backlog(
             });
             let payload = serde_json::to_string(&batch)?;
             socket.send(Message::Text(payload.into())).await?;
+            if let Some(replacement) =
+                poll_replay_control_messages(socket, state, device_id).await?
+            {
+                return Ok(Some(replacement));
+            }
 
             let Some(last) = events.last() else {
                 break;
@@ -1008,7 +1123,60 @@ async fn replay_targeted_backlog(
             }
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+async fn poll_replay_control_messages(
+    socket: &mut WebSocket,
+    state: &AppState,
+    device_id: &str,
+) -> Result<Option<PendingSelection>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut replacement: Option<PendingSelection> = None;
+    loop {
+        let maybe_msg = tokio::time::timeout(Duration::from_millis(0), socket.recv()).await;
+        let msg = match maybe_msg {
+            Ok(msg) => msg,
+            Err(_) => return Ok(replacement),
+        };
+        match msg {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<WsMessage>(&text) {
+                Ok(WsMessage::ReceiverSetSelection(set_selection)) => {
+                    replacement = Some(PendingSelection {
+                        selection: set_selection.selection,
+                        replay_policy: set_selection.replay_policy,
+                        replay_targets: set_selection.replay_targets,
+                    });
+                }
+                Ok(WsMessage::ReceiverAck(ack)) => {
+                    if let Err(e) = handle_receiver_ack(state, device_id, ack).await {
+                        error!(device_id = %device_id, error = %e, "error handling receiver ack");
+                    }
+                }
+                Ok(WsMessage::Heartbeat(_)) => {}
+                Ok(other) => {
+                    warn!(device_id = %device_id, message = ?other, "unexpected message kind during replay");
+                }
+                Err(e) => {
+                    send_ws_error(
+                        socket,
+                        error_codes::PROTOCOL_ERROR,
+                        &format!("invalid JSON: {}", e),
+                        false,
+                    )
+                    .await;
+                    return Err("invalid JSON during replay".into());
+                }
+            },
+            Some(Ok(Message::Ping(data))) => {
+                let _ = socket.send(Message::Pong(data)).await;
+            }
+            Some(Ok(Message::Close(_))) | None => {
+                return Err("socket closed during replay".into());
+            }
+            Some(Err(e)) => return Err(format!("WS error during replay: {e}").into()),
+            Some(Ok(_)) => {}
+        }
+    }
 }
 
 async fn handle_receiver_ack(

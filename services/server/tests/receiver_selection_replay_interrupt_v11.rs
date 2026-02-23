@@ -354,3 +354,148 @@ async fn targeted_policy_replay_is_snapshot_bounded() {
     assert_eq!(replay_seqs.first().copied(), Some(1));
     assert_eq!(replay_seqs.last().copied(), Some(1000));
 }
+
+#[tokio::test]
+async fn set_selection_interrupts_long_targeted_replay_at_batch_boundary() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-ri", "receiver", b"rcv-ri-token").await;
+
+    let stream_one_id: sqlx::types::Uuid = sqlx::query_scalar(
+        "SELECT stream_id FROM streams WHERE forwarder_id = 'fwd-ri' AND reader_ip = '10.40.0.1:10000'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id)
+           SELECT $1, 1, gs, '2026-02-23T10:00:00.000Z', CONCAT('R1E1S', gs::text), 'RAW', NULL
+           FROM generate_series(1, 200000) AS gs"#,
+    )
+    .bind(stream_one_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "stream-two".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-ri".to_owned(),
+            reader_ip: "10.40.0.2:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
+            raw_read_line: "R2E1S1".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-ri-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-ri".to_owned(),
+        selection: ReceiverSelection::Manual {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-ri".to_owned(),
+                reader_ip: "10.40.0.1:10000".to_owned(),
+            }],
+        },
+        replay_policy: ReplayPolicy::Targeted,
+        replay_targets: Some(vec![ReplayTarget {
+            forwarder_id: "fwd-ri".to_owned(),
+            reader_ip: "10.40.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            from_seq: 1,
+        }]),
+    }))
+    .await
+    .unwrap();
+
+    let _ = rcv.recv_message().await.unwrap();
+    let first_batch = match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+        Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => batch,
+        Ok(Ok(other)) => panic!("expected first replay batch, got {:?}", other),
+        Ok(Err(e)) => panic!("recv error: {}", e),
+        Err(_) => panic!("timeout waiting for first replay batch"),
+    };
+    assert_eq!(
+        first_batch
+            .events
+            .first()
+            .map(|event| event.reader_ip.as_str()),
+        Some("10.40.0.1:10000")
+    );
+
+    rcv.send_message(&WsMessage::ReceiverSetSelection(ReceiverSetSelection {
+        selection: ReceiverSelection::Manual {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-ri".to_owned(),
+                reader_ip: "10.40.0.2:10000".to_owned(),
+            }],
+        },
+        replay_policy: ReplayPolicy::Targeted,
+        replay_targets: Some(vec![ReplayTarget {
+            forwarder_id: "fwd-ri".to_owned(),
+            reader_ip: "10.40.0.2:10000".to_owned(),
+            stream_epoch: 1,
+            from_seq: 1,
+        }]),
+    }))
+    .await
+    .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut saw_selection_applied = false;
+    let mut saw_stream_two_replay = false;
+    while tokio::time::Instant::now() < deadline {
+        let msg = match tokio::time::timeout(Duration::from_millis(200), rcv.recv_message()).await {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(e)) => panic!("recv error: {}", e),
+            Err(_) => continue,
+        };
+        match msg {
+            WsMessage::ReceiverSelectionApplied(applied) => {
+                assert_eq!(applied.resolved_target_count, 1);
+                match applied.selection {
+                    ReceiverSelection::Manual { streams } => {
+                        assert_eq!(streams.len(), 1);
+                        assert_eq!(streams[0].reader_ip, "10.40.0.2:10000");
+                    }
+                    other => panic!("expected manual selection, got {:?}", other),
+                }
+                saw_selection_applied = true;
+            }
+            WsMessage::ReceiverEventBatch(batch) => {
+                if batch
+                    .events
+                    .iter()
+                    .any(|event| event.reader_ip == "10.40.0.2:10000" && event.seq == 1)
+                {
+                    saw_stream_two_replay = true;
+                }
+            }
+            WsMessage::Heartbeat(_) => {}
+            other => panic!("unexpected message: {:?}", other),
+        }
+        if saw_selection_applied && saw_stream_two_replay {
+            break;
+        }
+    }
+
+    assert!(
+        saw_selection_applied,
+        "expected new selection_applied within 2s"
+    );
+    assert!(
+        saw_stream_two_replay,
+        "expected replay from the new selection within 2s"
+    );
+}
