@@ -3,9 +3,9 @@ type: is
 id: is-01kj3bms18h8hvkhr9nr8btabf
 title: "Task 12b: Build server-ui epoch mapping controls and component tests"
 kind: task
-status: open
+status: closed
 priority: 2
-version: 6
+version: 7
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -16,7 +16,9 @@ child_order_hints:
   - is-01kj3s9ws4g7fyqjfr84gsh4st
   - is-01kj3sa0m22yt38csfxapr9wn7
 created_at: 2026-02-22T19:01:28.230Z
-updated_at: 2026-02-22T23:00:28.197Z
+updated_at: 2026-02-23T00:36:30.196Z
+closed_at: 2026-02-23T00:36:30.194Z
+close_reason: Task 12b acceptance met via closed children rt-8zy2 and rt-pg8n; server-ui row-save mapping + activate-next controls implemented and independently reviewed.
 ---
 Build server-ui stream epoch mapping controls and component tests with approved UX contract. Acceptance: (1) render epoch list on stream detail page; (2) each row has race selector with explicit Save action; (3) row-level dirty/pending/success/error feedback; (4) activate-next action remains available and correctly wired; (5) tests verify no API write occurs before row Save and verify error/retry behavior.
 

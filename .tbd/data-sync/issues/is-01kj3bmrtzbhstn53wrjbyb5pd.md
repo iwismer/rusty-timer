@@ -3,9 +3,9 @@ type: is
 id: is-01kj3bmrtzbhstn53wrjbyb5pd
 title: "Task 12a: Set up server-ui jsdom and testing-library component test infra"
 kind: task
-status: in_progress
+status: closed
 priority: 2
-version: 5
+version: 6
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 assignee: subagent-server-ui-infra
 labels: []
@@ -16,7 +16,9 @@ dependencies:
     target: is-01kj3s9ws4g7fyqjfr84gsh4st
 parent_id: is-01kj3b53n95tz8rd5g2ya5nehm
 created_at: 2026-02-22T19:01:28.030Z
-updated_at: 2026-02-22T23:11:36.549Z
+updated_at: 2026-02-22T23:45:31.130Z
+closed_at: 2026-02-22T23:45:31.129Z
+close_reason: Completed via commit 2cfd949 (from b5deba3), validated in main workspace, and independently reviewed APPROVE.
 ---
 Split from Task 12: one-time test harness setup in server-ui.
 
