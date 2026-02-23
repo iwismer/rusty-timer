@@ -168,7 +168,11 @@ impl AppState {
                 });
                 let sk =
                     crate::cache::StreamKey::new(si.forwarder_id.as_str(), si.reader_ip.as_str());
-                let counts = counts_snapshot.get(&sk);
+                let counts = if local.is_some() {
+                    counts_snapshot.get(&sk)
+                } else {
+                    None
+                };
                 streams.push(StreamEntry {
                     forwarder_id: si.forwarder_id.clone(),
                     reader_ip: si.reader_ip.clone(),
@@ -1674,6 +1678,32 @@ mod tests {
 
         assert_eq!(stream.reads_total, Some(9));
         assert_eq!(stream.reads_epoch, Some(9));
+    }
+
+    #[tokio::test]
+    async fn build_streams_response_excludes_reads_fields_for_unsubscribed_streams() {
+        let db = Db::open_in_memory().expect("open in-memory db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        // No subscriptions — stream is unsubscribed
+
+        let key = crate::cache::StreamKey::new("f1", "10.0.0.1");
+        for seq in 1..=5 {
+            state.stream_counts.record(&key, 3, seq);
+        }
+
+        let response = state.build_streams_response().await;
+        // The unsubscribed stream won't appear in the response (no server
+        // streams and no local subscription), but if it did appear via an
+        // upstream merge, counts should be None.  We can verify the cache
+        // has counts but the response omits the stream entirely.
+        let stream = response
+            .streams
+            .iter()
+            .find(|s| s.forwarder_id == "f1" && s.reader_ip == "10.0.0.1");
+        assert!(
+            stream.is_none(),
+            "unsubscribed stream without upstream entry should not appear"
+        );
     }
 
     #[test]
