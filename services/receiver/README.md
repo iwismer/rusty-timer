@@ -43,6 +43,7 @@ endpoints are JSON unless otherwise noted.
 | `GET`  | `/api/v1/profile` | Read the current profile (server URL, token, log level). Returns `404` if no profile is configured. |
 | `PUT`  | `/api/v1/profile` | Create or replace the profile. |
 | `GET`  | `/api/v1/streams` | List all known streams, merging upstream server data with local subscriptions. |
+| `GET`  | `/api/v1/subscriptions` | Read the current subscription list. |
 | `PUT`  | `/api/v1/subscriptions` | Replace the full subscription list (atomic). |
 | `GET`  | `/api/v1/selection` | Read the current receiver selection (mode, replay policy, replay targets). |
 | `PUT`  | `/api/v1/selection` | Set the receiver selection. Body: `ReceiverSetSelection` with `selection`, `replay_policy`, and optional `replay_targets`. Returns `400` if `replay_policy` is `targeted` but `replay_targets` is absent or empty. |
@@ -110,8 +111,9 @@ When the receiver is not connected to the server, `degraded` is `true` and
 
 ## Subscription model
 
-Subscriptions are managed via `PUT /api/v1/subscriptions`. The request body
-replaces the entire subscription list atomically:
+Subscriptions are managed via `GET /api/v1/subscriptions` and
+`PUT /api/v1/subscriptions`. The PUT request body replaces the entire
+subscription list atomically:
 
 ```json
 {

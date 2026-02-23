@@ -803,6 +803,43 @@ async fn put_subscriptions_and_get_streams() {
         .unwrap();
     assert_eq!(s2["local_port"], 9900);
 }
+
+#[tokio::test]
+async fn get_subscriptions_returns_empty_initially() {
+    let (status, val) = get_json(setup(), "/api/v1/subscriptions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val, json!({ "subscriptions": [] }));
+}
+
+#[tokio::test]
+async fn get_subscriptions_returns_saved_subscriptions() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+    let body = json!({
+        "subscriptions": [
+            {"forwarder_id":"f2","reader_ip":"10.0.0.2:10000","local_port_override":9988},
+            {"forwarder_id":"f1","reader_ip":"10.0.0.1:10000","local_port_override":null}
+        ]
+    });
+    assert_eq!(
+        put_json(app.clone(), "/api/v1/subscriptions", body).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/subscriptions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        val,
+        json!({
+            "subscriptions": [
+                {"forwarder_id":"f1","reader_ip":"10.0.0.1:10000","local_port_override":null},
+                {"forwarder_id":"f2","reader_ip":"10.0.0.2:10000","local_port_override":9988}
+            ]
+        })
+    );
+}
+
 #[tokio::test]
 async fn get_status_disconnected_initially() {
     let (status, val) = get_json(setup(), "/api/v1/status").await;

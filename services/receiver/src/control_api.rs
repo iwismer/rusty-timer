@@ -5,6 +5,7 @@
 //!   GET  /api/v1/profile        - read current profile
 //!   PUT  /api/v1/profile        - update profile
 //!   GET  /api/v1/streams        - list streams (merges server + local subs)
+//!   GET  /api/v1/subscriptions  - list subscription list
 //!   PUT  /api/v1/subscriptions  - replace subscription list
 //!   GET  /api/v1/status         - runtime status
 //!   GET  /api/v1/logs           - recent log entries
@@ -15,7 +16,7 @@
 
 use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
@@ -860,6 +861,24 @@ async fn put_subscriptions(
     }
 }
 
+async fn get_subscriptions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db = state.db.lock().await;
+    match db.load_subscriptions() {
+        Ok(subscriptions) => Json(SubscriptionsBody {
+            subscriptions: subscriptions
+                .into_iter()
+                .map(|s| SubscriptionRequest {
+                    forwarder_id: s.forwarder_id,
+                    reader_ip: s.reader_ip,
+                    local_port_override: s.local_port_override,
+                })
+                .collect(),
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = state.connection_state.read().await.clone();
     let db = state.db.lock().await;
@@ -1108,7 +1127,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/replay-targets/epochs",
             get(get_replay_target_epochs),
         )
-        .route("/api/v1/subscriptions", put(put_subscriptions))
+        .route(
+            "/api/v1/subscriptions",
+            get(get_subscriptions).put(put_subscriptions),
+        )
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/logs", get(get_logs))
         .route("/api/v1/connect", post(post_connect))

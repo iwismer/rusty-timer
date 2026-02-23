@@ -61,7 +61,7 @@ rt-receiver &
 
 ```bash
 # The receiver control API is always on port 9090.
-curl http://localhost:9090/healthz
+curl http://localhost:9090/api/v1/status
 ```
 
 ---
@@ -97,14 +97,13 @@ is required. Collisions are logged as errors at startup.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /healthz` | Receiver process is alive. |
-| `GET /readyz` | Receiver DB is open and integrity check passed. |
+| `GET /api/v1/status` | Receiver control API is reachable and returns `connection_state`, DB health (`local_ok`), and stream count. |
 
 ### Check connection status
 
 ```bash
 # Via the control API.
-curl http://localhost:9090/status
+curl http://localhost:9090/api/v1/status
 ```
 
 ### Log monitoring
