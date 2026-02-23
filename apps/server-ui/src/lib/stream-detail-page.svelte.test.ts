@@ -189,6 +189,34 @@ describe("stream detail page epoch race mapping", () => {
     );
   });
 
+  it("keeps row unverified when selection changes and reverts without saving", async () => {
+    vi.mocked(api.getRaceStreamEpochMappings).mockImplementation(
+      async (raceId: string) => {
+        if (raceId === "race-1") {
+          throw new Error("mapping fetch failed");
+        }
+        return { mappings: [] };
+      },
+    );
+
+    render(Page);
+
+    const select = await screen.findByTestId("epoch-race-select-1");
+    const saveButton = screen.getByTestId("epoch-race-save-1");
+    const status = screen.getByTestId("epoch-race-state-1");
+
+    expect(status).toHaveTextContent("Unverified");
+    expect(saveButton).toBeDisabled();
+
+    await fireEvent.change(select, { target: { value: "race-2" } });
+    expect(status).toHaveTextContent("Unsaved");
+    expect(saveButton).not.toBeDisabled();
+
+    await fireEvent.change(select, { target: { value: "" } });
+    expect(status).toHaveTextContent("Unverified");
+    expect(saveButton).toBeDisabled();
+  });
+
   it("shows pending state while row save is in flight", async () => {
     const pending = deferred<{
       stream_id: string;

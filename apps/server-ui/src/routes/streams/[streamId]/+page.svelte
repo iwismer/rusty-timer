@@ -287,7 +287,7 @@
     updateEpochRaceRow(epoch, (row) => ({
       ...row,
       selected_race_id: raceId,
-      status: "saved",
+      status: row.status === "incomplete" ? "incomplete" : "saved",
     }));
   }
 
