@@ -3,9 +3,9 @@ type: is
 id: is-01kj3b52swpn9sdvjn68tbg4wp
 title: "Task 8: Implement replay policies targeted replay and interruptible cancel/restart"
 kind: task
-status: in_progress
+status: closed
 priority: 2
-version: 7
+version: 8
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -19,6 +19,8 @@ child_order_hints:
   - is-01kj3bmm0d69b26xm0drnycx9j
   - is-01kj3bmm6zwfzsp2w12pbfxysk
 created_at: 2026-02-22T18:52:53.946Z
-updated_at: 2026-02-23T01:04:17.560Z
+updated_at: 2026-02-23T02:24:19.130Z
+closed_at: 2026-02-23T02:24:19.128Z
+close_reason: "Task 8 completed: 8a and 8b previously closed; 8c now closed in f44fa13. CI green on PR #89."
 ---
 From implementation plan Task 8 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md).
