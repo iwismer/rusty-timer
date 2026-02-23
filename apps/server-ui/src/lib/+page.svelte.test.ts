@@ -208,9 +208,12 @@ describe("stream detail page activate-next", () => {
 
     pending.resolve();
 
+    // After the API resolves, button transitions to "Reloading..."
+    // while waiting for the SSE-driven table refresh
     await waitFor(() => {
-      expect(activateNext).toHaveTextContent("Advance to Next Epoch");
+      expect(activateNext).toHaveTextContent("Reloading...");
     });
+    expect(activateNext).toBeDisabled();
     expect(api.activateNextStreamEpochForRace).toHaveBeenCalledWith(
       "race-1",
       "abc-123",

@@ -49,6 +49,7 @@
   let epochRaceRowsHydrationIncomplete = $state(false);
   let epochAdvancePending = $state(false);
   let epochAdvanceStatus: "idle" | "error" = $state("idle");
+  let epochAdvanceAwaitingReload = $state(false);
   let epochRaceLoadVersion = 0;
 
   let streamId = $derived($page.params.streamId!);
@@ -269,6 +270,10 @@
     } finally {
       if (currentVersion === epochRaceLoadVersion) {
         epochRaceRowsLoading = false;
+        if (epochAdvanceAwaitingReload) {
+          epochAdvanceAwaitingReload = false;
+          epochAdvancePending = false;
+        }
       }
     }
   }
@@ -381,9 +386,9 @@
     epochAdvanceStatus = "idle";
     try {
       await api.activateNextStreamEpochForRace(raceId, streamId);
+      epochAdvanceAwaitingReload = true;
     } catch {
       epochAdvanceStatus = "error";
-    } finally {
       epochAdvancePending = false;
     }
   }
@@ -727,11 +732,13 @@
               disabled={!canAdvanceToNextEpoch()}
               class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {epochAdvancePending
-                ? "Advancing..."
-                : epochAdvanceStatus === "error"
-                  ? "Advance failed"
-                  : "Advance to Next Epoch"}
+              {epochAdvancePending && epochAdvanceAwaitingReload
+                ? "Reloading..."
+                : epochAdvancePending
+                  ? "Advancing..."
+                  : epochAdvanceStatus === "error"
+                    ? "Advance failed"
+                    : "Advance to Next Epoch"}
             </button>
             <span class="text-xs text-text-muted">
               Uses the current epoch's saved race mapping.
