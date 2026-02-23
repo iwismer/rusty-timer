@@ -3,8 +3,8 @@ export async function apiFetch<T>(
   init?: RequestInit,
 ): Promise<T> {
   const resp = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
   if (!resp.ok) {
     const text = await resp.text();
