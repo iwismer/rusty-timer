@@ -736,6 +736,34 @@ describe("stream detail page epoch race mapping", () => {
     }
   });
 
+  it("renders Export CSV links for each epoch row", async () => {
+    render(Page);
+
+    const link1 = await screen.findByTestId("epoch-export-csv-1");
+    const link2 = screen.getByTestId("epoch-export-csv-2");
+
+    expect(link1).toBeInTheDocument();
+    expect(link2).toBeInTheDocument();
+
+    expect(link1.tagName).toBe("A");
+    expect(link2.tagName).toBe("A");
+
+    expect(link1).toHaveTextContent("CSV");
+    expect(link2).toHaveTextContent("CSV");
+
+    // Verify hrefs point to the per-epoch export endpoint
+    expect(link1.getAttribute("href")).toContain(
+      "/api/v1/streams/abc-123/epochs/1/export.csv",
+    );
+    expect(link2.getAttribute("href")).toContain(
+      "/api/v1/streams/abc-123/epochs/2/export.csv",
+    );
+
+    // Verify download attribute is present
+    expect(link1).toHaveAttribute("download");
+    expect(link2).toHaveAttribute("download");
+  });
+
   it("does not overwrite pending or dirty rows during poll refresh", async () => {
     const pollCallbacks: Array<() => void> = [];
     const realSetInterval = globalThis.setInterval.bind(globalThis);

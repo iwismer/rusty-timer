@@ -723,6 +723,11 @@
                   >
                     Status
                   </th>
+                  <th
+                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
+                  >
+                    Export
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -784,6 +789,16 @@
                       >
                         {epochRowStatusText(row)}
                       </span>
+                    </td>
+                    <td class="px-3 py-2">
+                      <a
+                        data-testid={`epoch-export-csv-${row.epoch}`}
+                        href={api.epochExportCsvUrl(streamId, row.epoch)}
+                        download
+                        class="text-xs text-accent no-underline hover:underline"
+                      >
+                        CSV
+                      </a>
                     </td>
                   </tr>
                 {/each}

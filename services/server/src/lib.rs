@@ -50,6 +50,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::export::export_csv),
         )
         .route(
+            "/api/v1/streams/{stream_id}/epochs/{epoch}/export.csv",
+            get(http::export::export_epoch_csv),
+        )
+        .route(
             "/api/v1/streams/{stream_id}/reset-epoch",
             post(http::streams::reset_epoch),
         )
