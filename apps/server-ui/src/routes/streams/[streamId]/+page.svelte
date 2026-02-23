@@ -408,7 +408,7 @@
     if (epochRaceRows.length === 0) return;
     let didUpdate = false;
     const nextRows = epochRaceRows.map((row) => {
-      const isCurrentRow = row.is_current || row.epoch === currentEpoch;
+      const isCurrentRow = row.epoch === currentEpoch;
       if (!isCurrentRow) return row;
       if (row.pending || isEpochRowDirty(row)) return row;
       if (row.event_count === currentEpochEventCount) return row;

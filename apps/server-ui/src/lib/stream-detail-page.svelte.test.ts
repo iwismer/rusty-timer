@@ -650,6 +650,60 @@ describe("stream detail page epoch race mapping", () => {
     expect(screen.getByTestId("epoch-event-count-1")).toHaveTextContent("4");
   });
 
+  it("does not rewrite previous epoch count when stream epoch advances before table reload", async () => {
+    const epochReload = deferred<typeof epochs>();
+    vi.mocked(api.getStreamEpochs)
+      .mockResolvedValueOnce(epochs)
+      .mockReturnValueOnce(epochReload.promise);
+
+    render(Page);
+    await screen.findByTestId("epoch-race-select-2");
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
+
+    replaceStreams([
+      {
+        ...stream,
+        stream_epoch: 3,
+      },
+    ]);
+
+    setMetrics("abc-123", {
+      ...metrics,
+      epoch_dedup_count: 99,
+    });
+
+    await tick();
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
+
+    sseMock.listener?.({ stream_id: "abc-123", stream_epoch: 3 });
+    epochReload.resolve([
+      ...epochs,
+      {
+        epoch: 3,
+        event_count: 0,
+        first_event_at: "2026-02-22T13:00:00Z",
+        last_event_at: "2026-02-22T13:00:00Z",
+        name: null,
+        is_current: true,
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-event-count-3")).toHaveTextContent("99");
+    });
+
+    setMetrics("abc-123", {
+      ...metrics,
+      epoch_dedup_count: 100,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-event-count-3")).toHaveTextContent(
+        "100",
+      );
+    });
+  });
+
   it("renders Export CSV links for each epoch row", async () => {
     render(Page);
 
