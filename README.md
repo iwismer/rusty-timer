@@ -73,6 +73,8 @@ cargo test --workspace --lib
 
 See [docs/local-testing.md](docs/local-testing.md) for full local development setup and [deploy/server/](deploy/server/) for production server deployment.
 
+See [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-guide.md) for race-day operations.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for test commands, code quality checks, and git hook setup.
