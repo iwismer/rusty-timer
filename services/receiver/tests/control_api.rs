@@ -1305,3 +1305,99 @@ async fn put_subscriptions_concurrent_writes_emit_current_count() {
     }
     assert!(saw_status, "Expected at least one status_changed event");
 }
+
+// ---------------------------------------------------------------------------
+// Selection: default behavior and validation
+// ---------------------------------------------------------------------------
+
+/// Without any profile set, GET /selection must return 200 with the default
+/// Manual selection (empty stream list, resume policy).
+#[tokio::test]
+async fn selection_defaults_to_manual_empty_without_profile() {
+    let app = setup();
+    let (status, val) = get_json(app, "/api/v1/selection").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["selection"]["mode"], "manual");
+    assert_eq!(val["selection"]["streams"], json!([]));
+    assert_eq!(val["replay_policy"], "resume");
+    assert!(val["replay_targets"].is_null());
+}
+
+/// With a profile set and Manual{[]} selection, GET /streams reports no
+/// streams — the receiver has no ports to proxy until subscriptions are added.
+#[tokio::test]
+async fn manual_empty_selection_results_in_no_streams_to_proxy() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/selection",
+            json!({"selection":{"mode":"manual","streams":[]},"replay_policy":"resume"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(app, "/api/v1/streams").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["streams"], json!([]));
+}
+
+/// PUT /api/v1/selection with mode=race and an empty race_id must be rejected
+/// with 400 to prevent a hard-to-diagnose connection failure at the protocol level.
+#[tokio::test]
+async fn put_selection_race_mode_rejects_empty_race_id() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Empty string race_id.
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/selection",
+            json!({
+                "selection":{"mode":"race","race_id":"","epoch_scope":"current"},
+                "replay_policy":"resume"
+            })
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Whitespace-only race_id.
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/selection",
+            json!({
+                "selection":{"mode":"race","race_id":"   ","epoch_scope":"current"},
+                "replay_policy":"resume"
+            })
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+}

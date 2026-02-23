@@ -1678,14 +1678,6 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(reader_ip): Path<String>,
 ) -> Response {
-    // Keep prior behavior for malformed percent-encoding style stream keys.
-    if reader_ip.contains('%') {
-        return text_response(
-            StatusCode::BAD_REQUEST,
-            "invalid percent-encoding in stream key",
-        );
-    }
-
     let result = state.journal.lock().await.reset_epoch(&reader_ip);
     match result {
         Ok(new_epoch) => {
@@ -1718,13 +1710,6 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
     Path(reader_ip): Path<String>,
     body: Bytes,
 ) -> Response {
-    if reader_ip.contains('%') {
-        return text_response(
-            StatusCode::BAD_REQUEST,
-            "invalid percent-encoding in stream key",
-        );
-    }
-
     let payload = match parse_json_body::<serde_json::Value>(&body) {
         Ok(value) => value,
         Err(error) => return text_response(StatusCode::BAD_REQUEST, error),
@@ -1862,7 +1847,10 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
         return json_response(response_status, response_body);
     }
 
-    text_response(response_status, response_body)
+    json_response(
+        response_status,
+        serde_json::json!({"error": response_body}).to_string(),
+    )
 }
 
 fn status_from_u16_or_internal(status: u16) -> StatusCode {

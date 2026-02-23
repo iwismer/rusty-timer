@@ -530,6 +530,16 @@ async fn put_selection(
             .into_response();
     }
 
+    if let rt_protocol::ReceiverSelection::Race { ref race_id, .. } = body.selection
+        && race_id.trim().is_empty()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "race_id must not be empty when mode is race",
+        )
+            .into_response();
+    }
+
     let normalized = ReceiverSetSelection {
         selection: body.selection,
         replay_policy: body.replay_policy,
