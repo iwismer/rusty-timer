@@ -1,4 +1,4 @@
-use super::response::{bad_request, internal_error, not_found};
+use super::response::{bad_request, conflict, internal_error, not_found};
 use crate::repo::races as repo;
 use crate::state::AppState;
 use axum::{
@@ -65,6 +65,10 @@ pub async fn delete_race(
     State(state): State<AppState>,
     Path(race_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if state.has_active_receiver_session_for_race(race_id).await {
+        return conflict("race is currently selected by an active receiver session");
+    }
+
     match repo::delete_race(&state.pool, race_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => not_found("race not found"),

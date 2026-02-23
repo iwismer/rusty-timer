@@ -173,6 +173,25 @@ impl AppState {
             .get(session_id)
             .cloned()
     }
+
+    pub async fn has_active_receiver_session_for_race(&self, race_id: Uuid) -> bool {
+        self.active_receiver_sessions
+            .read()
+            .await
+            .values()
+            .any(|record| {
+                matches!(
+                    &record.selection,
+                    ReceiverSelectionSnapshot::Race {
+                        race_id: selected_race_id,
+                        ..
+                    } if selected_race_id
+                        .parse::<Uuid>()
+                        .ok()
+                        .is_some_and(|selected_race_id| selected_race_id == race_id)
+                )
+            })
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +301,93 @@ mod tests {
                     reader_ip: "10.0.0.9:10000".to_owned(),
                 }],
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_session_registry_can_query_active_race_selection_by_race_id() {
+        let state = AppState::new(make_lazy_pool());
+        let selected_race_id = Uuid::new_v4();
+        let other_race_id = Uuid::new_v4();
+
+        state
+            .register_receiver_session(
+                "session-race",
+                "receiver-race",
+                ReceiverSessionProtocol::V11,
+                ReceiverSelectionSnapshot::Race {
+                    race_id: selected_race_id.to_string(),
+                    epoch_scope: EpochScope::Current,
+                },
+            )
+            .await;
+
+        state
+            .register_receiver_session(
+                "session-manual",
+                "receiver-manual",
+                ReceiverSessionProtocol::V11,
+                ReceiverSelectionSnapshot::Manual {
+                    streams: vec![StreamRef {
+                        forwarder_id: "fwd-1".to_owned(),
+                        reader_ip: "10.0.0.1:10000".to_owned(),
+                    }],
+                },
+            )
+            .await;
+
+        assert!(
+            state
+                .has_active_receiver_session_for_race(selected_race_id)
+                .await
+        );
+        assert!(
+            !state
+                .has_active_receiver_session_for_race(other_race_id)
+                .await
+        );
+
+        state.unregister_receiver_session("session-race").await;
+        assert!(
+            !state
+                .has_active_receiver_session_for_race(selected_race_id)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_session_registry_matches_equivalent_uuid_text_and_ignores_invalid_ids() {
+        let state = AppState::new(make_lazy_pool());
+        let selected_race_id = Uuid::new_v4();
+
+        state
+            .register_receiver_session(
+                "session-race-uppercase",
+                "receiver-race",
+                ReceiverSessionProtocol::V11,
+                ReceiverSelectionSnapshot::Race {
+                    race_id: selected_race_id.to_string().to_uppercase(),
+                    epoch_scope: EpochScope::Current,
+                },
+            )
+            .await;
+
+        state
+            .register_receiver_session(
+                "session-race-invalid",
+                "receiver-race",
+                ReceiverSessionProtocol::V11,
+                ReceiverSelectionSnapshot::Race {
+                    race_id: "not-a-uuid".to_owned(),
+                    epoch_scope: EpochScope::Current,
+                },
+            )
+            .await;
+
+        assert!(
+            state
+                .has_active_receiver_session_for_race(selected_race_id)
+                .await
         );
     }
 }
