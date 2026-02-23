@@ -28,7 +28,8 @@
       "Bash(tbd blocked:*)",
       "mcp__jetbrains__list_directory_tree",
       "Bash(git worktree:*)",
-      "Bash(tail:*)"
+      "Bash(tail:*)",
+      "Bash(gh run:*)"
     ]
   }
 }
