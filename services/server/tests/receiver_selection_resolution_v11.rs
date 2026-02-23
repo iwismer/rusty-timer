@@ -281,3 +281,172 @@ async fn test_race_current_resume_does_not_backfill_prior_epoch() {
     .unwrap();
     assert_eq!(row.get::<i64, _>("stream_epoch"), 2);
 }
+
+#[tokio::test]
+async fn test_race_current_resume_without_cursor_accepts_live_events_after_stale_epoch_jump() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-race", "receiver", b"rcv-race-token").await;
+
+    // Persist one event in epoch 1 before stream_epoch is moved forward.
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session.clone(),
+        batch_id: "seed".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-22T10:00:00.000Z".to_owned(),
+            raw_read_line: "SEED_E1".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    // Simulate stream_epoch being advanced ahead of real incoming events.
+    sqlx::query(
+        "UPDATE streams SET stream_epoch = 2 WHERE forwarder_id = 'fwd-race' AND reader_ip = '10.30.0.1:10000'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let race_id = insert_race(&pool, "current-stale-epoch").await;
+    map_epoch(&pool, "10.30.0.1:10000", 2, &race_id).await;
+
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-race-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-race".to_owned(),
+        selection: ReceiverSelection::Race {
+            race_id,
+            epoch_scope: EpochScope::Current,
+        },
+        replay_policy: ReplayPolicy::Resume,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    let _ = rcv.recv_message().await.unwrap();
+    let _ = rcv.recv_message().await.unwrap();
+
+    // No persisted cursor exists; new live events should still flow.
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "live-after-subscribe".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 2,
+            reader_timestamp: "2026-02-22T10:00:01.000Z".to_owned(),
+            raw_read_line: "LIVE_E1".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+        Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+            let event = &batch.events[0];
+            assert_eq!(event.stream_epoch, 1);
+            assert_eq!(event.seq, 2);
+            assert_eq!(event.raw_read_line, "LIVE_E1");
+        }
+        Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
+        Ok(Err(e)) => panic!("recv error: {}", e),
+        Err(_) => panic!("timeout waiting for live event"),
+    }
+}
+
+#[tokio::test]
+async fn test_race_current_resume_without_cursor_replays_persisted_current_epoch() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-race", "receiver", b"rcv-race-token").await;
+
+    // Persist an old-epoch event first.
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session.clone(),
+        batch_id: "old".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-22T10:00:00.000Z".to_owned(),
+            raw_read_line: "OLD_E1".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    // Move stream_epoch and persist a current-epoch event.
+    sqlx::query(
+        "UPDATE streams SET stream_epoch = 2 WHERE forwarder_id = 'fwd-race' AND reader_ip = '10.30.0.1:10000'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "current".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-race".to_owned(),
+            reader_ip: "10.30.0.1:10000".to_owned(),
+            stream_epoch: 2,
+            seq: 1,
+            reader_timestamp: "2026-02-22T10:00:01.000Z".to_owned(),
+            raw_read_line: "CURRENT_E2".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    let race_id = insert_race(&pool, "current-resume-replay").await;
+    map_epoch(&pool, "10.30.0.1:10000", 2, &race_id).await;
+
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-race-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-race".to_owned(),
+        selection: ReceiverSelection::Race {
+            race_id,
+            epoch_scope: EpochScope::Current,
+        },
+        replay_policy: ReplayPolicy::Resume,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    let _ = rcv.recv_message().await.unwrap();
+    match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
+        Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+            assert_eq!(batch.events.len(), 1);
+            let event = &batch.events[0];
+            assert_eq!(event.stream_epoch, 2);
+            assert_eq!(event.seq, 1);
+            assert_eq!(event.raw_read_line, "CURRENT_E2");
+        }
+        Ok(Ok(other)) => panic!("expected receiver_event_batch replay, got {:?}", other),
+        Ok(Err(e)) => panic!("recv error: {}", e),
+        Err(_) => panic!("timeout waiting for replayed current-epoch event"),
+    }
+}

@@ -850,7 +850,20 @@ async fn compute_selection_start_cursor(
             if target.current_epoch_only {
                 Ok(match cursor {
                     Some((epoch, seq)) if epoch == target.current_stream_epoch => (epoch, seq),
-                    _ => (target.current_stream_epoch, 0),
+                    Some(_) => (target.current_stream_epoch, 0),
+                    None => match fetch_max_event_cursor(&state.pool, target.stream_id).await? {
+                        // Current-only resume must not replay old epochs.
+                        // When the stream head is stale (< current_stream_epoch), we still start
+                        // from the stale head so first live stale-epoch events are not dropped.
+                        Some((tail_epoch, tail_seq))
+                            if tail_epoch < target.current_stream_epoch =>
+                        {
+                            (tail_epoch, tail_seq)
+                        }
+                        // Otherwise begin at current epoch start so first-time receivers replay
+                        // already persisted current-epoch rows.
+                        _ => (target.current_stream_epoch, 0),
+                    },
                 })
             } else {
                 Ok(cursor.unwrap_or((1, 0)))
