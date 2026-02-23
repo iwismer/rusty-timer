@@ -42,7 +42,7 @@ jobs:
 
       - name: Install Rollup Linux optional dependency workaround
         if: runner.os == 'Linux'
-        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
 
       - name: Prettier check
         run: npm run lint
