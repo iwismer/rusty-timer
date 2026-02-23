@@ -3,7 +3,7 @@ use crate::{
     repo::{
         events::{
             fetch_events_after_cursor_through_cursor_limited,
-            fetch_events_for_stream_epoch_from_seq_limited, fetch_max_event_cursor,
+            fetch_events_for_stream_epoch_from_seq_through_cursor_limited, fetch_max_event_cursor,
         },
         receiver_cursors::{fetch_cursor, upsert_cursor},
         stream_epoch_races::list_race_selection_streams,
@@ -79,6 +79,8 @@ struct TargetedReplaySelection {
     stream_id: Uuid,
     stream_epoch: i64,
     from_seq: i64,
+    through_epoch: i64,
+    through_seq: i64,
 }
 
 fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
@@ -589,7 +591,7 @@ async fn apply_receiver_selection(
     } = pending;
     let mut warnings: Vec<String> = Vec::new();
     let resolved = resolve_selection_targets(state, selection).await?;
-    let targeted_replay = if replay_policy == ReplayPolicy::Targeted {
+    let targeted_replay_selections = if replay_policy == ReplayPolicy::Targeted {
         resolve_targeted_replay_targets(&resolved, replay_targets, &mut warnings)
     } else {
         Vec::new()
@@ -621,6 +623,8 @@ async fn apply_receiver_selection(
             replay_backlog(socket, state, session_id, sub).await?;
         }
     } else if replay_policy == ReplayPolicy::Targeted {
+        let targeted_replay =
+            snapshot_targeted_replay_bounds(state, targeted_replay_selections).await?;
         replay_targeted_backlog(
             socket,
             state,
@@ -651,6 +655,28 @@ async fn apply_receiver_selection(
         "applied receiver selection"
     );
     Ok(())
+}
+
+async fn snapshot_targeted_replay_bounds(
+    state: &AppState,
+    targeted: Vec<TargetedReplaySelection>,
+) -> Result<Vec<TargetedReplaySelection>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut bounded = Vec::with_capacity(targeted.len());
+    for target in targeted {
+        let Some((through_epoch, through_seq)) =
+            fetch_max_event_cursor(&state.pool, target.stream_id).await?
+        else {
+            continue;
+        };
+        bounded.push(TargetedReplaySelection {
+            stream_id: target.stream_id,
+            stream_epoch: target.stream_epoch,
+            from_seq: target.from_seq,
+            through_epoch,
+            through_seq,
+        });
+    }
+    Ok(bounded)
 }
 
 fn resolve_targeted_replay_targets(
@@ -692,6 +718,8 @@ fn resolve_targeted_replay_targets(
                 stream_id: resolved_target.stream_id,
                 stream_epoch: target.stream_epoch,
                 from_seq,
+                through_epoch: 0,
+                through_seq: 0,
             });
         }
     }
@@ -922,13 +950,20 @@ async fn replay_targeted_backlog(
     subscriptions: &mut [StreamSub],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for target in targets {
+        if target.through_epoch < target.stream_epoch
+            || (target.through_epoch == target.stream_epoch && target.through_seq < target.from_seq)
+        {
+            continue;
+        }
         let mut from_seq = target.from_seq;
         loop {
-            let events = fetch_events_for_stream_epoch_from_seq_limited(
+            let events = fetch_events_for_stream_epoch_from_seq_through_cursor_limited(
                 &state.pool,
                 target.stream_id,
                 target.stream_epoch,
                 from_seq,
+                target.through_epoch,
+                target.through_seq,
                 REPLAY_BATCH_LIMIT,
             )
             .await?;
