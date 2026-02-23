@@ -81,6 +81,8 @@ pub struct ReaderStatus {
     pub reads_total: i64,
     /// The local port the forwarder listens on to re-expose reads from this reader.
     pub local_port: u16,
+    /// The name of the current epoch (set via the server), if any.
+    pub current_epoch_name: Option<String>,
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -313,6 +315,7 @@ impl StatusServer {
                 reads_since_restart: 0,
                 reads_total: 0,
                 local_port: *local_port,
+                current_epoch_name: None,
             });
         }
     }
@@ -322,6 +325,30 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.reads_total = total;
+        }
+    }
+
+    /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
+    pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.current_epoch_name = name;
+            let state_str = match &r.state {
+                ReaderConnectionState::Connected => "connected",
+                ReaderConnectionState::Connecting => "connecting",
+                ReaderConnectionState::Disconnected => "disconnected",
+            };
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: state_str.to_owned(),
+                    reads_session: r.reads_since_restart,
+                    reads_total: r.reads_total,
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: r.local_port,
+                    current_epoch_name: r.current_epoch_name.clone(),
+                });
         }
     }
 
@@ -344,6 +371,7 @@ impl StatusServer {
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
+                    current_epoch_name: r.current_epoch_name.clone(),
                 });
         }
     }
@@ -369,6 +397,7 @@ impl StatusServer {
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
+                    current_epoch_name: r.current_epoch_name.clone(),
                 });
         }
     }
@@ -1503,6 +1532,7 @@ struct ReaderStatusJson {
     reads_total: i64,
     last_seen_secs: Option<u64>,
     local_port: u16,
+    current_epoch_name: Option<String>,
 }
 
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
@@ -1525,6 +1555,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 reads_total: r.reads_total,
                 last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                 local_port: r.local_port,
+                current_epoch_name: r.current_epoch_name.clone(),
             }
         })
         .collect();
@@ -1844,6 +1875,30 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
         state
             .logger
             .log(format!("set current epoch name for {} via API", reader_ip));
+
+        // Store the epoch name locally and broadcast a ReaderUpdated SSE event.
+        let mut ss = state.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(&reader_ip) {
+            r.current_epoch_name = normalized_name;
+            let state_str = match &r.state {
+                ReaderConnectionState::Connected => "connected",
+                ReaderConnectionState::Connecting => "connecting",
+                ReaderConnectionState::Disconnected => "disconnected",
+            };
+            let _ = state
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                    ip: reader_ip.to_owned(),
+                    state: state_str.to_owned(),
+                    reads_session: r.reads_since_restart,
+                    reads_total: r.reads_total,
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    local_port: r.local_port,
+                    current_epoch_name: r.current_epoch_name.clone(),
+                });
+        }
+        drop(ss);
+
         return json_response(response_status, response_body);
     }
 
@@ -2993,5 +3048,147 @@ target = "192.168.1.100:10000"
                 version: "2.0.0".to_owned()
             })
         );
+    }
+
+    #[tokio::test]
+    async fn set_reader_epoch_name_broadcasts_reader_updated_with_name() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
+        server
+            .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
+            .await;
+
+        let mut rx = server.ui_tx.subscribe();
+
+        // Set epoch name
+        server
+            .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
+            .await;
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                ip,
+                current_epoch_name,
+                ..
+            } => {
+                assert_eq!(ip, "192.168.1.10");
+                assert_eq!(current_epoch_name, Some("Race Day".to_owned()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_reader_epoch_name_to_none_clears_name() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
+        server
+            .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
+            .await;
+
+        let mut rx = server.ui_tx.subscribe();
+
+        // Clear epoch name
+        server.set_reader_epoch_name("192.168.1.10", None).await;
+
+        let evt = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("recv event");
+        match evt {
+            crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                current_epoch_name, ..
+            } => {
+                assert_eq!(current_epoch_name, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_json_includes_current_epoch_name() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
+        server
+            .set_reader_epoch_name("192.168.1.10", Some("Race Day".to_owned()))
+            .await;
+
+        let addr = server.local_addr();
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/v1/status", addr))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["readers"][0]["current_epoch_name"], "Race Day");
+    }
+
+    #[tokio::test]
+    async fn status_json_epoch_name_null_when_not_set() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
+
+        let addr = server.local_addr();
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/v1/status", addr))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert!(body["readers"][0]["current_epoch_name"].is_null());
     }
 }
