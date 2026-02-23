@@ -5,7 +5,7 @@ title: Add human-readable name field to epochs on stream details page
 kind: feature
 status: closed
 priority: 3
-version: 7
+version: 8
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -15,9 +15,11 @@ dependencies:
     target: is-01kj42gnh9p4hd4b7dbhdn9y3h
   - type: blocks
     target: is-01kj4633xganepcdxs7ms2wvzz
+  - type: blocks
+    target: is-01kj5a5se9p151d113psg7ddga
 parent_id: is-01kj3b514za6r2c96xxn5w3wcn
 created_at: 2026-02-23T01:07:24.047Z
-updated_at: 2026-02-23T05:46:29.002Z
+updated_at: 2026-02-23T13:14:22.473Z
 closed_at: 2026-02-23T05:46:28.998Z
 close_reason: "Implemented backend + server-ui epoch naming with explicit row save; reviewed, validated, and CI green on PR #89."
 ---
