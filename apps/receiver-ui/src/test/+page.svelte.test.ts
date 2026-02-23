@@ -79,22 +79,22 @@ describe("receiver page", () => {
     });
   });
 
-  it("auto-applies race id when committed on blur", async () => {
+  it("uses race dropdown and auto-applies selected race id", async () => {
     render(Page);
 
     const modeSelect = await screen.findByTestId("selection-mode-select");
     await fireEvent.change(modeSelect, { target: { value: "race" } });
 
-    const raceIdInput = await screen.findByTestId("race-id-input");
-    await fireEvent.input(raceIdInput, { target: { value: "race-42" } });
-    await fireEvent.blur(raceIdInput);
+    const raceIdSelect = await screen.findByTestId("race-id-select");
+    expect(raceIdSelect.tagName).toBe("SELECT");
+    await fireEvent.change(raceIdSelect, { target: { value: "race-1" } });
 
     await waitFor(() => {
       expect(apiMocks.putSelection).toHaveBeenCalledWith(
         expect.objectContaining({
           selection: expect.objectContaining({
             mode: "race",
-            race_id: "race-42",
+            race_id: "race-1",
           }),
         }),
       );
@@ -146,6 +146,33 @@ describe("receiver page", () => {
     expect(replayPolicySelect).toHaveTextContent("Resume");
     expect(replayPolicySelect).toHaveTextContent("Live only");
     expect(replayPolicySelect).toHaveTextContent("Targeted replay");
+  });
+
+  it("shows plain-language descriptions for epoch scope and replay policy", async () => {
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    expect(
+      await screen.findByText(/Current:\s*replay only the current epoch\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/All:\s*replay all epochs available for the race\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Resume:\s*continue from the last acknowledged position\./,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Live only:\s*skip replay and receive new reads only\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Targeted replay:\s*replay full selected epochs per stream\./,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("renders targeted row stream select as dropdown with known stream options", async () => {
@@ -249,10 +276,6 @@ describe("receiver page", () => {
     await fireEvent.input(epochInput, { target: { value: "3" } });
     await fireEvent.blur(epochInput);
 
-    const fromSeqInput = await screen.findByTestId("targeted-row-from-seq-0");
-    await fireEvent.input(fromSeqInput, { target: { value: "12" } });
-    await fireEvent.blur(fromSeqInput);
-
     await waitFor(() => {
       expect(apiMocks.putSelection).toHaveBeenCalledWith({
         selection: { mode: "manual", streams: [] },
@@ -262,7 +285,6 @@ describe("receiver page", () => {
             forwarder_id: "fwd-1",
             reader_ip: "10.0.0.1:10000",
             stream_epoch: 3,
-            from_seq: 12,
           },
         ],
       });
@@ -287,8 +309,20 @@ describe("receiver page", () => {
 
     expect(screen.getByTestId("targeted-row-stream-1")).toBeInTheDocument();
     expect(screen.getByTestId("targeted-row-epoch-1")).toBeInTheDocument();
-    expect(screen.getByTestId("targeted-row-from-seq-1")).toBeInTheDocument();
     expect(screen.getByTestId("remove-targeted-row-1")).toBeInTheDocument();
+  });
+
+  it("does not render from-seq input for targeted replay rows", async () => {
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    expect(screen.queryByTestId("targeted-row-from-seq-0")).toBeNull();
   });
 
   it("removes a targeted replay row when remove is clicked", async () => {

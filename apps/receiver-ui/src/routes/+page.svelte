@@ -25,12 +25,10 @@
   type TargetedRowDraft = {
     streamKey: string;
     streamEpoch: string;
-    fromSeq: string;
   };
   type TargetedRowErrors = {
     streamKey?: string;
     streamEpoch?: string;
-    fromSeq?: string;
   };
 
   let profile = $state<Profile | null>(null);
@@ -63,7 +61,7 @@
   let epochScopeDraft = $state<EpochScope>("current");
   let replayPolicyDraft = $state<ReplayPolicy>("resume");
   let targetedRows = $state<TargetedRowDraft[]>([
-    { streamKey: "", streamEpoch: "", fromSeq: "" },
+    { streamKey: "", streamEpoch: "" },
   ]);
   let targetedRowErrors = $state<Record<number, TargetedRowErrors>>({});
   let selectionBusy = $state(false);
@@ -83,10 +81,6 @@
     return {
       streamKey: streamKey(target.forwarder_id, target.reader_ip),
       streamEpoch: String(target.stream_epoch),
-      fromSeq:
-        target.from_seq === undefined
-          ? ""
-          : String(Math.max(0, target.from_seq)),
     };
   }
 
@@ -136,18 +130,7 @@
           : "Stream epoch is required.";
       }
 
-      const trimmedFromSeq = row.fromSeq.trim();
-      let fromSeq: number | undefined;
-      if (trimmedFromSeq) {
-        const parsedFromSeq = parseNonNegativeInt(trimmedFromSeq);
-        if (parsedFromSeq === null) {
-          rowErrors.fromSeq = "From seq must be a non-negative integer.";
-        } else {
-          fromSeq = parsedFromSeq;
-        }
-      }
-
-      if (rowErrors.streamKey || rowErrors.streamEpoch || rowErrors.fromSeq) {
+      if (rowErrors.streamKey || rowErrors.streamEpoch) {
         errors[index] = rowErrors;
         return;
       }
@@ -156,7 +139,6 @@
         forwarder_id: parsedStream!.forwarder_id,
         reader_ip: parsedStream!.reader_ip,
         stream_epoch: epoch!,
-        ...(fromSeq !== undefined ? { from_seq: fromSeq } : {}),
       });
     });
 
@@ -258,7 +240,7 @@
           nextSelection.replay_targets &&
           nextSelection.replay_targets.length > 0
             ? nextSelection.replay_targets.map(rowFromReplayTarget)
-            : [{ streamKey: "", streamEpoch: "", fromSeq: "" }];
+            : [{ streamKey: "", streamEpoch: "" }];
         targetedRowErrors = {};
         if (nextSelection.selection.mode === "manual") {
           selectedStreams = nextSelection.selection.streams;
@@ -376,8 +358,8 @@
     void applySelection();
   }
 
-  function handleRaceIdBlur(): void {
-    raceIdDraft = raceIdDraft.trim();
+  function handleRaceIdChange(event: Event): void {
+    raceIdDraft = (event.currentTarget as HTMLSelectElement).value;
     if (selectionMode === "race") {
       void applySelection();
     }
@@ -411,26 +393,15 @@
     void applySelection();
   }
 
-  function handleTargetedFromSeqBlur(index: number, event: Event): void {
-    const value = (event.currentTarget as HTMLInputElement).value.trim();
-    targetedRows = targetedRows.map((row, rowIndex) =>
-      rowIndex === index ? { ...row, fromSeq: value } : row,
-    );
-    void applySelection();
-  }
-
   function addTargetedRow(): void {
-    targetedRows = [
-      ...targetedRows,
-      { streamKey: "", streamEpoch: "", fromSeq: "" },
-    ];
+    targetedRows = [...targetedRows, { streamKey: "", streamEpoch: "" }];
     targetedRowErrors = {};
   }
 
   function removeTargetedRow(index: number): void {
     targetedRows = targetedRows.filter((_, rowIndex) => rowIndex !== index);
     if (targetedRows.length === 0) {
-      targetedRows = [{ streamKey: "", streamEpoch: "", fromSeq: "" }];
+      targetedRows = [{ streamKey: "", streamEpoch: "" }];
     }
     targetedRowErrors = {};
     void applySelection();
@@ -757,20 +728,18 @@
           {#if selectionMode === "race"}
             <label class="block text-xs font-medium text-text-muted">
               Race ID
-              <input
-                data-testid="race-id-input"
+              <select
+                data-testid="race-id-select"
                 class="{inputClass} mt-1"
                 bind:value={raceIdDraft}
-                onblur={handleRaceIdBlur}
-                list="race-id-options"
-                placeholder="race id"
+                onchange={handleRaceIdChange}
                 disabled={selectionBusy}
-              />
-              <datalist id="race-id-options">
+              >
+                <option value="">Select race...</option>
                 {#each races as race}
                   <option value={race.race_id}>{race.name}</option>
                 {/each}
-              </datalist>
+              </select>
             </label>
 
             <label class="block text-xs font-medium text-text-muted">
@@ -785,6 +754,10 @@
                 <option value="current">Current</option>
                 <option value="all">All</option>
               </select>
+              <p class="text-xs text-text-muted mt-1 m-0">
+                Current: replay only the current epoch. All: replay all epochs
+                available for the race.
+              </p>
             </label>
           {/if}
 
@@ -801,6 +774,11 @@
               <option value="live_only">Live only</option>
               <option value="targeted">Targeted replay</option>
             </select>
+            <p class="text-xs text-text-muted mt-1 m-0">
+              Resume: continue from the last acknowledged position. Live only:
+              skip replay and receive new reads only. Targeted replay: replay
+              full selected epochs per stream.
+            </p>
           </label>
 
           {#if replayPolicyDraft === "targeted"}
@@ -822,7 +800,7 @@
               <div class="grid gap-2">
                 {#each targetedRows as row, index}
                   <div
-                    class="grid gap-2 md:grid-cols-[2fr_1fr_1fr_auto] items-start"
+                    class="grid gap-2 md:grid-cols-[2fr_1fr_auto] items-start"
                   >
                     <select
                       data-testid={"targeted-row-stream-" + index}
@@ -857,18 +835,6 @@
                       disabled={selectionBusy}
                     />
 
-                    <input
-                      data-testid={"targeted-row-from-seq-" + index}
-                      type="number"
-                      min="0"
-                      class={inputClass}
-                      value={row.fromSeq}
-                      onblur={(event) =>
-                        handleTargetedFromSeqBlur(index, event)}
-                      placeholder="From seq"
-                      disabled={selectionBusy}
-                    />
-
                     <button
                       data-testid={"remove-targeted-row-" + index}
                       class={btnSecondary}
@@ -889,13 +855,6 @@
                         {#if targetedRowErrors[index].streamEpoch}
                           {targetedRowErrors[index].streamKey ? " " : ""}
                           {targetedRowErrors[index].streamEpoch}
-                        {/if}
-                        {#if targetedRowErrors[index].fromSeq}
-                          {targetedRowErrors[index].streamKey ||
-                          targetedRowErrors[index].streamEpoch
-                            ? " "
-                            : ""}
-                          {targetedRowErrors[index].fromSeq}
                         {/if}
                       </p>
                     {/if}
