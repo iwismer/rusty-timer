@@ -11,8 +11,8 @@
 
 use forwarder::status_http::{StatusConfig, StatusServer, SubsystemStatus};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 // Helper: make an HTTP request (using tokio's TcpStream for simplicity)

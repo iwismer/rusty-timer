@@ -7,7 +7,7 @@ use axum::{
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 pub async fn receiver_sse(
     State(state): State<Arc<AppState>>,

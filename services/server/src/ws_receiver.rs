@@ -14,8 +14,8 @@ use crate::{
     },
 };
 use axum::extract::{
-    State,
     ws::{Message, WebSocket, WebSocketUpgrade},
+    State,
 };
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;

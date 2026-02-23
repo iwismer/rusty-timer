@@ -12,7 +12,7 @@
 //! 9. Raw read lines are valid IPICO wire-format
 //! 10. Chip IDs map to hex tag IDs in parsed reads
 
-use emulator::scenario::{EmulatorMode, ReaderScenarioConfig, load_scenario_from_str};
+use emulator::scenario::{load_scenario_from_str, EmulatorMode, ReaderScenarioConfig};
 use ipico_core::read::ChipRead;
 use std::convert::TryFrom;
 

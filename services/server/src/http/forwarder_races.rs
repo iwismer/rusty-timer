@@ -4,10 +4,10 @@ use crate::repo::forwarder_races as repo;
 use crate::repo::races as race_repo;
 use crate::state::AppState;
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
+    Json,
 };
 use uuid::Uuid;
 

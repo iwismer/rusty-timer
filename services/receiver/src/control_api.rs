@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, broadcast, watch};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
@@ -816,7 +816,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use rt_updater::workflow::{Checker, run_check, run_download};
+    use rt_updater::workflow::{run_check, run_download, Checker};
     use std::future::Future;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

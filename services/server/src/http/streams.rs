@@ -1,10 +1,10 @@
 use super::response::{bad_request, conflict, internal_error, not_found};
 use crate::state::{AppState, ForwarderCommand};
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
+    Json,
 };
 use sqlx::Row;
 use uuid::Uuid;

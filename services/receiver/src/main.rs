@@ -1,9 +1,9 @@
-use receiver::Subscription;
 use receiver::cache::EventBus;
 use receiver::control_api::{AppState, ConnectionState};
 use receiver::db::Db;
 use receiver::local_proxy::LocalProxy;
-use receiver::ports::{PortAssignment, resolve_ports, stream_key};
+use receiver::ports::{resolve_ports, stream_key, PortAssignment};
+use receiver::Subscription;
 use rt_ui_log::UiLogLevel;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -2,7 +2,7 @@ use rt_protocol::{ConfigGetResponse, ConfigSetResponse, EpochResetCommand, Resta
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, RwLock};
 use uuid::Uuid;
 
 use crate::dashboard_events::DashboardEvent;

@@ -56,7 +56,7 @@ mod tests {
     use crate::models::Message;
     use tokio::net::TcpStream;
     use tokio::sync::mpsc;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     #[tokio::test]
     async fn begin_accepts_connection_and_dispatches_client_message() {
