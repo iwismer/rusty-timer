@@ -189,23 +189,22 @@ pub async fn export_epoch_raw(
         return response;
     }
 
-    let rows = sqlx::query!(
-        r#"SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type
-           FROM events
+    let rows = sqlx::query_scalar::<_, String>(
+        r#"SELECT raw_read_line FROM events
            WHERE stream_id = $1 AND stream_epoch = $2
            ORDER BY seq ASC"#,
-        stream_id,
-        epoch
     )
+    .bind(stream_id)
+    .bind(epoch)
     .fetch_all(&state.pool)
     .await;
 
     match rows {
         Err(e) => internal_error(e),
-        Ok(rows) => {
+        Ok(raw_lines) => {
             let mut buf = String::new();
-            for row in &rows {
-                buf.push_str(&row.raw_read_line);
+            for raw_line in &raw_lines {
+                buf.push_str(raw_line);
                 buf.push('\n');
             }
             Response::builder()

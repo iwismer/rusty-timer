@@ -234,3 +234,21 @@ async fn test_export_raw_not_found() {
     .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+#[tokio::test]
+async fn test_export_epoch_raw_not_found() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let resp = reqwest::get(format!(
+        "http://{}/api/v1/streams/00000000-0000-0000-0000-000000000000/epochs/1/export.txt",
+        addr
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
+}
