@@ -27,7 +27,8 @@
       "Bash(tbd ready:*)",
       "Bash(tbd blocked:*)",
       "mcp__jetbrains__list_directory_tree",
-      "Bash(git worktree:*)"
+      "Bash(git worktree:*)",
+      "Bash(tail:*)"
     ]
   }
 }
