@@ -119,6 +119,64 @@ pub async fn export_csv(
     }
 }
 
+/// `GET /api/v1/streams/{stream_id}/epochs/{epoch}/export.csv`
+///
+/// Streams canonical deduplicated events for a single epoch as CSV:
+/// - Header: `stream_epoch,seq,reader_timestamp,raw_read_line,read_type`
+/// - RFC 4180 quoting (same as whole-stream export).
+/// - Ordered by `seq`.
+/// - Returns valid CSV with headers even when the epoch has zero reads.
+pub async fn export_epoch_csv(
+    State(state): State<AppState>,
+    Path((stream_id, epoch)): Path<(Uuid, i64)>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_stream_exists(&state.pool, stream_id).await {
+        return response;
+    }
+
+    let rows = sqlx::query!(
+        r#"SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type
+           FROM events
+           WHERE stream_id = $1 AND stream_epoch = $2
+           ORDER BY seq ASC"#,
+        stream_id,
+        epoch
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Err(e) => internal_error(e),
+        Ok(rows) => {
+            let mut buf =
+                String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");
+            for row in &rows {
+                let ep = row.stream_epoch.to_string();
+                let seq = row.seq.to_string();
+                let ts = row.reader_timestamp.as_deref().unwrap_or("");
+                let line = &row.raw_read_line;
+                let read_type = &row.read_type;
+                buf.push_str(&csv_field(&ep));
+                buf.push(',');
+                buf.push_str(&csv_field(&seq));
+                buf.push(',');
+                buf.push_str(&csv_field(ts));
+                buf.push(',');
+                buf.push_str(&csv_field(line));
+                buf.push(',');
+                buf.push_str(&csv_field(read_type));
+                buf.push('\n');
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+                .body(Body::from(buf))
+                .unwrap()
+                .into_response()
+        }
+    }
+}
+
 /// RFC 4180 CSV field quoting.
 /// Wraps in double-quotes if the field contains comma, double-quote, or newline.
 /// Doubles any embedded double-quotes.
