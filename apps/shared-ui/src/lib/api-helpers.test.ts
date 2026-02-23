@@ -54,4 +54,29 @@ describe("apiFetch", () => {
       expect.objectContaining({ method: "PUT", body: '{"a":1}' }),
     );
   });
+
+  it("retains Content-Type when caller passes custom headers", async () => {
+    const { apiFetch } = await import("./api-helpers");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await apiFetch("/api/v1/test", {
+      method: "POST",
+      headers: { "X-Custom": "value" },
+      body: '{"cursor":"abc"}',
+    });
+    const callArgs = mockFetch.mock.calls[0];
+    const headers = callArgs[1].headers;
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["X-Custom"]).toBe("value");
+  });
+
+  it("allows caller to override Content-Type", async () => {
+    const { apiFetch } = await import("./api-helpers");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await apiFetch("/api/v1/test", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+    });
+    const callArgs = mockFetch.mock.calls[0];
+    expect(callArgs[1].headers["Content-Type"]).toBe("text/plain");
+  });
 });

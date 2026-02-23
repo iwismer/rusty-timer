@@ -77,6 +77,40 @@ describe("receiver admin page", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows display_alias prominently when available", async () => {
+    render(Page);
+
+    const finishAlias = await screen.findByText("Finish");
+    expect(finishAlias).toBeInTheDocument();
+    expect(finishAlias.tagName).toBe("SPAN");
+    // The alias should be accompanied by the forwarder/reader detail below it
+    expect(screen.getByText("f1 / 10.0.0.1:10000")).toBeInTheDocument();
+  });
+
+  it("falls back to forwarder_id / reader_ip when no display_alias", async () => {
+    apiMocks.getStreams.mockResolvedValueOnce({
+      streams: [
+        {
+          forwarder_id: "f3",
+          reader_ip: "10.0.0.3:10000",
+          subscribed: true,
+          local_port: 10102,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    expect(await screen.findByText("f3 / 10.0.0.3:10000")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Reset cursor for f3 / 10.0.0.3:10000",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("only disables the active row while reset is in flight", async () => {
     let resolveFirstReset: (() => void) | undefined;
     apiMocks.resetStreamCursor

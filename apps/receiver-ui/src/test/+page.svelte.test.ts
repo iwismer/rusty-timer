@@ -233,7 +233,9 @@ describe("receiver page", () => {
     await fireEvent.change(modeSelect, { target: { value: "race" } });
 
     expect(
-      await screen.findByText(/Current:\s*replay only the current epoch\./),
+      await screen.findByText(
+        /Current and future:\s*replay the current epoch and continue/,
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/All:\s*replay all epochs available for the race\./),

@@ -526,7 +526,6 @@ describe("stream detail page epoch race mapping", () => {
     unmount();
     expect(sseMock.unsubscribe).toHaveBeenCalledTimes(1);
   });
-
   it("keeps advance button disabled and shows Reloading until SSE-triggered table reload completes", async () => {
     const epochReload = deferred<typeof epochs>();
     vi.mocked(api.getStreamEpochs)
