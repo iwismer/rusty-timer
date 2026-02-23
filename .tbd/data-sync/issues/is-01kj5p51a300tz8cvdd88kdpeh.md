@@ -3,13 +3,15 @@ type: is
 id: is-01kj5p51a300tz8cvdd88kdpeh
 title: apiFetch drops Content-Type when caller passes custom headers, breaking cursor reset
 kind: bug
-status: open
+status: closed
 priority: 2
-version: 2
+version: 4
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:43:35.618Z
-updated_at: 2026-02-23T16:43:47.435Z
+updated_at: 2026-02-23T18:56:20.621Z
+closed_at: 2026-02-23T18:56:20.619Z
+close_reason: "Fixed in PR #97"
 ---
 ## Bug
 

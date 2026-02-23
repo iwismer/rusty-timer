@@ -3,13 +3,13 @@ type: is
 id: is-01kj5krvpsswahkkkfsj1h19v5
 title: Replace auto-save with explicit Save button on receiver UI selection card
 kind: task
-status: open
+status: in_progress
 priority: 2
-version: 2
+version: 3
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:01:59.507Z
-updated_at: 2026-02-23T16:02:18.761Z
+updated_at: 2026-02-23T18:05:19.644Z
 ---
 **Problem:** Every control change in the Selection card (mode, race ID, epoch scope, replay policy, targeted replay rows) immediately fires applySelection() → PUT /api/v1/selection. An operator who changes Mode and then Race ID makes two separate PUT requests, with an intermediate half-configured state visible to the server between the two. An explicit Save button lets operators compose their full intent before committing.
 

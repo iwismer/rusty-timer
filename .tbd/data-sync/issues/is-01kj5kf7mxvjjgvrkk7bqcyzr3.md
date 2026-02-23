@@ -3,13 +3,15 @@ type: is
 id: is-01kj5kf7mxvjjgvrkk7bqcyzr3
 title: Rename 'Selection' card to 'Race & Mode Selection' in receiver UI
 kind: task
-status: open
+status: closed
 priority: 3
-version: 2
+version: 4
 labels: []
 dependencies: []
 created_at: 2026-02-23T15:56:44.055Z
-updated_at: 2026-02-23T15:56:58.253Z
+updated_at: 2026-02-23T18:56:21.726Z
+closed_at: 2026-02-23T18:56:21.725Z
+close_reason: "Fixed in PR #98"
 ---
 **Problem:** The card grouping the receiver's mode and race controls is labelled 'Selection', which is too generic. Operators glancing at the UI don't immediately know what kind of selection the card governs.
 

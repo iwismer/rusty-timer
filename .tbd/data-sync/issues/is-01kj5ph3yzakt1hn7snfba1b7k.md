@@ -3,15 +3,16 @@ type: is
 id: is-01kj5ph3yzakt1hn7snfba1b7k
 title: Epoch race mapping table event count does not auto-update as new reads arrive
 kind: bug
-status: open
+status: closed
 priority: 3
-version: 1
+version: 3
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:50:11.550Z
-updated_at: 2026-02-23T16:50:11.550Z
+updated_at: 2026-02-23T20:09:12.875Z
+closed_at: 2026-02-23T20:09:12.874Z
+close_reason: "PR #102 created. Auto-refresh epoch event counts every 5s with visibility-aware polling."
 ---
-
 ## Problem
 
 The "Events" column in the epoch race mapping table on the stream details page shows a stale count. It is loaded once on page load (or on epoch advance) and does not refresh as new reads come in from connected readers. An operator watching the page during a live race will see a frozen event count until the epoch changes.

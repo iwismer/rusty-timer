@@ -3,15 +3,16 @@ type: is
 id: is-01kj5ppr9bc58pfhg5ac8abrgg
 title: Remove redundant Clear button from epoch name column in forwarder UI readers table
 kind: task
-status: open
+status: closed
 priority: 3
-version: 1
+version: 3
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:53:16.202Z
-updated_at: 2026-02-23T16:53:16.202Z
+updated_at: 2026-02-23T19:31:44.946Z
+closed_at: 2026-02-23T19:31:44.945Z
+close_reason: "PR #100 created. Clear button removed from forwarder UI epoch name column."
 ---
-
 ## Problem
 
 The epoch name column in the forwarder UI readers table shows three controls: a text input, a "Save" button, and a "Clear" button. The "Clear" button is redundant: clearing is already achievable by emptying the input field and clicking Save (the handler converts empty string to `null`). Two buttons for one field creates unnecessary visual clutter.

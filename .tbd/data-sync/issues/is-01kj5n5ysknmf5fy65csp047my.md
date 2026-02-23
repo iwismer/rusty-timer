@@ -3,13 +3,15 @@ type: is
 id: is-01kj5n5ysknmf5fy65csp047my
 title: Show human-readable stream name in cursor reset table on receiver admin page
 kind: task
-status: open
+status: closed
 priority: 3
-version: 2
+version: 4
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:26:37.233Z
-updated_at: 2026-02-23T16:27:04.285Z
+updated_at: 2026-02-23T19:31:47.438Z
+closed_at: 2026-02-23T19:31:47.437Z
+close_reason: "PR #99 created. Stream display_alias shown in admin cursor reset table."
 ---
 ## Problem / Context
 

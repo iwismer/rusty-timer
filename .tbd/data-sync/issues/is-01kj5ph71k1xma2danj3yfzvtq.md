@@ -3,15 +3,16 @@ type: is
 id: is-01kj5ph71k1xma2danj3yfzvtq
 title: Add info-level tracing logs for race creation, participant upload, and bibchip upload in server service
 kind: task
-status: open
+status: closed
 priority: 3
-version: 1
+version: 3
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:50:14.705Z
-updated_at: 2026-02-23T16:50:14.705Z
+updated_at: 2026-02-23T19:31:45.623Z
+closed_at: 2026-02-23T19:31:45.622Z
+close_reason: "PR #100 created. Info-level tracing logs added to races.rs."
 ---
-
 ## Problem
 
 Key operational events in the server service produce no structured log output on success. Race creation, participant (PPL) file upload, and bibchip file upload are all silent unless they fail. This makes it difficult to correlate server-side actions with observed behaviour during event-day operations.

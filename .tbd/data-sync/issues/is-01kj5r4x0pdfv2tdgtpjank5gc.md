@@ -3,13 +3,13 @@ type: is
 id: is-01kj5r4x0pdfv2tdgtpjank5gc
 title: Navigation from server admin page breaks — URL updates but UI stays frozen
 kind: bug
-status: open
+status: in_progress
 priority: 1
-version: 2
+version: 3
 labels: []
 dependencies: []
 created_at: 2026-02-23T17:18:28.372Z
-updated_at: 2026-02-23T17:19:01.967Z
+updated_at: 2026-02-23T18:05:18.987Z
 ---
 ## Problem
 

@@ -3,15 +3,16 @@ type: is
 id: is-01kj5ph0m22458s1ay6qhcgxyx
 title: Epoch advance button reverts to idle state while table is still reloading — no visual indicator during SSE-driven data refresh
 kind: bug
-status: open
+status: closed
 priority: 3
-version: 1
+version: 3
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:50:08.129Z
-updated_at: 2026-02-23T16:50:08.129Z
+updated_at: 2026-02-23T19:31:46.408Z
+closed_at: 2026-02-23T19:31:46.407Z
+close_reason: "PR #101 created. Epoch advance button now stays in loading state during SSE table reload."
 ---
-
 ## Problem
 
 When an operator clicks "Advance to Next Epoch" on the stream details page, the button shows "Advancing..." only while the POST request is in-flight. As soon as the API returns 204, `epochAdvancePending` is reset to `false` and the button reverts to "Advance to Next Epoch" — but the epoch race mapping table has **not yet updated**. The table refreshes only after the server emits a `stream_updated` SSE event and `loadEpochRaceRows()` completes (a round-trip that takes a noticeable 1–2 seconds). During this gap there is no feedback, making it look like nothing happened.

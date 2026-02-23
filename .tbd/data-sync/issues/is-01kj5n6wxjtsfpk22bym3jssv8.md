@@ -3,13 +3,15 @@ type: is
 id: is-01kj5n6wxjtsfpk22bym3jssv8
 title: Add per-epoch reads export to epoch race mapping table on stream details page
 kind: feature
-status: open
+status: closed
 priority: 3
-version: 2
+version: 4
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:27:08.080Z
-updated_at: 2026-02-23T16:27:27.788Z
+updated_at: 2026-02-23T20:33:19.426Z
+closed_at: 2026-02-23T20:33:19.425Z
+close_reason: "PR #103 created. Per-epoch CSV export endpoint + Export column in race mapping table."
 ---
 ## Problem / Context
 

@@ -3,15 +3,14 @@ type: is
 id: is-01kj5pha4a0ssbvdtgp4r3crt8
 title: Forwarder UI never shows epoch name set on server — backend ReaderStatus struct and ReaderUpdated SSE event missing current_epoch_name
 kind: bug
-status: open
+status: in_progress
 priority: 2
-version: 1
+version: 2
 labels: []
 dependencies: []
 created_at: 2026-02-23T16:50:17.865Z
-updated_at: 2026-02-23T16:50:17.865Z
+updated_at: 2026-02-23T18:05:20.234Z
 ---
-
 ## Problem
 
 The forwarder UI has a display cell for the current epoch name ("Active: {name}") but it is **never populated**. When an operator sets an epoch name on the server UI, it does not appear in the forwarder UI. The `current_epoch_name` field was added to the TypeScript `ReaderStatus` interface (rt-9tuf, closed), but the forwarder backend never populates or propagates the value.
