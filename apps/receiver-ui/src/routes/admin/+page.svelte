@@ -107,7 +107,20 @@
           {#each streams as stream (streamKey(stream))}
             {@const key = streamKey(stream)}
             <tr class="border-b border-border/50">
-              <td class="py-2 pr-4 text-text-primary">{streamLabel(stream)}</td>
+              <td class="py-2 pr-4">
+                {#if stream.display_alias}
+                  <span class="text-text-primary font-medium"
+                    >{stream.display_alias}</span
+                  >
+                  <span class="block text-xs text-text-muted"
+                    >{stream.forwarder_id} / {stream.reader_ip}</span
+                  >
+                {:else}
+                  <span class="text-text-primary"
+                    >{stream.forwarder_id} / {stream.reader_ip}</span
+                  >
+                {/if}
+              </td>
               <td class="py-2 pr-4 text-text-secondary"
                 >{stream.forwarder_id}</td
               >
