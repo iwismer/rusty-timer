@@ -7,7 +7,7 @@ import {
   cleanup,
 } from "@testing-library/svelte";
 import { tick } from "svelte";
-import { setRaces, replaceStreams, resetStores } from "$lib/stores";
+import { setRaces, replaceStreams, resetStores, setMetrics } from "$lib/stores";
 
 const sseMock = vi.hoisted(() => ({
   onStreamUpdated: vi.fn(),
@@ -630,109 +630,113 @@ describe("stream detail page epoch race mapping", () => {
     expect(api.activateNextStreamEpochForRace).toHaveBeenCalledTimes(1);
   });
 
-  it("polls event counts every 5 seconds and updates displayed values", async () => {
-    // Intercept the 5 s poll by spying on setInterval
-    const pollCallbacks: Array<() => void> = [];
-    const realSetInterval = globalThis.setInterval.bind(globalThis);
-    const siSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((
-      cb: () => void,
-      ms?: number,
-    ) => {
-      if (ms === 5000) {
-        pollCallbacks.push(cb);
-      }
-      // Return a real handle so clearInterval still works
-      return realSetInterval(() => {}, 999_999);
-    }) as typeof setInterval);
+  it("updates current epoch event count from live metrics without polling", async () => {
+    render(Page);
+    await screen.findByTestId("epoch-race-select-1");
 
-    try {
-      render(Page);
-      await screen.findByTestId("epoch-race-select-1");
+    expect(screen.getByTestId("epoch-event-count-1")).toHaveTextContent("4");
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
 
-      const initialCalls = vi.mocked(api.getStreamEpochs).mock.calls.length;
+    setMetrics("abc-123", {
+      ...metrics,
+      epoch_dedup_count: 20,
+    });
 
-      vi.mocked(api.getStreamEpochs).mockResolvedValue([
-        { ...epochs[0], event_count: 10 },
-        { ...epochs[1], event_count: 20 },
-      ]);
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("20");
+    });
 
-      // Manually fire the 5 s poll callback
-      expect(pollCallbacks.length).toBeGreaterThan(0);
-      pollCallbacks[pollCallbacks.length - 1]();
-
-      await waitFor(() => {
-        expect(
-          vi.mocked(api.getStreamEpochs).mock.calls.length,
-        ).toBeGreaterThan(initialCalls);
-      });
-    } finally {
-      siSpy.mockRestore();
-    }
+    // Non-current epochs should not be rewritten by current-epoch metrics updates.
+    expect(screen.getByTestId("epoch-event-count-1")).toHaveTextContent("4");
   });
 
-  it("pauses polling when page is hidden and resumes when visible", async () => {
-    // Track setInterval/clearInterval calls for the 5 s poll
-    type CbEntry = { cb: () => void; handle: number };
-    const intervals: CbEntry[] = [];
-    const cleared = new Set<number>();
-    let nextHandle = 9000;
-    const realSetInterval = globalThis.setInterval.bind(globalThis);
+  it("does not rewrite previous epoch count when stream epoch advances before table reload", async () => {
+    const epochReload = deferred<typeof epochs>();
+    vi.mocked(api.getStreamEpochs)
+      .mockResolvedValueOnce(epochs)
+      .mockReturnValueOnce(epochReload.promise);
 
-    const siSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((
-      cb: () => void,
-      ms?: number,
-    ) => {
-      const h = nextHandle++;
-      if (ms === 5000) intervals.push({ cb, handle: h });
-      return h as unknown as ReturnType<typeof setInterval>;
-    }) as typeof setInterval);
-    const ciSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation(((
-      h?: unknown,
-    ) => {
-      if (typeof h === "number") cleared.add(h);
-    }) as typeof clearInterval);
+    render(Page);
+    await screen.findByTestId("epoch-race-select-2");
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
 
-    try {
-      render(Page);
-      await screen.findByTestId("epoch-race-select-1");
+    replaceStreams([
+      {
+        ...stream,
+        stream_epoch: 3,
+      },
+    ]);
 
-      const callsAfterMount = vi.mocked(api.getStreamEpochs).mock.calls.length;
-      const intervalsBeforeHide = intervals.length;
+    setMetrics("abc-123", {
+      ...metrics,
+      epoch_dedup_count: 99,
+    });
 
-      // Hide the page
-      Object.defineProperty(document, "hidden", {
-        value: true,
-        writable: true,
-        configurable: true,
-      });
-      document.dispatchEvent(new Event("visibilitychange"));
+    await tick();
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
 
-      // The poll handle should have been cleared
-      expect(cleared.size).toBeGreaterThan(0);
+    sseMock.listener?.({ stream_id: "abc-123", stream_epoch: 3 });
+    epochReload.resolve([
+      ...epochs,
+      {
+        epoch: 3,
+        event_count: 0,
+        first_event_at: "2026-02-22T13:00:00Z",
+        last_event_at: "2026-02-22T13:00:00Z",
+        name: null,
+        is_current: true,
+      },
+    ]);
 
-      // Make the page visible again
-      Object.defineProperty(document, "hidden", {
-        value: false,
-        writable: true,
-        configurable: true,
-      });
-      document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-event-count-3")).toHaveTextContent("99");
+    });
 
-      // A new 5 s interval should have been registered
-      expect(intervals.length).toBeGreaterThan(intervalsBeforeHide);
+    setMetrics("abc-123", {
+      ...metrics,
+      epoch_dedup_count: 100,
+    });
 
-      // Fire the latest poll callback
-      intervals[intervals.length - 1].cb();
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-event-count-3")).toHaveTextContent(
+        "100",
+      );
+    });
+  });
 
-      await waitFor(() => {
-        expect(
-          vi.mocked(api.getStreamEpochs).mock.calls.length,
-        ).toBeGreaterThan(callsAfterMount);
-      });
-    } finally {
-      siSpy.mockRestore();
-      ciSpy.mockRestore();
-    }
+  it("does not apply stale metrics count to new current epoch after reload", async () => {
+    const epochReload = deferred<typeof epochs>();
+    vi.mocked(api.getStreamEpochs)
+      .mockResolvedValueOnce(epochs)
+      .mockReturnValueOnce(epochReload.promise);
+
+    render(Page);
+    await screen.findByTestId("epoch-race-select-2");
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
+
+    replaceStreams([
+      {
+        ...stream,
+        stream_epoch: 3,
+      },
+    ]);
+    sseMock.listener?.({ stream_id: "abc-123", stream_epoch: 3 });
+
+    epochReload.resolve([
+      ...epochs,
+      {
+        epoch: 3,
+        event_count: 0,
+        first_event_at: "2026-02-22T13:00:00Z",
+        last_event_at: "2026-02-22T13:00:00Z",
+        name: null,
+        is_current: true,
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-event-count-3")).toHaveTextContent("0");
+    });
   });
 
   it("renders Export CSV links for each epoch row", async () => {
@@ -763,56 +767,27 @@ describe("stream detail page epoch race mapping", () => {
     expect(link2).toHaveAttribute("download");
   });
 
-  it("does not overwrite pending or dirty rows during poll refresh", async () => {
-    const pollCallbacks: Array<() => void> = [];
-    const realSetInterval = globalThis.setInterval.bind(globalThis);
-    const siSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((
-      cb: () => void,
-      ms?: number,
-    ) => {
-      if (ms === 5000) pollCallbacks.push(cb);
-      return realSetInterval(() => {}, 999_999);
-    }) as typeof setInterval);
+  it("does not overwrite dirty current-epoch rows during metrics-driven count updates", async () => {
+    render(Page);
+    await screen.findByTestId("epoch-race-select-2");
 
-    // Hold a row save in pending state
-    const pendingSave = deferred<{
-      stream_id: string;
-      stream_epoch: number;
-      race_id: string | null;
-    }>();
-    vi.mocked(api.setStreamEpochRace).mockReturnValue(pendingSave.promise);
+    // Make current epoch row dirty.
+    const select = screen.getByTestId("epoch-race-select-2");
+    await fireEvent.change(select, { target: { value: "race-2" } });
+    expect(screen.getByTestId("epoch-race-state-2")).toHaveTextContent(
+      "Unsaved",
+    );
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
 
-    try {
-      render(Page);
-      await screen.findByTestId("epoch-race-select-1");
+    setMetrics("abc-123", {
+      ...metrics,
+      epoch_dedup_count: 99,
+    });
 
-      // Make epoch 1 dirty and start saving
-      const select = screen.getByTestId("epoch-race-select-1");
-      await fireEvent.change(select, { target: { value: "race-1" } });
-      await fireEvent.click(screen.getByTestId("epoch-race-save-1"));
-      expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-        "Saving...",
-      );
-
-      // Return updated counts from the poll
-      vi.mocked(api.getStreamEpochs).mockResolvedValue([
-        { ...epochs[0], event_count: 99 },
-        { ...epochs[1], event_count: 88 },
-      ]);
-
-      // Fire the 5 s poll
-      expect(pollCallbacks.length).toBeGreaterThan(0);
-      pollCallbacks[pollCallbacks.length - 1]();
-      await tick();
-      await new Promise((r) => setTimeout(r, 50));
-
-      // Row 1 is pending — it must NOT be overwritten by the poll
-      expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-        "Saving...",
-      );
-      expect(screen.getByTestId("epoch-race-save-1")).toBeDisabled();
-    } finally {
-      siSpy.mockRestore();
-    }
+    await tick();
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
+    expect(screen.getByTestId("epoch-race-state-2")).toHaveTextContent(
+      "Unsaved",
+    );
   });
 });

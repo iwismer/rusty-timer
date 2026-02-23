@@ -2,7 +2,12 @@
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import { onStreamUpdated } from "$lib/sse";
-  import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
+  import type {
+    ReadEntry,
+    DedupMode,
+    SortOrder,
+    StreamMetrics,
+  } from "$lib/api";
   import {
     streamsStore,
     metricsStore,
@@ -57,6 +62,9 @@
     $streamsStore.find((s) => s.stream_id === streamId) ?? null,
   );
   let metrics = $derived($metricsStore[streamId] ?? null);
+  let lastSyncedEpochCountStreamId: string | null = null;
+  let lastSyncedEpochCountEpoch: number | null = null;
+  let lastSyncedEpochCountMetrics: StreamMetrics | null = null;
 
   // Keep rename input in sync when stream data arrives
   $effect(() => {
@@ -401,69 +409,45 @@
     return "Saved";
   }
 
-  // Lightweight refresh: fetch epoch data and merge only event_count into
-  // existing rows, preserving any pending or dirty edits.
-  async function refreshEpochEventCounts(id: string): Promise<void> {
+  function syncCurrentEpochEventCount(
+    currentEpoch: number,
+    currentEpochEventCount: number,
+  ): void {
     if (epochRaceRows.length === 0) return;
-    try {
-      const freshEpochs = await api.getStreamEpochs(id);
-      const countByEpoch = new Map(
-        freshEpochs.map((e) => [e.epoch, e.event_count]),
-      );
-      epochRaceRows = epochRaceRows.map((row) => {
-        if (row.pending || isEpochRowDirty(row)) return row;
-        const freshCount = countByEpoch.get(row.epoch);
-        if (freshCount !== undefined && freshCount !== row.event_count) {
-          return { ...row, event_count: freshCount };
-        }
-        return row;
-      });
-    } catch {
-      // Silently ignore — the full loadEpochRaceRows will surface errors.
+    let didUpdate = false;
+    const nextRows = epochRaceRows.map((row) => {
+      const isCurrentRow = row.epoch === currentEpoch;
+      if (!isCurrentRow) return row;
+      if (row.pending || isEpochRowDirty(row)) return row;
+      if (row.event_count === currentEpochEventCount) return row;
+      didUpdate = true;
+      return { ...row, event_count: currentEpochEventCount };
+    });
+    if (didUpdate) {
+      epochRaceRows = nextRows;
     }
   }
 
-  // Poll event counts every 5 seconds while the page is visible
+  // Keep current epoch event count in sync with live SSE-driven metrics.
   $effect(() => {
-    // Capture the current streamId so the effect re-subscribes on navigation
-    const id = streamId;
-    if (!id) return;
+    if (!metrics) return;
+    const currentEpoch = stream?.stream_epoch;
+    if (typeof currentEpoch !== "number") return;
 
-    let intervalHandle: ReturnType<typeof setInterval> | null = null;
+    const sameStream = lastSyncedEpochCountStreamId === streamId;
+    const sameMetrics = sameStream && lastSyncedEpochCountMetrics === metrics;
+    const epochChangedSinceLastSync =
+      sameStream &&
+      lastSyncedEpochCountEpoch !== null &&
+      lastSyncedEpochCountEpoch !== currentEpoch;
+    // Avoid applying stale epoch counters during stream_epoch rollover until
+    // fresh metrics arrive.
+    if (sameMetrics && epochChangedSinceLastSync) return;
 
-    function startPolling(): void {
-      if (intervalHandle) return;
-      intervalHandle = setInterval(() => {
-        void refreshEpochEventCounts(id);
-      }, 5000);
-    }
-
-    function stopPolling(): void {
-      if (intervalHandle) {
-        clearInterval(intervalHandle);
-        intervalHandle = null;
-      }
-    }
-
-    function onVisibilityChange(): void {
-      if (document.hidden) {
-        stopPolling();
-      } else {
-        startPolling();
-      }
-    }
-
-    // Start immediately if visible
-    if (!document.hidden) {
-      startPolling();
-    }
-
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    return () => {
-      stopPolling();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
+    syncCurrentEpochEventCount(currentEpoch, metrics.epoch_dedup_count);
+    lastSyncedEpochCountStreamId = streamId;
+    lastSyncedEpochCountEpoch = currentEpoch;
+    lastSyncedEpochCountMetrics = metrics;
   });
 </script>
 
@@ -736,7 +720,10 @@
                     <td class="px-3 py-2 font-mono">
                       {row.epoch}{row.is_current ? " (current)" : ""}
                     </td>
-                    <td class="px-3 py-2 font-mono">
+                    <td
+                      data-testid={`epoch-event-count-${row.epoch}`}
+                      class="px-3 py-2 font-mono"
+                    >
                       {row.event_count.toLocaleString()}
                     </td>
                     <td class="px-3 py-2">
