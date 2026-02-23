@@ -400,6 +400,71 @@
     if (row.status === "incomplete") return "Unverified";
     return "Saved";
   }
+
+  // Lightweight refresh: fetch epoch data and merge only event_count into
+  // existing rows, preserving any pending or dirty edits.
+  async function refreshEpochEventCounts(id: string): Promise<void> {
+    if (epochRaceRows.length === 0) return;
+    try {
+      const freshEpochs = await api.getStreamEpochs(id);
+      const countByEpoch = new Map(
+        freshEpochs.map((e) => [e.epoch, e.event_count]),
+      );
+      epochRaceRows = epochRaceRows.map((row) => {
+        if (row.pending || isEpochRowDirty(row)) return row;
+        const freshCount = countByEpoch.get(row.epoch);
+        if (freshCount !== undefined && freshCount !== row.event_count) {
+          return { ...row, event_count: freshCount };
+        }
+        return row;
+      });
+    } catch {
+      // Silently ignore — the full loadEpochRaceRows will surface errors.
+    }
+  }
+
+  // Poll event counts every 5 seconds while the page is visible
+  $effect(() => {
+    // Capture the current streamId so the effect re-subscribes on navigation
+    const id = streamId;
+    if (!id) return;
+
+    let intervalHandle: ReturnType<typeof setInterval> | null = null;
+
+    function startPolling(): void {
+      if (intervalHandle) return;
+      intervalHandle = setInterval(() => {
+        void refreshEpochEventCounts(id);
+      }, 5000);
+    }
+
+    function stopPolling(): void {
+      if (intervalHandle) {
+        clearInterval(intervalHandle);
+        intervalHandle = null;
+      }
+    }
+
+    function onVisibilityChange(): void {
+      if (document.hidden) {
+        stopPolling();
+      } else {
+        startPolling();
+      }
+    }
+
+    // Start immediately if visible
+    if (!document.hidden) {
+      startPolling();
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      stopPolling();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  });
 </script>
 
 <main class="max-w-[1100px] mx-auto px-6 py-6">
