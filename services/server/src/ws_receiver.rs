@@ -1,7 +1,10 @@
 use crate::{
     auth::validate_token,
     repo::{
-        events::{fetch_events_after_cursor_through_cursor_limited, fetch_max_event_cursor},
+        events::{
+            fetch_events_after_cursor_through_cursor_limited,
+            fetch_events_for_stream_epoch_from_seq_limited, fetch_max_event_cursor,
+        },
         receiver_cursors::{fetch_cursor, upsert_cursor},
         stream_epoch_races::list_race_selection_streams,
     },
@@ -22,7 +25,7 @@ use rt_protocol::{
 };
 use sqlx::types::Uuid as SqlUuid;
 use sqlx::Row;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -57,6 +60,7 @@ struct StreamSub {
     rx: tokio::sync::broadcast::Receiver<ReadEvent>,
 }
 
+#[derive(Clone)]
 struct ResolvedStreamTarget {
     stream_id: Uuid,
     forwarder_id: String,
@@ -69,6 +73,12 @@ struct PendingSelection {
     selection: ReceiverSelection,
     replay_policy: ReplayPolicy,
     replay_targets: Option<Vec<ReplayTarget>>,
+}
+
+struct TargetedReplaySelection {
+    stream_id: Uuid,
+    stream_epoch: i64,
+    from_seq: i64,
 }
 
 fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
@@ -578,16 +588,12 @@ async fn apply_receiver_selection(
         replay_targets,
     } = pending;
     let mut warnings: Vec<String> = Vec::new();
-    if replay_policy == ReplayPolicy::Targeted
-        && replay_targets
-            .as_ref()
-            .is_some_and(|targets| !targets.is_empty())
-    {
-        warnings
-            .push("targeted replay is not implemented yet; using live_only behavior".to_owned());
-    }
-
     let resolved = resolve_selection_targets(state, selection).await?;
+    let targeted_replay = if replay_policy == ReplayPolicy::Targeted {
+        resolve_targeted_replay_targets(&resolved, replay_targets, &mut warnings)
+    } else {
+        Vec::new()
+    };
     let normalized_streams = resolved
         .iter()
         .map(|target| StreamRef {
@@ -614,6 +620,15 @@ async fn apply_receiver_selection(
         for sub in &mut next_subscriptions {
             replay_backlog(socket, state, session_id, sub).await?;
         }
+    } else if replay_policy == ReplayPolicy::Targeted {
+        replay_targeted_backlog(
+            socket,
+            state,
+            session_id,
+            &targeted_replay,
+            &mut next_subscriptions,
+        )
+        .await?;
     }
 
     *subscriptions = next_subscriptions;
@@ -636,6 +651,51 @@ async fn apply_receiver_selection(
         "applied receiver selection"
     );
     Ok(())
+}
+
+fn resolve_targeted_replay_targets(
+    resolved: &[ResolvedStreamTarget],
+    replay_targets: Option<Vec<ReplayTarget>>,
+    warnings: &mut Vec<String>,
+) -> Vec<TargetedReplaySelection> {
+    let by_stream_ref: HashMap<(&str, &str), &ResolvedStreamTarget> = resolved
+        .iter()
+        .map(|target| {
+            (
+                (target.forwarder_id.as_str(), target.reader_ip.as_str()),
+                target,
+            )
+        })
+        .collect();
+
+    let Some(replay_targets) = replay_targets else {
+        return Vec::new();
+    };
+
+    let mut dedup = HashSet::new();
+    let mut targeted = Vec::new();
+    for target in replay_targets {
+        let Some(resolved_target) = by_stream_ref
+            .get(&(target.forwarder_id.as_str(), target.reader_ip.as_str()))
+            .copied()
+        else {
+            warnings.push(format!(
+                "ignored replay_target for unselected stream {}:{}",
+                target.forwarder_id, target.reader_ip
+            ));
+            continue;
+        };
+        let from_seq = target.from_seq.max(1);
+        let dedup_key = (resolved_target.stream_id, target.stream_epoch, from_seq);
+        if dedup.insert(dedup_key) {
+            targeted.push(TargetedReplaySelection {
+                stream_id: resolved_target.stream_id,
+                stream_epoch: target.stream_epoch,
+                from_seq,
+            });
+        }
+    }
+    targeted
 }
 
 async fn resolve_selection_targets(
@@ -852,6 +912,68 @@ async fn replay_backlog(
             return Ok(());
         }
     }
+}
+
+async fn replay_targeted_backlog(
+    socket: &mut WebSocket,
+    state: &AppState,
+    session_id: &str,
+    targets: &[TargetedReplaySelection],
+    subscriptions: &mut [StreamSub],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for target in targets {
+        let mut from_seq = target.from_seq;
+        loop {
+            let events = fetch_events_for_stream_epoch_from_seq_limited(
+                &state.pool,
+                target.stream_id,
+                target.stream_epoch,
+                from_seq,
+                REPLAY_BATCH_LIMIT,
+            )
+            .await?;
+            if events.is_empty() {
+                break;
+            }
+
+            let read_events: Vec<ReadEvent> = events
+                .iter()
+                .map(|event| ReadEvent {
+                    forwarder_id: event.forwarder_id.clone(),
+                    reader_ip: event.reader_ip.clone(),
+                    stream_epoch: event.stream_epoch as u64,
+                    seq: event.seq as u64,
+                    reader_timestamp: event.reader_timestamp.clone().unwrap_or_default(),
+                    raw_read_line: event.raw_read_line.clone(),
+                    read_type: event.read_type.clone(),
+                })
+                .collect();
+
+            let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+                session_id: session_id.to_owned(),
+                events: read_events,
+            });
+            let payload = serde_json::to_string(&batch)?;
+            socket.send(Message::Text(payload.into())).await?;
+
+            let Some(last) = events.last() else {
+                break;
+            };
+            if let Some(sub) = subscriptions
+                .iter_mut()
+                .find(|sub| sub.stream_id == target.stream_id)
+                && cursor_gt(last.stream_epoch, last.seq, sub.last_epoch, sub.last_seq)
+            {
+                sub.last_epoch = last.stream_epoch;
+                sub.last_seq = last.seq;
+            }
+            from_seq = last.seq.saturating_add(1);
+            if events.len() < REPLAY_BATCH_LIMIT as usize {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn handle_receiver_ack(
