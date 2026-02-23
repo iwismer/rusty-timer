@@ -1,5 +1,6 @@
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
+use server::state::ReceiverSelectionSnapshot;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
@@ -18,7 +19,7 @@ async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, r
     .unwrap();
 }
 
-async fn start_server() -> (sqlx::PgPool, std::net::SocketAddr) {
+async fn start_server() -> (sqlx::PgPool, std::net::SocketAddr, server::AppState) {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     std::mem::forget(container);
@@ -26,6 +27,7 @@ async fn start_server() -> (sqlx::PgPool, std::net::SocketAddr) {
     let pool = server::db::create_pool(&db_url).await;
     server::db::run_migrations(&pool).await;
     let app_state = server::AppState::new(pool.clone());
+    let app_state_for_test = app_state.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -33,12 +35,56 @@ async fn start_server() -> (sqlx::PgPool, std::net::SocketAddr) {
             .await
             .unwrap();
     });
-    (pool, addr)
+    (pool, addr, app_state_for_test)
+}
+
+async fn wait_for_session_unregistered(
+    state: &server::AppState,
+    session_id: &str,
+    timeout: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if state.get_receiver_session(session_id).await.is_none() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {session_id} still registered after {:?}",
+            timeout
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn wait_for_session_selection(
+    state: &server::AppState,
+    session_id: &str,
+    expected: &ReceiverSelectionSnapshot,
+    timeout: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let selection = state
+            .get_receiver_session(session_id)
+            .await
+            .expect("session should stay registered")
+            .selection;
+        if &selection == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {session_id} selection did not reach expected value within {:?}; last={selection:?}",
+            timeout
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[tokio::test]
 async fn test_ws_v11_route_requires_receiver_hello_v11() {
-    let (pool, addr) = start_server().await;
+    let (pool, addr, _state) = start_server().await;
     insert_token(&pool, "rcv-v11", "receiver", b"rcv-v11-token").await;
 
     let url = format!("ws://{}/ws/v1.1/receivers", addr);
@@ -65,7 +111,7 @@ async fn test_ws_v11_route_requires_receiver_hello_v11() {
 
 #[tokio::test]
 async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_streams() {
-    let (pool, addr) = start_server().await;
+    let (pool, addr, state) = start_server().await;
     insert_token(&pool, "fwd-v11", "forwarder", b"fwd-v11-token").await;
     insert_token(&pool, "rcv-v11", "receiver", b"rcv-v11-token").await;
 
@@ -103,10 +149,13 @@ async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_str
     .await
     .unwrap();
 
-    match rcv.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(h) => assert_eq!(h.device_id, "rcv-v11"),
+    let session_id = match rcv.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => {
+            assert_eq!(h.device_id, "rcv-v11");
+            h.session_id
+        }
         other => panic!("expected heartbeat, got {:?}", other),
-    }
+    };
 
     match rcv.recv_message().await.unwrap() {
         WsMessage::ReceiverSelectionApplied(applied) => {
@@ -122,6 +171,25 @@ async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_str
         }
         other => panic!("expected receiver_selection_applied, got {:?}", other),
     }
+
+    let expected_initial = ReceiverSelectionSnapshot::Manual {
+        streams: vec![StreamRef {
+            forwarder_id: "fwd-v11".to_owned(),
+            reader_ip: "10.20.0.1:10000".to_owned(),
+        }],
+    };
+    wait_for_session_selection(
+        &state,
+        &session_id,
+        &expected_initial,
+        Duration::from_secs(1),
+    )
+    .await;
+    let initial_snapshot = state
+        .get_receiver_session(&session_id)
+        .await
+        .expect("session should be tracked after hello");
+    assert_eq!(initial_snapshot.selection, expected_initial);
 
     // Replace selection with reader2.
     rcv.send_message(&WsMessage::ReceiverSetSelection(ReceiverSetSelection {
@@ -149,6 +217,25 @@ async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_str
         }
         other => panic!("expected receiver_selection_applied, got {:?}", other),
     }
+
+    let expected_updated = ReceiverSelectionSnapshot::Manual {
+        streams: vec![StreamRef {
+            forwarder_id: "fwd-v11".to_owned(),
+            reader_ip: "10.20.0.2:10000".to_owned(),
+        }],
+    };
+    wait_for_session_selection(
+        &state,
+        &session_id,
+        &expected_updated,
+        Duration::from_secs(1),
+    )
+    .await;
+    let updated_snapshot = state
+        .get_receiver_session(&session_id)
+        .await
+        .expect("session should still be tracked after set_selection");
+    assert_eq!(updated_snapshot.selection, expected_updated);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -197,4 +284,42 @@ async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_str
         Ok(Err(e)) => panic!("recv error: {}", e),
         Err(_) => panic!("timeout waiting for event batch"),
     }
+}
+
+#[tokio::test]
+async fn test_v11_disconnect_unregisters_receiver_session() {
+    let (pool, addr, state) = start_server().await;
+    insert_token(&pool, "rcv-v11", "receiver", b"rcv-v11-token").await;
+
+    let rcv_url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-v11-token")
+        .await
+        .unwrap();
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-v11".to_owned(),
+        selection: ReceiverSelection::Manual {
+            streams: vec![StreamRef {
+                forwarder_id: "unknown-fwd".to_owned(),
+                reader_ip: "10.20.0.99:10000".to_owned(),
+            }],
+        },
+        replay_policy: ReplayPolicy::LiveOnly,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    let session_id = match rcv.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {:?}", other),
+    };
+    let _ = rcv.recv_message().await.unwrap();
+
+    assert!(
+        state.get_receiver_session(&session_id).await.is_some(),
+        "session should be tracked while connected"
+    );
+
+    drop(rcv);
+    wait_for_session_unregistered(&state, &session_id, Duration::from_secs(2)).await;
 }

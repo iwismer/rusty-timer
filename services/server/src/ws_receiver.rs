@@ -8,7 +8,7 @@ use crate::{
         receiver_cursors::{fetch_cursor, upsert_cursor},
         stream_epoch_races::list_race_selection_streams,
     },
-    state::AppState,
+    state::{AppState, ReceiverSelectionSnapshot, ReceiverSessionProtocol},
     ws_common::{
         extract_token_from_headers, recv_text_with_timeout, send_heartbeat, send_ws_error,
     },
@@ -180,167 +180,219 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     }
 
     let session_id = Uuid::new_v4().to_string();
+    let mut legacy_selection_streams = normalize_manual_streams(
+        hello
+            .resume
+            .iter()
+            .map(|cursor| StreamRef {
+                forwarder_id: cursor.forwarder_id.clone(),
+                reader_ip: cursor.reader_ip.clone(),
+            })
+            .collect(),
+    );
+    state
+        .register_receiver_session(
+            &session_id,
+            &device_id,
+            ReceiverSessionProtocol::V1,
+            ReceiverSelectionSnapshot::LegacyV1 {
+                streams: legacy_selection_streams.clone(),
+            },
+        )
+        .await;
+
     state.logger.log(format!(
         "receiver {device_id} connected (session {session_id})"
     ));
 
-    // Send heartbeat with session_id
-    if !send_heartbeat(&mut socket, &session_id, &device_id).await {
-        return;
-    }
-
-    let mut subscriptions: Vec<StreamSub> = Vec::new();
-
-    // Process resume cursors from hello
-    for cursor in &hello.resume {
-        if let Some(sub) = subscribe_to_stream(
-            &state,
-            &cursor.forwarder_id,
-            &cursor.reader_ip,
-            cursor.stream_epoch as i64,
-            cursor.last_seq as i64,
-        )
-        .await
-        {
-            subscriptions.push(sub);
-        }
-    }
-
-    // Replay backlog for each subscribed stream
-    for sub in &mut subscriptions {
-        if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await {
-            error!(device_id = %device_id, error = %e, "error during replay");
+    let session_id_for_cleanup = session_id.clone();
+    async {
+        // Send heartbeat with session_id
+        if !send_heartbeat(&mut socket, &session_id, &device_id).await {
             return;
         }
-    }
 
-    let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
-    heartbeat_interval.tick().await;
+        let mut subscriptions: Vec<StreamSub> = Vec::new();
 
-    loop {
-        // Check all broadcasts for ready events (non-blocking)
-        let mut events_to_send: Vec<ReadEvent> = Vec::new();
+        // Process resume cursors from hello
+        for cursor in &hello.resume {
+            if let Some(sub) = subscribe_to_stream(
+                &state,
+                &cursor.forwarder_id,
+                &cursor.reader_ip,
+                cursor.stream_epoch as i64,
+                cursor.last_seq as i64,
+            )
+            .await
+            {
+                subscriptions.push(sub);
+            }
+        }
+
+        // Replay backlog for each subscribed stream
         for sub in &mut subscriptions {
-            loop {
-                match sub.rx.try_recv() {
-                    Ok(event) => {
-                        let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
-                            warn!(
-                                stream_id = %sub.stream_id,
-                                stream_epoch = event.stream_epoch,
-                                "dropping live event with out-of-range stream_epoch"
-                            );
-                            continue;
-                        };
-                        let Ok(event_seq) = i64::try_from(event.seq) else {
-                            warn!(
-                                stream_id = %sub.stream_id,
-                                seq = event.seq,
-                                "dropping live event with out-of-range seq"
-                            );
-                            continue;
-                        };
-                        if !cursor_gt(event_epoch, event_seq, sub.last_epoch, sub.last_seq) {
-                            continue;
+            if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await {
+                error!(device_id = %device_id, error = %e, "error during replay");
+                return;
+            }
+        }
+
+        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat_interval.tick().await;
+
+        loop {
+            // Check all broadcasts for ready events (non-blocking)
+            let mut events_to_send: Vec<ReadEvent> = Vec::new();
+            for sub in &mut subscriptions {
+                loop {
+                    match sub.rx.try_recv() {
+                        Ok(event) => {
+                            let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
+                                warn!(
+                                    stream_id = %sub.stream_id,
+                                    stream_epoch = event.stream_epoch,
+                                    "dropping live event with out-of-range stream_epoch"
+                                );
+                                continue;
+                            };
+                            let Ok(event_seq) = i64::try_from(event.seq) else {
+                                warn!(
+                                    stream_id = %sub.stream_id,
+                                    seq = event.seq,
+                                    "dropping live event with out-of-range seq"
+                                );
+                                continue;
+                            };
+                            if !cursor_gt(event_epoch, event_seq, sub.last_epoch, sub.last_seq) {
+                                continue;
+                            }
+                            sub.last_epoch = event_epoch;
+                            sub.last_seq = event_seq;
+                            events_to_send.push(event);
                         }
-                        sub.last_epoch = event_epoch;
-                        sub.last_seq = event_seq;
-                        events_to_send.push(event);
-                    }
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                        warn!(device_id = %device_id, stream_id = %sub.stream_id, lagged = n, "receiver lagged, replaying from DB");
-                        if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await
-                        {
-                            error!(error = %e, "replay failed");
-                            return;
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                            warn!(device_id = %device_id, stream_id = %sub.stream_id, lagged = n, "receiver lagged, replaying from DB");
+                            if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await
+                            {
+                                error!(error = %e, "replay failed");
+                                return;
+                            }
+                            break;
                         }
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                        warn!(device_id = %device_id, stream_id = %sub.stream_id, "broadcast channel closed");
-                        break;
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                            warn!(device_id = %device_id, stream_id = %sub.stream_id, "broadcast channel closed");
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if !events_to_send.is_empty() {
-            let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
-                session_id: session_id.clone(),
-                events: events_to_send,
-            });
-            if let Ok(json) = serde_json::to_string(&batch)
-                && socket.send(Message::Text(json.into())).await.is_err()
-            {
-                break;
+            if !events_to_send.is_empty() {
+                let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+                    session_id: session_id.clone(),
+                    events: events_to_send,
+                });
+                if let Ok(json) = serde_json::to_string(&batch)
+                    && socket.send(Message::Text(json.into())).await.is_err()
+                {
+                    break;
+                }
+                continue;
             }
-            continue;
-        }
 
-        // Wait on socket or heartbeat with short timeout to allow broadcast polling
-        let wait_duration = Duration::from_millis(10);
-        tokio::select! {
-            msg = tokio::time::timeout(wait_duration, socket.recv()) => {
-                match msg {
-                    Ok(Some(Ok(Message::Text(text)))) => {
-                        match serde_json::from_str::<WsMessage>(&text) {
-                            Ok(WsMessage::ReceiverAck(ack)) => {
-                                if let Err(e) = handle_receiver_ack(&state, &device_id, ack).await {
-                                    error!(device_id = %device_id, error = %e, "error handling receiver ack");
+            // Wait on socket or heartbeat with short timeout to allow broadcast polling
+            let wait_duration = Duration::from_millis(10);
+            tokio::select! {
+                msg = tokio::time::timeout(wait_duration, socket.recv()) => {
+                    match msg {
+                        Ok(Some(Ok(Message::Text(text)))) => {
+                            match serde_json::from_str::<WsMessage>(&text) {
+                                Ok(WsMessage::ReceiverAck(ack)) => {
+                                    if let Err(e) = handle_receiver_ack(&state, &device_id, ack).await {
+                                        error!(device_id = %device_id, error = %e, "error handling receiver ack");
+                                    }
                                 }
-                            }
-                            Ok(WsMessage::ReceiverSubscribe(sub_msg)) => {
-                                for stream_ref in &sub_msg.streams {
-                                    let (last_epoch, last_seq) = get_cursor_for_stream(
-                                        &state, &device_id,
-                                        &stream_ref.forwarder_id, &stream_ref.reader_ip,
-                                    ).await;
-                                    if let Some(new_sub) = subscribe_to_stream(
-                                        &state,
-                                        &stream_ref.forwarder_id, &stream_ref.reader_ip,
-                                        last_epoch, last_seq,
-                                    ).await {
-                                        let already = subscriptions.iter().any(|s| s.stream_id == new_sub.stream_id);
-                                        if !already {
-                                            subscriptions.push(new_sub);
-                                            let last = subscriptions.last_mut().unwrap();
-                                            if let Err(e) = replay_backlog(&mut socket, &state, &session_id, last).await {
-                                                error!(error = %e, "replay failed");
-                                                return;
+                                Ok(WsMessage::ReceiverSubscribe(sub_msg)) => {
+                                    let mut snapshot_updated = false;
+                                    for stream_ref in &sub_msg.streams {
+                                        if !legacy_selection_streams.iter().any(|stream| {
+                                            stream.forwarder_id == stream_ref.forwarder_id
+                                                && stream.reader_ip == stream_ref.reader_ip
+                                        }) {
+                                            legacy_selection_streams.push(StreamRef {
+                                                forwarder_id: stream_ref.forwarder_id.clone(),
+                                                reader_ip: stream_ref.reader_ip.clone(),
+                                            });
+                                            snapshot_updated = true;
+                                        }
+                                        let (last_epoch, last_seq) = get_cursor_for_stream(
+                                            &state, &device_id,
+                                            &stream_ref.forwarder_id, &stream_ref.reader_ip,
+                                        ).await;
+                                        if let Some(new_sub) = subscribe_to_stream(
+                                            &state,
+                                            &stream_ref.forwarder_id, &stream_ref.reader_ip,
+                                            last_epoch, last_seq,
+                                        ).await {
+                                            let already = subscriptions.iter().any(|s| s.stream_id == new_sub.stream_id);
+                                            if !already {
+                                                subscriptions.push(new_sub);
+                                                let last = subscriptions.last_mut().unwrap();
+                                                if let Err(e) = replay_backlog(&mut socket, &state, &session_id, last).await {
+                                                    error!(error = %e, "replay failed");
+                                                    return;
+                                                }
                                             }
                                         }
                                     }
+                                    if snapshot_updated {
+                                        let _ = state
+                                            .update_receiver_session_selection(
+                                                &session_id,
+                                                ReceiverSelectionSnapshot::LegacyV1 {
+                                                    streams: normalize_manual_streams(
+                                                        legacy_selection_streams.clone(),
+                                                    ),
+                                                },
+                                            )
+                                            .await;
+                                    }
+                                }
+                                Ok(WsMessage::Heartbeat(_)) => {}
+                                Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
+                                Err(e) => {
+                                    send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await;
+                                    break;
                                 }
                             }
-                            Ok(WsMessage::Heartbeat(_)) => {}
-                            Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
-                            Err(e) => {
-                                send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await;
-                                break;
-                            }
                         }
+                        Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
+                        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                            state.logger.log(format!("receiver {device_id} disconnected"));
+                            break;
+                        }
+                        Err(_) => {} // short timeout - continue polling broadcasts
+                        Ok(Some(Err(e))) => { warn!(device_id = %device_id, error = %e, "WS error"); break; }
+                        Ok(Some(Ok(_))) => {}
                     }
-                    Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
-                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                        state.logger.log(format!("receiver {device_id} disconnected"));
-                        break;
-                    }
-                    Err(_) => {} // short timeout - continue polling broadcasts
-                    Ok(Some(Err(e))) => { warn!(device_id = %device_id, error = %e, "WS error"); break; }
-                    Ok(Some(Ok(_))) => {}
+                }
+                _ = heartbeat_interval.tick() => {
+                    if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
                 }
             }
-            _ = heartbeat_interval.tick() => {
-                if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
-            }
         }
-    }
 
-    info!(device_id = %device_id, "receiver session ended");
+        info!(device_id = %device_id, "receiver session ended");
+        state
+            .logger
+            .log(format!("receiver {device_id} session ended"));
+    }
+    .await;
+
     state
-        .logger
-        .log(format!("receiver {device_id} session ended"));
+        .unregister_receiver_session(&session_id_for_cleanup)
+        .await;
 }
 
 async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, token: Option<String>) {
@@ -431,154 +483,170 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
     }
 
     let session_id = Uuid::new_v4().to_string();
+    state
+        .register_receiver_session(
+            &session_id,
+            &device_id,
+            ReceiverSessionProtocol::V11,
+            selection_to_snapshot(&hello.selection),
+        )
+        .await;
+
     state.logger.log(format!(
         "receiver {device_id} connected (session {session_id}) [v1.1]"
     ));
 
-    if !send_heartbeat(&mut socket, &session_id, &device_id).await {
-        return;
-    }
+    let session_id_for_cleanup = session_id.clone();
+    async {
+        if !send_heartbeat(&mut socket, &session_id, &device_id).await {
+            return;
+        }
 
-    let mut subscriptions: Vec<StreamSub> = Vec::new();
-    if let Err(e) = apply_receiver_selection_until_stable(
-        &mut socket,
-        &state,
-        &device_id,
-        &session_id,
-        PendingSelection {
-            selection: hello.selection,
-            replay_policy: hello.replay_policy,
-            replay_targets: hello.replay_targets,
-        },
-        &mut subscriptions,
-    )
-    .await
-    {
-        error!(device_id = %device_id, error = %e, "error applying initial receiver selection");
-        return;
-    }
+        let mut subscriptions: Vec<StreamSub> = Vec::new();
+        if let Err(e) = apply_receiver_selection_until_stable(
+            &mut socket,
+            &state,
+            &device_id,
+            &session_id,
+            PendingSelection {
+                selection: hello.selection,
+                replay_policy: hello.replay_policy,
+                replay_targets: hello.replay_targets,
+            },
+            &mut subscriptions,
+        )
+        .await
+        {
+            error!(device_id = %device_id, error = %e, "error applying initial receiver selection");
+            return;
+        }
 
-    let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
-    heartbeat_interval.tick().await;
+        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat_interval.tick().await;
 
-    loop {
-        let mut events_to_send: Vec<ReadEvent> = Vec::new();
-        for sub in &mut subscriptions {
-            loop {
-                match sub.rx.try_recv() {
-                    Ok(event) => {
-                        let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
-                            warn!(
-                                stream_id = %sub.stream_id,
-                                stream_epoch = event.stream_epoch,
-                                "dropping live event with out-of-range stream_epoch"
-                            );
-                            continue;
-                        };
-                        let Ok(event_seq) = i64::try_from(event.seq) else {
-                            warn!(
-                                stream_id = %sub.stream_id,
-                                seq = event.seq,
-                                "dropping live event with out-of-range seq"
-                            );
-                            continue;
-                        };
-                        if !cursor_gt(event_epoch, event_seq, sub.last_epoch, sub.last_seq) {
-                            continue;
+        loop {
+            let mut events_to_send: Vec<ReadEvent> = Vec::new();
+            for sub in &mut subscriptions {
+                loop {
+                    match sub.rx.try_recv() {
+                        Ok(event) => {
+                            let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
+                                warn!(
+                                    stream_id = %sub.stream_id,
+                                    stream_epoch = event.stream_epoch,
+                                    "dropping live event with out-of-range stream_epoch"
+                                );
+                                continue;
+                            };
+                            let Ok(event_seq) = i64::try_from(event.seq) else {
+                                warn!(
+                                    stream_id = %sub.stream_id,
+                                    seq = event.seq,
+                                    "dropping live event with out-of-range seq"
+                                );
+                                continue;
+                            };
+                            if !cursor_gt(event_epoch, event_seq, sub.last_epoch, sub.last_seq) {
+                                continue;
+                            }
+                            sub.last_epoch = event_epoch;
+                            sub.last_seq = event_seq;
+                            events_to_send.push(event);
                         }
-                        sub.last_epoch = event_epoch;
-                        sub.last_seq = event_seq;
-                        events_to_send.push(event);
-                    }
-                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                        warn!(device_id = %device_id, stream_id = %sub.stream_id, lagged = n, "receiver lagged, replaying from DB");
-                        if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await
-                        {
-                            error!(error = %e, "replay failed");
-                            return;
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                            warn!(device_id = %device_id, stream_id = %sub.stream_id, lagged = n, "receiver lagged, replaying from DB");
+                            if let Err(e) = replay_backlog(&mut socket, &state, &session_id, sub).await
+                            {
+                                error!(error = %e, "replay failed");
+                                return;
+                            }
+                            break;
                         }
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                        warn!(device_id = %device_id, stream_id = %sub.stream_id, "broadcast channel closed");
-                        break;
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                            warn!(device_id = %device_id, stream_id = %sub.stream_id, "broadcast channel closed");
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if !events_to_send.is_empty() {
-            let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
-                session_id: session_id.clone(),
-                events: events_to_send,
-            });
-            if let Ok(json) = serde_json::to_string(&batch)
-                && socket.send(Message::Text(json.into())).await.is_err()
-            {
-                break;
+            if !events_to_send.is_empty() {
+                let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+                    session_id: session_id.clone(),
+                    events: events_to_send,
+                });
+                if let Ok(json) = serde_json::to_string(&batch)
+                    && socket.send(Message::Text(json.into())).await.is_err()
+                {
+                    break;
+                }
+                continue;
             }
-            continue;
-        }
 
-        let wait_duration = Duration::from_millis(10);
-        tokio::select! {
-            msg = tokio::time::timeout(wait_duration, socket.recv()) => {
-                match msg {
-                    Ok(Some(Ok(Message::Text(text)))) => {
-                        match serde_json::from_str::<WsMessage>(&text) {
-                            Ok(WsMessage::ReceiverAck(ack)) => {
-                                if let Err(e) = handle_receiver_ack(&state, &device_id, ack).await {
-                                    error!(device_id = %device_id, error = %e, "error handling receiver ack");
+            let wait_duration = Duration::from_millis(10);
+            tokio::select! {
+                msg = tokio::time::timeout(wait_duration, socket.recv()) => {
+                    match msg {
+                        Ok(Some(Ok(Message::Text(text)))) => {
+                            match serde_json::from_str::<WsMessage>(&text) {
+                                Ok(WsMessage::ReceiverAck(ack)) => {
+                                    if let Err(e) = handle_receiver_ack(&state, &device_id, ack).await {
+                                        error!(device_id = %device_id, error = %e, "error handling receiver ack");
+                                    }
                                 }
-                            }
-                            Ok(WsMessage::ReceiverSetSelection(set_selection)) => {
-                                if let Err(e) = apply_receiver_selection_until_stable(
-                                    &mut socket,
-                                    &state,
-                                    &device_id,
-                                    &session_id,
-                                    PendingSelection {
-                                        selection: set_selection.selection,
-                                        replay_policy: set_selection.replay_policy,
-                                        replay_targets: set_selection.replay_targets,
-                                    },
-                                    &mut subscriptions,
-                                )
-                                .await
-                                {
-                                    error!(device_id = %device_id, error = %e, "error applying receiver set_selection");
+                                Ok(WsMessage::ReceiverSetSelection(set_selection)) => {
+                                    if let Err(e) = apply_receiver_selection_until_stable(
+                                        &mut socket,
+                                        &state,
+                                        &device_id,
+                                        &session_id,
+                                        PendingSelection {
+                                            selection: set_selection.selection,
+                                            replay_policy: set_selection.replay_policy,
+                                            replay_targets: set_selection.replay_targets,
+                                        },
+                                        &mut subscriptions,
+                                    )
+                                    .await
+                                    {
+                                        error!(device_id = %device_id, error = %e, "error applying receiver set_selection");
+                                        break;
+                                    }
+                                }
+                                Ok(WsMessage::Heartbeat(_)) => {}
+                                Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
+                                Err(e) => {
+                                    send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await;
                                     break;
                                 }
                             }
-                            Ok(WsMessage::Heartbeat(_)) => {}
-                            Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
-                            Err(e) => {
-                                send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await;
-                                break;
-                            }
                         }
+                        Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
+                        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                            state.logger.log(format!("receiver {device_id} disconnected"));
+                            break;
+                        }
+                        Err(_) => {}
+                        Ok(Some(Err(e))) => { warn!(device_id = %device_id, error = %e, "WS error"); break; }
+                        Ok(Some(Ok(_))) => {}
                     }
-                    Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
-                    Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                        state.logger.log(format!("receiver {device_id} disconnected"));
-                        break;
-                    }
-                    Err(_) => {}
-                    Ok(Some(Err(e))) => { warn!(device_id = %device_id, error = %e, "WS error"); break; }
-                    Ok(Some(Ok(_))) => {}
+                }
+                _ = heartbeat_interval.tick() => {
+                    if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
                 }
             }
-            _ = heartbeat_interval.tick() => {
-                if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
-            }
         }
+        info!(device_id = %device_id, "receiver v1.1 session ended");
+        state
+            .logger
+            .log(format!("receiver {device_id} v1.1 session ended"));
     }
+    .await;
 
-    info!(device_id = %device_id, "receiver v1.1 session ended");
     state
-        .logger
-        .log(format!("receiver {device_id} v1.1 session ended"));
+        .unregister_receiver_session(&session_id_for_cleanup)
+        .await;
 }
 
 async fn apply_receiver_selection_until_stable(
@@ -623,6 +691,7 @@ async fn apply_receiver_selection(
         replay_policy,
         replay_targets,
     } = pending;
+    let selection_snapshot = selection_to_snapshot(&selection);
     let mut warnings: Vec<String> = Vec::new();
     let resolved = resolve_selection_targets(state, selection).await?;
     let targeted_replay_selections = if replay_policy == ReplayPolicy::Targeted {
@@ -696,7 +765,25 @@ async fn apply_receiver_selection(
         targets = subscriptions.len(),
         "applied receiver selection"
     );
+    let _ = state
+        .update_receiver_session_selection(session_id, selection_snapshot)
+        .await;
     Ok(ApplySelectionOutcome::Applied)
+}
+
+fn selection_to_snapshot(selection: &ReceiverSelection) -> ReceiverSelectionSnapshot {
+    match selection {
+        ReceiverSelection::Manual { streams } => ReceiverSelectionSnapshot::Manual {
+            streams: normalize_manual_streams(streams.clone()),
+        },
+        ReceiverSelection::Race {
+            race_id,
+            epoch_scope,
+        } => ReceiverSelectionSnapshot::Race {
+            race_id: race_id.clone(),
+            epoch_scope: *epoch_scope,
+        },
+    }
 }
 
 async fn snapshot_targeted_replay_bounds(
