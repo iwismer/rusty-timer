@@ -501,4 +501,108 @@ describe("stream detail page epoch race mapping", () => {
     unmount();
     expect(sseMock.unsubscribe).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps advance button disabled and shows Reloading until SSE-triggered table reload completes", async () => {
+    const epochReload = deferred<typeof epochs>();
+    vi.mocked(api.getStreamEpochs)
+      .mockResolvedValueOnce(epochs) // initial load
+      .mockReturnValueOnce(epochReload.promise); // SSE-triggered reload
+
+    render(Page);
+
+    const advanceButton = await screen.findByTestId(
+      "epoch-race-advance-next-btn",
+    );
+    await waitFor(() => {
+      expect(advanceButton).not.toBeDisabled();
+    });
+
+    // Click advance -- API resolves immediately (default mock)
+    await fireEvent.click(advanceButton);
+
+    // After API returns, button should still be disabled and show "Reloading..."
+    await waitFor(() => {
+      expect(advanceButton).toHaveTextContent("Reloading...");
+    });
+    expect(advanceButton).toBeDisabled();
+
+    // Simulate SSE triggering the reload
+    sseMock.listener?.({ stream_id: "abc-123", stream_epoch: 3 });
+
+    // Button should still be loading since epochReload hasn't resolved
+    expect(advanceButton).toBeDisabled();
+
+    // Now resolve the epoch reload
+    epochReload.resolve([
+      ...epochs,
+      {
+        epoch: 3,
+        event_count: 0,
+        first_event_at: "2026-02-22T13:00:00Z",
+        last_event_at: "2026-02-22T13:00:00Z",
+        name: null,
+        is_current: true,
+      },
+    ]);
+
+    // Wait for the reloaded table to appear, then re-query the button
+    // (Svelte recreates the DOM when epochRaceRowsLoading toggles)
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-race-select-3")).toBeInTheDocument();
+    });
+    const updatedButton = screen.getByTestId("epoch-race-advance-next-btn");
+    expect(updatedButton).toHaveTextContent("Advance to Next Epoch");
+  });
+
+  it("clears advance pending state on API error without waiting for reload", async () => {
+    vi.mocked(api.activateNextStreamEpochForRace).mockRejectedValueOnce(
+      new Error("server error"),
+    );
+
+    render(Page);
+
+    const advanceButton = await screen.findByTestId(
+      "epoch-race-advance-next-btn",
+    );
+    await waitFor(() => {
+      expect(advanceButton).not.toBeDisabled();
+    });
+
+    await fireEvent.click(advanceButton);
+
+    await waitFor(() => {
+      expect(advanceButton).toHaveTextContent("Advance failed");
+    });
+    // Button should not be in a reloading state
+    expect(advanceButton).not.toBeDisabled();
+  });
+
+  it("prevents double-click during reload phase", async () => {
+    const epochReload = deferred<typeof epochs>();
+    vi.mocked(api.getStreamEpochs)
+      .mockResolvedValueOnce(epochs)
+      .mockReturnValueOnce(epochReload.promise);
+
+    render(Page);
+
+    const advanceButton = await screen.findByTestId(
+      "epoch-race-advance-next-btn",
+    );
+    await waitFor(() => {
+      expect(advanceButton).not.toBeDisabled();
+    });
+
+    await fireEvent.click(advanceButton);
+
+    await waitFor(() => {
+      expect(advanceButton).toHaveTextContent("Reloading...");
+    });
+
+    // Try to click again while reloading -- should be disabled
+    expect(advanceButton).toBeDisabled();
+    await fireEvent.click(advanceButton);
+
+    // Should only have been called once
+    expect(api.activateNextStreamEpochForRace).toHaveBeenCalledTimes(1);
+  });
 });
