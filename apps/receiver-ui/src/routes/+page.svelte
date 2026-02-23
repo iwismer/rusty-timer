@@ -1016,6 +1016,12 @@
                   <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                     {stream.forwarder_id} / {stream.reader_ip}
                   </p>
+                  {#if stream.stream_epoch !== undefined}
+                    <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
+                      epoch: {stream.stream_epoch}{#if stream.current_epoch_name && stream.current_epoch_name.trim().length > 0}
+                        {" "}({stream.current_epoch_name.trim()}){/if}
+                    </p>
+                  {/if}
                   {#if stream.reads_total !== undefined}
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                       reads: {stream.reads_total} total{#if stream.reads_epoch !== undefined},

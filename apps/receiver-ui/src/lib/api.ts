@@ -18,6 +18,8 @@ export interface StreamEntry {
   local_port: number | null;
   online?: boolean;
   display_alias?: string;
+  stream_epoch?: number;
+  current_epoch_name?: string | null;
   reads_total?: number;
   reads_epoch?: number;
 }

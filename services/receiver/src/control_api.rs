@@ -22,7 +22,7 @@ use axum::{
     response::IntoResponse,
     Json, Router,
 };
-use rt_protocol::{ReceiverSetSelection, ReplayPolicy, StreamInfo};
+use rt_protocol::{ReceiverSetSelection, ReplayPolicy};
 use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,8 @@ impl AppState {
                     local_port: port,
                     online: Some(si.online),
                     display_alias: si.display_alias.clone(),
+                    stream_epoch: Some(si.stream_epoch),
+                    current_epoch_name: si.current_epoch_name.clone(),
                     reads_total: counts.as_ref().map(|c| c.total),
                     reads_epoch: counts.as_ref().map(|c| c.epoch),
                 });
@@ -199,6 +201,8 @@ impl AppState {
                 local_port: port,
                 online: None,
                 display_alias: None,
+                stream_epoch: None,
+                current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
             });
@@ -285,6 +289,10 @@ pub struct StreamEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_epoch_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_epoch: Option<u64>,
@@ -364,7 +372,18 @@ struct UpstreamRaceEpochMapping {
 /// Response shape from the server's `GET /api/v1/streams`.
 #[derive(Debug, Deserialize)]
 struct ServerStreamsResponse {
-    streams: Vec<StreamInfo>,
+    streams: Vec<UpstreamStreamInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamStreamInfo {
+    stream_id: String,
+    forwarder_id: String,
+    reader_ip: String,
+    display_alias: Option<String>,
+    stream_epoch: u64,
+    online: bool,
+    current_epoch_name: Option<String>,
 }
 
 /// Normalize a server URL by prepending `ws://` if no scheme is present.
@@ -396,7 +415,7 @@ pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
 }
 
 /// Fetch available streams from the upstream server.
-async fn fetch_server_streams(ws_url: &str) -> Result<Vec<StreamInfo>, String> {
+async fn fetch_server_streams(ws_url: &str) -> Result<Vec<UpstreamStreamInfo>, String> {
     let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
     let url = format!("{base}/api/v1/streams");
 

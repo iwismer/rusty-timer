@@ -72,6 +72,50 @@ describe("receiver page", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders current epoch number and name in stream rows when available", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+          stream_epoch: 12,
+          current_epoch_name: "Qualifier",
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    expect(
+      await screen.findByText("epoch: 12 (Qualifier)"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders current epoch number without name when no epoch name exists", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+          stream_epoch: 4,
+          current_epoch_name: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    expect(await screen.findByText("epoch: 4")).toBeInTheDocument();
+  });
+
   it("auto-applies selection mode changes", async () => {
     render(Page);
 

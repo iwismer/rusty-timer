@@ -150,6 +150,45 @@ async fn test_list_streams_after_forwarder_connect() {
         "stream should be online while forwarder connected"
     );
     assert!(s["stream_epoch"].is_number());
+    assert!(s["current_epoch_name"].is_null());
+}
+
+#[tokio::test]
+async fn test_list_streams_includes_current_epoch_name_when_present() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-epoch-name", "10.11.0.1:10000").await;
+    sqlx::query("UPDATE streams SET stream_epoch = $1 WHERE stream_id = $2")
+        .bind(7_i64)
+        .bind(stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO stream_epoch_metadata (stream_id, stream_epoch, name) VALUES ($1, $2, $3)",
+    )
+    .bind(stream_id)
+    .bind(7_i64)
+    .bind("Lap 7")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let resp = reqwest::get(format!("http://{}/api/v1/streams", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    let stream = &streams[0];
+    assert_eq!(stream["stream_epoch"], 7);
+    assert_eq!(stream["current_epoch_name"], "Lap 7");
 }
 
 #[tokio::test]

@@ -923,6 +923,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
                     "reader_ip":"192.168.1.100:10000",
                     "display_alias":"Finish",
                     "stream_epoch":1,
+                    "current_epoch_name":"Heat 1",
                     "online":true
                 },
                 {
@@ -931,6 +932,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
                     "reader_ip":"192.168.1.200:10000",
                     "display_alias":null,
                     "stream_epoch":1,
+                    "current_epoch_name":null,
                     "online":false
                 }
             ]
@@ -968,6 +970,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
     assert_eq!(matched["subscribed"], true);
     assert_eq!(matched["online"], true);
     assert_eq!(matched["display_alias"], "Finish");
+    assert_eq!(matched["current_epoch_name"], "Heat 1");
     assert_eq!(matched["local_port"], 10100);
 
     let server_only = streams
@@ -977,6 +980,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
     assert_eq!(server_only["subscribed"], false);
     assert_eq!(server_only["online"], false);
     assert!(server_only["display_alias"].is_null());
+    assert!(server_only["current_epoch_name"].is_null());
     assert!(server_only["local_port"].is_null());
 
     let local_only = streams
@@ -987,6 +991,7 @@ async fn get_streams_connected_merges_server_and_local_streams() {
     assert_eq!(local_only["local_port"], 9950);
     assert!(local_only.get("online").is_none());
     assert!(local_only.get("display_alias").is_none());
+    assert!(local_only.get("current_epoch_name").is_none());
 
     upstream_handle.abort();
 }

@@ -10,9 +10,20 @@ use sqlx::Row;
 use uuid::Uuid;
 
 pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
-    let rows = sqlx::query!(
-        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, stream_epoch, online, created_at
-           FROM streams ORDER BY created_at ASC"#
+    let rows = sqlx::query(
+        r#"SELECT s.stream_id,
+                  s.forwarder_id,
+                  s.reader_ip,
+                  s.display_alias,
+                  s.forwarder_display_name,
+                  s.stream_epoch,
+                  s.online,
+                  s.created_at,
+                  em.name AS current_epoch_name
+           FROM streams s
+           LEFT JOIN stream_epoch_metadata em
+             ON em.stream_id = s.stream_id AND em.stream_epoch = s.stream_epoch
+           ORDER BY s.created_at ASC"#,
     )
     .fetch_all(&state.pool)
     .await;
@@ -22,15 +33,25 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
             let streams: Vec<serde_json::Value> = rows
                 .into_iter()
                 .map(|r| {
+                    let stream_id: uuid::Uuid = r.get("stream_id");
+                    let forwarder_id: String = r.get("forwarder_id");
+                    let reader_ip: String = r.get("reader_ip");
+                    let display_alias: Option<String> = r.get("display_alias");
+                    let forwarder_display_name: Option<String> = r.get("forwarder_display_name");
+                    let stream_epoch: i64 = r.get("stream_epoch");
+                    let online: bool = r.get("online");
+                    let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
+                    let current_epoch_name: Option<String> = r.get("current_epoch_name");
                     serde_json::json!({
-                        "stream_id": r.stream_id.to_string(),
-                        "forwarder_id": r.forwarder_id,
-                        "reader_ip": r.reader_ip,
-                        "display_alias": r.display_alias,
-                        "forwarder_display_name": r.forwarder_display_name,
-                        "stream_epoch": r.stream_epoch,
-                        "online": r.online,
-                        "created_at": r.created_at.to_rfc3339(),
+                        "stream_id": stream_id.to_string(),
+                        "forwarder_id": forwarder_id,
+                        "reader_ip": reader_ip,
+                        "display_alias": display_alias,
+                        "forwarder_display_name": forwarder_display_name,
+                        "stream_epoch": stream_epoch,
+                        "current_epoch_name": current_epoch_name,
+                        "online": online,
+                        "created_at": created_at.to_rfc3339(),
                     })
                 })
                 .collect();
