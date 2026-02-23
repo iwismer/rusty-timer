@@ -11,6 +11,7 @@ export interface Profile {
 }
 
 export interface StreamEntry {
+  stream_id?: string;
   forwarder_id: string;
   reader_ip: string;
   subscribed: boolean;
@@ -99,6 +100,17 @@ export interface RacesResponse {
   races: RaceEntry[];
 }
 
+export interface ReplayTargetEpochOption {
+  stream_epoch: number;
+  name: string | null;
+  first_seen_at: string | null;
+  race_names: string[];
+}
+
+export interface ReplayTargetEpochsResponse {
+  epochs: ReplayTargetEpochOption[];
+}
+
 export async function getProfile(): Promise<Profile> {
   return apiFetch<Profile>("/api/v1/profile");
 }
@@ -146,6 +158,18 @@ export async function putSelection(
 
 export async function getRaces(): Promise<RacesResponse> {
   return apiFetch<RacesResponse>("/api/v1/races");
+}
+
+export async function getReplayTargetEpochs(
+  stream: StreamRef,
+): Promise<ReplayTargetEpochsResponse> {
+  const params = new URLSearchParams({
+    forwarder_id: stream.forwarder_id,
+    reader_ip: stream.reader_ip,
+  });
+  return apiFetch<ReplayTargetEpochsResponse>(
+    `/api/v1/replay-targets/epochs?${params.toString()}`,
+  );
 }
 
 export async function resetStreamCursor(stream: StreamRef): Promise<void> {

@@ -17,7 +17,7 @@ use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json, Router,
@@ -26,7 +26,7 @@ use rt_protocol::{ReceiverSetSelection, ReplayPolicy, StreamInfo};
 use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -309,6 +309,54 @@ pub struct LogsResponse {
     pub entries: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReplayTargetEpochsQuery {
+    forwarder_id: String,
+    reader_ip: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplayTargetEpochOption {
+    pub stream_epoch: i64,
+    pub name: Option<String>,
+    pub first_seen_at: Option<String>,
+    pub race_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplayTargetEpochsResponse {
+    pub epochs: Vec<ReplayTargetEpochOption>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamStreamEpochOption {
+    epoch: i64,
+    name: Option<String>,
+    first_event_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRacesResponse {
+    races: Vec<UpstreamRaceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceEntry {
+    race_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceEpochMappingsResponse {
+    mappings: Vec<UpstreamRaceEpochMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceEpochMapping {
+    stream_id: String,
+    stream_epoch: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Server stream fetching helpers
 // ---------------------------------------------------------------------------
@@ -546,6 +594,202 @@ async fn get_races(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )
             .into_response(),
     }
+}
+
+async fn get_replay_target_epochs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ReplayTargetEpochsQuery>,
+) -> impl IntoResponse {
+    let profile = {
+        let db = state.db.lock().await;
+        match db.load_profile() {
+            Ok(Some(p)) => p,
+            Ok(None) => return (StatusCode::NOT_FOUND, "no profile").into_response(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    };
+
+    let Some(base) = http_base_url(&profile.server_url) else {
+        return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("HTTP client error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let streams_url = format!("{base}/api/v1/streams");
+    let streams_response = match client
+        .get(&streams_url)
+        .bearer_auth(&profile.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+    if !streams_response.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream streams returned {}", streams_response.status()),
+        )
+            .into_response();
+    }
+    let upstream_streams = match streams_response.json::<ServerStreamsResponse>().await {
+        Ok(body) => body.streams,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("invalid streams JSON from upstream: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let Some(stream) = upstream_streams.iter().find(|stream| {
+        stream.forwarder_id == query.forwarder_id && stream.reader_ip == query.reader_ip
+    }) else {
+        return (StatusCode::NOT_FOUND, "stream not found").into_response();
+    };
+
+    let epochs_url = format!("{base}/api/v1/streams/{}/epochs", stream.stream_id);
+    let epochs_response = match client
+        .get(&epochs_url)
+        .bearer_auth(&profile.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+    if !epochs_response.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream epochs returned {}", epochs_response.status()),
+        )
+            .into_response();
+    }
+    let upstream_epochs = match epochs_response
+        .json::<Vec<UpstreamStreamEpochOption>>()
+        .await
+    {
+        Ok(body) => body,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("invalid epochs JSON from upstream: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let races_url = format!("{base}/api/v1/races");
+    let races_response = match client
+        .get(&races_url)
+        .bearer_auth(&profile.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+    if !races_response.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream races returned {}", races_response.status()),
+        )
+            .into_response();
+    }
+    let races = match races_response.json::<UpstreamRacesResponse>().await {
+        Ok(body) => body.races,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("invalid races JSON from upstream: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let race_mapping_fetches = races.iter().map(|race| {
+        let client = client.clone();
+        let base = base.clone();
+        let token = profile.token.clone();
+        let race_id = race.race_id.clone();
+        let race_name = race.name.clone();
+        async move {
+            let mappings_url = format!("{base}/api/v1/races/{race_id}/stream-epochs");
+            let mappings_response = match client.get(&mappings_url).bearer_auth(&token).send().await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err((StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")));
+                }
+            };
+            if !mappings_response.status().is_success() {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "upstream stream-epochs for race {} returned {}",
+                        race_id,
+                        mappings_response.status()
+                    ),
+                ));
+            }
+            let mappings = match mappings_response
+                .json::<UpstreamRaceEpochMappingsResponse>()
+                .await
+            {
+                Ok(body) => body.mappings,
+                Err(e) => {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        format!("invalid stream-epochs JSON from upstream: {e}"),
+                    ));
+                }
+            };
+            Ok((race_name, mappings))
+        }
+    });
+
+    let race_mappings = futures_util::future::join_all(race_mapping_fetches).await;
+    let mut race_names_by_epoch: HashMap<i64, BTreeSet<String>> = HashMap::new();
+    for race_mappings_result in race_mappings {
+        let (race_name, mappings) = match race_mappings_result {
+            Ok(value) => value,
+            Err((status, message)) => return (status, message).into_response(),
+        };
+        for mapping in mappings {
+            if mapping.stream_id == stream.stream_id {
+                race_names_by_epoch
+                    .entry(mapping.stream_epoch)
+                    .or_default()
+                    .insert(race_name.clone());
+            }
+        }
+    }
+
+    let epochs = upstream_epochs
+        .into_iter()
+        .map(|epoch| ReplayTargetEpochOption {
+            stream_epoch: epoch.epoch,
+            name: epoch.name,
+            first_seen_at: epoch.first_event_at,
+            race_names: race_names_by_epoch
+                .remove(&epoch.epoch)
+                .map_or_else(Vec::new, |names| names.into_iter().collect()),
+        })
+        .collect();
+
+    Json(ReplayTargetEpochsResponse { epochs }).into_response()
 }
 
 async fn put_subscriptions(
@@ -831,6 +1075,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/selection", get(get_selection).put(put_selection))
         .route("/api/v1/streams", get(get_streams))
         .route("/api/v1/races", get(get_races))
+        .route(
+            "/api/v1/replay-targets/epochs",
+            get(get_replay_target_epochs),
+        )
         .route("/api/v1/subscriptions", put(put_subscriptions))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/logs", get(get_logs))

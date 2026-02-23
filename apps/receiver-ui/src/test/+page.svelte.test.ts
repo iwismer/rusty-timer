@@ -24,6 +24,9 @@ const apiMocks = vi.hoisted(() => ({
   getRaces: vi.fn().mockResolvedValue({
     races: [{ race_id: "race-1", name: "Race 1", created_at: "2026-01-01" }],
   }),
+  getReplayTargetEpochs: vi.fn().mockResolvedValue({
+    epochs: [],
+  }),
   putSelection: vi.fn().mockResolvedValue(undefined),
   putProfile: vi.fn().mockResolvedValue(undefined),
   checkForUpdate: vi.fn().mockResolvedValue({ status: "up_to_date" }),
@@ -232,9 +235,8 @@ describe("receiver page", () => {
     const streamSelect = await screen.findByTestId("targeted-row-stream-0");
     await fireEvent.change(streamSelect, { target: { value: "" } });
 
-    const epochInput = await screen.findByTestId("targeted-row-epoch-0");
-    await fireEvent.input(epochInput, { target: { value: "" } });
-    await fireEvent.blur(epochInput);
+    const epochSelect = await screen.findByTestId("targeted-row-epoch-0");
+    await fireEvent.change(epochSelect, { target: { value: "" } });
 
     expect(await screen.findByTestId("targeted-row-error-0")).toHaveTextContent(
       "Select a stream",
@@ -259,6 +261,16 @@ describe("receiver page", () => {
       degraded: false,
       upstream_error: null,
     });
+    apiMocks.getReplayTargetEpochs.mockResolvedValue({
+      epochs: [
+        {
+          stream_epoch: 3,
+          name: "Lap 3",
+          first_seen_at: "2026-01-01T10:00:00Z",
+          race_names: [],
+        },
+      ],
+    });
 
     render(Page);
 
@@ -277,9 +289,11 @@ describe("receiver page", () => {
       target: { value: "fwd-1/10.0.0.1:10000" },
     });
 
-    const epochInput = await screen.findByTestId("targeted-row-epoch-0");
-    await fireEvent.input(epochInput, { target: { value: "3" } });
-    await fireEvent.blur(epochInput);
+    const epochSelect = await screen.findByTestId("targeted-row-epoch-0");
+    await waitFor(() => {
+      expect(epochSelect).toHaveTextContent("Lap 3");
+    });
+    await fireEvent.change(epochSelect, { target: { value: "3" } });
 
     await waitFor(() => {
       expect(apiMocks.putSelection).toHaveBeenCalledWith({
@@ -328,6 +342,159 @@ describe("receiver page", () => {
     });
 
     expect(screen.queryByTestId("targeted-row-from-seq-0")).toBeNull();
+  });
+
+  it("renders targeted row epoch selector as dropdown scoped to selected stream", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          stream_id: "stream-1",
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+          display_alias: "Finish",
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+    apiMocks.getReplayTargetEpochs.mockResolvedValue({
+      epochs: [
+        {
+          stream_epoch: 5,
+          name: "Final",
+          first_seen_at: "2026-01-02T11:22:33Z",
+          race_names: ["Race 1"],
+        },
+      ],
+    });
+
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    const streamSelect = await screen.findByTestId("targeted-row-stream-0");
+    await fireEvent.change(streamSelect, {
+      target: { value: "fwd-1/10.0.0.1:10000" },
+    });
+
+    const epochSelect = await screen.findByTestId("targeted-row-epoch-0");
+    expect(epochSelect.tagName).toBe("SELECT");
+    await waitFor(() => {
+      expect(epochSelect).toHaveTextContent("Final");
+      expect(epochSelect).toHaveTextContent("Race 1");
+    });
+    expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledWith({
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+    });
+  });
+
+  it("uses epoch/timestamp fallback label when epoch name is unavailable", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          stream_id: "stream-2",
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+    apiMocks.getReplayTargetEpochs.mockResolvedValue({
+      epochs: [
+        {
+          stream_epoch: 9,
+          name: null,
+          first_seen_at: "2026-01-03T00:00:00Z",
+          race_names: [],
+        },
+      ],
+    });
+
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    const streamSelect = await screen.findByTestId("targeted-row-stream-0");
+    await fireEvent.change(streamSelect, {
+      target: { value: "fwd-2/10.0.0.2:10000" },
+    });
+
+    const epochSelect = await screen.findByTestId("targeted-row-epoch-0");
+    await waitFor(() => {
+      expect(epochSelect).toHaveTextContent("Epoch 9");
+      expect(epochSelect).toHaveTextContent("2026");
+    });
+  });
+
+  it("retries epoch fetch for a stream after transient failure", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          stream_id: "stream-2",
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+    apiMocks.getReplayTargetEpochs
+      .mockRejectedValueOnce(new Error("temporary upstream failure"))
+      .mockResolvedValueOnce({
+        epochs: [
+          {
+            stream_epoch: 11,
+            name: "Lap 11",
+            first_seen_at: "2026-01-03T00:00:00Z",
+            race_names: [],
+          },
+        ],
+      });
+
+    render(Page);
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "targeted" },
+    });
+
+    const streamSelect = await screen.findByTestId("targeted-row-stream-0");
+    await fireEvent.change(streamSelect, {
+      target: { value: "fwd-2/10.0.0.2:10000" },
+    });
+    await fireEvent.change(streamSelect, { target: { value: "" } });
+    await fireEvent.change(streamSelect, {
+      target: { value: "fwd-2/10.0.0.2:10000" },
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledTimes(2);
+    });
+
+    const epochSelect = await screen.findByTestId("targeted-row-epoch-0");
+    await waitFor(() => {
+      expect(epochSelect).toHaveTextContent("Lap 11");
+    });
   });
 
   it("removes a targeted replay row when remove is clicked", async () => {

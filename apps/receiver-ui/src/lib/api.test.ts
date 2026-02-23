@@ -265,6 +265,40 @@ describe("api client", () => {
     expect(result.races[0].race_id).toBe("r1");
   });
 
+  it("getReplayTargetEpochs calls replay target epochs endpoint with query params", async () => {
+    const { getReplayTargetEpochs } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        epochs: [
+          {
+            stream_epoch: 7,
+            name: "Heat 2",
+            first_seen_at: "2026-02-01T10:00:00Z",
+            race_names: ["Saturday 5K"],
+          },
+        ],
+      }),
+    );
+
+    const result = await getReplayTargetEpochs({
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/replay-targets/epochs?forwarder_id=fwd-1&reader_ip=10.0.0.1%3A10000",
+      expect.any(Object),
+    );
+    expect(result.epochs).toEqual([
+      {
+        stream_epoch: 7,
+        name: "Heat 2",
+        first_seen_at: "2026-02-01T10:00:00Z",
+        race_names: ["Saturday 5K"],
+      },
+    ]);
+  });
+
   it("resetStreamCursor posts admin cursor reset payload", async () => {
     const { resetStreamCursor } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(204, null));

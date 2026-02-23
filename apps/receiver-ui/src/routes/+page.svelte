@@ -21,6 +21,7 @@
     StatusResponse,
     StreamsResponse,
     LogsResponse,
+    ReplayTargetEpochOption,
   } from "$lib/api";
   type TargetedRowDraft = {
     streamKey: string;
@@ -63,6 +64,9 @@
   let targetedRows = $state<TargetedRowDraft[]>([
     { streamKey: "", streamEpoch: "" },
   ]);
+  let targetedEpochOptionsByStream = $state<
+    Record<string, ReplayTargetEpochOption[]>
+  >({});
   let targetedRowErrors = $state<Record<number, TargetedRowErrors>>({});
   let selectionBusy = $state(false);
   let selectionApplyQueued = $state(false);
@@ -149,6 +153,57 @@
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
     return `${forwarder_id}/${reader_ip}`;
+  }
+
+  async function ensureTargetedEpochOptionsForStream(
+    key: string,
+  ): Promise<void> {
+    if (!key || targetedEpochOptionsByStream[key] !== undefined) {
+      return;
+    }
+    const parsed = parseStreamKey(key);
+    if (!parsed) {
+      return;
+    }
+    try {
+      const response = await api.getReplayTargetEpochs(parsed);
+      targetedEpochOptionsByStream = {
+        ...targetedEpochOptionsByStream,
+        [key]: response.epochs,
+      };
+    } catch {
+      // Do not cache transient failures as empty options; allow in-session retry.
+    }
+  }
+
+  function epochFallbackLabel(option: ReplayTargetEpochOption): string {
+    if (option.name && option.name.trim().length > 0) {
+      return option.name.trim();
+    }
+    if (option.first_seen_at) {
+      const firstSeen = new Date(option.first_seen_at);
+      if (!Number.isNaN(firstSeen.getTime())) {
+        return `Epoch ${option.stream_epoch} (${firstSeen.toLocaleString()})`;
+      }
+    }
+    return `Epoch ${option.stream_epoch}`;
+  }
+
+  function targetedEpochOptionLabel(option: ReplayTargetEpochOption): string {
+    const base = epochFallbackLabel(option);
+    if (option.race_names.length === 0) {
+      return base;
+    }
+    return `${base} - Race: ${option.race_names.join(", ")}`;
+  }
+
+  function targetedRowEpochOptions(
+    row: TargetedRowDraft,
+  ): ReplayTargetEpochOption[] {
+    if (!row.streamKey) {
+      return [];
+    }
+    return targetedEpochOptionsByStream[row.streamKey] ?? [];
   }
 
   function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
@@ -260,6 +315,11 @@
           nextSelection.replay_targets.length > 0
             ? nextSelection.replay_targets.map(rowFromReplayTarget)
             : [{ streamKey: "", streamEpoch: "" }];
+        for (const row of targetedRows) {
+          if (row.streamKey) {
+            void ensureTargetedEpochOptionsForStream(row.streamKey);
+          }
+        }
         targetedRowErrors = {};
         if (nextSelection.selection.mode === "manual") {
           selectedStreams = nextSelection.selection.streams;
@@ -405,13 +465,16 @@
   function handleTargetedStreamChange(index: number, event: Event): void {
     const value = (event.currentTarget as HTMLSelectElement).value;
     targetedRows = targetedRows.map((row, rowIndex) =>
-      rowIndex === index ? { ...row, streamKey: value } : row,
+      rowIndex === index ? { ...row, streamKey: value, streamEpoch: "" } : row,
     );
+    if (value) {
+      void ensureTargetedEpochOptionsForStream(value);
+    }
     void applySelection();
   }
 
-  function handleTargetedEpochBlur(index: number, event: Event): void {
-    const value = (event.currentTarget as HTMLInputElement).value.trim();
+  function handleTargetedEpochChange(index: number, event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value.trim();
     targetedRows = targetedRows.map((row, rowIndex) =>
       rowIndex === index ? { ...row, streamEpoch: value } : row,
     );
@@ -828,7 +891,7 @@
               <div class="grid gap-2">
                 {#each targetedRows as row, index}
                   <div
-                    class="grid gap-2 md:grid-cols-[2fr_1fr_auto] items-start"
+                    class="grid gap-2 md:grid-cols-[2fr_2fr_auto] items-start"
                   >
                     <select
                       data-testid={"targeted-row-stream-" + index}
@@ -852,16 +915,21 @@
                       {/each}
                     </select>
 
-                    <input
+                    <select
                       data-testid={"targeted-row-epoch-" + index}
-                      type="number"
-                      min="0"
                       class={inputClass}
                       value={row.streamEpoch}
-                      onblur={(event) => handleTargetedEpochBlur(index, event)}
-                      placeholder="Stream epoch"
-                      disabled={selectionBusy}
-                    />
+                      onchange={(event) =>
+                        handleTargetedEpochChange(index, event)}
+                      disabled={selectionBusy || !row.streamKey}
+                    >
+                      <option value="">Select epoch...</option>
+                      {#each targetedRowEpochOptions(row) as option}
+                        <option value={String(option.stream_epoch)}>
+                          {targetedEpochOptionLabel(option)}
+                        </option>
+                      {/each}
+                    </select>
 
                     <button
                       data-testid={"remove-targeted-row-" + index}

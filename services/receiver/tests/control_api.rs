@@ -4,7 +4,9 @@ use receiver::control_api::{build_router, AppState, ConnectionState};
 use receiver::Db;
 use rt_updater::UpdateMode;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt;
 fn setup() -> axum::Router {
     let db = Db::open_in_memory().unwrap();
@@ -105,6 +107,214 @@ async fn spawn_upstream_races_server(
     });
 
     (format!("ws://{addr}/ws/v1.1/receivers"), handle)
+}
+
+async fn spawn_upstream_replay_epochs_server() -> (String, tokio::task::JoinHandle<()>) {
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/streams",
+            axum::routing::get(|| async {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "streams": [{
+                            "stream_id":"11111111-1111-1111-1111-111111111111",
+                            "forwarder_id":"f1",
+                            "reader_ip":"10.0.0.1:10000",
+                            "display_alias":"Finish",
+                            "stream_epoch":9,
+                            "online":true
+                        }]
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/streams/{stream_id}/epochs",
+            axum::routing::get(
+                |axum::extract::Path(stream_id): axum::extract::Path<String>| async move {
+                    let body = if stream_id == "11111111-1111-1111-1111-111111111111" {
+                        json!([
+                            {
+                                "epoch": 9,
+                                "name": "Lap 9",
+                                "first_event_at": "2026-01-03T00:00:00Z"
+                            }
+                        ])
+                    } else {
+                        json!([])
+                    };
+                    (StatusCode::OK, axum::Json(body))
+                },
+            ),
+        )
+        .route(
+            "/api/v1/races",
+            axum::routing::get(|| async {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "races": [{
+                            "race_id":"00000000-0000-0000-0000-000000000001",
+                            "name":"Spring 5K",
+                            "created_at":"2026-01-01T00:00:00Z"
+                        }]
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/races/{race_id}/stream-epochs",
+            axum::routing::get(
+                |axum::extract::Path(race_id): axum::extract::Path<String>| async move {
+                    let body = if race_id == "00000000-0000-0000-0000-000000000001" {
+                        json!({
+                            "mappings": [{
+                                "stream_id":"11111111-1111-1111-1111-111111111111",
+                                "forwarder_id":"f1",
+                                "reader_ip":"10.0.0.1:10000",
+                                "stream_epoch":9,
+                                "race_id":"00000000-0000-0000-0000-000000000001"
+                            }]
+                        })
+                    } else {
+                        json!({ "mappings": [] })
+                    };
+                    (StatusCode::OK, axum::Json(body))
+                },
+            ),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (format!("ws://{addr}/ws/v1.1/receivers"), handle)
+}
+
+async fn spawn_upstream_replay_epochs_server_with_race_mapping_delay(
+    race_count: usize,
+    delay: Duration,
+) -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
+    let race_count_u64 = u64::try_from(race_count).unwrap_or(0);
+
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/streams",
+            axum::routing::get(|| async {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "streams": [{
+                            "stream_id":"11111111-1111-1111-1111-111111111111",
+                            "forwarder_id":"f1",
+                            "reader_ip":"10.0.0.1:10000",
+                            "display_alias":"Finish",
+                            "stream_epoch":9,
+                            "online":true
+                        }]
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/streams/{stream_id}/epochs",
+            axum::routing::get(|_path: axum::extract::Path<String>| async move {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!([
+                        {
+                            "epoch": 9,
+                            "name": "Lap 9",
+                            "first_event_at": "2026-01-03T00:00:00Z"
+                        }
+                    ])),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/races",
+            axum::routing::get(move || async move {
+                let races = (0..race_count_u64)
+                    .map(|i| {
+                        json!({
+                            "race_id": format!("00000000-0000-0000-0000-{i:012}"),
+                            "name": format!("Race {i}"),
+                            "created_at":"2026-01-01T00:00:00Z"
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (StatusCode::OK, axum::Json(json!({ "races": races })))
+            }),
+        )
+        .route(
+            "/api/v1/races/{race_id}/stream-epochs",
+            axum::routing::get({
+                let in_flight = Arc::clone(&in_flight);
+                let max_in_flight = Arc::clone(&max_in_flight);
+                move |_path: axum::extract::Path<String>| {
+                    let in_flight = Arc::clone(&in_flight);
+                    let max_in_flight = Arc::clone(&max_in_flight);
+                    async move {
+                        let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        loop {
+                            let max_seen = max_in_flight.load(Ordering::SeqCst);
+                            if current <= max_seen {
+                                break;
+                            }
+                            if max_in_flight
+                                .compare_exchange(
+                                    max_seen,
+                                    current,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(delay).await;
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "mappings": [{
+                                    "stream_id":"11111111-1111-1111-1111-111111111111",
+                                    "forwarder_id":"f1",
+                                    "reader_ip":"10.0.0.1:10000",
+                                    "stream_epoch":9,
+                                    "race_id":"00000000-0000-0000-0000-000000000001"
+                                }]
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (
+        format!("ws://{addr}/ws/v1.1/receivers"),
+        handle,
+        in_flight,
+        max_in_flight,
+    )
 }
 
 #[tokio::test]
@@ -339,6 +549,69 @@ async fn get_races_proxies_to_upstream() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(val["races"].as_array().unwrap().len(), 2);
     assert_eq!(val["races"][0]["race_id"], "r1");
+
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn get_replay_target_epochs_proxies_upstream_epochs_with_race_names() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let (ws_url, upstream_handle) = spawn_upstream_replay_epochs_server().await;
+    let app = build_router(Arc::clone(&state));
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":ws_url,"token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, val) = get_json(
+        app,
+        "/api/v1/replay-targets/epochs?forwarder_id=f1&reader_ip=10.0.0.1:10000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(val["epochs"].as_array().unwrap().len(), 1);
+    assert_eq!(val["epochs"][0]["stream_epoch"], 9);
+    assert_eq!(val["epochs"][0]["name"], "Lap 9");
+    assert_eq!(val["epochs"][0]["first_seen_at"], "2026-01-03T00:00:00Z");
+    assert_eq!(val["epochs"][0]["race_names"], json!(["Spring 5K"]));
+
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn get_replay_target_epochs_fetches_race_mappings_concurrently() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let (ws_url, upstream_handle, _in_flight, max_in_flight) =
+        spawn_upstream_replay_epochs_server_with_race_mapping_delay(3, Duration::from_millis(75))
+            .await;
+    let app = build_router(Arc::clone(&state));
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":ws_url,"token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, _val) = get_json(
+        app,
+        "/api/v1/replay-targets/epochs?forwarder_id=f1&reader_ip=10.0.0.1:10000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        max_in_flight.load(Ordering::SeqCst) >= 2,
+        "expected at least two concurrent race mapping fetches"
+    );
 
     upstream_handle.abort();
 }
