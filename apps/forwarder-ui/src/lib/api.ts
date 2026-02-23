@@ -7,6 +7,7 @@ export interface ReaderStatus {
   reads_total: number;
   last_seen_secs: number | null;
   local_port: number;
+  current_epoch_name?: string | null;
 }
 
 export interface ForwarderStatus {

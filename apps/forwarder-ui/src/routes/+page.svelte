@@ -30,6 +30,9 @@
   let epochNameFeedback = $state<
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
   >({});
+  let resetEpochFeedback = $state<
+    Record<string, { kind: "ok" | "err"; message: string } | undefined>
+  >({});
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -119,10 +122,23 @@
   }
 
   async function handleResetEpoch(readerIp: string) {
+    resetEpochFeedback = { ...resetEpochFeedback, [readerIp]: undefined };
     try {
-      await api.resetEpoch(readerIp);
+      const result = await api.resetEpoch(readerIp);
+      resetEpochFeedback = {
+        ...resetEpochFeedback,
+        [readerIp]: {
+          kind: "ok",
+          message: `Advanced to epoch ${result.new_epoch}.`,
+        },
+      };
     } catch (e) {
-      error = String(e);
+      const msg = String(e);
+      error = msg;
+      resetEpochFeedback = {
+        ...resetEpochFeedback,
+        [readerIp]: { kind: "err", message: `Failed to advance epoch: ${msg}` },
+      };
     }
   }
 
@@ -388,6 +404,11 @@
                   </td>
                   <td class="px-4 py-2.5">
                     <div class="flex flex-col gap-1">
+                      {#if reader.current_epoch_name}
+                        <span class="text-xs text-text-muted font-mono">
+                          Active: {reader.current_epoch_name}
+                        </span>
+                      {/if}
                       <div class="flex items-center gap-2">
                         <input
                           type="text"
@@ -427,8 +448,8 @@
                           <span
                             class={`text-xs ${
                               feedback.kind === "ok"
-                                ? "text-semantic-ok"
-                                : "text-semantic-err"
+                                ? "text-status-ok"
+                                : "text-status-err"
                             }`}
                           >
                             {feedback.message}
@@ -438,12 +459,24 @@
                     </div>
                   </td>
                   <td class="px-4 py-2.5 text-right">
-                    <button
-                      onclick={() => handleResetEpoch(reader.ip)}
-                      class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
-                    >
-                      Advance Epoch
-                    </button>
+                    <div class="flex flex-col items-end gap-1">
+                      <button
+                        onclick={() => handleResetEpoch(reader.ip)}
+                        class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                      >
+                        Advance Epoch
+                      </button>
+                      {#if resetEpochFeedback[reader.ip]}
+                        {@const rf = resetEpochFeedback[reader.ip]}
+                        {#if rf}
+                          <span
+                            class={`text-xs ${rf.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
+                          >
+                            {rf.message}
+                          </span>
+                        {/if}
+                      {/if}
+                    </div>
                   </td>
                 </tr>
               {/each}

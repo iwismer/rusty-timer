@@ -44,6 +44,10 @@ endpoints are JSON unless otherwise noted.
 | `PUT`  | `/api/v1/profile` | Create or replace the profile. |
 | `GET`  | `/api/v1/streams` | List all known streams, merging upstream server data with local subscriptions. |
 | `PUT`  | `/api/v1/subscriptions` | Replace the full subscription list (atomic). |
+| `GET`  | `/api/v1/selection` | Read the current receiver selection (mode, replay policy, replay targets). |
+| `PUT`  | `/api/v1/selection` | Set the receiver selection. Body: `ReceiverSetSelection` with `selection`, `replay_policy`, and optional `replay_targets`. Returns `400` if `replay_policy` is `targeted` but `replay_targets` is absent or empty. |
+| `GET`  | `/api/v1/races` | List available races for race-mode selection. |
+| `GET`  | `/api/v1/replay-targets/epochs` | List available stream epochs for targeted replay. |
 | `GET`  | `/api/v1/status` | Runtime status: connection state, stream count, DB health. |
 | `GET`  | `/api/v1/logs` | Recent log entries (up to 500, in-memory ring buffer). |
 | `POST` | `/api/v1/connect` | Initiate a WebSocket connection to the server (asynchronous). |
@@ -164,3 +168,26 @@ The receiver uses the `RUST_LOG` environment variable to control log verbosity
 ```bash
 RUST_LOG=debug receiver
 ```
+
+## Troubleshooting
+
+### `PUT /api/v1/selection` returns 400
+
+If you call `PUT /api/v1/selection` with `"replay_policy": "targeted"` and receive
+`400 Bad Request` with body `replay_targets must be provided when replay_policy is targeted`,
+the request is missing the required `replay_targets` array.
+
+**Fix:** Include a non-empty `replay_targets` array in the request body. Example:
+
+```json
+{
+  "selection": { "mode": "manual", "streams": [] },
+  "replay_policy": "targeted",
+  "replay_targets": [
+    { "forwarder_id": "fwd-001", "reader_ip": "192.168.1.100:10000", "stream_epoch": 3 }
+  ]
+}
+```
+
+The `replay_targets` field is required (and must be non-empty) when `replay_policy` is `"targeted"`.
+For any other replay policy, `replay_targets` is ignored and may be omitted.

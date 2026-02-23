@@ -839,4 +839,18 @@ describe("receiver page", () => {
       expect(apiMocks.getLogs).not.toHaveBeenCalled();
     });
   });
+
+  it("shows AlertBanner when putSelection fails", async () => {
+    const errMsg = "server rejected selection: 422";
+    apiMocks.putSelection.mockRejectedValueOnce(new Error(errMsg));
+
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    await waitFor(() => {
+      expect(screen.getByText(`Error: ${errMsg}`)).toBeInTheDocument();
+    });
+  });
 });

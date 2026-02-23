@@ -37,6 +37,7 @@
   let streams = $state<StreamsResponse | null>(null);
   let logs = $state<LogsResponse | null>(null);
   let error = $state<string | null>(null);
+  let epochLoadError = $state<string | null>(null);
 
   // Edit state
   let editServerUrl = $state("");
@@ -166,13 +167,15 @@
       return;
     }
     try {
+      epochLoadError = null;
       const response = await api.getReplayTargetEpochs(parsed);
       targetedEpochOptionsByStream = {
         ...targetedEpochOptionsByStream,
         [key]: response.epochs,
       };
-    } catch {
+    } catch (e) {
       // Do not cache transient failures as empty options; allow in-session retry.
+      epochLoadError = `Failed to load epoch options: ${String(e)}`;
     }
   }
 
@@ -874,6 +877,11 @@
 
           {#if replayPolicyDraft === "targeted"}
             <div class="border border-border rounded-md p-3 bg-surface-0">
+              {#if epochLoadError}
+                <div class="mb-2">
+                  <AlertBanner variant="err" message={epochLoadError} />
+                </div>
+              {/if}
               <div class="flex items-center justify-between mb-2">
                 <p class="text-xs font-semibold text-text-primary m-0">
                   Replay Targets
