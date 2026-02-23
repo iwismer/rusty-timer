@@ -802,7 +802,7 @@
   </div>
 
   <div class="mb-6">
-    <Card title="Selection">
+    <Card title="Race & Mode Selection">
       <section data-testid="selection-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
