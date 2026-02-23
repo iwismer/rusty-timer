@@ -455,7 +455,8 @@ fn unique_chip_index_migration_exists_and_has_expected_index() {
 fn migration_creates_stream_epoch_races_table() {
     let sql = read_epoch_race_migration();
     assert!(
-        sql.contains("CREATE TABLE stream_epoch_races"),
+        sql.contains("CREATE TABLE stream_epoch_races")
+            || sql.contains("CREATE TABLE IF NOT EXISTS stream_epoch_races"),
         "0007 migration must define stream_epoch_races table"
     );
     assert!(
@@ -485,7 +486,8 @@ fn migration_changes_receiver_cursors_pk_to_include_epoch() {
 fn migration_creates_stream_epoch_metadata_table() {
     let sql = read_epoch_metadata_migration();
     assert!(
-        sql.contains("CREATE TABLE stream_epoch_metadata"),
+        sql.contains("CREATE TABLE stream_epoch_metadata")
+            || sql.contains("CREATE TABLE IF NOT EXISTS stream_epoch_metadata"),
         "0008 migration must define stream_epoch_metadata table"
     );
 }
