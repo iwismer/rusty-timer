@@ -497,11 +497,18 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
             // Detect a missing staged file synchronously so the status update is
             // immediate and reliable (avoids Windows blocking-thread startup
             // latency causing the test to race against a fixed timeout).
-            if !path.exists() {
-                tracing::error!(path = %path.display(), "staged file not found");
-                *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
-                    error: format!("staged file not found: {}", path.display()),
-                };
+            let staged_file_error = match path.try_exists() {
+                Ok(true) => None,
+                Ok(false) => Some(format!("staged file not found: {}", path.display())),
+                Err(e) => Some(format!(
+                    "failed to access staged file {}: {}",
+                    path.display(),
+                    e
+                )),
+            };
+            if let Some(error) = staged_file_error {
+                tracing::error!(path = %path.display(), error = %error, "cannot apply update");
+                *state.update_status.write().await = rt_updater::UpdateStatus::Failed { error };
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({"status": "failed"})),
@@ -683,6 +690,8 @@ mod tests {
     use http_body_util::BodyExt;
     use rt_updater::workflow::{Checker, run_check, run_download};
     use std::future::Future;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
@@ -831,6 +840,75 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&bytes.to_bytes()).expect("status json");
         assert_eq!(json["status"], "failed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn post_update_apply_sets_failed_status_when_staged_file_access_denied() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+        let blocked_dir = temp.path().join("blocked");
+        std::fs::create_dir(&blocked_dir).expect("create blocked dir");
+        let mut perms = std::fs::metadata(&blocked_dir)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&blocked_dir, perms).expect("set blocked permissions");
+
+        *state.update_status.write().await = UpdateStatus::Downloaded {
+            version: "1.2.3".to_owned(),
+        };
+        *state.staged_update_path.write().await = Some(blocked_dir.join("staged-receiver"));
+
+        let app = build_router(Arc::clone(&state));
+
+        let apply_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/update/apply")
+                    .body(Body::empty())
+                    .expect("build apply request"),
+            )
+            .await
+            .expect("apply request");
+        assert_eq!(apply_resp.status(), StatusCode::OK);
+
+        let mut restore_perms = std::fs::metadata(&blocked_dir)
+            .expect("metadata")
+            .permissions();
+        restore_perms.set_mode(0o700);
+        std::fs::set_permissions(&blocked_dir, restore_perms).expect("restore permissions");
+
+        let status_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/update/status")
+                    .body(Body::empty())
+                    .expect("build status request"),
+            )
+            .await
+            .expect("status request");
+
+        let bytes = status_resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes.to_bytes()).expect("status json");
+        assert_eq!(json["status"], "failed");
+        let error = json["error"]
+            .as_str()
+            .expect("error string")
+            .to_ascii_lowercase();
+        assert!(
+            error.contains("permission denied"),
+            "expected permission error, got: {error}"
+        );
     }
 
     #[tokio::test]
