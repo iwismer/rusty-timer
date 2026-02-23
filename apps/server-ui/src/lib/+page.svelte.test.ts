@@ -161,6 +161,33 @@ describe("stream detail page activate-next", () => {
     expect(activateNext).not.toBeDisabled();
   });
 
+  it("enables shared advance action when stream epoch matches and is_current is false", async () => {
+    vi.mocked(api.getStreamEpochs).mockResolvedValue([
+      {
+        epoch: 1,
+        event_count: 6,
+        first_event_at: "2026-02-22T12:00:00Z",
+        last_event_at: "2026-02-22T12:30:00Z",
+        is_current: false,
+      },
+    ]);
+
+    render(StreamDetailPage);
+
+    const activateNext = await screen.findByTestId(
+      "epoch-race-advance-next-btn",
+    );
+    await waitFor(() => {
+      expect(activateNext).not.toBeDisabled();
+    });
+
+    await fireEvent.click(activateNext);
+    expect(api.activateNextStreamEpochForRace).toHaveBeenCalledWith(
+      "race-1",
+      "abc-123",
+    );
+  });
+
   it("shows pending state while shared advance action is in flight", async () => {
     const pending = deferred<void>();
     vi.mocked(api.activateNextStreamEpochForRace).mockReturnValueOnce(

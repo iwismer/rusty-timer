@@ -307,7 +307,11 @@
   }
 
   function getCurrentEpochRow(): EpochRaceRow | null {
-    return epochRaceRows.find((row) => row.is_current) ?? null;
+    return (
+      epochRaceRows.find((row) => row.is_current) ??
+      epochRaceRows.find((row) => row.epoch === stream?.stream_epoch) ??
+      null
+    );
   }
 
   function canAdvanceToNextEpoch(): boolean {
