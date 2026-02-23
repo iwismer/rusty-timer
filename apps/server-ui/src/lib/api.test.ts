@@ -148,7 +148,7 @@ describe("server_api client", () => {
     await expect(getMetrics("bad-id")).rejects.toThrow();
   });
 
-  // ----- exportRawUrl / exportCsvUrl -----
+  // ----- exportRawUrl / exportCsvUrl / epochExportTxtUrl -----
   it("exportRawUrl returns correct URL for stream", async () => {
     const { exportRawUrl } = await import("./api");
     const url = exportRawUrl("abc-123");
@@ -159,6 +159,12 @@ describe("server_api client", () => {
     const { exportCsvUrl } = await import("./api");
     const url = exportCsvUrl("abc-123");
     expect(url).toContain("/api/v1/streams/abc-123/export.csv");
+  });
+
+  it("epochExportTxtUrl returns correct URL for stream epoch", async () => {
+    const { epochExportTxtUrl } = await import("./api");
+    const url = epochExportTxtUrl("abc-123", 7);
+    expect(url).toContain("/api/v1/streams/abc-123/epochs/7/export.txt");
   });
 
   // ----- resetEpoch -----

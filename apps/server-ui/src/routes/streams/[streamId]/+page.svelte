@@ -791,14 +791,24 @@
                       </span>
                     </td>
                     <td class="px-3 py-2">
-                      <a
-                        data-testid={`epoch-export-csv-${row.epoch}`}
-                        href={api.epochExportCsvUrl(streamId, row.epoch)}
-                        download
-                        class="text-xs text-accent no-underline hover:underline"
-                      >
-                        CSV
-                      </a>
+                      <div class="flex items-center gap-2">
+                        <a
+                          data-testid={`epoch-export-csv-${row.epoch}`}
+                          href={api.epochExportCsvUrl(streamId, row.epoch)}
+                          download
+                          class="text-xs text-accent no-underline hover:underline"
+                        >
+                          CSV
+                        </a>
+                        <a
+                          data-testid={`epoch-export-txt-${row.epoch}`}
+                          href={api.epochExportTxtUrl(streamId, row.epoch)}
+                          download
+                          class="text-xs text-accent no-underline hover:underline"
+                        >
+                          TXT
+                        </a>
+                      </div>
                     </td>
                   </tr>
                 {/each}

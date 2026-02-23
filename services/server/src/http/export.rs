@@ -177,6 +177,47 @@ pub async fn export_epoch_csv(
     }
 }
 
+/// `GET /api/v1/streams/{stream_id}/epochs/{epoch}/export.txt`
+///
+/// Streams canonical deduplicated events for a single epoch as bare
+/// `raw_read_line` values, one per line (`\n`-terminated), ordered by `seq`.
+pub async fn export_epoch_raw(
+    State(state): State<AppState>,
+    Path((stream_id, epoch)): Path<(Uuid, i64)>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_stream_exists(&state.pool, stream_id).await {
+        return response;
+    }
+
+    let rows = sqlx::query!(
+        r#"SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type
+           FROM events
+           WHERE stream_id = $1 AND stream_epoch = $2
+           ORDER BY seq ASC"#,
+        stream_id,
+        epoch
+    )
+    .fetch_all(&state.pool)
+    .await;
+
+    match rows {
+        Err(e) => internal_error(e),
+        Ok(rows) => {
+            let mut buf = String::new();
+            for row in &rows {
+                buf.push_str(&row.raw_read_line);
+                buf.push('\n');
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from(buf))
+                .unwrap()
+                .into_response()
+        }
+    }
+}
+
 /// RFC 4180 CSV field quoting.
 /// Wraps in double-quotes if the field contains comma, double-quote, or newline.
 /// Doubles any embedded double-quotes.
