@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
   import { page } from "$app/stores";
   import * as api from "$lib/api";
+  import { onStreamUpdated } from "$lib/sse";
   import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
   import {
     streamsStore,
@@ -68,6 +68,17 @@
 
   $effect(() => {
     void loadEpochRaceRows(streamId, $racesStore);
+  });
+
+  $effect(() => {
+    const unsubscribe = onStreamUpdated((update) => {
+      if (update.stream_id !== streamId) return;
+      if (typeof update.stream_epoch !== "number") return;
+      void loadEpochRaceRows(streamId, $racesStore);
+    });
+    return () => {
+      unsubscribe();
+    };
   });
 
   function maybeFetchMetrics(id: string): void {

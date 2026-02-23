@@ -154,6 +154,28 @@ describe("sse", () => {
     expect(get(streamsStore)[0].online).toBe(false);
   });
 
+  it("notifies stream_updated listeners and honors unsubscribe", async () => {
+    const { initSSE, onStreamUpdated } = await import("./sse");
+    const listener = vi.fn();
+    const unsubscribe = onStreamUpdated(listener);
+
+    initSSE();
+    const es = MockEventSource.instances[0];
+    es.emit(
+      "stream_updated",
+      JSON.stringify({ stream_id: "s1", stream_epoch: 3 }),
+    );
+
+    expect(listener).toHaveBeenCalledWith({ stream_id: "s1", stream_epoch: 3 });
+
+    unsubscribe();
+    es.emit(
+      "stream_updated",
+      JSON.stringify({ stream_id: "s1", stream_epoch: 4 }),
+    );
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
   it("handles stream_updated forwarder_display_name patch", async () => {
     const { initSSE } = await import("./sse");
 

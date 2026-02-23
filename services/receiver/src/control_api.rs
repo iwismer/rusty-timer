@@ -11,11 +11,17 @@
 //!   POST /api/v1/connect        - initiate WS connection (async, 202)
 //!   POST /api/v1/disconnect     - close WS connection (async, 202)
 //!   GET  /api/v1/events         - SSE stream of receiver UI events
+//!   POST /api/v1/admin/cursors/reset - reset one stream cursor
 
 use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post, put};
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json, Router,
+};
 use rt_protocol::{ReceiverSetSelection, ReplayPolicy, StreamInfo};
 use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
@@ -26,6 +32,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::warn;
+
+const ADMIN_INTENT_HEADER: &str = "x-rt-receiver-admin-intent";
+const ADMIN_RESET_CURSOR_INTENT: &str = "reset-stream-cursor";
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -257,6 +266,12 @@ pub struct SubscriptionRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscriptionsBody {
     pub subscriptions: Vec<SubscriptionRequest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CursorResetRequest {
+    pub forwarder_id: String,
+    pub reader_ip: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -611,6 +626,26 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
     StatusCode::ACCEPTED.into_response()
 }
 
+async fn post_admin_reset_cursor(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CursorResetRequest>,
+) -> impl IntoResponse {
+    let has_valid_intent = headers
+        .get(ADMIN_INTENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == ADMIN_RESET_CURSOR_INTENT);
+    if !has_valid_intent {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+
+    let db = state.db.lock().await;
+    match db.delete_cursor(&body.forwarder_id, &body.reader_ip) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn get_update_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = state.update_status.read().await.clone();
     Json(status).into_response()
@@ -802,6 +837,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
         .route("/api/v1/events", get(crate::sse::receiver_sse))
+        .route("/api/v1/admin/cursors/reset", post(post_admin_reset_cursor))
         .route("/api/v1/update/status", get(get_update_status))
         .route("/api/v1/update/apply", post(post_update_apply))
         .route("/api/v1/update/check", post(post_update_check))

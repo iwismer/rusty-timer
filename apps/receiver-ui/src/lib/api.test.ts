@@ -227,6 +227,33 @@ describe("api client", () => {
     expect(mockFetch).toHaveBeenCalledWith("/api/v1/races", expect.any(Object));
     expect(result.races[0].race_id).toBe("r1");
   });
+
+  it("resetStreamCursor posts admin cursor reset payload", async () => {
+    const { resetStreamCursor } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+
+    await resetStreamCursor({
+      forwarder_id: "f1",
+      reader_ip: "10.0.0.1:10000",
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/cursors/reset",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          forwarder_id: "f1",
+          reader_ip: "10.0.0.1:10000",
+        }),
+      }),
+    );
+
+    const [, options] = mockFetch.mock.calls.at(-1)!;
+    const headers = new Headers((options as RequestInit).headers);
+    expect(headers.get("x-rt-receiver-admin-intent")).toBe(
+      "reset-stream-cursor",
+    );
+  });
 });
 
 class MockEventSource {

@@ -256,6 +256,13 @@ impl Db {
         self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch as i64, seq as i64])?;
         Ok(())
     }
+    pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {
+        self.conn.execute(
+            "DELETE FROM cursors WHERE forwarder_id = ?1 AND reader_ip = ?2",
+            rusqlite::params![fwd, ip],
+        )?;
+        Ok(())
+    }
     fn apply_pragmas(&self) -> DbResult<()> {
         self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; PRAGMA foreign_keys=ON;")?;
         Ok(())
@@ -391,5 +398,19 @@ mod tests {
 
         let err = db.load_receiver_selection().unwrap_err();
         assert!(matches!(err, DbError::InvalidReceiverSelection(_)));
+    }
+
+    #[test]
+    fn delete_cursor_removes_only_matching_stream() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
+        db.save_cursor("f2", "10.0.0.2:10000", 3, 9).unwrap();
+
+        db.delete_cursor("f1", "10.0.0.1:10000").unwrap();
+
+        let rows = db.load_cursors().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].forwarder_id, "f2");
+        assert_eq!(rows[0].reader_ip, "10.0.0.2:10000");
     }
 }

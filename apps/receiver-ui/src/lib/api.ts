@@ -148,6 +148,16 @@ export async function getRaces(): Promise<RacesResponse> {
   return apiFetch<RacesResponse>("/api/v1/races");
 }
 
+export async function resetStreamCursor(stream: StreamRef): Promise<void> {
+  await apiFetch("/api/v1/admin/cursors/reset", {
+    method: "POST",
+    headers: {
+      "x-rt-receiver-admin-intent": "reset-stream-cursor",
+    },
+    body: JSON.stringify(stream),
+  });
+}
+
 export async function connect(): Promise<void> {
   const resp = await fetch("/api/v1/connect", { method: "POST" });
   if (resp.status !== 200 && resp.status !== 202)

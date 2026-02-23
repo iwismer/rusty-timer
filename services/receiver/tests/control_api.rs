@@ -42,6 +42,26 @@ async fn post_empty(app: axum::Router, path: &str) -> StatusCode {
         .unwrap();
     app.oneshot(req).await.unwrap().status()
 }
+async fn post_json(app: axum::Router, path: &str, body: Value) -> StatusCode {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
+
+async fn post_json_with_reset_guard(app: axum::Router, path: &str, body: Value) -> StatusCode {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("x-rt-receiver-admin-intent", "reset-stream-cursor")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
 
 async fn spawn_upstream_streams_server(
     status: StatusCode,
@@ -421,6 +441,65 @@ async fn get_streams_degraded_when_disconnected_with_profile() {
     let (_, val) = get_json(build_router(state), "/api/v1/streams").await;
     assert_eq!(val["degraded"], true);
     assert!(val["upstream_error"].is_string());
+}
+
+#[tokio::test]
+async fn post_admin_cursor_reset_clears_only_target_stream_cursor() {
+    let db = Db::open_in_memory().unwrap();
+    db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
+    db.save_cursor("f2", "10.0.0.2:10000", 3, 9).unwrap();
+
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    assert_eq!(
+        post_json_with_reset_guard(
+            app.clone(),
+            "/api/v1/admin/cursors/reset",
+            json!({"forwarder_id":"f1","reader_ip":"10.0.0.1:10000"}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let cursors = state.db.lock().await.load_cursors().unwrap();
+    assert_eq!(cursors.len(), 1);
+    assert_eq!(cursors[0].forwarder_id, "f2");
+    assert_eq!(cursors[0].reader_ip, "10.0.0.2:10000");
+}
+
+#[tokio::test]
+async fn post_admin_cursor_reset_is_idempotent_for_missing_cursor() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+
+    assert_eq!(
+        post_json_with_reset_guard(
+            app,
+            "/api/v1/admin/cursors/reset",
+            json!({"forwarder_id":"f-missing","reader_ip":"10.9.0.1:10000"}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn post_admin_cursor_reset_rejects_missing_guard_header() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(state);
+
+    assert_eq!(
+        post_json(
+            app,
+            "/api/v1/admin/cursors/reset",
+            json!({"forwarder_id":"f1","reader_ip":"10.0.0.1:10000"}),
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
 }
 #[tokio::test]
 async fn put_subscriptions_and_get_streams() {

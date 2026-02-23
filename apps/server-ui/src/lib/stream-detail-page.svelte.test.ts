@@ -2,6 +2,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import { setRaces, replaceStreams, resetStores } from "$lib/stores";
 
+const sseMock = vi.hoisted(() => ({
+  onStreamUpdated: vi.fn(),
+  unsubscribe: vi.fn(),
+  listener: null as
+    | ((update: { stream_id: string; stream_epoch?: number }) => void)
+    | null,
+}));
+
 vi.mock("$app/stores", async () => {
   const { readable } = await import("svelte/store");
   return {
@@ -22,6 +30,16 @@ vi.mock("$lib/api", async () => {
     activateNextStreamEpochForRace: vi.fn(),
   };
 });
+
+vi.mock("$lib/sse", () => ({
+  onStreamUpdated: (
+    listener: (update: { stream_id: string; stream_epoch?: number }) => void,
+  ) => {
+    sseMock.listener = listener;
+    sseMock.onStreamUpdated(listener);
+    return sseMock.unsubscribe;
+  },
+}));
 
 import * as api from "$lib/api";
 import Page from "../routes/streams/[streamId]/+page.svelte";
@@ -84,6 +102,7 @@ describe("stream detail page epoch race mapping", () => {
   beforeEach(() => {
     resetStores();
     vi.clearAllMocks();
+    sseMock.listener = null;
 
     vi.mocked(api.getMetrics).mockResolvedValue(metrics);
     vi.mocked(api.getStreamReads).mockResolvedValue({
@@ -342,5 +361,63 @@ describe("stream detail page epoch race mapping", () => {
       "race-1",
       "abc-123",
     );
+  });
+
+  it("reloads epoch race mappings on matching stream epoch updates", async () => {
+    vi.mocked(api.getStreamEpochs)
+      .mockResolvedValueOnce(epochs)
+      .mockResolvedValueOnce([
+        ...epochs,
+        {
+          epoch: 3,
+          event_count: 0,
+          first_event_at: null,
+          last_event_at: null,
+          is_current: true,
+        },
+      ]);
+
+    render(Page);
+    await screen.findByTestId("epoch-race-select-1");
+    expect(api.getStreamEpochs).toHaveBeenCalledTimes(1);
+
+    sseMock.listener?.({ stream_id: "abc-123", stream_epoch: 3 });
+
+    await waitFor(() => {
+      expect(api.getStreamEpochs).toHaveBeenCalledTimes(2);
+    });
+    expect(
+      await screen.findByTestId("epoch-race-select-3"),
+    ).toBeInTheDocument();
+  });
+
+  it("ignores same-stream updates without numeric epoch", async () => {
+    render(Page);
+    await screen.findByTestId("epoch-race-select-1");
+    expect(api.getStreamEpochs).toHaveBeenCalledTimes(1);
+
+    sseMock.listener?.({ stream_id: "abc-123" });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(api.getStreamEpochs).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores epoch updates for other streams", async () => {
+    render(Page);
+    await screen.findByTestId("epoch-race-select-1");
+    expect(api.getStreamEpochs).toHaveBeenCalledTimes(1);
+
+    sseMock.listener?.({ stream_id: "other-stream", stream_epoch: 3 });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(api.getStreamEpochs).toHaveBeenCalledTimes(1);
+  });
+
+  it("unsubscribes stream update listener on unmount", () => {
+    const { unmount } = render(Page);
+
+    expect(sseMock.onStreamUpdated).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(sseMock.unsubscribe).toHaveBeenCalledTimes(1);
   });
 });
