@@ -889,6 +889,66 @@ describe("receiver page", () => {
     });
   });
 
+  it("applies stream-count patches only to subscribed streams", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-sub",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 4001,
+          reads_total: 10,
+          reads_epoch: 4,
+        },
+        {
+          forwarder_id: "fwd-unsub",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("streams-section")).toHaveTextContent(
+        "reads: 10 total, 4 epoch",
+      );
+      expect(screen.getByTestId("streams-section")).not.toHaveTextContent(
+        "reads: 999 total, 999 epoch",
+      );
+    });
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+    callbacks.onStreamCountsUpdated([
+      {
+        forwarder_id: "fwd-sub",
+        reader_ip: "10.0.0.1:10000",
+        reads_total: 11,
+        reads_epoch: 5,
+      },
+      {
+        forwarder_id: "fwd-unsub",
+        reader_ip: "10.0.0.2:10000",
+        reads_total: 999,
+        reads_epoch: 999,
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("streams-section")).toHaveTextContent(
+        "reads: 11 total, 5 epoch",
+      );
+      expect(screen.getByTestId("streams-section")).not.toHaveTextContent(
+        "reads: 999 total, 999 epoch",
+      );
+    });
+  });
+
   it("shows AlertBanner when Save click triggers putSelection failure", async () => {
     const errMsg = "server rejected selection: 422";
     apiMocks.putSelection.mockRejectedValueOnce(new Error(errMsg));
