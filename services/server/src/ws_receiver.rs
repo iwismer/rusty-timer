@@ -596,6 +596,9 @@ async fn apply_receiver_selection_until_stable(
         {
             ApplySelectionOutcome::Applied => return Ok(()),
             ApplySelectionOutcome::Replaced(replacement) => {
+                // Drop in-memory cursors before retrying so replacement replay
+                // always rehydrates from persisted cursor rows.
+                subscriptions.clear();
                 info!(
                     device_id = %device_id,
                     "selection changed during replay; restarting with latest selection"

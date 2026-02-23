@@ -499,3 +499,164 @@ async fn set_selection_interrupts_long_targeted_replay_at_batch_boundary() {
         "expected replay from the new selection within 2s"
     );
 }
+
+#[tokio::test]
+async fn set_selection_replay_restart_uses_persisted_cursor_for_new_selection() {
+    let (pool, addr) = start_server().await;
+    let (mut fwd, fwd_session) = connect_forwarder(&pool, addr).await;
+    insert_token(&pool, "rcv-ri", "receiver", b"rcv-ri-token").await;
+
+    let stream_one_id: sqlx::types::Uuid = sqlx::query_scalar(
+        "SELECT stream_id FROM streams WHERE forwarder_id = 'fwd-ri' AND reader_ip = '10.40.0.1:10000'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stream_two_id: sqlx::types::Uuid = sqlx::query_scalar(
+        "SELECT stream_id FROM streams WHERE forwarder_id = 'fwd-ri' AND reader_ip = '10.40.0.2:10000'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id)
+           SELECT $1, 1, gs, '2026-02-23T10:00:00.000Z', CONCAT('R1E1S', gs::text), 'RAW', NULL
+           FROM generate_series(1, 200000) AS gs"#,
+    )
+    .bind(stream_one_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id)
+           VALUES
+           ($1, 1, 1, '2026-02-23T10:00:00.000Z', 'R2E1S1', 'RAW', NULL),
+           ($1, 1, 2, '2026-02-23T10:00:01.000Z', 'R2E1S2', 'RAW', NULL),
+           ($1, 1, 3, '2026-02-23T10:00:02.000Z', 'R2E1S3', 'RAW', NULL)"#,
+    )
+    .bind(stream_two_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO receiver_cursors (receiver_id, stream_id, stream_epoch, last_seq)
+           VALUES ('rcv-ri', $1, 1, 1)
+           ON CONFLICT (receiver_id, stream_id, stream_epoch)
+           DO UPDATE SET last_seq = 1"#,
+    )
+    .bind(stream_two_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id: fwd_session,
+        batch_id: "stream-two-live".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-ri".to_owned(),
+            reader_ip: "10.40.0.2:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 4,
+            reader_timestamp: "2026-02-23T10:00:03.000Z".to_owned(),
+            raw_read_line: "R2E1S4".to_owned(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    fwd.recv_message().await.unwrap();
+
+    let url = format!("ws://{}/ws/v1.1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&url, "rcv-ri-token")
+        .await
+        .unwrap();
+
+    rcv.send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+        receiver_id: "rcv-ri".to_owned(),
+        selection: ReceiverSelection::Manual {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-ri".to_owned(),
+                reader_ip: "10.40.0.1:10000".to_owned(),
+            }],
+        },
+        replay_policy: ReplayPolicy::Targeted,
+        replay_targets: Some(vec![ReplayTarget {
+            forwarder_id: "fwd-ri".to_owned(),
+            reader_ip: "10.40.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            from_seq: 1,
+        }]),
+    }))
+    .await
+    .unwrap();
+
+    let _ = rcv.recv_message().await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), rcv.recv_message())
+        .await
+        .expect("timeout waiting for first replay batch")
+        .expect("receiver closed unexpectedly");
+
+    rcv.send_message(&WsMessage::ReceiverSetSelection(ReceiverSetSelection {
+        selection: ReceiverSelection::Manual {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-ri".to_owned(),
+                reader_ip: "10.40.0.2:10000".to_owned(),
+            }],
+        },
+        replay_policy: ReplayPolicy::Resume,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_selection_applied = false;
+    let mut resumed_seqs: Vec<u64> = Vec::new();
+    while tokio::time::Instant::now() < deadline {
+        let msg = match tokio::time::timeout(Duration::from_millis(250), rcv.recv_message()).await {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(e)) => panic!("recv error: {}", e),
+            Err(_) => continue,
+        };
+        match msg {
+            WsMessage::ReceiverSelectionApplied(applied) => {
+                assert_eq!(applied.replay_policy, ReplayPolicy::Resume);
+                saw_selection_applied = true;
+            }
+            WsMessage::ReceiverEventBatch(batch) => {
+                resumed_seqs.extend(
+                    batch
+                        .events
+                        .into_iter()
+                        .filter(|event| event.reader_ip == "10.40.0.2:10000")
+                        .map(|event| event.seq),
+                );
+            }
+            WsMessage::Heartbeat(_) => {}
+            other => panic!("unexpected message: {:?}", other),
+        }
+        if saw_selection_applied && resumed_seqs.contains(&2) && resumed_seqs.contains(&3) {
+            break;
+        }
+    }
+
+    assert!(
+        saw_selection_applied,
+        "expected selection_applied for replacement selection"
+    );
+    assert!(
+        resumed_seqs.contains(&2),
+        "expected replay for new selection to include seq=2 from persisted cursor"
+    );
+    assert!(
+        resumed_seqs.contains(&3),
+        "expected replay for new selection to include seq=3 from persisted cursor"
+    );
+    assert!(
+        !resumed_seqs.contains(&1),
+        "did not expect replay to include seq=1 that is already persisted"
+    );
+}
