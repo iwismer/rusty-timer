@@ -339,7 +339,7 @@
                       onclick={() => handleResetEpoch(reader.ip)}
                       class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
                     >
-                      Reset Epoch
+                      Advance Epoch
                     </button>
                   </td>
                 </tr>

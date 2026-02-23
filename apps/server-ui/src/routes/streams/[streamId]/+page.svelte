@@ -16,8 +16,6 @@
   import ReadsTable from "$lib/components/ReadsTable.svelte";
   import { createLatestRequestGate } from "$lib/latestRequestGate";
 
-  let resetResult: string | null = $state(null);
-  let resetBusy = $state(false);
   let renameValue = $state("");
   let renameBusy = $state(false);
   let renameError: string | null = $state(null);
@@ -41,17 +39,15 @@
     selected_race_id: string | null;
     saved_race_id: string | null;
     pending: boolean;
-    activate_pending: boolean;
-    activate_request_token: number | null;
-    activate_status: "idle" | "error";
     status: "saved" | "error" | "incomplete";
   };
   let epochRaceRows = $state<EpochRaceRow[]>([]);
   let epochRaceRowsLoading = $state(false);
   let epochRaceRowsError: string | null = $state(null);
   let epochRaceRowsHydrationIncomplete = $state(false);
+  let epochAdvancePending = $state(false);
+  let epochAdvanceStatus: "idle" | "error" = $state("idle");
   let epochRaceLoadVersion = 0;
-  let epochRaceActivateRequestCounter = 0;
 
   let streamId = $derived($page.params.streamId!);
   let stream = $derived(
@@ -101,19 +97,6 @@
       const next = new Set(inFlightMetricStreamIds);
       next.delete(id);
       inFlightMetricStreamIds = next;
-    }
-  }
-
-  async function handleResetEpoch() {
-    resetBusy = true;
-    resetResult = null;
-    try {
-      await api.resetEpoch(streamId);
-      resetResult = "Epoch reset command sent successfully.";
-    } catch (e) {
-      resetResult = `Error: ${String(e)}`;
-    } finally {
-      resetBusy = false;
     }
   }
 
@@ -259,9 +242,6 @@
           selected_race_id: savedRaceId,
           saved_race_id: savedRaceId,
           pending: false,
-          activate_pending: false,
-          activate_request_token: null,
-          activate_status: "idle",
           status: hasMappingFetchFailures ? "incomplete" : "saved",
         };
       });
@@ -291,11 +271,9 @@
   }
 
   function onEpochRaceSelectChange(epoch: number, raceId: string | null): void {
+    epochAdvanceStatus = "idle";
     updateEpochRaceRow(epoch, (row) => ({
       ...row,
-      activate_pending: false,
-      activate_request_token: null,
-      activate_status: "idle",
       selected_race_id: raceId,
       status: row.status === "incomplete" ? "incomplete" : "saved",
     }));
@@ -308,7 +286,6 @@
     updateEpochRaceRow(epoch, (current) => ({
       ...current,
       pending: true,
-      activate_status: "idle",
       status: "saved",
     }));
 
@@ -329,58 +306,38 @@
     }
   }
 
-  async function handleActivateNextEpoch(epoch: number): Promise<void> {
-    const row = epochRaceRows.find((candidate) => candidate.epoch === epoch);
+  function getCurrentEpochRow(): EpochRaceRow | null {
+    return epochRaceRows.find((row) => row.is_current) ?? null;
+  }
+
+  function canAdvanceToNextEpoch(): boolean {
+    const row = getCurrentEpochRow();
+    if (!row) return false;
+    if (!row.saved_race_id) return false;
+    if (isEpochRowDirty(row)) return false;
+    if (row.pending) return false;
+    if (epochAdvancePending) return false;
+    return true;
+  }
+
+  async function handleAdvanceToNextEpoch(): Promise<void> {
+    const row = getCurrentEpochRow();
     const raceId = row?.saved_race_id ?? null;
-    if (
-      !row ||
-      !raceId ||
-      isEpochRowDirty(row) ||
-      row.pending ||
-      row.activate_pending
-    ) {
-      return;
-    }
-    const requestToken = ++epochRaceActivateRequestCounter;
-
-    updateEpochRaceRow(epoch, (current) => ({
-      ...current,
-      activate_pending: true,
-      activate_request_token: requestToken,
-      activate_status: "idle",
-    }));
-
+    if (!raceId || !canAdvanceToNextEpoch()) return;
+    epochAdvancePending = true;
+    epochAdvanceStatus = "idle";
     try {
       await api.activateNextStreamEpochForRace(raceId, streamId);
-      updateEpochRaceRow(epoch, (current) => ({
-        ...(current.activate_request_token !== requestToken
-          ? current
-          : {
-              ...current,
-              activate_pending: false,
-              activate_request_token: null,
-              activate_status: "idle",
-            }),
-      }));
     } catch {
-      updateEpochRaceRow(epoch, (current) => ({
-        ...(current.activate_request_token !== requestToken
-          ? current
-          : {
-              ...current,
-              activate_pending: false,
-              activate_request_token: null,
-              activate_status: "error",
-            }),
-      }));
+      epochAdvanceStatus = "error";
+    } finally {
+      epochAdvancePending = false;
     }
   }
 
   function epochRowStatusText(row: EpochRaceRow): string {
     if (row.pending) return "Saving...";
-    if (row.activate_pending) return "Activating...";
     if (row.status === "error") return "Error";
-    if (row.activate_status === "error") return "Activate failed";
     if (isEpochRowDirty(row)) return "Unsaved";
     if (row.status === "incomplete") return "Unverified";
     return "Saved";
@@ -591,22 +548,6 @@
     </div>
 
     <div class="mb-6">
-      <Card title="Reads">
-        <ReadsTable
-          {reads}
-          total={readsTotal}
-          loading={readsLoading}
-          bind:dedup={readsDedup}
-          bind:windowSecs={readsWindowSecs}
-          bind:limit={readsLimit}
-          bind:offset={readsOffset}
-          bind:order={readsOrder}
-          onParamsChange={handleReadsParamsChange}
-        />
-      </Card>
-    </div>
-
-    <div class="mb-6">
       <Card title="Epoch Race Mapping">
         {#if epochRaceRowsLoading}
           <p class="text-sm text-text-muted italic m-0">Loading epochs...</p>
@@ -652,11 +593,6 @@
                   <th
                     class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
                   >
-                    Activate
-                  </th>
-                  <th
-                    class="px-3 py-2 text-left text-xs font-medium text-text-muted uppercase tracking-wider border-b border-border"
-                  >
                     Status
                   </th>
                 </tr>
@@ -692,24 +628,9 @@
                         data-testid={`epoch-race-save-${row.epoch}`}
                         onclick={() => void handleSaveEpochRace(row.epoch)}
                         disabled={!isEpochRowDirty(row) || row.pending}
-                        class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
+                        class="px-3 py-1 text-xs font-medium rounded-md bg-status-ok-bg border border-status-ok-border text-status-ok cursor-pointer hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {row.pending ? "Saving..." : "Save"}
-                      </button>
-                    </td>
-                    <td class="px-3 py-2">
-                      <button
-                        data-testid={`epoch-race-activate-next-${row.epoch}`}
-                        onclick={() => void handleActivateNextEpoch(row.epoch)}
-                        disabled={row.pending ||
-                          row.activate_pending ||
-                          isEpochRowDirty(row) ||
-                          !row.saved_race_id}
-                        class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {row.activate_pending
-                          ? "Activating..."
-                          : "Activate Next"}
                       </button>
                     </td>
                     <td class="px-3 py-2">
@@ -729,11 +650,44 @@
               </tbody>
             </table>
           </div>
+          <div class="mt-3 flex items-center gap-3">
+            <button
+              data-testid="epoch-race-advance-next-btn"
+              onclick={() => void handleAdvanceToNextEpoch()}
+              disabled={!canAdvanceToNextEpoch()}
+              class="px-3 py-1 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {epochAdvancePending
+                ? "Advancing..."
+                : epochAdvanceStatus === "error"
+                  ? "Advance failed"
+                  : "Advance to Next Epoch"}
+            </button>
+            <span class="text-xs text-text-muted">
+              Uses the current epoch's saved race mapping.
+            </span>
+          </div>
         {/if}
       </Card>
     </div>
 
-    <div class="grid grid-cols-2 gap-4 mb-6 items-start">
+    <div class="mb-6">
+      <Card title="Reads">
+        <ReadsTable
+          {reads}
+          total={readsTotal}
+          loading={readsLoading}
+          bind:dedup={readsDedup}
+          bind:windowSecs={readsWindowSecs}
+          bind:limit={readsLimit}
+          bind:offset={readsOffset}
+          bind:order={readsOrder}
+          onParamsChange={handleReadsParamsChange}
+        />
+      </Card>
+    </div>
+
+    <div class="mb-6">
       <Card title="Export">
         <div data-testid="export-section">
           <p class="text-xs text-text-secondary mb-3 m-0">
@@ -758,31 +712,6 @@
             </a>
           </div>
         </div>
-      </Card>
-
-      <Card title="Actions">
-        <button
-          data-testid="reset-epoch-btn"
-          onclick={handleResetEpoch}
-          disabled={resetBusy}
-          class="px-3 py-1.5 text-sm font-medium rounded-md bg-status-err-bg text-status-err border border-status-err-border cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {resetBusy ? "Sending…" : "Reset Epoch"}
-        </button>
-        <p class="text-xs text-text-muted mt-2 m-0">
-          Sends an epoch-reset command to the connected forwarder. Only works
-          while the forwarder is connected; returns 409 otherwise.
-        </p>
-        {#if resetResult}
-          <p
-            data-testid="reset-epoch-result"
-            class="text-sm mt-2 m-0 {resetResult.startsWith('Error')
-              ? 'text-status-err'
-              : 'text-status-ok'}"
-          >
-            {resetResult}
-          </p>
-        {/if}
       </Card>
     </div>
   {:else}

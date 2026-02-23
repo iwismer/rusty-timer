@@ -138,11 +138,11 @@ describe("stream detail page activate-next", () => {
     ]);
   });
 
-  it("keeps activate-next disabled for dirty rows until Save succeeds", async () => {
+  it("keeps shared advance action disabled for dirty rows until Save succeeds", async () => {
     render(StreamDetailPage);
 
     const select = await screen.findByTestId("epoch-race-select-1");
-    const activateNext = screen.getByTestId("epoch-race-activate-next-1");
+    const activateNext = screen.getByTestId("epoch-race-advance-next-btn");
     const saveButton = screen.getByTestId("epoch-race-save-1");
 
     expect(activateNext).not.toBeDisabled();
@@ -161,7 +161,7 @@ describe("stream detail page activate-next", () => {
     expect(activateNext).not.toBeDisabled();
   });
 
-  it("shows pending state while activate-next is in flight", async () => {
+  it("shows pending state while shared advance action is in flight", async () => {
     const pending = deferred<void>();
     vi.mocked(api.activateNextStreamEpochForRace).mockReturnValueOnce(
       pending.promise,
@@ -170,22 +170,17 @@ describe("stream detail page activate-next", () => {
     render(StreamDetailPage);
 
     const activateNext = await screen.findByTestId(
-      "epoch-race-activate-next-1",
+      "epoch-race-advance-next-btn",
     );
     await fireEvent.click(activateNext);
 
     expect(activateNext).toBeDisabled();
-    expect(activateNext).toHaveTextContent("Activating...");
-    expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-      "Activating...",
-    );
+    expect(activateNext).toHaveTextContent("Advancing...");
 
     pending.resolve();
 
     await waitFor(() => {
-      expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-        "Saved",
-      );
+      expect(activateNext).toHaveTextContent("Advance to Next Epoch");
     });
     expect(api.activateNextStreamEpochForRace).toHaveBeenCalledWith(
       "race-1",
@@ -193,38 +188,7 @@ describe("stream detail page activate-next", () => {
     );
   });
 
-  it("ignores stale activate-next completion after row intent changes", async () => {
-    const pending = deferred<void>();
-    vi.mocked(api.activateNextStreamEpochForRace).mockReturnValueOnce(
-      pending.promise,
-    );
-
-    render(StreamDetailPage);
-
-    const activateNext = await screen.findByTestId(
-      "epoch-race-activate-next-1",
-    );
-    const select = screen.getByTestId("epoch-race-select-1");
-
-    await fireEvent.click(activateNext);
-    await fireEvent.change(select, { target: { value: "race-2" } });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-        "Unsaved",
-      );
-    });
-
-    pending.reject(new Error("stale-failure"));
-
-    await waitFor(() => {
-      expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-        "Unsaved",
-      );
-    });
-  });
-
-  it("shows error state when activate-next fails", async () => {
+  it("shows error state when shared advance action fails", async () => {
     vi.mocked(api.activateNextStreamEpochForRace).mockRejectedValueOnce(
       new Error("boom"),
     );
@@ -232,14 +196,12 @@ describe("stream detail page activate-next", () => {
     render(StreamDetailPage);
 
     const activateNext = await screen.findByTestId(
-      "epoch-race-activate-next-1",
+      "epoch-race-advance-next-btn",
     );
     await fireEvent.click(activateNext);
 
     await waitFor(() => {
-      expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-        "Activate failed",
-      );
+      expect(activateNext).toHaveTextContent("Advance failed");
     });
   });
 });

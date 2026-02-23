@@ -19,6 +19,7 @@ vi.mock("$lib/api", async () => {
     getRaceStreamEpochMappings: vi.fn(),
     setStreamEpochRace: vi.fn(),
     setForwarderRace: vi.fn(),
+    activateNextStreamEpochForRace: vi.fn(),
   };
 });
 
@@ -92,14 +93,30 @@ describe("stream detail page epoch race mapping", () => {
       offset: 0,
     });
     vi.mocked(api.getStreamEpochs).mockResolvedValue(epochs);
-    vi.mocked(api.getRaceStreamEpochMappings).mockResolvedValue({
-      mappings: [],
-    });
+    vi.mocked(api.getRaceStreamEpochMappings).mockImplementation(
+      async (raceId: string) => {
+        if (raceId === "race-1") {
+          return {
+            mappings: [
+              {
+                stream_id: "abc-123",
+                forwarder_id: "fwd-1",
+                reader_ip: "10.0.0.1:10000",
+                stream_epoch: 2,
+                race_id: "race-1",
+              },
+            ],
+          };
+        }
+        return { mappings: [] };
+      },
+    );
     vi.mocked(api.setStreamEpochRace).mockResolvedValue({
       stream_id: "abc-123",
       stream_epoch: 1,
       race_id: "race-1",
     });
+    vi.mocked(api.activateNextStreamEpochForRace).mockResolvedValue();
 
     replaceStreams([stream]);
     setRaces([
@@ -281,5 +298,49 @@ describe("stream detail page epoch race mapping", () => {
         "Error",
       );
     });
+  });
+
+  it("shows Epoch Race Mapping before Reads", async () => {
+    render(Page);
+
+    await screen.findByTestId("epoch-race-select-1");
+    const epochHeading = screen.getByText("Epoch Race Mapping");
+    const readsHeading = screen.getByText("Reads");
+
+    expect(
+      epochHeading.compareDocumentPosition(readsHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("does not render the legacy reset epoch action", async () => {
+    render(Page);
+
+    await screen.findByTestId("epoch-race-select-1");
+    expect(screen.queryByTestId("reset-epoch-btn")).not.toBeInTheDocument();
+  });
+
+  it("renders save action as green", async () => {
+    render(Page);
+
+    const saveButton = await screen.findByTestId("epoch-race-save-1");
+    expect(saveButton.className).toContain("bg-status-ok-bg");
+  });
+
+  it("advances to next epoch with the shared action", async () => {
+    render(Page);
+
+    const advanceButton = await screen.findByTestId(
+      "epoch-race-advance-next-btn",
+    );
+    await waitFor(() => {
+      expect(advanceButton).not.toBeDisabled();
+    });
+    await fireEvent.click(advanceButton);
+
+    expect(api.activateNextStreamEpochForRace).toHaveBeenCalledWith(
+      "race-1",
+      "abc-123",
+    );
   });
 });
