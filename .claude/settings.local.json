@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tbd show:*)",
+      "Bash(gh pr view:*)",
+      "Bash(tbd create:*)",
+      "Bash(tbd update:*)",
+      "Bash(tbd search:*)",
+      "Bash(tbd list:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(tbd close:*)",
+      "Bash(npm run check:*)",
+      "Bash(git status:*)",
+      "Bash(cargo check:*)",
+      "Bash(npm test:*)",
+      "Bash(cargo test:*)",
+      "Bash(tbd label add:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(git restore:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(tbd sync:*)",
+      "Bash(tbd status:*)"
+    ]
+  }
+}
