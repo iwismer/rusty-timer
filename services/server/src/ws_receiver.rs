@@ -33,6 +33,7 @@ use uuid::Uuid;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
 const REPLAY_BATCH_LIMIT: i64 = 500;
+const RACE_SELECTION_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 pub async fn ws_receiver_handler(
     ws: WebSocketUpgrade,
@@ -69,6 +70,7 @@ struct ResolvedStreamTarget {
     current_epoch_only: bool,
 }
 
+#[derive(Clone)]
 struct PendingSelection {
     selection: ReceiverSelection,
     replay_policy: ReplayPolicy,
@@ -503,7 +505,7 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
         }
 
         let mut subscriptions: Vec<StreamSub> = Vec::new();
-        if let Err(e) = apply_receiver_selection_until_stable(
+        let mut active_selection = match apply_receiver_selection_until_stable(
             &mut socket,
             &state,
             &device_id,
@@ -517,12 +519,17 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
         )
         .await
         {
-            error!(device_id = %device_id, error = %e, "error applying initial receiver selection");
-            return;
-        }
+            Ok(applied) => applied,
+            Err(e) => {
+                error!(device_id = %device_id, error = %e, "error applying initial receiver selection");
+                return;
+            }
+        };
 
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         heartbeat_interval.tick().await;
+        let mut race_refresh_interval = tokio::time::interval(RACE_SELECTION_REFRESH_INTERVAL);
+        race_refresh_interval.tick().await;
 
         loop {
             let mut events_to_send: Vec<ReadEvent> = Vec::new();
@@ -571,6 +578,7 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
                 }
             }
 
+            let mut sent_live_batch = false;
             if !events_to_send.is_empty() {
                 let batch = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
                     session_id: session_id.clone(),
@@ -581,10 +589,14 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
                 {
                     break;
                 }
-                continue;
+                sent_live_batch = true;
             }
 
-            let wait_duration = Duration::from_millis(10);
+            let wait_duration = if sent_live_batch {
+                Duration::from_millis(0)
+            } else {
+                Duration::from_millis(10)
+            };
             tokio::select! {
                 msg = tokio::time::timeout(wait_duration, socket.recv()) => {
                     match msg {
@@ -596,7 +608,7 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
                                     }
                                 }
                                 Ok(WsMessage::ReceiverSetSelection(set_selection)) => {
-                                    if let Err(e) = apply_receiver_selection_until_stable(
+                                    match apply_receiver_selection_until_stable(
                                         &mut socket,
                                         &state,
                                         &device_id,
@@ -610,8 +622,13 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
                                     )
                                     .await
                                     {
-                                        error!(device_id = %device_id, error = %e, "error applying receiver set_selection");
-                                        break;
+                                        Ok(applied) => {
+                                            active_selection = applied;
+                                        }
+                                        Err(e) => {
+                                            error!(device_id = %device_id, error = %e, "error applying receiver set_selection");
+                                            break;
+                                        }
                                     }
                                 }
                                 Ok(WsMessage::Heartbeat(_)) => {}
@@ -635,6 +652,36 @@ async fn handle_receiver_socket_v11(mut socket: WebSocket, state: AppState, toke
                 _ = heartbeat_interval.tick() => {
                     if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
                 }
+                _ = race_refresh_interval.tick() => {
+                    match selection_refresh_needed(&state, &active_selection, &subscriptions).await {
+                        Ok(true) => {
+                            info!(device_id = %device_id, "race/current selection targets changed; refreshing");
+                            match apply_receiver_selection_until_stable(
+                                &mut socket,
+                                &state,
+                                &device_id,
+                                &session_id,
+                                active_selection.clone(),
+                                &mut subscriptions,
+                            )
+                            .await
+                            {
+                                Ok(applied) => {
+                                    active_selection = applied;
+                                }
+                                Err(e) => {
+                                    error!(device_id = %device_id, error = %e, "error refreshing race/current receiver selection");
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            error!(device_id = %device_id, error = %e, "error checking race/current selection refresh");
+                            break;
+                        }
+                    }
+                }
             }
         }
         info!(device_id = %device_id, "receiver v1.1 session ended");
@@ -656,13 +703,20 @@ async fn apply_receiver_selection_until_stable(
     session_id: &str,
     pending: PendingSelection,
     subscriptions: &mut Vec<StreamSub>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<PendingSelection, Box<dyn std::error::Error + Send + Sync>> {
     let mut next_pending = Some(pending);
     while let Some(current) = next_pending.take() {
-        match apply_receiver_selection(socket, state, device_id, session_id, current, subscriptions)
-            .await?
+        match apply_receiver_selection(
+            socket,
+            state,
+            device_id,
+            session_id,
+            current.clone(),
+            subscriptions,
+        )
+        .await?
         {
-            ApplySelectionOutcome::Applied => return Ok(()),
+            ApplySelectionOutcome::Applied => return Ok(current),
             ApplySelectionOutcome::Replaced(replacement) => {
                 // Drop in-memory cursors before retrying so replacement replay
                 // always rehydrates from persisted cursor rows.
@@ -675,7 +729,7 @@ async fn apply_receiver_selection_until_stable(
             }
         }
     }
-    Ok(())
+    Err("selection apply loop ended without applying a selection".into())
 }
 
 async fn apply_receiver_selection(
@@ -694,6 +748,18 @@ async fn apply_receiver_selection(
     let selection_snapshot = selection_to_snapshot(&selection);
     let mut warnings: Vec<String> = Vec::new();
     let resolved = resolve_selection_targets(state, selection).await?;
+    if matches!(
+        selection_snapshot,
+        ReceiverSelectionSnapshot::Race {
+            epoch_scope: EpochScope::Current,
+            ..
+        }
+    ) && resolved.is_empty()
+    {
+        warnings.push(
+            "current-scope mismatch: no streams currently resolve for selected race".to_owned(),
+        );
+    }
     let targeted_replay_selections = if replay_policy == ReplayPolicy::Targeted {
         resolve_targeted_replay_targets(&resolved, replay_targets, &mut warnings)
     } else {
@@ -769,6 +835,33 @@ async fn apply_receiver_selection(
         .update_receiver_session_selection(session_id, selection_snapshot)
         .await;
     Ok(ApplySelectionOutcome::Applied)
+}
+
+async fn selection_refresh_needed(
+    state: &AppState,
+    selection: &PendingSelection,
+    subscriptions: &[StreamSub],
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let ReceiverSelection::Race {
+        epoch_scope: EpochScope::Current,
+        ..
+    } = &selection.selection
+    else {
+        return Ok(false);
+    };
+
+    let resolved = resolve_selection_targets(state, selection.selection.clone()).await?;
+    let mut resolved_stream_ids = resolved
+        .into_iter()
+        .map(|target| target.stream_id)
+        .collect::<Vec<_>>();
+    let mut subscribed_stream_ids = subscriptions
+        .iter()
+        .map(|sub| sub.stream_id)
+        .collect::<Vec<_>>();
+    resolved_stream_ids.sort_unstable();
+    subscribed_stream_ids.sort_unstable();
+    Ok(resolved_stream_ids != subscribed_stream_ids)
 }
 
 fn selection_to_snapshot(selection: &ReceiverSelection) -> ReceiverSelectionSnapshot {
