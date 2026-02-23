@@ -704,6 +704,41 @@ describe("stream detail page epoch race mapping", () => {
     });
   });
 
+  it("does not apply stale metrics count to new current epoch after reload", async () => {
+    const epochReload = deferred<typeof epochs>();
+    vi.mocked(api.getStreamEpochs)
+      .mockResolvedValueOnce(epochs)
+      .mockReturnValueOnce(epochReload.promise);
+
+    render(Page);
+    await screen.findByTestId("epoch-race-select-2");
+    expect(screen.getByTestId("epoch-event-count-2")).toHaveTextContent("6");
+
+    replaceStreams([
+      {
+        ...stream,
+        stream_epoch: 3,
+      },
+    ]);
+    sseMock.listener?.({ stream_id: "abc-123", stream_epoch: 3 });
+
+    epochReload.resolve([
+      ...epochs,
+      {
+        epoch: 3,
+        event_count: 0,
+        first_event_at: "2026-02-22T13:00:00Z",
+        last_event_at: "2026-02-22T13:00:00Z",
+        name: null,
+        is_current: true,
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("epoch-event-count-3")).toHaveTextContent("0");
+    });
+  });
+
   it("renders Export CSV links for each epoch row", async () => {
     render(Page);
 

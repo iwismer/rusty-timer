@@ -2,7 +2,12 @@
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import { onStreamUpdated } from "$lib/sse";
-  import type { ReadEntry, DedupMode, SortOrder } from "$lib/api";
+  import type {
+    ReadEntry,
+    DedupMode,
+    SortOrder,
+    StreamMetrics,
+  } from "$lib/api";
   import {
     streamsStore,
     metricsStore,
@@ -57,6 +62,9 @@
     $streamsStore.find((s) => s.stream_id === streamId) ?? null,
   );
   let metrics = $derived($metricsStore[streamId] ?? null);
+  let lastSyncedEpochCountStreamId: string | null = null;
+  let lastSyncedEpochCountEpoch: number | null = null;
+  let lastSyncedEpochCountMetrics: StreamMetrics | null = null;
 
   // Keep rename input in sync when stream data arrives
   $effect(() => {
@@ -425,7 +433,21 @@
     if (!metrics) return;
     const currentEpoch = stream?.stream_epoch;
     if (typeof currentEpoch !== "number") return;
+
+    const sameStream = lastSyncedEpochCountStreamId === streamId;
+    const sameMetrics = sameStream && lastSyncedEpochCountMetrics === metrics;
+    const epochChangedSinceLastSync =
+      sameStream &&
+      lastSyncedEpochCountEpoch !== null &&
+      lastSyncedEpochCountEpoch !== currentEpoch;
+    // Avoid applying stale epoch counters during stream_epoch rollover until
+    // fresh metrics arrive.
+    if (sameMetrics && epochChangedSinceLastSync) return;
+
     syncCurrentEpochEventCount(currentEpoch, metrics.epoch_dedup_count);
+    lastSyncedEpochCountStreamId = streamId;
+    lastSyncedEpochCountEpoch = currentEpoch;
+    lastSyncedEpochCountMetrics = metrics;
   });
 </script>
 
