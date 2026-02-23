@@ -33,6 +33,9 @@
     } else if (!open && dialogEl.open) {
       dialogEl.close();
     }
+    return () => {
+      if (dialogEl?.open) dialogEl.close();
+    };
   });
 
   $effect(() => {
