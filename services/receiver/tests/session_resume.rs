@@ -77,6 +77,87 @@ fn profile_selection_rejects_targeted_without_replay_targets() {
         receiver::db::DbError::InvalidReceiverSelection(_)
     ));
 }
+
+#[test]
+fn profile_selection_rejects_targeted_with_empty_replay_targets() {
+    let d = tempfile::tempdir().unwrap();
+    let db_path = d.path().join("r.db");
+    let c = open_db(&db_path);
+    c.execute(
+        "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
+        rusqlite::params!["wss://s.com", "t"],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE profile SET replay_policy = 'targeted', replay_targets_json = '[]'",
+        [],
+    )
+    .unwrap();
+    drop(c);
+
+    let db = receiver::db::Db::open(&db_path).unwrap();
+    let err = db.load_receiver_selection().unwrap_err();
+    assert!(matches!(
+        err,
+        receiver::db::DbError::InvalidReceiverSelection(_)
+    ));
+}
+
+#[test]
+fn profile_selection_defaults_survive_legacy_db_migration_path() {
+    let d = tempfile::tempdir().unwrap();
+    let db_path = d.path().join("legacy.db");
+    let c = Connection::open(&db_path).unwrap();
+    c.execute_batch(
+        "
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=FULL;
+        PRAGMA wal_autocheckpoint=1000;
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE profile (
+            server_url TEXT NOT NULL,
+            token TEXT NOT NULL
+        );
+        INSERT INTO profile (server_url, token) VALUES ('wss://legacy.example', 'legacy-token');
+        ",
+    )
+    .unwrap();
+    drop(c);
+
+    let db = receiver::db::Db::open(&db_path).unwrap();
+    let selection = db.load_receiver_selection().unwrap();
+    assert_eq!(
+        selection.selection,
+        ReceiverSelection::Manual {
+            streams: Vec::new()
+        }
+    );
+    assert_eq!(selection.replay_policy, ReplayPolicy::Resume);
+    assert!(selection.replay_targets.is_none());
+}
+
+#[test]
+fn profile_selection_defaults_survive_db_reopen_via_receiver_db() {
+    let d = tempfile::tempdir().unwrap();
+    let db_path = d.path().join("r.db");
+
+    {
+        let db = receiver::db::Db::open(&db_path).unwrap();
+        db.save_profile("wss://persist.example", "tok", "check-and-download")
+            .unwrap();
+    }
+
+    let reopened = receiver::db::Db::open(&db_path).unwrap();
+    let selection = reopened.load_receiver_selection().unwrap();
+    assert_eq!(
+        selection.selection,
+        ReceiverSelection::Manual {
+            streams: Vec::new()
+        }
+    );
+    assert_eq!(selection.replay_policy, ReplayPolicy::Resume);
+    assert!(selection.replay_targets.is_none());
+}
 #[test]
 fn profile_persists_across_db_reopen() {
     let d = tempfile::tempdir().unwrap();

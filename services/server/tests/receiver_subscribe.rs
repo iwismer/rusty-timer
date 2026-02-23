@@ -84,6 +84,27 @@ async fn wait_for_session_selection(
     }
 }
 
+async fn assert_session_selection_stays(
+    state: &server::AppState,
+    session_id: &str,
+    expected: &ReceiverSelectionSnapshot,
+    duration: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + duration;
+    while tokio::time::Instant::now() < deadline {
+        let selection = state
+            .get_receiver_session(session_id)
+            .await
+            .expect("session should stay registered")
+            .selection;
+        assert_eq!(
+            selection, *expected,
+            "session {session_id} selection changed unexpectedly within stability window"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test]
 async fn test_receiver_connect_and_heartbeat() {
     let container = Postgres::default().start().await.unwrap();
@@ -119,6 +140,90 @@ async fn test_receiver_connect_and_heartbeat() {
         }
         other => panic!("expected Heartbeat, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn test_receiver_v1_route_rejects_receiver_hello_v11() {
+    let (pool, addr, state) = start_server().await;
+    insert_token(
+        &pool,
+        "rcv-v1-reject-hello-v11",
+        "receiver",
+        b"rcv-v1-reject-hello-v11-token",
+    )
+    .await;
+
+    let url = format!("ws://{}/ws/v1/receivers", addr);
+    let mut client = MockWsClient::connect_with_token(&url, "rcv-v1-reject-hello-v11-token")
+        .await
+        .unwrap();
+
+    client
+        .send_message(&WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+            receiver_id: "rcv-v1-reject-hello-v11".to_owned(),
+            selection: ReceiverSelection::Manual { streams: vec![] },
+            replay_policy: ReplayPolicy::Resume,
+            replay_targets: None,
+        }))
+        .await
+        .unwrap();
+
+    match client.recv_message().await.unwrap() {
+        WsMessage::Error(err) => {
+            assert_eq!(err.code, error_codes::PROTOCOL_ERROR);
+            assert!(err.message.contains("expected receiver_hello"));
+        }
+        other => panic!("expected protocol error, got {:?}", other),
+    }
+
+    assert!(
+        state.active_receiver_sessions.read().await.is_empty(),
+        "v1.1 hello on /ws/v1/receivers must not register a receiver session"
+    );
+}
+
+#[tokio::test]
+async fn test_receiver_v1_route_rejects_receiver_set_selection_during_handshake() {
+    let (pool, addr, state) = start_server().await;
+    insert_token(
+        &pool,
+        "rcv-v1-reject-set-selection",
+        "receiver",
+        b"rcv-v1-reject-set-selection-token",
+    )
+    .await;
+
+    let url = format!("ws://{}/ws/v1/receivers", addr);
+    let mut client = MockWsClient::connect_with_token(&url, "rcv-v1-reject-set-selection-token")
+        .await
+        .unwrap();
+
+    client
+        .send_message(&WsMessage::ReceiverSetSelection(ReceiverSetSelection {
+            selection: ReceiverSelection::Manual {
+                streams: vec![StreamRef {
+                    forwarder_id: "fwd-ignored".to_owned(),
+                    reader_ip: "10.42.0.1:10000".to_owned(),
+                }],
+            },
+            replay_policy: ReplayPolicy::Resume,
+            replay_targets: None,
+        }))
+        .await
+        .unwrap();
+
+    match client.recv_message().await.unwrap() {
+        WsMessage::Error(err) => {
+            assert_eq!(err.code, error_codes::PROTOCOL_ERROR);
+            assert!(err.message.contains("expected receiver_hello"));
+        }
+        other => panic!("expected protocol error, got {:?}", other),
+    }
+
+    assert!(
+        state.active_receiver_sessions.read().await.is_empty(),
+        "receiver_set_selection must not be accepted as the first message on v1 route"
+    );
 }
 
 #[tokio::test]
@@ -187,6 +292,83 @@ async fn test_receiver_subscribe_updates_legacy_v1_selection_snapshot() {
         .await
         .expect("session should remain tracked");
     assert_eq!(updated.selection, expected);
+}
+
+#[tokio::test]
+async fn test_receiver_v1_ignores_set_selection_and_keeps_legacy_snapshot_semantics() {
+    let (pool, addr, state) = start_server().await;
+    insert_token(
+        &pool,
+        "rcv-v1-legacy-snapshot",
+        "receiver",
+        b"rcv-v1-legacy-snapshot-token",
+    )
+    .await;
+
+    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-v1-legacy-snapshot-token")
+        .await
+        .unwrap();
+    rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
+        receiver_id: "rcv-v1-legacy-snapshot".to_owned(),
+        resume: vec![],
+    }))
+    .await
+    .unwrap();
+    let session_id = match rcv.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {:?}", other),
+    };
+
+    let initial = state
+        .get_receiver_session(&session_id)
+        .await
+        .expect("session should be tracked");
+    assert_eq!(initial.protocol, server::state::ReceiverSessionProtocol::V1);
+    assert_eq!(
+        initial.selection,
+        ReceiverSelectionSnapshot::LegacyV1 { streams: vec![] }
+    );
+
+    rcv.send_message(&WsMessage::ReceiverSetSelection(ReceiverSetSelection {
+        selection: ReceiverSelection::Manual {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-v11-only".to_owned(),
+                reader_ip: "10.200.0.1:10000".to_owned(),
+            }],
+        },
+        replay_policy: ReplayPolicy::Resume,
+        replay_targets: None,
+    }))
+    .await
+    .unwrap();
+
+    let expected_before_subscribe = ReceiverSelectionSnapshot::LegacyV1 { streams: vec![] };
+    assert_session_selection_stays(
+        &state,
+        &session_id,
+        &expected_before_subscribe,
+        Duration::from_millis(250),
+    )
+    .await;
+
+    rcv.send_message(&WsMessage::ReceiverSubscribe(ReceiverSubscribe {
+        session_id: session_id.clone(),
+        streams: vec![StreamRef {
+            forwarder_id: "fwd-v1-subscribe".to_owned(),
+            reader_ip: "10.201.0.1:10000".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+
+    let expected = ReceiverSelectionSnapshot::LegacyV1 {
+        streams: vec![StreamRef {
+            forwarder_id: "fwd-v1-subscribe".to_owned(),
+            reader_ip: "10.201.0.1:10000".to_owned(),
+        }],
+    };
+    wait_for_session_selection(&state, &session_id, &expected, Duration::from_secs(1)).await;
 }
 
 #[tokio::test]

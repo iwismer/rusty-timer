@@ -195,17 +195,45 @@ describe("api client", () => {
     expect(result.replay_policy).toBe("resume");
   });
 
-  it("putSelection sends PUT body", async () => {
+  it("putSelection preserves default manual/resume payload shape", async () => {
     const { putSelection } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(204, null));
-    const payload = {
+    const payload: Parameters<typeof putSelection>[0] = {
+      selection: {
+        mode: "manual",
+        streams: [],
+      },
+      replay_policy: "resume",
+    };
+
+    await putSelection(payload);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/selection",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    );
+
+    const [, options] = mockFetch.mock.calls.at(-1)!;
+    const body = JSON.parse((options as RequestInit).body as string);
+    expect(body).toEqual(payload);
+    expect(body.selection).not.toHaveProperty("race_id");
+    expect(body.selection).not.toHaveProperty("epoch_scope");
+  });
+
+  it("putSelection supports explicit race/current opt-in payload shape", async () => {
+    const { putSelection } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    const payload: Parameters<typeof putSelection>[0] = {
       selection: {
         mode: "race",
         race_id: "race-1",
         epoch_scope: "current",
       },
       replay_policy: "live_only",
-    } as const;
+    };
     await putSelection(payload);
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/selection",
@@ -214,6 +242,15 @@ describe("api client", () => {
         body: JSON.stringify(payload),
       }),
     );
+
+    const [, options] = mockFetch.mock.calls.at(-1)!;
+    const body = JSON.parse((options as RequestInit).body as string);
+    expect(body).toEqual(payload);
+    expect(body.selection).toMatchObject({
+      mode: "race",
+      race_id: "race-1",
+      epoch_scope: "current",
+    });
   });
 
   it("getRaces calls races endpoint", async () => {
