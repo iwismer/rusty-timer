@@ -3,9 +3,9 @@ type: is
 id: is-01kj3b53ectffkpmtkx9tczmaw
 title: "Task 11: Add receiver UI selection controls plus component-level behavior tests"
 kind: task
-status: in_progress
+status: closed
 priority: 2
-version: 9
+version: 10
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -18,7 +18,9 @@ child_order_hints:
   - is-01kj3bmqvgssejwpsw9xczny6s
   - is-01kj3bmr21hx8q7yxg8j53q24q
 created_at: 2026-02-22T18:52:54.602Z
-updated_at: 2026-02-22T22:59:44.593Z
+updated_at: 2026-02-23T01:02:32.942Z
+closed_at: 2026-02-23T01:02:32.941Z
+close_reason: "Task 11 completed: infra/task splits rt-iex3 + rt-b73f closed, implementation integrated and independently reviewed, and UI suites pass in PR #89."
 ---
 From implementation plan Task 11 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md). Include receiver UI behavior/tests that default selection mode to manual and require explicit opt-in to race mode.
 

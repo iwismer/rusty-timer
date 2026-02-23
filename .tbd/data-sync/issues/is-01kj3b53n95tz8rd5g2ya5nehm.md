@@ -3,9 +3,9 @@ type: is
 id: is-01kj3b53n95tz8rd5g2ya5nehm
 title: "Task 12: Add server UI mapping and activation controls plus component tests"
 kind: task
-status: in_progress
+status: closed
 priority: 2
-version: 8
+version: 9
 spec_path: docs/plans/2026-02-22-race-epoch-receiver-v1.1-design.md
 labels: []
 dependencies:
@@ -18,7 +18,9 @@ child_order_hints:
   - is-01kj3bmrtzbhstn53wrjbyb5pd
   - is-01kj3bms18h8hvkhr9nr8btabf
 created_at: 2026-02-22T18:52:54.823Z
-updated_at: 2026-02-22T22:59:48.758Z
+updated_at: 2026-02-23T01:02:33.113Z
+closed_at: 2026-02-23T01:02:33.112Z
+close_reason: "Task 12 completed: infra/task splits rt-sohq + rt-pg8n closed, per-row save mapping + activate-next behavior implemented, independently reviewed, and UI suites pass in PR #89."
 ---
 From implementation plan Task 12 (docs/plans/2026-02-22-race-epoch-receiver-v1.1-implementation-plan.md).
 
