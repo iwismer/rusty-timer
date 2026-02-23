@@ -24,8 +24,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, Notify, watch};
-use tokio::time::{Duration, sleep};
+use tokio::sync::{watch, Mutex, Notify};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -1143,7 +1143,7 @@ async fn main() {
     let restart_requested;
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
+        use tokio::signal::unix::{signal, SignalKind};
         let mut sigterm = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {

@@ -1,5 +1,10 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+pub struct CursorRow {
+    pub stream_epoch: i64,
+    pub last_seq: i64,
+}
 
 pub async fn upsert_cursor(
     pool: &PgPool,
@@ -11,13 +16,9 @@ pub async fn upsert_cursor(
     sqlx::query(
         r#"INSERT INTO receiver_cursors (receiver_id, stream_id, stream_epoch, last_seq, updated_at)
            VALUES ($1, $2, $3, $4, now())
-           ON CONFLICT (receiver_id, stream_id) DO UPDATE
-           SET stream_epoch = EXCLUDED.stream_epoch,
-               last_seq = EXCLUDED.last_seq,
-               updated_at = now()
-           WHERE EXCLUDED.stream_epoch > receiver_cursors.stream_epoch
-              OR (EXCLUDED.stream_epoch = receiver_cursors.stream_epoch
-                  AND EXCLUDED.last_seq >= receiver_cursors.last_seq)"#,
+           ON CONFLICT (receiver_id, stream_id, stream_epoch) DO UPDATE
+           SET last_seq = GREATEST(receiver_cursors.last_seq, EXCLUDED.last_seq),
+               updated_at = now()"#,
     )
     .bind(receiver_id)
     .bind(stream_id)
@@ -33,11 +34,74 @@ pub async fn fetch_cursor(
     receiver_id: &str,
     stream_id: Uuid,
 ) -> Result<Option<(i64, i64)>, sqlx::Error> {
-    let row = sqlx::query!(
-        "SELECT stream_epoch, last_seq FROM receiver_cursors WHERE receiver_id = $1 AND stream_id = $2",
-        receiver_id, stream_id
-    ).fetch_optional(pool).await?;
-    Ok(row.map(|r| (r.stream_epoch, r.last_seq)))
+    let row = sqlx::query(
+        "SELECT stream_epoch, last_seq
+         FROM receiver_cursors
+         WHERE receiver_id = $1 AND stream_id = $2
+         ORDER BY stream_epoch DESC
+         LIMIT 1",
+    )
+    .bind(receiver_id)
+    .bind(stream_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| (r.get("stream_epoch"), r.get("last_seq"))))
+}
+
+pub async fn fetch_cursor_for_epoch(
+    pool: &PgPool,
+    receiver_id: &str,
+    stream_id: Uuid,
+    stream_epoch: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT last_seq
+         FROM receiver_cursors
+         WHERE receiver_id = $1 AND stream_id = $2 AND stream_epoch = $3",
+    )
+    .bind(receiver_id)
+    .bind(stream_id)
+    .bind(stream_epoch)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.get("last_seq")))
+}
+
+pub async fn fetch_cursors_for_stream(
+    pool: &PgPool,
+    receiver_id: &str,
+    stream_id: Uuid,
+) -> Result<Vec<CursorRow>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT stream_epoch, last_seq
+         FROM receiver_cursors
+         WHERE receiver_id = $1 AND stream_id = $2
+         ORDER BY stream_epoch",
+    )
+    .bind(receiver_id)
+    .bind(stream_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| CursorRow {
+            stream_epoch: row.get("stream_epoch"),
+            last_seq: row.get("last_seq"),
+        })
+        .collect())
+}
+
+pub async fn prune_stale_cursors(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM receiver_cursors rc
+         USING streams s
+         WHERE rc.stream_id = s.stream_id
+           AND rc.updated_at < now() - INTERVAL '30 days'
+           AND rc.stream_epoch <> s.stream_epoch",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn compute_backlog(

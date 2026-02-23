@@ -178,6 +178,153 @@ describe("api client", () => {
       error: "no update available",
     });
   });
+
+  it("getSelection calls selection endpoint", async () => {
+    const { getSelection } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        selection: { mode: "manual", streams: [] },
+        replay_policy: "resume",
+      }),
+    );
+    const result = await getSelection();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/selection",
+      expect.any(Object),
+    );
+    expect(result.replay_policy).toBe("resume");
+  });
+
+  it("putSelection preserves default manual/resume payload shape", async () => {
+    const { putSelection } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    const payload: Parameters<typeof putSelection>[0] = {
+      selection: {
+        mode: "manual",
+        streams: [],
+      },
+      replay_policy: "resume",
+    };
+
+    await putSelection(payload);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/selection",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    );
+
+    const [, options] = mockFetch.mock.calls.at(-1)!;
+    const body = JSON.parse((options as RequestInit).body as string);
+    expect(body).toEqual(payload);
+    expect(body.selection).not.toHaveProperty("race_id");
+    expect(body.selection).not.toHaveProperty("epoch_scope");
+  });
+
+  it("putSelection supports explicit race/current opt-in payload shape", async () => {
+    const { putSelection } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    const payload: Parameters<typeof putSelection>[0] = {
+      selection: {
+        mode: "race",
+        race_id: "race-1",
+        epoch_scope: "current",
+      },
+      replay_policy: "live_only",
+    };
+    await putSelection(payload);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/selection",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    );
+
+    const [, options] = mockFetch.mock.calls.at(-1)!;
+    const body = JSON.parse((options as RequestInit).body as string);
+    expect(body).toEqual(payload);
+    expect(body.selection).toMatchObject({
+      mode: "race",
+      race_id: "race-1",
+      epoch_scope: "current",
+    });
+  });
+
+  it("getRaces calls races endpoint", async () => {
+    const { getRaces } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        races: [{ race_id: "r1", name: "Race 1", created_at: "now" }],
+      }),
+    );
+    const result = await getRaces();
+    expect(mockFetch).toHaveBeenCalledWith("/api/v1/races", expect.any(Object));
+    expect(result.races[0].race_id).toBe("r1");
+  });
+
+  it("getReplayTargetEpochs calls replay target epochs endpoint with query params", async () => {
+    const { getReplayTargetEpochs } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        epochs: [
+          {
+            stream_epoch: 7,
+            name: "Heat 2",
+            first_seen_at: "2026-02-01T10:00:00Z",
+            race_names: ["Saturday 5K"],
+          },
+        ],
+      }),
+    );
+
+    const result = await getReplayTargetEpochs({
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/replay-targets/epochs?forwarder_id=fwd-1&reader_ip=10.0.0.1%3A10000",
+      expect.any(Object),
+    );
+    expect(result.epochs).toEqual([
+      {
+        stream_epoch: 7,
+        name: "Heat 2",
+        first_seen_at: "2026-02-01T10:00:00Z",
+        race_names: ["Saturday 5K"],
+      },
+    ]);
+  });
+
+  it("resetStreamCursor posts admin cursor reset payload", async () => {
+    const { resetStreamCursor } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+
+    await resetStreamCursor({
+      forwarder_id: "f1",
+      reader_ip: "10.0.0.1:10000",
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/admin/cursors/reset",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          forwarder_id: "f1",
+          reader_ip: "10.0.0.1:10000",
+        }),
+      }),
+    );
+
+    const [, options] = mockFetch.mock.calls.at(-1)!;
+    const headers = new Headers((options as RequestInit).headers);
+    expect(headers.get("x-rt-receiver-admin-intent")).toBe(
+      "reset-stream-cursor",
+    );
+  });
 });
 
 class MockEventSource {

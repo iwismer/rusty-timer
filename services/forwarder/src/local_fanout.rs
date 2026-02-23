@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{broadcast, Mutex};
 
 // ---------------------------------------------------------------------------
 // Public error type

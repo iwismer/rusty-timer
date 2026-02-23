@@ -79,6 +79,14 @@ See [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-g
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for test commands, code quality checks, and git hook setup.
 
+## Receiver Selection Semantics (v1.1)
+
+- Default receiver selection mode is `manual`, with `resume` replay behavior as the default path.
+- `race/current` selection is available as an explicit opt-in mode and is not the default.
+- Receiver targeted replay supports explicit per-row save behavior in the receiver UI.
+- Forwarder epoch name controls support setting and clearing current epoch names through the server-backed path.
+- Design drift for this shipped behavior is tracked in `docs/design-drift/2026-02-23-rt-gxdq-design-drift-notes.md`.
+
 ## Licence
 
 GPL3 — see LICENCE.txt

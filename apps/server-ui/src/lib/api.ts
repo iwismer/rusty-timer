@@ -45,6 +45,7 @@ export interface EpochInfo {
   event_count: number;
   first_event_at: string | null;
   last_event_at: string | null;
+  name: string | null;
   is_current: boolean;
 }
 
@@ -507,6 +508,18 @@ export interface UploadResult {
   imported: number;
 }
 
+export interface StreamEpochRaceMapping {
+  stream_id: string;
+  forwarder_id: string;
+  reader_ip: string;
+  stream_epoch: number;
+  race_id: string | null;
+}
+
+export interface RaceStreamEpochMappingsResponse {
+  mappings: StreamEpochRaceMapping[];
+}
+
 // ----- Race API -----
 
 /** GET /api/v1/races */
@@ -527,6 +540,66 @@ export async function deleteRace(raceId: string): Promise<void> {
   return apiFetch<void>(`/api/v1/races/${encodeURIComponent(raceId)}`, {
     method: "DELETE",
   });
+}
+
+/** PUT /api/v1/streams/{streamId}/epochs/{epoch}/race */
+export async function setStreamEpochRace(
+  streamId: string,
+  epoch: number,
+  raceId: string | null,
+): Promise<{
+  stream_id: string;
+  stream_epoch: number;
+  race_id: string | null;
+}> {
+  return apiFetch<{
+    stream_id: string;
+    stream_epoch: number;
+    race_id: string | null;
+  }>(`/api/v1/streams/${encodeURIComponent(streamId)}/epochs/${epoch}/race`, {
+    method: "PUT",
+    body: JSON.stringify({ race_id: raceId }),
+  });
+}
+
+/** PUT /api/v1/streams/{streamId}/epochs/{epoch}/name */
+export async function setStreamEpochName(
+  streamId: string,
+  epoch: number,
+  name: string | null,
+): Promise<{
+  stream_id: string;
+  stream_epoch: number;
+  name: string | null;
+}> {
+  return apiFetch<{
+    stream_id: string;
+    stream_epoch: number;
+    name: string | null;
+  }>(`/api/v1/streams/${encodeURIComponent(streamId)}/epochs/${epoch}/name`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** GET /api/v1/races/{raceId}/stream-epochs */
+export async function getRaceStreamEpochMappings(
+  raceId: string,
+): Promise<RaceStreamEpochMappingsResponse> {
+  return apiFetch<RaceStreamEpochMappingsResponse>(
+    `/api/v1/races/${encodeURIComponent(raceId)}/stream-epochs`,
+  );
+}
+
+/** POST /api/v1/races/{raceId}/streams/{streamId}/epochs/activate-next */
+export async function activateNextStreamEpochForRace(
+  raceId: string,
+  streamId: string,
+): Promise<void> {
+  return apiFetch<void>(
+    `/api/v1/races/${encodeURIComponent(raceId)}/streams/${encodeURIComponent(streamId)}/epochs/activate-next`,
+    { method: "POST" },
+  );
 }
 
 /** GET /api/v1/races/{raceId}/participants */

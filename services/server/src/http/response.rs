@@ -1,7 +1,7 @@
 use axum::{
-    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use rt_protocol::HttpErrorEnvelope;
 use std::fmt::Display;

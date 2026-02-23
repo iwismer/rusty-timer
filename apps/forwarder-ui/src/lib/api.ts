@@ -7,6 +7,7 @@ export interface ReaderStatus {
   reads_total: number;
   last_seen_secs: number | null;
   local_port: number;
+  current_epoch_name?: string | null;
 }
 
 export interface ForwarderStatus {
@@ -125,6 +126,16 @@ export async function resetEpoch(
 ): Promise<{ new_epoch: number }> {
   return apiFetch(`/api/v1/streams/${readerIp}/reset-epoch`, {
     method: "POST",
+  });
+}
+
+export async function setCurrentEpochName(
+  readerIp: string,
+  name: string | null,
+): Promise<void> {
+  await apiFetch(`/api/v1/streams/${readerIp}/current-epoch/name`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
   });
 }
 

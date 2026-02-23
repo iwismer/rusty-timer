@@ -10,4 +10,5 @@ pub mod races;
 pub mod reads;
 pub mod response;
 pub mod sse;
+pub mod stream_epoch_races;
 pub mod streams;

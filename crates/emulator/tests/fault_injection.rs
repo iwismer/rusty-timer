@@ -14,8 +14,8 @@
 //! 8. Slow ack fault introduces delay before ack
 //! 9. No fault = zero delays, all events emitted
 
-use emulator::faults::{FaultOutcome, FaultSchedule, apply_fault_to_event_emission};
-use emulator::scenario::{FaultConfig, load_scenario_from_str};
+use emulator::faults::{apply_fault_to_event_emission, FaultOutcome, FaultSchedule};
+use emulator::scenario::{load_scenario_from_str, FaultConfig};
 
 // ---------------------------------------------------------------------------
 // YAML parsing tests for fault configs

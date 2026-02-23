@@ -13,11 +13,11 @@ pub use state::AppState;
 use std::path::PathBuf;
 
 use axum::{
-    Router,
     extract::Request,
     http::{Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, patch, post},
+    Router,
 };
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
@@ -26,6 +26,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
     let router = Router::new()
         .route("/ws/v1/forwarders", get(ws_forwarder::ws_forwarder_handler))
         .route("/ws/v1/receivers", get(ws_receiver::ws_receiver_handler))
+        .route(
+            "/ws/v1.1/receivers",
+            get(ws_receiver::ws_receiver_v11_handler),
+        )
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
         .route("/api/v1/streams", get(http::streams::list_streams))
@@ -52,6 +56,14 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/v1/streams/{stream_id}/epochs",
             get(http::streams::list_epochs),
+        )
+        .route(
+            "/api/v1/streams/{stream_id}/epochs/{epoch}/name",
+            axum::routing::put(http::streams::put_epoch_name),
+        )
+        .route(
+            "/api/v1/streams/{stream_id}/epochs/{epoch}/race",
+            axum::routing::put(http::stream_epoch_races::put_stream_epoch_race),
         )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
         .route("/api/v1/logs", get(http::logs::get_logs))
@@ -150,6 +162,14 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/v1/races/{race_id}/chips/upload",
             post(http::races::upload_chips),
+        )
+        .route(
+            "/api/v1/races/{race_id}/stream-epochs",
+            get(http::stream_epoch_races::list_stream_epochs_for_race),
+        )
+        .route(
+            "/api/v1/races/{race_id}/streams/{stream_id}/epochs/activate-next",
+            post(http::stream_epoch_races::activate_next_stream_epoch_for_race),
         );
 
     let router = match dashboard_dir {

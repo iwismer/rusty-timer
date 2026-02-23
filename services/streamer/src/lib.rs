@@ -1,4 +1,4 @@
-use rusqlite::{Connection, types::ToSql};
+use rusqlite::{types::ToSql, Connection};
 use timer_core::models::{ChipBib, Participant};
 use timer_core::util::io::{read_bibchip_file, read_participant_file};
 
@@ -72,7 +72,7 @@ pub fn import_participants(conn: &Connection, participants: &[Participant]) {
 }
 
 pub async fn run(config: StreamerConfig) {
-    use futures::{future::FutureExt, future::select_all, pin_mut};
+    use futures::{future::select_all, future::FutureExt, pin_mut};
     use std::future::Future;
     use std::pin::Pin;
     use timer_core::models::Message;

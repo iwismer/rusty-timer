@@ -399,3 +399,86 @@ pub async fn fetch_events_after_cursor_through_cursor_limited(
         })
         .collect())
 }
+
+pub async fn fetch_events_for_stream_epoch_from_seq_limited(
+    pool: &PgPool,
+    stream_id: Uuid,
+    stream_epoch: i64,
+    from_seq: i64,
+    limit: i64,
+) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
+                  s.forwarder_id, s.reader_ip
+           FROM events e
+           JOIN streams s ON s.stream_id = e.stream_id
+           WHERE e.stream_id = $1
+             AND e.stream_epoch = $2
+             AND e.seq >= $3
+           ORDER BY e.seq ASC
+           LIMIT $4"#,
+    )
+    .bind(stream_id)
+    .bind(stream_epoch)
+    .bind(from_seq)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| crate::repo::EventRow {
+            stream_epoch: r.get("stream_epoch"),
+            seq: r.get("seq"),
+            reader_timestamp: r.get("reader_timestamp"),
+            raw_read_line: r.get("raw_read_line"),
+            read_type: r.get("read_type"),
+            forwarder_id: r.get("forwarder_id"),
+            reader_ip: r.get("reader_ip"),
+        })
+        .collect())
+}
+
+pub async fn fetch_events_for_stream_epoch_from_seq_through_cursor_limited(
+    pool: &PgPool,
+    stream_id: Uuid,
+    stream_epoch: i64,
+    from_seq: i64,
+    through_epoch: i64,
+    through_seq: i64,
+    limit: i64,
+) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
+                  s.forwarder_id, s.reader_ip
+           FROM events e
+           JOIN streams s ON s.stream_id = e.stream_id
+           WHERE e.stream_id = $1
+             AND e.stream_epoch = $2
+             AND e.seq >= $3
+             AND (e.stream_epoch < $4 OR (e.stream_epoch = $4 AND e.seq <= $5))
+           ORDER BY e.seq ASC
+           LIMIT $6"#,
+    )
+    .bind(stream_id)
+    .bind(stream_epoch)
+    .bind(from_seq)
+    .bind(through_epoch)
+    .bind(through_seq)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| crate::repo::EventRow {
+            stream_epoch: r.get("stream_epoch"),
+            seq: r.get("seq"),
+            reader_timestamp: r.get("reader_timestamp"),
+            raw_read_line: r.get("raw_read_line"),
+            read_type: r.get("read_type"),
+            forwarder_id: r.get("forwarder_id"),
+            reader_ip: r.get("reader_ip"),
+        })
+        .collect())
+}

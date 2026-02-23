@@ -15,12 +15,15 @@
     "lint": "prettier --check ."
   },
   "devDependencies": {
-    "@rusty-timer/shared-ui": "*",
-    "@tailwindcss/vite": "^4.2.0",
     "@playwright/test": "^1.40.0",
+    "@rusty-timer/shared-ui": "*",
     "@sveltejs/adapter-static": "^3.0.0",
     "@sveltejs/kit": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "^6.0.0",
+    "@tailwindcss/vite": "^4.2.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/svelte": "^5.3.1",
+    "jsdom": "^28.1.0",
     "prettier": "^3.0.0",
     "prettier-plugin-svelte": "^3.0.0",
     "svelte": "^5.0.0",

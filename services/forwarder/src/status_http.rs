@@ -27,15 +27,16 @@
 //! No authentication in v1.
 
 use crate::storage::journal::Journal;
-use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, Uri, header};
+use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
+use axum::Router;
+use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
-use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Write as _;
@@ -1559,7 +1560,7 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use std::time::Duration;
-    use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+    use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
     let rx = state.ui_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
@@ -1594,6 +1595,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route(
             "/api/v1/streams/{reader_ip}/reset-epoch",
             post(reset_epoch_handler::<J>),
+        )
+        .route(
+            "/api/v1/streams/{reader_ip}/current-epoch/name",
+            put(set_current_epoch_name_handler::<J>),
         )
         .route("/update/status", get(update_status_handler::<J>))
         .route("/update/apply", post(update_apply_handler::<J>))
@@ -1673,14 +1678,6 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(reader_ip): Path<String>,
 ) -> Response {
-    // Keep prior behavior for malformed percent-encoding style stream keys.
-    if reader_ip.contains('%') {
-        return text_response(
-            StatusCode::BAD_REQUEST,
-            "invalid percent-encoding in stream key",
-        );
-    }
-
     let result = state.journal.lock().await.reset_epoch(&reader_ip);
     match result {
         Ok(new_epoch) => {
@@ -1693,6 +1690,171 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
         Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
         Err(EpochResetError::Storage(e)) => text_response(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerStreamsResponse {
+    streams: Vec<ServerStreamInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerStreamInfo {
+    stream_id: String,
+    forwarder_id: String,
+    reader_ip: String,
+    stream_epoch: i64,
+}
+
+async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(reader_ip): Path<String>,
+    body: Bytes,
+) -> Response {
+    let payload = match parse_json_body::<serde_json::Value>(&body) {
+        Ok(value) => value,
+        Err(error) => return text_response(StatusCode::BAD_REQUEST, error),
+    };
+    if let Err((status, message)) = require_object_payload(&payload) {
+        return text_response(status_from_u16_or_internal(status), message);
+    }
+
+    let normalized_name = match payload.get("name") {
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(name)) => {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        Some(_) => return text_response(StatusCode::BAD_REQUEST, "name must be a string or null"),
+        None => return text_response(StatusCode::BAD_REQUEST, "name is required"),
+    };
+
+    let config_state = match &state.config_state {
+        Some(config_state) => config_state.clone(),
+        None => return config_not_available(),
+    };
+
+    let cfg = match crate::config::load_config_from_path(&config_state.path) {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            return text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load config: {error}"),
+            )
+        }
+    };
+
+    let forwarder_id = {
+        let ss = state.subsystem.lock().await;
+        ss.forwarder_id.clone()
+    };
+    if forwarder_id.is_empty() {
+        return text_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "forwarder_id is not initialized",
+        );
+    }
+
+    let base_url = cfg.server.base_url.trim_end_matches('/');
+    let client = reqwest::Client::new();
+    let streams_url = format!("{base_url}/api/v1/streams");
+    let streams_resp = match client
+        .get(&streams_url)
+        .bearer_auth(&cfg.token)
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(error) => {
+            return text_response(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream stream lookup failed: {error}"),
+            )
+        }
+    };
+
+    let streams_status = streams_resp.status();
+    let streams_body = match streams_resp.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            return text_response(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream stream lookup body read failed: {error}"),
+            )
+        }
+    };
+    if !streams_status.is_success() {
+        return text_response(
+            StatusCode::BAD_GATEWAY,
+            format!("upstream stream lookup returned {streams_status}: {streams_body}"),
+        );
+    }
+
+    let streams = match serde_json::from_str::<ServerStreamsResponse>(&streams_body) {
+        Ok(parsed) => parsed.streams,
+        Err(error) => {
+            return text_response(
+                StatusCode::BAD_GATEWAY,
+                format!("invalid upstream stream lookup response: {error}"),
+            )
+        }
+    };
+    let maybe_stream = streams
+        .iter()
+        .find(|stream| stream.forwarder_id == forwarder_id && stream.reader_ip == reader_ip);
+    let stream = match maybe_stream {
+        Some(stream) => stream,
+        None => return text_response(StatusCode::NOT_FOUND, "stream not found"),
+    };
+
+    let epoch_name_url = format!(
+        "{base_url}/api/v1/streams/{}/epochs/{}/name",
+        stream.stream_id, stream.stream_epoch
+    );
+    let epoch_name_resp = match client
+        .put(&epoch_name_url)
+        .bearer_auth(&cfg.token)
+        .json(&serde_json::json!({ "name": normalized_name }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(error) => {
+            return text_response(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream epoch-name update failed: {error}"),
+            )
+        }
+    };
+
+    let response_status = status_from_u16_or_internal(epoch_name_resp.status().as_u16());
+    let response_body = match epoch_name_resp.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            return text_response(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream epoch-name response body read failed: {error}"),
+            )
+        }
+    };
+    if response_status.is_success() {
+        state
+            .logger
+            .log(format!("set current epoch name for {} via API", reader_ip));
+        return json_response(response_status, response_body);
+    }
+
+    json_response(
+        response_status,
+        serde_json::json!({"error": response_body}).to_string(),
+    )
+}
+
+fn status_from_u16_or_internal(status: u16) -> StatusCode {
+    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn update_status_handler<J: JournalAccess + Send + 'static>(
@@ -2028,11 +2190,11 @@ fn schedule_process_restart() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rt_updater::workflow::{Checker, run_check, run_download};
+    use rt_updater::workflow::{run_check, run_download, Checker};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{sleep, Duration};
 
     struct FakeChecker {
         check_result: Result<UpdateStatus, String>,
@@ -2556,10 +2718,9 @@ target = "192.168.1.100:10000"
 
         let (http_status, body) = result.expect_err("auth failures must return an HTTP error");
         assert_eq!(http_status, 403);
-        assert!(
-            body.to_ascii_lowercase()
-                .contains("interactive authentication required")
-        );
+        assert!(body
+            .to_ascii_lowercase()
+            .contains("interactive authentication required"));
     }
 
     #[cfg(unix)]

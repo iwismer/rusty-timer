@@ -459,6 +459,7 @@ describe("server_api client", () => {
         event_count: 156,
         first_event_at: "2026-02-18T10:00:00Z",
         last_event_at: "2026-02-18T14:30:00Z",
+        name: "Morning Heat",
         is_current: false,
       },
       {
@@ -466,6 +467,7 @@ describe("server_api client", () => {
         event_count: 89,
         first_event_at: "2026-02-20T08:00:00Z",
         last_event_at: "2026-02-20T12:00:00Z",
+        name: null,
         is_current: true,
       },
     ];
@@ -478,8 +480,10 @@ describe("server_api client", () => {
     expect(result).toHaveLength(2);
     expect(result[0].epoch).toBe(1);
     expect(result[0].event_count).toBe(156);
+    expect(result[0].name).toBe("Morning Heat");
     expect(result[0].is_current).toBe(false);
     expect(result[1].epoch).toBe(2);
+    expect(result[1].name).toBeNull();
     expect(result[1].is_current).toBe(true);
   });
 
@@ -555,6 +559,132 @@ describe("server_api client", () => {
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining("/api/v1/admin/races"),
       expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("setStreamEpochRace sends PUT /api/v1/streams/{id}/epochs/{epoch}/race", async () => {
+    const { setStreamEpochRace } = await import("./api");
+    const payload = {
+      stream_id: "abc-123",
+      stream_epoch: 2,
+      race_id: "race-9",
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+
+    const result = await setStreamEpochRace("abc-123", 2, "race-9");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/streams/abc-123/epochs/2/race"),
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.race_id).toBe("race-9");
+    expect(result.stream_epoch).toBe(2);
+    expect(result.race_id).toBe("race-9");
+  });
+
+  it("getRaceStreamEpochMappings calls GET /api/v1/races/{id}/stream-epochs", async () => {
+    const { getRaceStreamEpochMappings } = await import("./api");
+    const payload = {
+      mappings: [
+        {
+          stream_id: "abc-123",
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          stream_epoch: 1,
+          race_id: "race-1",
+        },
+      ],
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+
+    const result = await getRaceStreamEpochMappings("race-1");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/races/race-1/stream-epochs"),
+      expect.any(Object),
+    );
+    expect(result.mappings).toHaveLength(1);
+    expect(result.mappings[0].stream_id).toBe("abc-123");
+    expect(result.mappings[0].stream_epoch).toBe(1);
+  });
+
+  it("setStreamEpochRace throws on 404", async () => {
+    const { setStreamEpochRace } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(404, { code: "NOT_FOUND", message: "stream not found" }),
+    );
+    await expect(setStreamEpochRace("bad-id", 7, "race-1")).rejects.toThrow();
+  });
+
+  it("setStreamEpochName sends PUT /api/v1/streams/{id}/epochs/{epoch}/name", async () => {
+    const { setStreamEpochName } = await import("./api");
+    const payload = {
+      stream_id: "abc-123",
+      stream_epoch: 2,
+      name: "Finals",
+    };
+    mockFetch.mockResolvedValue(makeResponse(200, payload));
+
+    const result = await setStreamEpochName("abc-123", 2, "Finals");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/streams/abc-123/epochs/2/name"),
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.name).toBe("Finals");
+    expect(result.stream_epoch).toBe(2);
+    expect(result.name).toBe("Finals");
+  });
+
+  it("setStreamEpochName allows null and throws on 404", async () => {
+    const { setStreamEpochName } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(404, { code: "NOT_FOUND", message: "stream not found" }),
+    );
+    await expect(setStreamEpochName("bad-id", 7, null)).rejects.toThrow();
+  });
+
+  it("activateNextStreamEpochForRace sends POST /api/v1/races/{id}/streams/{streamId}/epochs/activate-next", async () => {
+    const { activateNextStreamEpochForRace } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+
+    await expect(
+      activateNextStreamEpochForRace("race-1", "abc-123"),
+    ).resolves.toBeUndefined();
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/races/race-1/streams/abc-123/epochs/activate-next",
+      ),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("activateNextStreamEpochForRace URL-encodes race and stream IDs", async () => {
+    const { activateNextStreamEpochForRace } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+
+    await activateNextStreamEpochForRace("race/1", "abc/123");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/v1/races/race%2F1/streams/abc%2F123/epochs/activate-next",
+      ),
+      expect.objectContaining({ method: "POST" }),
     );
   });
 });

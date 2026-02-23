@@ -11,12 +11,15 @@ export interface Profile {
 }
 
 export interface StreamEntry {
+  stream_id?: string;
   forwarder_id: string;
   reader_ip: string;
   subscribed: boolean;
   local_port: number | null;
   online?: boolean;
   display_alias?: string;
+  stream_epoch?: number;
+  current_epoch_name?: string | null;
   reads_total?: number;
   reads_epoch?: number;
 }
@@ -56,6 +59,60 @@ export interface LogsResponse {
   entries: string[];
 }
 
+export interface StreamRef {
+  forwarder_id: string;
+  reader_ip: string;
+}
+
+export type EpochScope = "all" | "current";
+
+export type ReplayPolicy = "resume" | "live_only" | "targeted";
+
+export type ReceiverSelection =
+  | {
+      mode: "manual";
+      streams: StreamRef[];
+    }
+  | {
+      mode: "race";
+      race_id: string;
+      epoch_scope: EpochScope;
+    };
+
+export interface ReplayTarget {
+  forwarder_id: string;
+  reader_ip: string;
+  stream_epoch: number;
+  from_seq?: number;
+}
+
+export interface ReceiverSetSelection {
+  selection: ReceiverSelection;
+  replay_policy: ReplayPolicy;
+  replay_targets?: ReplayTarget[];
+}
+
+export interface RaceEntry {
+  race_id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface RacesResponse {
+  races: RaceEntry[];
+}
+
+export interface ReplayTargetEpochOption {
+  stream_epoch: number;
+  name: string | null;
+  first_seen_at: string | null;
+  race_names: string[];
+}
+
+export interface ReplayTargetEpochsResponse {
+  epochs: ReplayTargetEpochOption[];
+}
+
 export async function getProfile(): Promise<Profile> {
   return apiFetch<Profile>("/api/v1/profile");
 }
@@ -86,6 +143,45 @@ export async function getStatus(): Promise<StatusResponse> {
 
 export async function getLogs(): Promise<LogsResponse> {
   return apiFetch<LogsResponse>("/api/v1/logs");
+}
+
+export async function getSelection(): Promise<ReceiverSetSelection> {
+  return apiFetch<ReceiverSetSelection>("/api/v1/selection");
+}
+
+export async function putSelection(
+  selection: ReceiverSetSelection,
+): Promise<void> {
+  await apiFetch("/api/v1/selection", {
+    method: "PUT",
+    body: JSON.stringify(selection),
+  });
+}
+
+export async function getRaces(): Promise<RacesResponse> {
+  return apiFetch<RacesResponse>("/api/v1/races");
+}
+
+export async function getReplayTargetEpochs(
+  stream: StreamRef,
+): Promise<ReplayTargetEpochsResponse> {
+  const params = new URLSearchParams({
+    forwarder_id: stream.forwarder_id,
+    reader_ip: stream.reader_ip,
+  });
+  return apiFetch<ReplayTargetEpochsResponse>(
+    `/api/v1/replay-targets/epochs?${params.toString()}`,
+  );
+}
+
+export async function resetStreamCursor(stream: StreamRef): Promise<void> {
+  await apiFetch("/api/v1/admin/cursors/reset", {
+    method: "POST",
+    headers: {
+      "x-rt-receiver-admin-intent": "reset-stream-cursor",
+    },
+    body: JSON.stringify(stream),
+  });
 }
 
 export async function connect(): Promise<void> {

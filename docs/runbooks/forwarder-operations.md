@@ -207,6 +207,21 @@ sudo systemctl start rt-forwarder
 An epoch reset is used when a race-epoch boundary occurs (e.g. chip IDs
 from a previous event must be excluded from a new epoch).
 
+### Current epoch name controls (UI)
+
+Forwarder UI supports setting and clearing the current epoch name for the
+active stream context.
+
+Operator procedure:
+1. Open the stream in the Forwarder UI.
+2. In the active stream context, set `Current epoch name` and click `Save`.
+3. To remove it, click `Clear`.
+
+Behavior:
+- This updates epoch labeling for operators and receiver UI visibility.
+- This does not reset sequence numbers.
+- This does not increment `stream epoch`.
+
 ### Triggering an epoch reset
 
 The server operator triggers the reset via the server HTTP API:
@@ -232,7 +247,7 @@ returns HTTP 409. Reconnect the forwarder and retry.
 
 ```bash
 # Check the stream epoch in the server API.
-curl https://timing.example.com/api/v1/streams | jq '.streams[] | {forwarder_id, reader_ip, stream_epoch}'
+curl https://timing.example.com/api/v1/streams | jq '.streams[] | {forwarder_id, reader_ip, stream_epoch, current_epoch_name}'
 ```
 
 ---

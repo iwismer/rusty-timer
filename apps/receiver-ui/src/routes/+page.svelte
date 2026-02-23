@@ -12,18 +12,32 @@
     AlertBanner,
   } from "@rusty-timer/shared-ui";
   import type {
+    EpochScope,
+    RaceEntry,
+    ReceiverSelection,
+    ReplayPolicy,
     Profile,
     StreamCountUpdate,
     StatusResponse,
     StreamsResponse,
     LogsResponse,
+    ReplayTargetEpochOption,
   } from "$lib/api";
+  type TargetedRowDraft = {
+    streamKey: string;
+    streamEpoch: string;
+  };
+  type TargetedRowErrors = {
+    streamKey?: string;
+    streamEpoch?: string;
+  };
 
   let profile = $state<Profile | null>(null);
   let status = $state<StatusResponse | null>(null);
   let streams = $state<StreamsResponse | null>(null);
   let logs = $state<LogsResponse | null>(null);
   let error = $state<string | null>(null);
+  let epochLoadError = $state<string | null>(null);
 
   // Edit state
   let editServerUrl = $state("");
@@ -40,18 +54,177 @@
   let portOverrides = $state<Record<string, string | number | null>>({});
   let subscriptionsBusy = $state(false);
   let activeSubscriptionKey = $state<string | null>(null);
+  let races = $state<RaceEntry[]>([]);
+  let selectionMode = $state<ReceiverSelection["mode"]>("manual");
+  let selectedStreams = $state<{ forwarder_id: string; reader_ip: string }[]>(
+    [],
+  );
+  let raceIdDraft = $state("");
+  let epochScopeDraft = $state<EpochScope>("current");
+  let replayPolicyDraft = $state<ReplayPolicy>("resume");
+  let targetedRows = $state<TargetedRowDraft[]>([
+    { streamKey: "", streamEpoch: "" },
+  ]);
+  let targetedEpochOptionsByStream = $state<
+    Record<string, ReplayTargetEpochOption[]>
+  >({});
+  let targetedRowErrors = $state<Record<number, TargetedRowErrors>>({});
+  let selectionBusy = $state(false);
+  let selectionApplyQueued = $state(false);
+  let loadAllInFlight = false;
+  let loadAllQueued = false;
+
+  function normalizeReplayPolicy(replayPolicy: ReplayPolicy): ReplayPolicy {
+    if (replayPolicy === "live_only") {
+      return "live_only";
+    }
+    if (replayPolicy === "targeted") {
+      return "targeted";
+    }
+    return "resume";
+  }
+
+  function rowFromReplayTarget(target: api.ReplayTarget): TargetedRowDraft {
+    return {
+      streamKey: streamKey(target.forwarder_id, target.reader_ip),
+      streamEpoch: String(target.stream_epoch),
+    };
+  }
+
+  function parseStreamKey(value: string): api.StreamRef | null {
+    const separator = value.indexOf("/");
+    if (separator <= 0 || separator === value.length - 1) {
+      return null;
+    }
+    const forwarder_id = value.slice(0, separator).trim();
+    const reader_ip = value.slice(separator + 1).trim();
+    if (!forwarder_id || !reader_ip) {
+      return null;
+    }
+    return { forwarder_id, reader_ip };
+  }
+
+  function parseNonNegativeInt(raw: string): number | null {
+    const trimmed = raw.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function validateTargetedRows(): {
+    replayTargets: api.ReplayTarget[];
+    errors: Record<number, TargetedRowErrors>;
+  } {
+    const replayTargets: api.ReplayTarget[] = [];
+    const errors: Record<number, TargetedRowErrors> = {};
+
+    targetedRows.forEach((row, index) => {
+      const rowErrors: TargetedRowErrors = {};
+      const parsedStream = parseStreamKey(row.streamKey);
+      if (!parsedStream) {
+        rowErrors.streamKey = "Select a stream.";
+      }
+
+      const epoch = parseNonNegativeInt(row.streamEpoch);
+      if (epoch === null) {
+        rowErrors.streamEpoch = row.streamEpoch.trim()
+          ? "Stream epoch must be a non-negative integer."
+          : "Stream epoch is required.";
+      }
+
+      if (rowErrors.streamKey || rowErrors.streamEpoch) {
+        errors[index] = rowErrors;
+        return;
+      }
+
+      replayTargets.push({
+        forwarder_id: parsedStream!.forwarder_id,
+        reader_ip: parsedStream!.reader_ip,
+        stream_epoch: epoch!,
+      });
+    });
+
+    return { replayTargets, errors };
+  }
 
   function streamKey(forwarder_id: string, reader_ip: string): string {
     return `${forwarder_id}/${reader_ip}`;
   }
 
-  function applyStreamCountUpdates(updates: StreamCountUpdate[]) {
-    if (!streams || updates.length === 0) {
+  async function ensureTargetedEpochOptionsForStream(
+    key: string,
+  ): Promise<void> {
+    if (!key || targetedEpochOptionsByStream[key] !== undefined) {
       return;
     }
+    const parsed = parseStreamKey(key);
+    if (!parsed) {
+      return;
+    }
+    try {
+      epochLoadError = null;
+      const response = await api.getReplayTargetEpochs(parsed);
+      targetedEpochOptionsByStream = {
+        ...targetedEpochOptionsByStream,
+        [key]: response.epochs,
+      };
+    } catch (e) {
+      // Do not cache transient failures as empty options; allow in-session retry.
+      epochLoadError = `Failed to load epoch options: ${String(e)}`;
+    }
+  }
 
+  function epochFallbackLabel(option: ReplayTargetEpochOption): string {
+    if (option.name && option.name.trim().length > 0) {
+      return option.name.trim();
+    }
+    if (option.first_seen_at) {
+      const firstSeen = new Date(option.first_seen_at);
+      if (!Number.isNaN(firstSeen.getTime())) {
+        return `Epoch ${option.stream_epoch} (${firstSeen.toLocaleString()})`;
+      }
+    }
+    return `Epoch ${option.stream_epoch}`;
+  }
+
+  function targetedEpochOptionLabel(option: ReplayTargetEpochOption): string {
+    const base = epochFallbackLabel(option);
+    if (option.race_names.length === 0) {
+      return base;
+    }
+    return `${base} - Race: ${option.race_names.join(", ")}`;
+  }
+
+  function targetedRowEpochOptions(
+    row: TargetedRowDraft,
+  ): ReplayTargetEpochOption[] {
+    if (!row.streamKey) {
+      return [];
+    }
+    return targetedEpochOptionsByStream[row.streamKey] ?? [];
+  }
+
+  function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
+    if (updates.length === 0) {
+      return false;
+    }
+    if (!streams) {
+      return true;
+    }
+
+    const knownKeys = new Set(
+      streams.streams.map((s) => streamKey(s.forwarder_id, s.reader_ip)),
+    );
     const updatesByKey = new Map(
       updates.map((u) => [streamKey(u.forwarder_id, u.reader_ip), u]),
+    );
+    const hasUnknownStream = updates.some(
+      (u) => !knownKeys.has(streamKey(u.forwarder_id, u.reader_ip)),
     );
 
     streams = {
@@ -70,6 +243,8 @@
         };
       }),
     };
+
+    return hasUnknownStream;
   }
 
   async function toggleSubscription(
@@ -115,12 +290,50 @@
   }
 
   async function loadAll() {
+    if (loadAllInFlight) {
+      loadAllQueued = true;
+      return;
+    }
+
+    loadAllInFlight = true;
     try {
-      [status, streams, logs] = await Promise.all([
-        api.getStatus(),
-        api.getStreams(),
-        api.getLogs(),
-      ]);
+      const [nextStatus, nextStreams, nextLogs, nextSelection, nextRaces] =
+        await Promise.all([
+          api.getStatus(),
+          api.getStreams(),
+          api.getLogs(),
+          api.getSelection().catch(() => null),
+          api.getRaces().catch(() => ({ races: [] })),
+        ]);
+      status = nextStatus;
+      streams = nextStreams;
+      logs = nextLogs;
+      races = nextRaces.races;
+      if (nextSelection) {
+        selectionMode = nextSelection.selection.mode;
+        replayPolicyDraft = normalizeReplayPolicy(nextSelection.replay_policy);
+        targetedRows =
+          nextSelection.replay_policy === "targeted" &&
+          nextSelection.replay_targets &&
+          nextSelection.replay_targets.length > 0
+            ? nextSelection.replay_targets.map(rowFromReplayTarget)
+            : [{ streamKey: "", streamEpoch: "" }];
+        for (const row of targetedRows) {
+          if (row.streamKey) {
+            void ensureTargetedEpochOptionsForStream(row.streamKey);
+          }
+        }
+        targetedRowErrors = {};
+        if (nextSelection.selection.mode === "manual") {
+          selectedStreams = nextSelection.selection.streams;
+          raceIdDraft = "";
+          epochScopeDraft = "current";
+        } else {
+          raceIdDraft = nextSelection.selection.race_id;
+          epochScopeDraft = nextSelection.selection.epoch_scope;
+          selectedStreams = [];
+        }
+      }
       const p = await api.getProfile().catch(() => null);
       if (p) {
         profile = p;
@@ -141,7 +354,148 @@
       }
     } catch (e) {
       error = String(e);
+    } finally {
+      loadAllInFlight = false;
+      if (loadAllQueued) {
+        loadAllQueued = false;
+        void loadAll();
+      }
     }
+  }
+
+  function selectionPayload(): api.ReceiverSetSelection {
+    const replay_targets =
+      replayPolicyDraft === "targeted"
+        ? validateTargetedRows().replayTargets
+        : undefined;
+
+    if (selectionMode === "manual") {
+      return {
+        selection: {
+          mode: "manual",
+          streams: selectedStreams,
+        },
+        replay_policy: replayPolicyDraft,
+        ...(replayPolicyDraft === "targeted" ? { replay_targets } : {}),
+      };
+    }
+
+    return {
+      selection: {
+        mode: "race",
+        race_id: raceIdDraft.trim(),
+        epoch_scope: epochScopeDraft,
+      },
+      replay_policy: replayPolicyDraft,
+      ...(replayPolicyDraft === "targeted" ? { replay_targets } : {}),
+    };
+  }
+
+  async function applySelection(): Promise<void> {
+    selectionApplyQueued = true;
+    if (selectionBusy) return;
+
+    selectionBusy = true;
+    error = null;
+    while (selectionApplyQueued) {
+      selectionApplyQueued = false;
+      if (replayPolicyDraft === "targeted") {
+        const validation = validateTargetedRows();
+        targetedRowErrors = validation.errors;
+        if (
+          Object.keys(validation.errors).length > 0 ||
+          validation.replayTargets.length === 0
+        ) {
+          if (validation.replayTargets.length === 0) {
+            targetedRowErrors = {
+              ...(Object.keys(validation.errors).length > 0
+                ? validation.errors
+                : { 0: {} }),
+              0: {
+                ...(validation.errors[0] ?? {}),
+                streamKey:
+                  validation.errors[0]?.streamKey ??
+                  "Add at least one valid replay target.",
+              },
+            };
+          }
+          continue;
+        }
+      } else {
+        targetedRowErrors = {};
+      }
+      try {
+        await api.putSelection(selectionPayload());
+        error = null;
+      } catch (e) {
+        error = String(e);
+        if (!selectionApplyQueued) {
+          break;
+        }
+      }
+    }
+
+    selectionBusy = false;
+  }
+
+  function handleSelectionModeChange(event: Event): void {
+    const nextMode = (event.currentTarget as HTMLSelectElement).value as
+      | "manual"
+      | "race";
+    selectionMode = nextMode;
+    void applySelection();
+  }
+
+  function handleRaceIdChange(event: Event): void {
+    raceIdDraft = (event.currentTarget as HTMLSelectElement).value;
+    if (selectionMode === "race") {
+      void applySelection();
+    }
+  }
+
+  function handleEpochScopeChange(event: Event): void {
+    epochScopeDraft = (event.currentTarget as HTMLSelectElement)
+      .value as EpochScope;
+    void applySelection();
+  }
+
+  function handleReplayPolicyChange(event: Event): void {
+    replayPolicyDraft = (event.currentTarget as HTMLSelectElement)
+      .value as ReplayPolicy;
+    void applySelection();
+  }
+
+  function handleTargetedStreamChange(index: number, event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    targetedRows = targetedRows.map((row, rowIndex) =>
+      rowIndex === index ? { ...row, streamKey: value, streamEpoch: "" } : row,
+    );
+    if (value) {
+      void ensureTargetedEpochOptionsForStream(value);
+    }
+    void applySelection();
+  }
+
+  function handleTargetedEpochChange(index: number, event: Event): void {
+    const value = (event.currentTarget as HTMLSelectElement).value.trim();
+    targetedRows = targetedRows.map((row, rowIndex) =>
+      rowIndex === index ? { ...row, streamEpoch: value } : row,
+    );
+    void applySelection();
+  }
+
+  function addTargetedRow(): void {
+    targetedRows = [...targetedRows, { streamKey: "", streamEpoch: "" }];
+    targetedRowErrors = {};
+  }
+
+  function removeTargetedRow(index: number): void {
+    targetedRows = targetedRows.filter((_, rowIndex) => rowIndex !== index);
+    if (targetedRows.length === 0) {
+      targetedRows = [{ streamKey: "", streamEpoch: "" }];
+    }
+    targetedRowErrors = {};
+    void applySelection();
   }
 
   async function saveProfile() {
@@ -247,6 +601,7 @@
   }
 
   onMount(() => {
+    void loadAll();
     initSSE({
       onStatusChanged: (s) => {
         status = s;
@@ -280,7 +635,10 @@
         }
       },
       onStreamCountsUpdated: (updates) => {
-        applyStreamCountUpdates(updates);
+        const needsResync = applyStreamCountUpdates(updates);
+        if (needsResync) {
+          void loadAll();
+        }
       },
     });
   });
@@ -443,6 +801,177 @@
     </Card>
   </div>
 
+  <div class="mb-6">
+    <Card title="Selection">
+      <section data-testid="selection-section">
+        <div class="grid gap-3">
+          <label class="block text-xs font-medium text-text-muted">
+            Mode
+            <select
+              data-testid="selection-mode-select"
+              class="{inputClass} mt-1"
+              bind:value={selectionMode}
+              onchange={handleSelectionModeChange}
+              disabled={selectionBusy}
+            >
+              <option value="manual">Manual</option>
+              <option value="race">Race</option>
+            </select>
+          </label>
+
+          {#if selectionMode === "race"}
+            <label class="block text-xs font-medium text-text-muted">
+              Race ID
+              <select
+                data-testid="race-id-select"
+                class="{inputClass} mt-1"
+                bind:value={raceIdDraft}
+                onchange={handleRaceIdChange}
+                disabled={selectionBusy}
+              >
+                <option value="">Select race...</option>
+                {#each races as race}
+                  <option value={race.race_id}>{race.name}</option>
+                {/each}
+              </select>
+            </label>
+
+            <label class="block text-xs font-medium text-text-muted">
+              Epoch Scope
+              <select
+                data-testid="epoch-scope-select"
+                class="{inputClass} mt-1"
+                bind:value={epochScopeDraft}
+                onchange={handleEpochScopeChange}
+                disabled={selectionBusy}
+              >
+                <option value="current">Current</option>
+                <option value="all">All</option>
+              </select>
+              <p class="text-xs text-text-muted mt-1 m-0">
+                Current: replay only the current epoch. All: replay all epochs
+                available for the race.
+              </p>
+            </label>
+          {/if}
+
+          <label class="block text-xs font-medium text-text-muted">
+            Replay Policy
+            <select
+              data-testid="replay-policy-select"
+              class="{inputClass} mt-1"
+              bind:value={replayPolicyDraft}
+              onchange={handleReplayPolicyChange}
+              disabled={selectionBusy}
+            >
+              <option value="resume">Resume</option>
+              <option value="live_only">Live only</option>
+              <option value="targeted">Targeted replay</option>
+            </select>
+            <p class="text-xs text-text-muted mt-1 m-0">
+              Resume: continue from the last acknowledged position. Live only:
+              skip replay and receive new reads only. Targeted replay: replay
+              full selected epochs per stream.
+            </p>
+          </label>
+
+          {#if replayPolicyDraft === "targeted"}
+            <div class="border border-border rounded-md p-3 bg-surface-0">
+              {#if epochLoadError}
+                <div class="mb-2">
+                  <AlertBanner variant="err" message={epochLoadError} />
+                </div>
+              {/if}
+              <div class="flex items-center justify-between mb-2">
+                <p class="text-xs font-semibold text-text-primary m-0">
+                  Replay Targets
+                </p>
+                <button
+                  data-testid="add-targeted-row-btn"
+                  class={btnSecondary}
+                  onclick={addTargetedRow}
+                  disabled={selectionBusy}
+                >
+                  Add Row
+                </button>
+              </div>
+
+              <div class="grid gap-2">
+                {#each targetedRows as row, index}
+                  <div
+                    class="grid gap-2 md:grid-cols-[2fr_2fr_auto] items-start"
+                  >
+                    <select
+                      data-testid={"targeted-row-stream-" + index}
+                      class={inputClass}
+                      value={row.streamKey}
+                      onchange={(event) =>
+                        handleTargetedStreamChange(index, event)}
+                      disabled={selectionBusy}
+                    >
+                      <option value="">Select stream...</option>
+                      {#each streams?.streams ?? [] as stream}
+                        <option
+                          value={streamKey(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                          )}
+                        >
+                          {stream.display_alias ??
+                            `${stream.forwarder_id} / ${stream.reader_ip}`}
+                        </option>
+                      {/each}
+                    </select>
+
+                    <select
+                      data-testid={"targeted-row-epoch-" + index}
+                      class={inputClass}
+                      value={row.streamEpoch}
+                      onchange={(event) =>
+                        handleTargetedEpochChange(index, event)}
+                      disabled={selectionBusy || !row.streamKey}
+                    >
+                      <option value="">Select epoch...</option>
+                      {#each targetedRowEpochOptions(row) as option}
+                        <option value={String(option.stream_epoch)}>
+                          {targetedEpochOptionLabel(option)}
+                        </option>
+                      {/each}
+                    </select>
+
+                    <button
+                      data-testid={"remove-targeted-row-" + index}
+                      class={btnSecondary}
+                      onclick={() => removeTargetedRow(index)}
+                      disabled={selectionBusy}
+                    >
+                      Remove
+                    </button>
+
+                    {#if targetedRowErrors[index]}
+                      <p
+                        data-testid={"targeted-row-error-" + index}
+                        class="md:col-span-4 text-xs text-status-err m-0"
+                      >
+                        {#if targetedRowErrors[index].streamKey}
+                          {targetedRowErrors[index].streamKey}
+                        {/if}
+                        {#if targetedRowErrors[index].streamEpoch}
+                          {targetedRowErrors[index].streamKey ? " " : ""}
+                          {targetedRowErrors[index].streamEpoch}
+                        {/if}
+                      </p>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
+      </section>
+    </Card>
+  </div>
+
   <!-- Streams Section -->
   <div class="mb-6">
     <Card>
@@ -495,6 +1024,12 @@
                   <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                     {stream.forwarder_id} / {stream.reader_ip}
                   </p>
+                  {#if stream.stream_epoch !== undefined}
+                    <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
+                      epoch: {stream.stream_epoch}{#if stream.current_epoch_name && stream.current_epoch_name.trim().length > 0}
+                        {" "}({stream.current_epoch_name.trim()}){/if}
+                    </p>
+                  {/if}
                   {#if stream.reads_total !== undefined}
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                       reads: {stream.reads_total} total{#if stream.reads_epoch !== undefined},

@@ -109,6 +109,142 @@ async fn test_receiver_resume_from_cursor() {
     }
 }
 
+#[tokio::test]
+async fn test_receiver_v1_resume_uses_hello_cursor_even_if_persisted_cursor_is_newer() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state, None))
+            .await
+            .unwrap();
+    });
+
+    insert_token(
+        &pool,
+        "fwd-legacy-resume-cursor",
+        "forwarder",
+        b"fwd-legacy-resume-cursor-token",
+    )
+    .await;
+    insert_token(
+        &pool,
+        "rcv-legacy-resume-cursor",
+        "receiver",
+        b"rcv-legacy-resume-cursor-token",
+    )
+    .await;
+
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-legacy-resume-cursor-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-legacy-resume-cursor".to_owned(),
+        reader_ips: vec!["10.22.0.1:10000".to_owned()],
+        display_name: None,
+    }))
+    .await
+    .unwrap();
+    let fwd_session = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("{:?}", other),
+    };
+
+    for seq in 1..=3u64 {
+        fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+            session_id: fwd_session.clone(),
+            batch_id: format!("legacy-resume-{}", seq),
+            events: vec![ReadEvent {
+                forwarder_id: "fwd-legacy-resume-cursor".to_owned(),
+                reader_ip: "10.22.0.1:10000".to_owned(),
+                stream_epoch: 1,
+                seq,
+                reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
+                raw_read_line: format!("LEGACY_RESUME_{}", seq),
+                read_type: "RAW".to_owned(),
+            }],
+        }))
+        .await
+        .unwrap();
+        fwd.recv_message().await.unwrap();
+    }
+
+    let stream_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+    )
+    .bind("fwd-legacy-resume-cursor")
+    .bind("10.22.0.1:10000")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    server::repo::receiver_cursors::upsert_cursor(
+        &pool,
+        "rcv-legacy-resume-cursor",
+        stream_id,
+        1,
+        3,
+    )
+    .await
+    .unwrap();
+
+    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-legacy-resume-cursor-token")
+        .await
+        .unwrap();
+    rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
+        receiver_id: "rcv-legacy-resume-cursor".to_owned(),
+        resume: vec![ResumeCursor {
+            forwarder_id: "fwd-legacy-resume-cursor".to_owned(),
+            reader_ip: "10.22.0.1:10000".to_owned(),
+            stream_epoch: 1,
+            last_seq: 1,
+        }],
+    }))
+    .await
+    .unwrap();
+    match rcv.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(_) => {}
+        other => panic!("expected Heartbeat, got {:?}", other),
+    }
+
+    let mut replayed: Vec<u64> = Vec::new();
+    let mut last_seen_seq = 1u64;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && replayed.len() < 2 {
+        match tokio::time::timeout(Duration::from_millis(300), rcv.recv_message()).await {
+            Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+                for event in batch.events {
+                    assert!(
+                        event.seq > last_seen_seq,
+                        "replayed events must be strictly increasing; got seq={} after seq={}",
+                        event.seq,
+                        last_seen_seq
+                    );
+                    last_seen_seq = event.seq;
+                    replayed.push(event.seq);
+                }
+            }
+            Ok(Ok(WsMessage::Heartbeat(_))) => {}
+            Ok(Ok(other)) => panic!("expected replay batch, got {:?}", other),
+            Ok(Err(e)) => panic!("{}", e),
+            Err(_) => {}
+        }
+    }
+
+    assert_eq!(
+        replayed,
+        vec![2, 3],
+        "v1 resume must replay from ReceiverHello.resume in replay order, not persisted cursor state"
+    );
+}
+
 /// Test that a receiver with no resume cursor gets all events.
 #[tokio::test]
 async fn test_receiver_no_cursor_gets_all() {

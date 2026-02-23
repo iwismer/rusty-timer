@@ -1,7 +1,7 @@
 #![cfg(feature = "embed-ui")]
 
 use axum::http::StatusCode;
-use receiver::control_api::{AppState, build_router};
+use receiver::control_api::{build_router, AppState};
 use std::sync::Arc;
 
 fn make_state() -> Arc<AppState> {

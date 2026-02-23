@@ -10,7 +10,10 @@
 CREATE TABLE IF NOT EXISTS profile (
     server_url  TEXT NOT NULL,
     token       TEXT NOT NULL,
-    update_mode TEXT NOT NULL DEFAULT 'check-and-download'
+    update_mode TEXT NOT NULL DEFAULT 'check-and-download',
+    selection_json TEXT NOT NULL DEFAULT '{"mode":"manual","streams":[]}',
+    replay_policy TEXT NOT NULL DEFAULT 'resume',
+    replay_targets_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (

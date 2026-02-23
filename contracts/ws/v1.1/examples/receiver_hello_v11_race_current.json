@@ -1,0 +1,10 @@
+{
+  "kind": "receiver_hello_v11",
+  "receiver_id": "rcv-1",
+  "selection": {
+    "mode": "race",
+    "race_id": "11111111-1111-1111-1111-111111111111",
+    "epoch_scope": "current"
+  },
+  "replay_policy": "resume"
+}

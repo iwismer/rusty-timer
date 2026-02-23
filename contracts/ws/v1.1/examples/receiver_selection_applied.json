@@ -1,0 +1,15 @@
+{
+  "kind": "receiver_selection_applied",
+  "selection": {
+    "mode": "manual",
+    "streams": [
+      {
+        "forwarder_id": "fwd-1",
+        "reader_ip": "10.0.0.10"
+      }
+    ]
+  },
+  "replay_policy": "live_only",
+  "resolved_target_count": 1,
+  "warnings": []
+}

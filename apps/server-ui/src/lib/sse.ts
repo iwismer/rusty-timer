@@ -13,11 +13,22 @@ import { getForwarderRaces, getLogs, getRaces, getStreams } from "./api";
 import type { StreamEntry, StreamMetrics } from "./api";
 import { mergeLogsWithPendingLive } from "./logs-merge";
 
+type StreamUpdatedEvent = {
+  stream_id: string;
+  stream_epoch?: number;
+  online?: boolean;
+  display_alias?: string | null;
+  forwarder_display_name?: string | null;
+};
+
+type StreamUpdatedListener = (update: StreamUpdatedEvent) => void;
+
 let eventSource: EventSource | null = null;
 let resyncInFlight = false;
 let resyncQueued = false;
 let logsResyncInFlight = false;
 let pendingLiveLogs: string[] = [];
+const streamUpdatedListeners = new Set<StreamUpdatedListener>();
 
 function replaceForwarderAssignments(
   assignments: Array<{ forwarder_id: string; race_id: string | null }>,
@@ -40,9 +51,12 @@ export function initSSE(): void {
   });
 
   eventSource.addEventListener("stream_updated", (e: MessageEvent) => {
-    const update = JSON.parse(e.data);
+    const update: StreamUpdatedEvent = JSON.parse(e.data);
     const { stream_id, ...fields } = update;
     patchStream(stream_id, fields);
+    for (const listener of streamUpdatedListeners) {
+      listener(update);
+    }
   });
 
   eventSource.addEventListener("metrics_updated", (e: MessageEvent) => {
@@ -91,6 +105,13 @@ export function initSSE(): void {
   // When no forwarders are connected, the SSE response body has no data
   // until the first keep-alive (15 s), which can delay the onopen callback.
   void resync();
+}
+
+export function onStreamUpdated(listener: StreamUpdatedListener): () => void {
+  streamUpdatedListeners.add(listener);
+  return () => {
+    streamUpdatedListeners.delete(listener);
+  };
 }
 
 async function resync(): Promise<void> {

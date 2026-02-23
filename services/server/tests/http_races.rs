@@ -1,12 +1,16 @@
 //! Integration tests for race management HTTP API.
 use std::net::SocketAddr;
+use std::time::Duration;
 
+use rt_protocol::EpochScope;
 use serde_json::Value;
+use server::state::{ReceiverSelectionSnapshot, ReceiverSessionProtocol};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
-async fn make_server(pool: sqlx::PgPool) -> SocketAddr {
+async fn make_server(pool: sqlx::PgPool) -> (SocketAddr, server::AppState) {
     let app_state = server::AppState::new(pool);
+    let app_state_for_test = app_state.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -14,7 +18,7 @@ async fn make_server(pool: sqlx::PgPool) -> SocketAddr {
             .await
             .unwrap();
     });
-    addr
+    (addr, app_state_for_test)
 }
 
 fn multipart_body(boundary: &str, filename: &str, bytes: &[u8]) -> Vec<u8> {
@@ -64,6 +68,32 @@ async fn create_race(client: &reqwest::Client, addr: SocketAddr, name: &str) -> 
     body["race_id"].as_str().unwrap().to_owned()
 }
 
+async fn wait_for_delete_status(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    race_id: &str,
+    expected: reqwest::StatusCode,
+    timeout: Duration,
+) -> reqwest::Response {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let response = client
+            .delete(format!("http://{addr}/api/v1/races/{race_id}"))
+            .send()
+            .await
+            .unwrap();
+        if response.status() == expected {
+            return response;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "DELETE /api/v1/races/{race_id} did not return {expected}; last status was {}",
+            response.status()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn create_race_rejects_blank_name() {
     let container = Postgres::default().start().await.unwrap();
@@ -71,7 +101,7 @@ async fn create_race_rejects_blank_name() {
     let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = server::db::create_pool(&db_url).await;
     server::db::run_migrations(&pool).await;
-    let addr = make_server(pool).await;
+    let (addr, _state) = make_server(pool).await;
 
     let client = reqwest::Client::new();
     let response = client
@@ -91,7 +121,7 @@ async fn invalid_participant_upload_is_rejected_without_wiping_existing_data() {
     let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = server::db::create_pool(&db_url).await;
     server::db::run_migrations(&pool).await;
-    let addr = make_server(pool).await;
+    let (addr, _state) = make_server(pool).await;
 
     let client = reqwest::Client::new();
     let race_id = create_race(&client, addr, "Race A").await;
@@ -148,7 +178,7 @@ async fn invalid_chip_upload_is_rejected_without_wiping_existing_data() {
     let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = server::db::create_pool(&db_url).await;
     server::db::run_migrations(&pool).await;
-    let addr = make_server(pool).await;
+    let (addr, _state) = make_server(pool).await;
 
     let client = reqwest::Client::new();
     let race_id = create_race(&client, addr, "Race B").await;
@@ -219,5 +249,133 @@ async fn invalid_chip_upload_is_rejected_without_wiping_existing_data() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn delete_race_returns_conflict_while_actively_selected_by_receiver() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let (addr, state) = make_server(pool).await;
+
+    let client = reqwest::Client::new();
+    let race_id = create_race(&client, addr, "Delete Guard Race").await;
+
+    state
+        .register_receiver_session(
+            "session-delete-guard",
+            "receiver-a",
+            ReceiverSessionProtocol::V11,
+            ReceiverSelectionSnapshot::Race {
+                race_id: race_id.clone(),
+                epoch_scope: EpochScope::Current,
+            },
+        )
+        .await;
+
+    let response = client
+        .delete(format!("http://{addr}/api/v1/races/{race_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn delete_race_returns_conflict_for_equivalent_noncanonical_uuid_selection() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let (addr, state) = make_server(pool).await;
+
+    let client = reqwest::Client::new();
+    let race_id = create_race(&client, addr, "Delete Guard Race Noncanonical").await;
+
+    state
+        .register_receiver_session(
+            "session-delete-guard-noncanonical",
+            "receiver-a",
+            ReceiverSessionProtocol::V11,
+            ReceiverSelectionSnapshot::Race {
+                race_id: race_id.to_uppercase(),
+                epoch_scope: EpochScope::Current,
+            },
+        )
+        .await;
+
+    let response = client
+        .delete(format!("http://{addr}/api/v1/races/{race_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn delete_race_succeeds_after_receiver_disconnects_and_keeps_unrelated_behavior() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let (addr, state) = make_server(pool).await;
+
+    let client = reqwest::Client::new();
+    let guarded_race_id = create_race(&client, addr, "Guarded Race").await;
+    let unrelated_race_id = create_race(&client, addr, "Unrelated Race").await;
+
+    state
+        .register_receiver_session(
+            "session-disconnect",
+            "receiver-b",
+            ReceiverSessionProtocol::V11,
+            ReceiverSelectionSnapshot::Race {
+                race_id: guarded_race_id.clone(),
+                epoch_scope: EpochScope::Current,
+            },
+        )
+        .await;
+
+    let blocked = client
+        .delete(format!("http://{addr}/api/v1/races/{guarded_race_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), reqwest::StatusCode::CONFLICT);
+
+    let unrelated_deleted = client
+        .delete(format!("http://{addr}/api/v1/races/{unrelated_race_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unrelated_deleted.status(), reqwest::StatusCode::NO_CONTENT);
+
+    state
+        .unregister_receiver_session("session-disconnect")
+        .await;
+
+    let deleted = wait_for_delete_status(
+        &client,
+        addr,
+        &guarded_race_id,
+        reqwest::StatusCode::NO_CONTENT,
+        Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(deleted.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let not_found_after_delete = client
+        .delete(format!("http://{addr}/api/v1/races/{guarded_race_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        not_found_after_delete.status(),
+        reqwest::StatusCode::NOT_FOUND
     );
 }

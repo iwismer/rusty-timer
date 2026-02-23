@@ -5,26 +5,37 @@
 //!   GET  /api/v1/profile        - read current profile
 //!   PUT  /api/v1/profile        - update profile
 //!   GET  /api/v1/streams        - list streams (merges server + local subs)
+//!   GET  /api/v1/subscriptions  - list subscription list
 //!   PUT  /api/v1/subscriptions  - replace subscription list
 //!   GET  /api/v1/status         - runtime status
 //!   GET  /api/v1/logs           - recent log entries
 //!   POST /api/v1/connect        - initiate WS connection (async, 202)
 //!   POST /api/v1/disconnect     - close WS connection (async, 202)
 //!   GET  /api/v1/events         - SSE stream of receiver UI events
+//!   POST /api/v1/admin/cursors/reset - reset one stream cursor
 
 use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
-use axum::routing::{get, post, put};
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse};
-use rt_protocol::StreamInfo;
+use axum::routing::{get, post};
+use axum::{
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json, Router,
+};
+use rt_protocol::{ReceiverSetSelection, ReplayPolicy};
+use rt_updater::workflow::{run_check, run_download, RealChecker, WorkflowState};
 use rt_updater::UpdateStatus;
-use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, broadcast, watch};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tracing::warn;
+
+const ADMIN_INTENT_HEADER: &str = "x-rt-receiver-admin-intent";
+const ADMIN_RESET_CURSOR_INTENT: &str = "reset-stream-cursor";
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -50,6 +61,7 @@ pub struct AppState {
     pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
+    connect_attempt: AtomicU64,
 }
 
 impl AppState {
@@ -71,8 +83,18 @@ impl AppState {
             staged_update_path: Arc::new(RwLock::new(None)),
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
+            connect_attempt: AtomicU64::new(0),
         });
         (state, shutdown_rx)
+    }
+
+    pub fn current_connect_attempt(&self) -> u64 {
+        self.connect_attempt.load(Ordering::SeqCst)
+    }
+
+    pub async fn request_connect(&self) {
+        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+        self.set_connection_state(ConnectionState::Connecting).await;
     }
 
     /// Update connection state, broadcast status change, and emit a log entry.
@@ -154,6 +176,8 @@ impl AppState {
                     local_port: port,
                     online: Some(si.online),
                     display_alias: si.display_alias.clone(),
+                    stream_epoch: Some(si.stream_epoch),
+                    current_epoch_name: si.current_epoch_name.clone(),
                     reads_total: counts.as_ref().map(|c| c.total),
                     reads_epoch: counts.as_ref().map(|c| c.epoch),
                 });
@@ -178,6 +202,8 @@ impl AppState {
                 local_port: port,
                 online: None,
                 display_alias: None,
+                stream_epoch: None,
+                current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
             });
@@ -218,6 +244,16 @@ fn default_update_mode() -> String {
     "check-and-download".to_owned()
 }
 
+fn default_selection_body() -> ReceiverSetSelection {
+    ReceiverSetSelection {
+        selection: rt_protocol::ReceiverSelection::Manual {
+            streams: Vec::new(),
+        },
+        replay_policy: ReplayPolicy::Resume,
+        replay_targets: None,
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
     pub server_url: String,
@@ -237,6 +273,12 @@ pub struct SubscriptionsBody {
     pub subscriptions: Vec<SubscriptionRequest>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CursorResetRequest {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StreamEntry {
     pub forwarder_id: String,
@@ -247,6 +289,10 @@ pub struct StreamEntry {
     pub online: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_epoch_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,6 +318,54 @@ pub struct LogsResponse {
     pub entries: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReplayTargetEpochsQuery {
+    forwarder_id: String,
+    reader_ip: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplayTargetEpochOption {
+    pub stream_epoch: i64,
+    pub name: Option<String>,
+    pub first_seen_at: Option<String>,
+    pub race_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplayTargetEpochsResponse {
+    pub epochs: Vec<ReplayTargetEpochOption>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamStreamEpochOption {
+    epoch: i64,
+    name: Option<String>,
+    first_event_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRacesResponse {
+    races: Vec<UpstreamRaceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceEntry {
+    race_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceEpochMappingsResponse {
+    mappings: Vec<UpstreamRaceEpochMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceEpochMapping {
+    stream_id: String,
+    stream_epoch: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Server stream fetching helpers
 // ---------------------------------------------------------------------------
@@ -279,7 +373,18 @@ pub struct LogsResponse {
 /// Response shape from the server's `GET /api/v1/streams`.
 #[derive(Debug, Deserialize)]
 struct ServerStreamsResponse {
-    streams: Vec<StreamInfo>,
+    streams: Vec<UpstreamStreamInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamStreamInfo {
+    stream_id: String,
+    forwarder_id: String,
+    reader_ip: String,
+    display_alias: Option<String>,
+    stream_epoch: u64,
+    online: bool,
+    current_epoch_name: Option<String>,
 }
 
 /// Normalize a server URL by prepending `ws://` if no scheme is present.
@@ -311,7 +416,7 @@ pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
 }
 
 /// Fetch available streams from the upstream server.
-async fn fetch_server_streams(ws_url: &str) -> Result<Vec<StreamInfo>, String> {
+async fn fetch_server_streams(ws_url: &str) -> Result<Vec<UpstreamStreamInfo>, String> {
     let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
     let url = format!("{base}/api/v1/streams");
 
@@ -352,6 +457,14 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         })
         .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no profile").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn get_selection(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db = state.db.lock().await;
+    match db.load_receiver_selection() {
+        Ok(selection) => Json(selection).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -401,8 +514,312 @@ async fn put_profile(
     }
 }
 
+async fn put_selection(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ReceiverSetSelection>,
+) -> impl IntoResponse {
+    if body.replay_policy == ReplayPolicy::Targeted
+        && body
+            .replay_targets
+            .as_ref()
+            .is_none_or(std::vec::Vec::is_empty)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "replay_targets must be provided when replay_policy is targeted",
+        )
+            .into_response();
+    }
+
+    if let rt_protocol::ReceiverSelection::Race { ref race_id, .. } = body.selection
+        && race_id.trim().is_empty()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "race_id must not be empty when mode is race",
+        )
+            .into_response();
+    }
+
+    let normalized = ReceiverSetSelection {
+        selection: body.selection,
+        replay_policy: body.replay_policy,
+        replay_targets: if body.replay_policy == ReplayPolicy::Targeted {
+            body.replay_targets
+        } else {
+            None
+        },
+    };
+
+    let db = state.db.lock().await;
+    match db.save_receiver_selection(&normalized) {
+        Ok(()) => {
+            drop(db);
+            let current_state = state.connection_state.read().await.clone();
+            if matches!(
+                current_state,
+                ConnectionState::Connected | ConnectionState::Connecting
+            ) {
+                state.request_connect().await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(crate::db::DbError::ProfileMissing) => {
+            let defaults = default_selection_body();
+            if normalized == defaults {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "no profile").into_response()
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(state.build_streams_response().await).into_response()
+}
+
+async fn get_races(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let profile = {
+        let db = state.db.lock().await;
+        match db.load_profile() {
+            Ok(Some(p)) => p,
+            Ok(None) => return (StatusCode::NOT_FOUND, "no profile").into_response(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    };
+
+    let Some(base) = http_base_url(&profile.server_url) else {
+        return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
+    };
+    let url = format!("{base}/api/v1/races");
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("HTTP client error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let response = match client.get(&url).bearer_auth(profile.token).send().await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => (status, Json(body)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("invalid JSON from upstream: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_replay_target_epochs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ReplayTargetEpochsQuery>,
+) -> impl IntoResponse {
+    let profile = {
+        let db = state.db.lock().await;
+        match db.load_profile() {
+            Ok(Some(p)) => p,
+            Ok(None) => return (StatusCode::NOT_FOUND, "no profile").into_response(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    };
+
+    let Some(base) = http_base_url(&profile.server_url) else {
+        return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("HTTP client error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let streams_url = format!("{base}/api/v1/streams");
+    let streams_response = match client
+        .get(&streams_url)
+        .bearer_auth(&profile.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+    if !streams_response.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream streams returned {}", streams_response.status()),
+        )
+            .into_response();
+    }
+    let upstream_streams = match streams_response.json::<ServerStreamsResponse>().await {
+        Ok(body) => body.streams,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("invalid streams JSON from upstream: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let Some(stream) = upstream_streams.iter().find(|stream| {
+        stream.forwarder_id == query.forwarder_id && stream.reader_ip == query.reader_ip
+    }) else {
+        return (StatusCode::NOT_FOUND, "stream not found").into_response();
+    };
+
+    let epochs_url = format!("{base}/api/v1/streams/{}/epochs", stream.stream_id);
+    let epochs_response = match client
+        .get(&epochs_url)
+        .bearer_auth(&profile.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+    if !epochs_response.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream epochs returned {}", epochs_response.status()),
+        )
+            .into_response();
+    }
+    let upstream_epochs = match epochs_response
+        .json::<Vec<UpstreamStreamEpochOption>>()
+        .await
+    {
+        Ok(body) => body,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("invalid epochs JSON from upstream: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let races_url = format!("{base}/api/v1/races");
+    let races_response = match client
+        .get(&races_url)
+        .bearer_auth(&profile.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+    };
+    if !races_response.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream races returned {}", races_response.status()),
+        )
+            .into_response();
+    }
+    let races = match races_response.json::<UpstreamRacesResponse>().await {
+        Ok(body) => body.races,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("invalid races JSON from upstream: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let race_mapping_fetches = races.iter().map(|race| {
+        let client = client.clone();
+        let base = base.clone();
+        let token = profile.token.clone();
+        let race_id = race.race_id.clone();
+        let race_name = race.name.clone();
+        async move {
+            let mappings_url = format!("{base}/api/v1/races/{race_id}/stream-epochs");
+            let mappings_response = match client.get(&mappings_url).bearer_auth(&token).send().await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err((StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")));
+                }
+            };
+            if !mappings_response.status().is_success() {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "upstream stream-epochs for race {} returned {}",
+                        race_id,
+                        mappings_response.status()
+                    ),
+                ));
+            }
+            let mappings = match mappings_response
+                .json::<UpstreamRaceEpochMappingsResponse>()
+                .await
+            {
+                Ok(body) => body.mappings,
+                Err(e) => {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        format!("invalid stream-epochs JSON from upstream: {e}"),
+                    ));
+                }
+            };
+            Ok((race_name, mappings))
+        }
+    });
+
+    let race_mappings = futures_util::future::join_all(race_mapping_fetches).await;
+    let mut race_names_by_epoch: HashMap<i64, BTreeSet<String>> = HashMap::new();
+    for race_mappings_result in race_mappings {
+        let (race_name, mappings) = match race_mappings_result {
+            Ok(value) => value,
+            Err((status, message)) => return (status, message).into_response(),
+        };
+        for mapping in mappings {
+            if mapping.stream_id == stream.stream_id {
+                race_names_by_epoch
+                    .entry(mapping.stream_epoch)
+                    .or_default()
+                    .insert(race_name.clone());
+            }
+        }
+    }
+
+    let epochs = upstream_epochs
+        .into_iter()
+        .map(|epoch| ReplayTargetEpochOption {
+            stream_epoch: epoch.epoch,
+            name: epoch.name,
+            first_seen_at: epoch.first_event_at,
+            race_names: race_names_by_epoch
+                .remove(&epoch.epoch)
+                .map_or_else(Vec::new, |names| names.into_iter().collect()),
+        })
+        .collect();
+
+    Json(ReplayTargetEpochsResponse { epochs }).into_response()
 }
 
 async fn put_subscriptions(
@@ -444,6 +861,24 @@ async fn put_subscriptions(
     }
 }
 
+async fn get_subscriptions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let db = state.db.lock().await;
+    match db.load_subscriptions() {
+        Ok(subscriptions) => Json(SubscriptionsBody {
+            subscriptions: subscriptions
+                .into_iter()
+                .map(|s| SubscriptionRequest {
+                    forwarder_id: s.forwarder_id,
+                    reader_ip: s.reader_ip,
+                    local_port_override: s.local_port_override,
+                })
+                .collect(),
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = state.connection_state.read().await.clone();
     let db = state.db.lock().await;
@@ -467,9 +902,7 @@ async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if current == ConnectionState::Connected {
         return StatusCode::OK.into_response();
     }
-    state
-        .set_connection_state(ConnectionState::Connecting)
-        .await;
+    state.request_connect().await;
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -483,6 +916,26 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .await;
     let _ = state.shutdown_tx.send(true);
     StatusCode::ACCEPTED.into_response()
+}
+
+async fn post_admin_reset_cursor(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CursorResetRequest>,
+) -> impl IntoResponse {
+    let has_valid_intent = headers
+        .get(ADMIN_INTENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == ADMIN_RESET_CURSOR_INTENT);
+    if !has_valid_intent {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+
+    let db = state.db.lock().await;
+    match db.delete_cursor(&body.forwarder_id, &body.reader_ip) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn get_update_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -667,13 +1120,23 @@ async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoRe
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/profile", get(get_profile).put(put_profile))
+        .route("/api/v1/selection", get(get_selection).put(put_selection))
         .route("/api/v1/streams", get(get_streams))
-        .route("/api/v1/subscriptions", put(put_subscriptions))
+        .route("/api/v1/races", get(get_races))
+        .route(
+            "/api/v1/replay-targets/epochs",
+            get(get_replay_target_epochs),
+        )
+        .route(
+            "/api/v1/subscriptions",
+            get(get_subscriptions).put(put_subscriptions),
+        )
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/logs", get(get_logs))
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))
         .route("/api/v1/events", get(crate::sse::receiver_sse))
+        .route("/api/v1/admin/cursors/reset", post(post_admin_reset_cursor))
         .route("/api/v1/update/status", get(get_update_status))
         .route("/api/v1/update/apply", post(post_update_apply))
         .route("/api/v1/update/check", post(post_update_check))
@@ -688,7 +1151,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use rt_updater::workflow::{Checker, run_check, run_download};
+    use rt_updater::workflow::{run_check, run_download, Checker};
     use std::future::Future;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

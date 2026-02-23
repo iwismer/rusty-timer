@@ -60,9 +60,8 @@ rt-receiver &
 ### Verify startup
 
 ```bash
-# The receiver exposes a control API on a local port.
-# Default port: 10000 + last octet of reader_ip (configurable).
-curl http://localhost:10001/healthz
+# The receiver control API is always on port 9090.
+curl http://localhost:9090/api/v1/status
 ```
 
 ---
@@ -98,14 +97,13 @@ is required. Collisions are logged as errors at startup.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /healthz` | Receiver process is alive. |
-| `GET /readyz` | Receiver DB is open and integrity check passed. |
+| `GET /api/v1/status` | Receiver control API is reachable and returns `connection_state`, DB health (`local_ok`), and stream count. |
 
 ### Check connection status
 
 ```bash
 # Via the control API.
-curl http://localhost:10001/status
+curl http://localhost:9090/api/v1/status
 ```
 
 ### Log monitoring
@@ -179,26 +177,57 @@ After restarting the receiver, it will replay from `last_seq + 1`.
 
 ## Stream Subscription Management
 
+### Receiver selection controls (`Mode` and `Epoch Scope`)
+
+`Mode: Manual` is the default receiver selection mode.
+- Operator chooses exactly which streams are subscribed.
+- Stream changes occur only when the operator updates selections.
+
+`Mode: Race` is an operator opt-in mode (not default).
+- Enable it only when you want receiver selection to follow race context.
+- In `Mode: Race`, set `Epoch Scope` to:
+  - `Current` to replay only the current epoch.
+  - `All` to replay all epochs available for the selected race.
+- If behavior is unexpected, switch back to `Mode: Manual` and select streams explicitly.
+
+### Stream list epoch visibility
+
+Receiver UI stream rows now show the current `stream epoch` and current epoch name when available from the server. Use this to confirm the active stream context before subscribing or replaying.
+
 ### Subscribe to a new stream
 
 The receiver subscribes during the hello handshake or mid-session
 via the `receiver_subscribe` message.
 
-Using the control API (if available):
+Using the control API:
 
 ```bash
-curl -X POST http://localhost:10001/api/v1/subscribe \
+curl -X PUT http://localhost:9090/api/v1/subscriptions \
   -H "Content-Type: application/json" \
-  -d '{"forwarder_id": "fwd-001", "reader_ip": "192.168.1.100"}'
+  -d '{"subscriptions": [{"forwarder_id": "fwd-001", "reader_ip": "192.168.1.100:10000", "local_port_override": null}]}'
 ```
+
+Note: `PUT /api/v1/subscriptions` replaces the entire subscription list atomically.
+To add a stream without removing existing ones, read the current list first with
+`GET /api/v1/subscriptions`, then include all subscriptions in the PUT body.
 
 Or restart the receiver with the updated profile to pick up new subscriptions.
 
 ### View current subscriptions
 
 ```bash
-curl http://localhost:10001/api/v1/subscriptions
+curl http://localhost:9090/api/v1/subscriptions
 ```
+
+### Replay modes and targeted replay semantics
+
+- Replay mode re-sends missed events according to cursor state for subscribed streams.
+- Targeted replay is scoped to one selected stream context and should be used when replaying only a specific source.
+- For targeted replay, verify the stream identity tuple before starting:
+  - `forwarder_id`
+  - `reader_ip`
+  - `stream epoch`
+- Do not start targeted replay until the stream row shows the expected epoch number/name.
 
 ---
 

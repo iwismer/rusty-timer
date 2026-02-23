@@ -1,16 +1,16 @@
 # rt-protocol
 
-WebSocket and HTTP message protocol definitions for the v1 remote forwarding protocol.
+WebSocket and HTTP message protocol definitions for the v1 and v1.1 remote forwarding protocol.
 
 ## Purpose
 
-Defines the frozen v1 protocol types shared between the forwarder, server, and receiver. All WebSocket messages use a discriminated `kind` tag for serialization via serde. This crate contains no runtime logic -- only data structures and serialization.
+Defines the frozen v1 protocol types and v1.1 receiver selection types shared between the forwarder, server, and receiver. All WebSocket messages use a discriminated `kind` tag for serialization via serde. This crate contains no runtime logic -- only data structures and serialization.
 
 ## Key types
 
 ### Top-level envelope
 
-- **`WsMessage`** -- Tagged enum (`#[serde(tag = "kind")]`) covering all v1 WebSocket message kinds.
+- **`WsMessage`** -- Tagged enum (`#[serde(tag = "kind")]`) covering all v1 + receiver v1.1 WebSocket message kinds.
 
 ### Shared sub-types
 
@@ -28,9 +28,19 @@ Defines the frozen v1 protocol types shared between the forwarder, server, and r
 ### Receiver messages
 
 - **`ReceiverHello`** -- Initial handshake from receiver to server.
+- **`ReceiverHelloV11`** -- Initial v1.1 receiver handshake with selection + replay policy.
+- **`ReceiverSetSelection`** -- Mid-session v1.1 selection update.
+- **`ReceiverSelectionApplied`** -- Server acknowledgement of normalized v1.1 selection.
 - **`ReceiverSubscribe`** -- Mid-session stream subscription request.
 - **`ReceiverEventBatch`** -- Batch of read events from server to receiver.
 - **`ReceiverAck`** -- Receiver acknowledgement of a delivered batch.
+
+### Receiver v1.1 selection sub-types
+
+- **`ReceiverSelection`** -- Tagged selection union (`manual` streams or `race` + epoch scope).
+- **`EpochScope`** -- Race selection epoch scope (`all`, `current`).
+- **`ReplayPolicy`** -- Replay behavior (`resume`, `live_only`, `targeted`).
+- **`ReplayTarget`** -- Explicit `(forwarder_id, reader_ip, stream_epoch, from_seq)` replay target.
 
 ### Bidirectional / server-initiated
 

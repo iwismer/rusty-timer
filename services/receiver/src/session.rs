@@ -1,9 +1,11 @@
 use crate::db::Db;
 use futures_util::{SinkExt, StreamExt};
-use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, ReceiverHello, WsMessage};
+use rt_protocol::{
+    AckEntry, ReadEvent, ReceiverAck, ReceiverHelloV11, ReceiverSelection, StreamRef, WsMessage,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 #[derive(Debug, thiserror::Error)]
@@ -75,12 +77,26 @@ fn apply_batch_counts(
 }
 
 pub async fn connect(url: &str, rid: &str, db: &Db) -> Result<Session, SessionError> {
-    let resume = db.load_resume_cursors().map_err(SessionError::Db)?;
-    info!(rid, url, n = resume.len(), "connecting");
+    let mut selection = db.load_receiver_selection().map_err(SessionError::Db)?;
+    if let ReceiverSelection::Manual { streams } = &mut selection.selection
+        && streams.is_empty()
+    {
+        let subs = db.load_subscriptions().map_err(SessionError::Db)?;
+        *streams = subs
+            .into_iter()
+            .map(|s| StreamRef {
+                forwarder_id: s.forwarder_id,
+                reader_ip: s.reader_ip,
+            })
+            .collect();
+    }
+    info!(rid, url, "connecting");
     let (mut ws, _) = connect_async(url).await?;
-    let h = WsMessage::ReceiverHello(ReceiverHello {
+    let h = WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
         receiver_id: rid.to_owned(),
-        resume,
+        selection: selection.selection,
+        replay_policy: selection.replay_policy,
+        replay_targets: selection.replay_targets,
     });
     ws.send(Message::Text(serde_json::to_string(&h)?.into()))
         .await?;

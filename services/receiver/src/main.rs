@@ -1,9 +1,9 @@
-use receiver::Subscription;
 use receiver::cache::EventBus;
 use receiver::control_api::{AppState, ConnectionState};
 use receiver::db::Db;
 use receiver::local_proxy::LocalProxy;
-use receiver::ports::{PortAssignment, resolve_ports, stream_key};
+use receiver::ports::{resolve_ports, stream_key, PortAssignment};
+use receiver::Subscription;
 use rt_ui_log::UiLogLevel;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -274,6 +274,7 @@ async fn main() {
             result = watch_connection_state(Arc::clone(&state)) => {
                 match result {
                     ConnectionState::Connecting => {
+                        let attempt = state.current_connect_attempt();
                         // Cancel any existing session first.
                         cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
 
@@ -281,12 +282,13 @@ async fn main() {
                         match url_opt {
                             None => {
                                 state.logger.log_at(UiLogLevel::Warn, "No upstream URL configured");
-                                state.set_connection_state(ConnectionState::Disconnected).await;
+                                let _ =
+                                    set_disconnected_if_attempt_current(&state, attempt).await;
                             }
                             Some(base_url) => {
                                 // Build the full WS URL from the base URL.
                                 let ws_url = format!(
-                                    "{}/ws/v1/receivers",
+                                    "{}/ws/v1.1/receivers",
                                     base_url.trim_end_matches('/')
                                 );
                                 // Read the token from the saved profile so we can
@@ -298,7 +300,8 @@ async fn main() {
                                 match token_opt {
                                   None => {
                                     state.logger.log_at(UiLogLevel::Warn, "No auth token in profile");
-                                    state.set_connection_state(ConnectionState::Disconnected).await;
+                                    let _ = set_disconnected_if_attempt_current(&state, attempt)
+                                        .await;
                                   }
                                   Some(token) => {
                                 let ws_request =
@@ -306,13 +309,15 @@ async fn main() {
                                 match ws_request {
                                   Err(e) => {
                                     state.logger.log_at(UiLogLevel::Error, format!("Failed to build WS request: {e}"));
-                                    state.set_connection_state(ConnectionState::Disconnected).await;
+                                    let _ = set_disconnected_if_attempt_current(&state, attempt)
+                                        .await;
                                   }
                                   Ok(ws_request) => {
                                 match connect_async(ws_request).await {
                                     Err(e) => {
                                         state.logger.log_at(UiLogLevel::Error, format!("Connection failed: {e}"));
-                                        state.set_connection_state(ConnectionState::Disconnected).await;
+                                        let _ = set_disconnected_if_attempt_current(&state, attempt)
+                                            .await;
                                     }
                                     Ok((ws, _)) => {
                                         // Perform the receiver hello / heartbeat handshake.
@@ -323,54 +328,21 @@ async fn main() {
                                         match (session_result, ws) {
                                             (Err(e), _) => {
                                                 state.logger.log_at(UiLogLevel::Error, format!("Handshake failed: {e}"));
-                                                state.set_connection_state(ConnectionState::Disconnected).await;
+                                                let _ = set_disconnected_if_attempt_current(
+                                                    &state, attempt,
+                                                )
+                                                .await;
                                             }
                                             (Ok(session_id), Some(ws)) => {
+                                                let still_current =
+                                                    is_current_connect_attempt(&state, attempt).await;
+                                                if !still_current {
+                                                    state.logger.log("Discarding stale connect attempt");
+                                                    continue;
+                                                }
                                                 state.logger.log(format!("Connected (session {session_id})"));
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
-
-                                                // Send ReceiverSubscribe for streams not covered by resume cursors.
-                                                let ws = {
-                                                    let db = state.db.lock().await;
-                                                    let new_streams = match load_new_streams_to_subscribe(&db) {
-                                                        Ok(streams) => streams,
-                                                        Err(e) => {
-                                                            state.logger.log_at(
-                                                                UiLogLevel::Error,
-                                                                format!("Failed to load subscriptions for ReceiverSubscribe: {e}"),
-                                                            );
-                                                            state.set_connection_state(ConnectionState::Disconnected).await;
-                                                            continue;
-                                                        }
-                                                    };
-
-                                                    if new_streams.is_empty() {
-                                                        ws
-                                                    } else {
-                                                        info!(n = new_streams.len(), "subscribing to new streams");
-                                                        let msg = rt_protocol::WsMessage::ReceiverSubscribe(
-                                                            rt_protocol::ReceiverSubscribe {
-                                                                session_id: session_id.clone(),
-                                                                streams: new_streams,
-                                                            },
-                                                        );
-                                                        use futures_util::SinkExt;
-                                                        use tokio_tungstenite::tungstenite::protocol::Message;
-                                                        let mut ws = ws;
-                                                        if let Err(e) = ws.send(Message::Text(
-                                                            serde_json::to_string(&msg).unwrap().into(),
-                                                        )).await {
-                                                            state.logger.log_at(
-                                                                UiLogLevel::Error,
-                                                                format!("Failed to send ReceiverSubscribe: {e}"),
-                                                            );
-                                                            state.set_connection_state(ConnectionState::Disconnected).await;
-                                                            continue;
-                                                        }
-                                                        ws
-                                                    }
-                                                };
 
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
@@ -417,7 +389,10 @@ async fn main() {
                                             }
                                             (Ok(_), None) => {
                                                 state.logger.log_at(UiLogLevel::Error, "Handshake succeeded but connection lost");
-                                                state.set_connection_state(ConnectionState::Disconnected).await;
+                                                let _ = set_disconnected_if_attempt_current(
+                                                    &state, attempt,
+                                                )
+                                                .await;
                                             }
                                         }
                                     }
@@ -472,62 +447,75 @@ async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
     }
 }
 
-fn planned_new_streams(
-    subs: &[receiver::Subscription],
-    cursors: &[rt_protocol::ResumeCursor],
-) -> Vec<rt_protocol::StreamRef> {
-    let cursor_set: HashSet<(&str, &str)> = cursors
-        .iter()
-        .map(|c| (c.forwarder_id.as_str(), c.reader_ip.as_str()))
-        .collect();
-    subs.iter()
-        .filter(|s| !cursor_set.contains(&(s.forwarder_id.as_str(), s.reader_ip.as_str())))
-        .map(|s| rt_protocol::StreamRef {
-            forwarder_id: s.forwarder_id.clone(),
-            reader_ip: s.reader_ip.clone(),
-        })
-        .collect()
+async fn is_current_connect_attempt(state: &Arc<AppState>, attempt: u64) -> bool {
+    state.current_connect_attempt() == attempt
+        && *state.connection_state.read().await == ConnectionState::Connecting
 }
 
-fn load_streams_to_subscribe_from_results(
-    subs: receiver::DbResult<Vec<receiver::Subscription>>,
-    cursors: receiver::DbResult<Vec<rt_protocol::ResumeCursor>>,
-) -> receiver::DbResult<Vec<rt_protocol::StreamRef>> {
-    let subs = subs?;
-    let cursors = cursors?;
-    Ok(planned_new_streams(&subs, &cursors))
+async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
+    if !is_current_connect_attempt(state, attempt).await {
+        state.logger.log("Ignoring stale connect attempt result");
+        return false;
+    }
+    state
+        .set_connection_state(ConnectionState::Disconnected)
+        .await;
+    true
 }
-
-fn load_new_streams_to_subscribe(db: &Db) -> receiver::DbResult<Vec<rt_protocol::StreamRef>> {
-    load_streams_to_subscribe_from_results(db.load_subscriptions(), db.load_resume_cursors())
-}
-
-type WsIoMessage = tokio_tungstenite::tungstenite::protocol::Message;
-type WsIoError = tokio_tungstenite::tungstenite::Error;
-type HandshakeResult<S> = (Result<String, receiver::session::SessionError>, Option<S>);
 
 // ---------------------------------------------------------------------------
 // Helper: perform ReceiverHello / Heartbeat handshake on an open WS.
 // Returns (Result<session_id>, Option<ws>) — ws is Some on success.
 // ---------------------------------------------------------------------------
-async fn do_handshake<S>(mut ws: S, db: &Db) -> HandshakeResult<S>
+#[allow(clippy::type_complexity)]
+async fn do_handshake<S>(
+    mut ws: S,
+    db: &Db,
+) -> (Result<String, receiver::session::SessionError>, Option<S>)
 where
-    S: futures_util::Stream<Item = Result<WsIoMessage, WsIoError>>
-        + futures_util::Sink<WsIoMessage, Error = WsIoError>
-        + Unpin,
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::protocol::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + futures_util::Sink<
+            tokio_tungstenite::tungstenite::protocol::Message,
+            Error = tokio_tungstenite::tungstenite::Error,
+        > + Unpin,
 {
     use futures_util::{SinkExt, StreamExt};
-    use rt_protocol::{ReceiverHello, WsMessage};
+    use rt_protocol::{ReceiverHelloV11, ReceiverSelection, StreamRef, WsMessage};
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    let resume = match db.load_resume_cursors() {
-        Ok(r) => r,
+    let mut selection_config = match db.load_receiver_selection() {
+        Ok(s) => s,
         Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
     };
 
-    let hello = WsMessage::ReceiverHello(ReceiverHello {
+    // Legacy compatibility: if manual mode has no explicit streams persisted,
+    // bootstrap from existing local subscriptions.
+    if let ReceiverSelection::Manual { streams } = &mut selection_config.selection
+        && streams.is_empty()
+    {
+        match db.load_subscriptions() {
+            Ok(subs) => {
+                *streams = subs
+                    .into_iter()
+                    .map(|s| StreamRef {
+                        forwarder_id: s.forwarder_id,
+                        reader_ip: s.reader_ip,
+                    })
+                    .collect();
+            }
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        }
+    }
+
+    let hello = WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
         receiver_id: "receiver-main".to_owned(),
-        resume,
+        selection: selection_config.selection,
+        replay_policy: selection_config.replay_policy,
+        replay_targets: selection_config.replay_targets,
     });
 
     let hello_text = match serde_json::to_string(&hello) {
@@ -708,44 +696,20 @@ async fn reconcile_proxies(
 mod tests {
     use super::*;
 
-    #[test]
-    fn planned_new_streams_excludes_streams_with_resume_cursors() {
-        let subs = vec![
-            receiver::Subscription {
-                forwarder_id: "f1".to_owned(),
-                reader_ip: "10.0.0.1".to_owned(),
-                local_port_override: None,
-            },
-            receiver::Subscription {
-                forwarder_id: "f2".to_owned(),
-                reader_ip: "10.0.0.2".to_owned(),
-                local_port_override: None,
-            },
-        ];
-        let cursors = vec![rt_protocol::ResumeCursor {
-            forwarder_id: "f1".to_owned(),
-            reader_ip: "10.0.0.1".to_owned(),
-            stream_epoch: 3,
-            last_seq: 44,
-        }];
+    #[tokio::test]
+    async fn stale_connect_attempt_failure_does_not_force_disconnected() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
 
-        let result = planned_new_streams(&subs, &cursors);
+        state.request_connect().await;
+        let stale_attempt = state.current_connect_attempt();
+        state.request_connect().await;
+
+        let transitioned = set_disconnected_if_attempt_current(&state, stale_attempt).await;
+        assert!(!transitioned);
         assert_eq!(
-            result,
-            vec![rt_protocol::StreamRef {
-                forwarder_id: "f2".to_owned(),
-                reader_ip: "10.0.0.2".to_owned(),
-            }]
+            *state.connection_state.read().await,
+            ConnectionState::Connecting
         );
-    }
-
-    #[test]
-    fn load_new_streams_to_subscribe_propagates_db_errors() {
-        let subs_err = receiver::DbError::Sqlite(rusqlite::Error::InvalidQuery);
-        let result = super::load_streams_to_subscribe_from_results(
-            Err(subs_err),
-            Ok(Vec::<rt_protocol::ResumeCursor>::new()),
-        );
-        assert!(result.is_err());
     }
 }

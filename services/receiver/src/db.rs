@@ -1,4 +1,6 @@
-use rt_protocol::ResumeCursor;
+use rt_protocol::{
+    ReceiverSelection, ReceiverSetSelection, ReplayPolicy, ReplayTarget, ResumeCursor,
+};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,12 @@ pub enum DbError {
     IntegrityCheckFailed(String),
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),
+    #[error("JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Profile missing")]
+    ProfileMissing,
+    #[error("Invalid receiver selection: {0}")]
+    InvalidReceiverSelection(String),
 }
 pub type DbResult<T> = Result<T, DbError>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +44,54 @@ pub struct CursorRecord {
 }
 pub struct Db {
     conn: Connection,
+}
+
+fn default_selection() -> ReceiverSelection {
+    ReceiverSelection::Manual {
+        streams: Vec::new(),
+    }
+}
+
+fn default_selection_json() -> String {
+    serde_json::to_string(&default_selection()).expect("manual selection is serializable")
+}
+
+fn default_replay_policy() -> ReplayPolicy {
+    ReplayPolicy::Resume
+}
+
+fn replay_policy_to_string(policy: ReplayPolicy) -> String {
+    serde_json::to_string(&policy)
+        .unwrap_or_else(|_| "\"resume\"".to_owned())
+        .trim_matches('"')
+        .to_owned()
+}
+
+fn parse_replay_policy(raw: &str) -> ReplayPolicy {
+    serde_json::from_str::<ReplayPolicy>(&format!("\"{raw}\""))
+        .unwrap_or_else(|_| default_replay_policy())
+}
+
+fn normalize_receiver_selection(
+    selection: ReceiverSetSelection,
+) -> Result<ReceiverSetSelection, DbError> {
+    let replay_targets =
+        match selection.replay_policy {
+            ReplayPolicy::Targeted => match selection.replay_targets {
+                Some(targets) if !targets.is_empty() => Some(targets),
+                _ => return Err(DbError::InvalidReceiverSelection(
+                    "replay_targets must be present and non-empty when replay_policy is targeted"
+                        .to_owned(),
+                )),
+            },
+            _ => None,
+        };
+
+    Ok(ReceiverSetSelection {
+        selection: selection.selection,
+        replay_policy: selection.replay_policy,
+        replay_targets,
+    })
 }
 impl Db {
     pub fn open(path: &Path) -> DbResult<Self> {
@@ -75,11 +131,58 @@ impl Db {
         Ok(rows.next().transpose()?)
     }
     pub fn save_profile(&self, url: &str, tok: &str, update_mode: &str) -> DbResult<()> {
+        let existing_selection = self.load_receiver_selection_raw()?;
+        let (selection_json, replay_policy, replay_targets_json) = existing_selection
+            .map(|s| (s.selection_json, s.replay_policy, s.replay_targets_json))
+            .unwrap_or_else(|| (default_selection_json(), "resume".to_owned(), None));
         self.conn.execute_batch("DELETE FROM profile")?;
         self.conn.execute(
-            "INSERT INTO profile (server_url, token, update_mode) VALUES (?1, ?2, ?3)",
-            rusqlite::params![url, tok, update_mode],
+            "INSERT INTO profile (server_url, token, update_mode, selection_json, replay_policy, replay_targets_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![url, tok, update_mode, selection_json, replay_policy, replay_targets_json],
         )?;
+        Ok(())
+    }
+    pub fn load_receiver_selection(&self) -> DbResult<ReceiverSetSelection> {
+        let Some(raw) = self.load_receiver_selection_raw()? else {
+            return Ok(ReceiverSetSelection {
+                selection: default_selection(),
+                replay_policy: default_replay_policy(),
+                replay_targets: None,
+            });
+        };
+
+        let selection = serde_json::from_str::<ReceiverSelection>(&raw.selection_json)
+            .unwrap_or_else(|_| default_selection());
+        let replay_policy = parse_replay_policy(&raw.replay_policy);
+        let replay_targets = raw
+            .replay_targets_json
+            .as_deref()
+            .map(serde_json::from_str::<Vec<ReplayTarget>>)
+            .transpose()?;
+
+        normalize_receiver_selection(ReceiverSetSelection {
+            selection,
+            replay_policy,
+            replay_targets,
+        })
+    }
+    pub fn save_receiver_selection(&self, selection: &ReceiverSetSelection) -> DbResult<()> {
+        let normalized = normalize_receiver_selection(selection.clone())?;
+        let selection_json = serde_json::to_string(&normalized.selection)?;
+        let replay_policy = replay_policy_to_string(normalized.replay_policy);
+        let replay_targets_json = normalized
+            .replay_targets
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
+        let updated = self.conn.execute(
+            "UPDATE profile SET selection_json = ?1, replay_policy = ?2, replay_targets_json = ?3",
+            rusqlite::params![selection_json, replay_policy, replay_targets_json],
+        )?;
+        if updated == 0 {
+            return Err(DbError::ProfileMissing);
+        }
         Ok(())
     }
     pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
@@ -153,6 +256,13 @@ impl Db {
         self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch as i64, seq as i64])?;
         Ok(())
     }
+    pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {
+        self.conn.execute(
+            "DELETE FROM cursors WHERE forwarder_id = ?1 AND reader_ip = ?2",
+            rusqlite::params![fwd, ip],
+        )?;
+        Ok(())
+    }
     fn apply_pragmas(&self) -> DbResult<()> {
         self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; PRAGMA foreign_keys=ON;")?;
         Ok(())
@@ -160,20 +270,68 @@ impl Db {
     fn apply_schema(&self) -> DbResult<()> {
         self.conn.execute_batch(SCHEMA_SQL)?;
         // Migration: add update_mode column to existing profile tables.
-        match self.conn.execute_batch(
+        apply_profile_column_migration(
+            &self.conn,
             "ALTER TABLE profile ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'check-and-download';",
-        ) {
-            Ok(()) => {}
-            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-                if is_duplicate_update_mode_column_error(&message) => {}
-            Err(e) => return Err(e.into()),
-        }
+            "update_mode",
+        )?;
+        apply_profile_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN selection_json TEXT NOT NULL DEFAULT '{\"mode\":\"manual\",\"streams\":[]}';",
+            "selection_json",
+        )?;
+        apply_profile_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN replay_policy TEXT NOT NULL DEFAULT 'resume';",
+            "replay_policy",
+        )?;
+        apply_profile_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN replay_targets_json TEXT;",
+            "replay_targets_json",
+        )?;
         Ok(())
+    }
+
+    fn load_receiver_selection_raw(&self) -> DbResult<Option<ReceiverSelectionRow>> {
+        self.conn
+            .query_row(
+                "SELECT selection_json, replay_policy, replay_targets_json FROM profile LIMIT 1",
+                [],
+                |row| {
+                    Ok(ReceiverSelectionRow {
+                        selection_json: row.get(0)?,
+                        replay_policy: row.get(1)?,
+                        replay_targets_json: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(DbError::from)
     }
 }
 
-fn is_duplicate_update_mode_column_error(message: &str) -> bool {
-    message.contains("duplicate column name: update_mode")
+#[derive(Debug)]
+struct ReceiverSelectionRow {
+    selection_json: String,
+    replay_policy: String,
+    replay_targets_json: Option<String>,
+}
+
+fn apply_profile_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
+    match conn.execute_batch(sql) {
+        Ok(()) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if is_duplicate_column_error(&message, column_name) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn is_duplicate_column_error(message: &str, column_name: &str) -> bool {
+    message.contains(&format!("duplicate column name: {column_name}"))
 }
 
 #[cfg(test)]
@@ -200,11 +358,59 @@ mod tests {
 
     #[test]
     fn duplicate_column_message_detection_matches_expected_error() {
-        assert!(is_duplicate_update_mode_column_error(
-            "duplicate column name: update_mode"
+        assert!(is_duplicate_column_error(
+            "duplicate column name: update_mode",
+            "update_mode"
         ));
-        assert!(!is_duplicate_update_mode_column_error(
-            "near \"ALTER\": syntax error"
+        assert!(!is_duplicate_column_error(
+            "near \"ALTER\": syntax error",
+            "update_mode"
         ));
+    }
+
+    #[test]
+    fn selection_defaults_to_manual_resume() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "check-and-download")
+            .unwrap();
+        let selection = db.load_receiver_selection().unwrap();
+        assert_eq!(
+            selection.selection,
+            ReceiverSelection::Manual {
+                streams: Vec::new()
+            }
+        );
+        assert_eq!(selection.replay_policy, ReplayPolicy::Resume);
+        assert!(selection.replay_targets.is_none());
+    }
+
+    #[test]
+    fn load_receiver_selection_rejects_targeted_without_targets() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "check-and-download")
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE profile SET replay_policy = 'targeted', replay_targets_json = NULL",
+                [],
+            )
+            .unwrap();
+
+        let err = db.load_receiver_selection().unwrap_err();
+        assert!(matches!(err, DbError::InvalidReceiverSelection(_)));
+    }
+
+    #[test]
+    fn delete_cursor_removes_only_matching_stream() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
+        db.save_cursor("f2", "10.0.0.2:10000", 3, 9).unwrap();
+
+        db.delete_cursor("f1", "10.0.0.1:10000").unwrap();
+
+        let rows = db.load_cursors().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].forwarder_id, "f2");
+        assert_eq!(rows[0].reader_ip, "10.0.0.2:10000");
     }
 }
