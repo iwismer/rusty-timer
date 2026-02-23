@@ -116,11 +116,25 @@ describe("receiver page", () => {
     expect(await screen.findByText("epoch: 4")).toBeInTheDocument();
   });
 
-  it("auto-applies selection mode changes", async () => {
+  it("does not PUT selection when mode changes without clicking Save", async () => {
     render(Page);
 
     const modeSelect = await screen.findByTestId("selection-mode-select");
     await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    // Wait a tick so any async side effects would have settled
+    await new Promise((r) => setTimeout(r, 50));
+    expect(apiMocks.putSelection).not.toHaveBeenCalled();
+  });
+
+  it("applies selection mode change after clicking Save", async () => {
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
 
     await waitFor(() => {
       expect(apiMocks.putSelection).toHaveBeenCalledWith(
@@ -131,7 +145,7 @@ describe("receiver page", () => {
     });
   });
 
-  it("uses race dropdown and auto-applies selected race id", async () => {
+  it("applies race id selection after clicking Save", async () => {
     render(Page);
 
     const modeSelect = await screen.findByTestId("selection-mode-select");
@@ -140,6 +154,12 @@ describe("receiver page", () => {
     const raceIdSelect = await screen.findByTestId("race-id-select");
     expect(raceIdSelect.tagName).toBe("SELECT");
     await fireEvent.change(raceIdSelect, { target: { value: "race-1" } });
+
+    // Not yet applied
+    expect(apiMocks.putSelection).not.toHaveBeenCalled();
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
 
     await waitFor(() => {
       expect(apiMocks.putSelection).toHaveBeenCalledWith(
@@ -153,7 +173,7 @@ describe("receiver page", () => {
     });
   });
 
-  it("auto-applies epoch scope and replay policy changes", async () => {
+  it("applies epoch scope and replay policy changes after clicking Save", async () => {
     render(Page);
 
     const modeSelect = await screen.findByTestId("selection-mode-select");
@@ -167,6 +187,12 @@ describe("receiver page", () => {
     await fireEvent.change(replayPolicySelect, {
       target: { value: "live_only" },
     });
+
+    // Not yet applied
+    expect(apiMocks.putSelection).not.toHaveBeenCalled();
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
 
     await waitFor(() => {
       expect(apiMocks.putSelection).toHaveBeenCalledWith(
@@ -265,7 +291,7 @@ describe("receiver page", () => {
     });
   });
 
-  it("shows inline row validation errors and does not submit targeted payload when invalid", async () => {
+  it("shows inline row validation errors and does not submit targeted payload when Save is clicked with invalid rows", async () => {
     render(Page);
 
     const replayPolicySelect = await screen.findByTestId(
@@ -275,23 +301,28 @@ describe("receiver page", () => {
       target: { value: "targeted" },
     });
 
-    apiMocks.putSelection.mockClear();
     const streamSelect = await screen.findByTestId("targeted-row-stream-0");
     await fireEvent.change(streamSelect, { target: { value: "" } });
 
     const epochSelect = await screen.findByTestId("targeted-row-epoch-0");
     await fireEvent.change(epochSelect, { target: { value: "" } });
 
-    expect(await screen.findByTestId("targeted-row-error-0")).toHaveTextContent(
-      "Select a stream",
-    );
-    expect(await screen.findByTestId("targeted-row-error-0")).toHaveTextContent(
+    apiMocks.putSelection.mockClear();
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("targeted-row-error-0")).toHaveTextContent(
+        "Select a stream",
+      );
+    });
+    expect(screen.getByTestId("targeted-row-error-0")).toHaveTextContent(
       "Stream epoch is required",
     );
     expect(apiMocks.putSelection).not.toHaveBeenCalled();
   });
 
-  it("serializes valid targeted rows into replay_targets payload", async () => {
+  it("serializes valid targeted rows into replay_targets payload on Save click", async () => {
     apiMocks.getStreams.mockResolvedValue({
       streams: [
         {
@@ -338,6 +369,12 @@ describe("receiver page", () => {
       expect(epochSelect).toHaveTextContent("Lap 3");
     });
     await fireEvent.change(epochSelect, { target: { value: "3" } });
+
+    // Not yet applied
+    expect(apiMocks.putSelection).not.toHaveBeenCalled();
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
 
     await waitFor(() => {
       expect(apiMocks.putSelection).toHaveBeenCalledWith({
@@ -566,7 +603,7 @@ describe("receiver page", () => {
     expect(screen.getByTestId("targeted-row-stream-0")).toBeInTheDocument();
   });
 
-  it("applies latest selection after in-flight request settles", async () => {
+  it("coalesces rapid Save clicks so the latest payload wins", async () => {
     const firstApply = deferred<void>();
     apiMocks.putSelection.mockReset();
     apiMocks.putSelection
@@ -578,12 +615,17 @@ describe("receiver page", () => {
     const modeSelect = await screen.findByTestId("selection-mode-select");
     await fireEvent.change(modeSelect, { target: { value: "race" } });
 
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
+
+    // While first save is in-flight, change replay policy and click Save again
     const replayPolicySelect = await screen.findByTestId(
       "replay-policy-select",
     );
     await fireEvent.change(replayPolicySelect, {
       target: { value: "live_only" },
     });
+    await fireEvent.click(saveBtn);
 
     firstApply.resolve();
 
@@ -600,7 +642,7 @@ describe("receiver page", () => {
     });
   });
 
-  it("retries queued latest selection after in-flight request fails", async () => {
+  it("retries queued Save after in-flight request fails", async () => {
     const firstApply = deferred<void>();
     apiMocks.putSelection.mockReset();
     apiMocks.putSelection
@@ -612,12 +654,17 @@ describe("receiver page", () => {
     const modeSelect = await screen.findByTestId("selection-mode-select");
     await fireEvent.change(modeSelect, { target: { value: "race" } });
 
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
+
+    // While first save is in-flight, change replay policy and click Save again
     const replayPolicySelect = await screen.findByTestId(
       "replay-policy-select",
     );
     await fireEvent.change(replayPolicySelect, {
       target: { value: "live_only" },
     });
+    await fireEvent.click(saveBtn);
 
     firstApply.reject(new Error("network error"));
 
@@ -840,7 +887,7 @@ describe("receiver page", () => {
     });
   });
 
-  it("shows AlertBanner when putSelection fails", async () => {
+  it("shows AlertBanner when Save click triggers putSelection failure", async () => {
     const errMsg = "server rejected selection: 422";
     apiMocks.putSelection.mockRejectedValueOnce(new Error(errMsg));
 
@@ -849,8 +896,110 @@ describe("receiver page", () => {
     const modeSelect = await screen.findByTestId("selection-mode-select");
     await fireEvent.change(modeSelect, { target: { value: "race" } });
 
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await fireEvent.click(saveBtn);
+
     await waitFor(() => {
       expect(screen.getByText(`Error: ${errMsg}`)).toBeInTheDocument();
+    });
+  });
+
+  // --- Save button state tests ---
+
+  it("Save button is disabled on initial load when local matches server", async () => {
+    render(Page);
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await waitFor(() => {
+      expect(saveBtn).toBeDisabled();
+    });
+  });
+
+  it("Save button becomes enabled after changing a control", async () => {
+    render(Page);
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await waitFor(() => {
+      expect(saveBtn).toBeDisabled();
+    });
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    await waitFor(() => {
+      expect(saveBtn).toBeEnabled();
+    });
+  });
+
+  it("Save button returns to disabled after successful save", async () => {
+    render(Page);
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    await waitFor(() => {
+      expect(saveBtn).toBeEnabled();
+    });
+
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(apiMocks.putSelection).toHaveBeenCalled();
+    });
+
+    await waitFor(() => {
+      expect(saveBtn).toBeDisabled();
+    });
+  });
+
+  it("Save button is disabled while save is in-flight", async () => {
+    const applyDeferred = deferred<void>();
+    apiMocks.putSelection.mockReset();
+    apiMocks.putSelection.mockReturnValue(applyDeferred.promise);
+
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("selection-mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "race" } });
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await waitFor(() => {
+      expect(saveBtn).toBeEnabled();
+    });
+
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(saveBtn).toBeDisabled();
+    });
+    expect(saveBtn).toHaveTextContent("Saving...");
+
+    applyDeferred.resolve();
+
+    await waitFor(() => {
+      expect(saveBtn).toHaveTextContent("Save");
+    });
+  });
+
+  it("Save button becomes enabled after changing replay policy", async () => {
+    render(Page);
+
+    const saveBtn = await screen.findByTestId("save-selection-btn");
+    await waitFor(() => {
+      expect(saveBtn).toBeDisabled();
+    });
+
+    const replayPolicySelect = await screen.findByTestId(
+      "replay-policy-select",
+    );
+    await fireEvent.change(replayPolicySelect, {
+      target: { value: "live_only" },
+    });
+
+    await waitFor(() => {
+      expect(saveBtn).toBeEnabled();
     });
   });
 });
