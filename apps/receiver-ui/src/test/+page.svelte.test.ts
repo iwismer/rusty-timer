@@ -36,9 +36,14 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("$lib/api", () => apiMocks);
 
-vi.mock("$lib/sse", () => ({
+const sseMocks = vi.hoisted(() => ({
   initSSE: vi.fn(),
   destroySSE: vi.fn(),
+}));
+
+vi.mock("$lib/sse", () => ({
+  initSSE: sseMocks.initSSE,
+  destroySSE: sseMocks.destroySSE,
 }));
 
 function deferred<T>() {
@@ -415,6 +420,212 @@ describe("receiver page", () => {
         epoch_scope: "current",
       },
       replay_policy: "live_only",
+    });
+  });
+
+  it("refreshes streams list when stream count update references an unknown stream", async () => {
+    apiMocks.getStreams.mockReset();
+    apiMocks.getStreams
+      .mockResolvedValueOnce({
+        streams: [
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            subscribed: false,
+            local_port: null,
+          },
+        ],
+        degraded: false,
+        upstream_error: null,
+      })
+      .mockResolvedValueOnce({
+        streams: [
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            subscribed: false,
+            local_port: null,
+          },
+          {
+            forwarder_id: "fwd-2",
+            reader_ip: "10.0.0.2:10000",
+            subscribed: false,
+            local_port: null,
+          },
+        ],
+        degraded: false,
+        upstream_error: null,
+      });
+
+    render(Page);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("streams-section")).toHaveTextContent(
+        "fwd-1 / 10.0.0.1:10000",
+      );
+    });
+    expect(screen.getByTestId("streams-section")).not.toHaveTextContent(
+      "fwd-2 / 10.0.0.2:10000",
+    );
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+    callbacks.onStreamCountsUpdated([
+      {
+        forwarder_id: "fwd-2",
+        reader_ip: "10.0.0.2:10000",
+        reads_total: 1,
+        reads_epoch: 1,
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("streams-section")).toHaveTextContent(
+        "fwd-2 / 10.0.0.2:10000",
+      );
+    });
+  });
+
+  it("coalesces burst unknown-stream updates into a single in-flight full reload", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("streams-section")).toHaveTextContent(
+        "fwd-1 / 10.0.0.1:10000",
+      );
+    });
+
+    const statusResync = deferred<{
+      connection_state: string;
+      local_ok: boolean;
+      streams_count: number;
+    }>();
+    apiMocks.getStatus.mockReset();
+    apiMocks.getStatus
+      .mockReturnValueOnce(statusResync.promise)
+      .mockResolvedValue({
+        connection_state: "connected",
+        local_ok: true,
+        streams_count: 2,
+      });
+    apiMocks.getStreams.mockReset();
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+        },
+        {
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+    apiMocks.getLogs.mockReset();
+    apiMocks.getLogs.mockResolvedValue({ entries: [] });
+    apiMocks.getSelection.mockReset();
+    apiMocks.getSelection.mockResolvedValue({
+      selection: { mode: "manual", streams: [] },
+      replay_policy: "resume",
+    });
+    apiMocks.getRaces.mockReset();
+    apiMocks.getRaces.mockResolvedValue({ races: [] });
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+    callbacks.onStreamCountsUpdated([
+      {
+        forwarder_id: "fwd-2",
+        reader_ip: "10.0.0.2:10000",
+        reads_total: 1,
+        reads_epoch: 1,
+      },
+    ]);
+    callbacks.onStreamCountsUpdated([
+      {
+        forwarder_id: "fwd-3",
+        reader_ip: "10.0.0.3:10000",
+        reads_total: 1,
+        reads_epoch: 1,
+      },
+    ]);
+
+    expect(apiMocks.getStatus).toHaveBeenCalledTimes(1);
+    statusResync.resolve({
+      connection_state: "connected",
+      local_ok: true,
+      streams_count: 2,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("streams-section")).toHaveTextContent(
+        "fwd-2 / 10.0.0.2:10000",
+      );
+    });
+  });
+
+  it("patches counts for known streams without triggering a full reload", async () => {
+    apiMocks.getStreams.mockResolvedValue({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+          reads_total: 10,
+          reads_epoch: 4,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("streams-section")).toHaveTextContent(
+        "fwd-1 / 10.0.0.1:10000",
+      );
+    });
+
+    apiMocks.getStatus.mockClear();
+    apiMocks.getStreams.mockClear();
+    apiMocks.getLogs.mockClear();
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+    callbacks.onStreamCountsUpdated([
+      {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        reads_total: 11,
+        reads_epoch: 5,
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(apiMocks.getStatus).not.toHaveBeenCalled();
+      expect(apiMocks.getStreams).not.toHaveBeenCalled();
+      expect(apiMocks.getLogs).not.toHaveBeenCalled();
     });
   });
 });

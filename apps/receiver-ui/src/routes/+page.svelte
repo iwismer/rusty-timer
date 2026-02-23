@@ -66,6 +66,8 @@
   let targetedRowErrors = $state<Record<number, TargetedRowErrors>>({});
   let selectionBusy = $state(false);
   let selectionApplyQueued = $state(false);
+  let loadAllInFlight = false;
+  let loadAllQueued = false;
 
   function normalizeReplayPolicy(replayPolicy: ReplayPolicy): ReplayPolicy {
     if (replayPolicy === "live_only") {
@@ -149,13 +151,22 @@
     return `${forwarder_id}/${reader_ip}`;
   }
 
-  function applyStreamCountUpdates(updates: StreamCountUpdate[]) {
-    if (!streams || updates.length === 0) {
-      return;
+  function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
+    if (updates.length === 0) {
+      return false;
+    }
+    if (!streams) {
+      return true;
     }
 
+    const knownKeys = new Set(
+      streams.streams.map((s) => streamKey(s.forwarder_id, s.reader_ip)),
+    );
     const updatesByKey = new Map(
       updates.map((u) => [streamKey(u.forwarder_id, u.reader_ip), u]),
+    );
+    const hasUnknownStream = updates.some(
+      (u) => !knownKeys.has(streamKey(u.forwarder_id, u.reader_ip)),
     );
 
     streams = {
@@ -174,6 +185,8 @@
         };
       }),
     };
+
+    return hasUnknownStream;
   }
 
   async function toggleSubscription(
@@ -219,6 +232,12 @@
   }
 
   async function loadAll() {
+    if (loadAllInFlight) {
+      loadAllQueued = true;
+      return;
+    }
+
+    loadAllInFlight = true;
     try {
       const [nextStatus, nextStreams, nextLogs, nextSelection, nextRaces] =
         await Promise.all([
@@ -272,6 +291,12 @@
       }
     } catch (e) {
       error = String(e);
+    } finally {
+      loadAllInFlight = false;
+      if (loadAllQueued) {
+        loadAllQueued = false;
+        void loadAll();
+      }
     }
   }
 
@@ -544,7 +569,10 @@
         }
       },
       onStreamCountsUpdated: (updates) => {
-        applyStreamCountUpdates(updates);
+        const needsResync = applyStreamCountUpdates(updates);
+        if (needsResync) {
+          void loadAll();
+        }
       },
     });
   });
