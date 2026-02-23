@@ -71,6 +71,11 @@
   let targetedRowErrors = $state<Record<number, TargetedRowErrors>>({});
   let selectionBusy = $state(false);
   let selectionApplyQueued = $state(false);
+  let savedPayload = $state<string | null>(null);
+  let isDirty = $derived(
+    savedPayload !== null &&
+      JSON.stringify(selectionPayload()) !== savedPayload,
+  );
   let loadAllInFlight = false;
   let loadAllQueued = false;
 
@@ -333,6 +338,7 @@
           epochScopeDraft = nextSelection.selection.epoch_scope;
           selectedStreams = [];
         }
+        savedPayload = JSON.stringify(selectionPayload());
       }
       const p = await api.getProfile().catch(() => null);
       if (p) {
@@ -425,7 +431,9 @@
         targetedRowErrors = {};
       }
       try {
-        await api.putSelection(selectionPayload());
+        const payload = selectionPayload();
+        await api.putSelection(payload);
+        savedPayload = JSON.stringify(payload);
         error = null;
       } catch (e) {
         error = String(e);
@@ -443,26 +451,20 @@
       | "manual"
       | "race";
     selectionMode = nextMode;
-    void applySelection();
   }
 
   function handleRaceIdChange(event: Event): void {
     raceIdDraft = (event.currentTarget as HTMLSelectElement).value;
-    if (selectionMode === "race") {
-      void applySelection();
-    }
   }
 
   function handleEpochScopeChange(event: Event): void {
     epochScopeDraft = (event.currentTarget as HTMLSelectElement)
       .value as EpochScope;
-    void applySelection();
   }
 
   function handleReplayPolicyChange(event: Event): void {
     replayPolicyDraft = (event.currentTarget as HTMLSelectElement)
       .value as ReplayPolicy;
-    void applySelection();
   }
 
   function handleTargetedStreamChange(index: number, event: Event): void {
@@ -473,7 +475,6 @@
     if (value) {
       void ensureTargetedEpochOptionsForStream(value);
     }
-    void applySelection();
   }
 
   function handleTargetedEpochChange(index: number, event: Event): void {
@@ -481,7 +482,6 @@
     targetedRows = targetedRows.map((row, rowIndex) =>
       rowIndex === index ? { ...row, streamEpoch: value } : row,
     );
-    void applySelection();
   }
 
   function addTargetedRow(): void {
@@ -495,7 +495,6 @@
       targetedRows = [{ streamKey: "", streamEpoch: "" }];
     }
     targetedRowErrors = {};
-    void applySelection();
   }
 
   async function saveProfile() {
@@ -967,6 +966,16 @@
               </div>
             </div>
           {/if}
+        </div>
+        <div class="mt-3 pt-3 border-t border-border">
+          <button
+            data-testid="save-selection-btn"
+            class={btnPrimary}
+            onclick={() => void applySelection()}
+            disabled={!isDirty || selectionBusy}
+          >
+            {selectionBusy ? "Saving..." : "Save"}
+          </button>
         </div>
       </section>
     </Card>
