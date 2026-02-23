@@ -22,7 +22,8 @@
       "Bash(git restore:*)",
       "Bash(gh pr checks:*)",
       "Bash(tbd sync:*)",
-      "Bash(tbd status:*)"
+      "Bash(tbd status:*)",
+      "Bash(find:*)"
     ]
   }
 }
