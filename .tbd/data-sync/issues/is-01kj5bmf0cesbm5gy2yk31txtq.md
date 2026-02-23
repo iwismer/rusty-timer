@@ -3,14 +3,16 @@ type: is
 id: is-01kj5bmf0cesbm5gy2yk31txtq
 title: "PR #89 review summary: rt-1rb7 race/epoch selection"
 kind: task
-status: open
+status: closed
 priority: 1
-version: 3
+version: 4
 labels: []
 dependencies: []
 parent_id: is-01kj5b8qc8vt6ecm216tkhw2ht
 created_at: 2026-02-23T13:39:46.826Z
-updated_at: 2026-02-23T13:52:42.010Z
+updated_at: 2026-02-23T15:47:30.328Z
+closed_at: 2026-02-23T15:47:30.327Z
+close_reason: null
 ---
 ## PR #89 Review Summary — rt-1rb7 race/epoch selection and backfill (manual default)
 

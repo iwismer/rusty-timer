@@ -3,9 +3,9 @@ type: is
 id: is-01kj5b8qc8vt6ecm216tkhw2ht
 title: "PR #89 review: rt-1rb7 race/epoch selection"
 kind: epic
-status: open
+status: closed
 priority: 2
-version: 13
+version: 14
 labels: []
 dependencies: []
 child_order_hints:
@@ -21,5 +21,7 @@ child_order_hints:
   - is-01kj5b8z5wm1p5ztc6c2dnhgeq
   - is-01kj5bmf0cesbm5gy2yk31txtq
 created_at: 2026-02-23T13:33:22.179Z
-updated_at: 2026-02-23T13:53:09.319Z
+updated_at: 2026-02-23T15:47:27.575Z
+closed_at: 2026-02-23T15:47:27.573Z
+close_reason: null
 ---
