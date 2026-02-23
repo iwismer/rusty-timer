@@ -25,6 +25,11 @@
   let updateBusy = $state(false);
   let sseConnected = $state(false);
   let logs = $state<string[]>([]);
+  let epochNameDrafts = $state<Record<string, string>>({});
+  let epochNameBusy = $state<Record<string, boolean>>({});
+  let epochNameFeedback = $state<
+    Record<string, { kind: "ok" | "err"; message: string } | undefined>
+  >({});
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -118,6 +123,48 @@
       await api.resetEpoch(readerIp);
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  function updateEpochNameDraft(readerIp: string, value: string) {
+    epochNameDrafts = { ...epochNameDrafts, [readerIp]: value };
+  }
+
+  function setEpochNameBusy(readerIp: string, busy: boolean) {
+    epochNameBusy = { ...epochNameBusy, [readerIp]: busy };
+  }
+
+  async function handleSetCurrentEpochName(
+    readerIp: string,
+    name: string | null,
+  ) {
+    setEpochNameBusy(readerIp, true);
+    error = null;
+    epochNameFeedback = { ...epochNameFeedback, [readerIp]: undefined };
+    try {
+      await api.setCurrentEpochName(readerIp, name);
+      if (name === null) {
+        epochNameDrafts = { ...epochNameDrafts, [readerIp]: "" };
+      }
+      epochNameFeedback = {
+        ...epochNameFeedback,
+        [readerIp]: {
+          kind: "ok",
+          message: name === null ? "Epoch name cleared." : "Epoch name saved.",
+        },
+      };
+    } catch (e) {
+      const msg = String(e);
+      error = msg;
+      epochNameFeedback = {
+        ...epochNameFeedback,
+        [readerIp]: {
+          kind: "err",
+          message: `Failed to update epoch name: ${msg}`,
+        },
+      };
+    } finally {
+      setEpochNameBusy(readerIp, false);
     }
   }
 
@@ -301,6 +348,11 @@
                 >
                   Last seen
                 </th>
+                <th
+                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
+                >
+                  Current epoch name
+                </th>
                 <th class="px-4 py-2.5"></th>
               </tr>
             </thead>
@@ -333,6 +385,57 @@
                   </td>
                   <td class="px-4 py-2.5 text-xs text-text-secondary">
                     {formatLastSeen(reader.last_seen_secs)}
+                  </td>
+                  <td class="px-4 py-2.5">
+                    <div class="flex flex-col gap-1">
+                      <div class="flex items-center gap-2">
+                        <input
+                          type="text"
+                          class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
+                          placeholder="Set name"
+                          value={epochNameDrafts[reader.ip] ?? ""}
+                          oninput={(event) =>
+                            updateEpochNameDraft(
+                              reader.ip,
+                              (event.currentTarget as HTMLInputElement).value,
+                            )}
+                          disabled={epochNameBusy[reader.ip] === true}
+                        />
+                        <button
+                          onclick={() =>
+                            handleSetCurrentEpochName(
+                              reader.ip,
+                              (epochNameDrafts[reader.ip] ?? "").trim() || null,
+                            )}
+                          class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                          disabled={epochNameBusy[reader.ip] === true}
+                        >
+                          Save
+                        </button>
+                        <button
+                          onclick={() =>
+                            handleSetCurrentEpochName(reader.ip, null)}
+                          class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                          disabled={epochNameBusy[reader.ip] === true}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      {#if epochNameFeedback[reader.ip]}
+                        {@const feedback = epochNameFeedback[reader.ip]}
+                        {#if feedback}
+                          <span
+                            class={`text-xs ${
+                              feedback.kind === "ok"
+                                ? "text-semantic-ok"
+                                : "text-semantic-err"
+                            }`}
+                          >
+                            {feedback.message}
+                          </span>
+                        {/if}
+                      {/if}
+                    </div>
                   </td>
                   <td class="px-4 py-2.5 text-right">
                     <button

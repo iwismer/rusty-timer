@@ -128,6 +128,16 @@ export async function resetEpoch(
   });
 }
 
+export async function setCurrentEpochName(
+  readerIp: string,
+  name: string | null,
+): Promise<void> {
+  await apiFetch(`/api/v1/streams/${readerIp}/current-epoch/name`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
 export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
   return apiFetch<UpdateStatusResponse>("/update/status");
 }

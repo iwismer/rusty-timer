@@ -29,6 +29,7 @@ futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
+reqwest = "0.12"
 rt-protocol = { path = "../../crates/rt-protocol" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-ui-http = { path = "../../crates/rt-ui-http" }
@@ -38,6 +39,5 @@ rust-embed = { version = "8", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
-reqwest = "0.12"
 rt-test-utils = { path = "../../crates/rt-test-utils" }
 tokio = { version = "1", features = ["full"] }

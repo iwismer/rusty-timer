@@ -108,6 +108,32 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("setCurrentEpochName calls correct endpoint with name", async () => {
+    const { setCurrentEpochName } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await setCurrentEpochName("192.168.1.10", "Lap 2");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/192.168.1.10/current-epoch/name",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ name: "Lap 2" }),
+      }),
+    );
+  });
+
+  it("setCurrentEpochName sends null when clearing", async () => {
+    const { setCurrentEpochName } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await setCurrentEpochName("192.168.1.10", null);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/192.168.1.10/current-epoch/name",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ name: null }),
+      }),
+    );
+  });
+
   it("downloadUpdate returns failed status payload on 409", async () => {
     const { downloadUpdate } = await import("./api");
     mockFetch.mockResolvedValue(
