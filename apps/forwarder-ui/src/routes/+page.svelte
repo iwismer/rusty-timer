@@ -433,14 +433,6 @@
                         >
                           Save
                         </button>
-                        <button
-                          onclick={() =>
-                            handleSetCurrentEpochName(reader.ip, null)}
-                          class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                          disabled={epochNameBusy[reader.ip] === true}
-                        >
-                          Clear
-                        </button>
                       </div>
                       {#if epochNameFeedback[reader.ip]}
                         {@const feedback = epochNameFeedback[reader.ip]}
