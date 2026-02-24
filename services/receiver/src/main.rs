@@ -48,9 +48,14 @@ async fn main() {
     // 4. Load profile and restore subscriptions
     // -------------------------------------------------------------------------
     let update_mode: rt_updater::UpdateMode;
+    let has_profile: bool;
     {
         let db = state.db.lock().await;
         let profile = db.load_profile().ok().flatten();
+        has_profile = profile
+            .as_ref()
+            .map(|p| !p.server_url.is_empty() && !p.token.is_empty())
+            .unwrap_or(false);
         if let Some(ref p) = profile {
             *state.upstream_url.write().await = Some(p.server_url.clone());
             info!(url = %p.server_url, "restored profile");
@@ -78,6 +83,12 @@ async fn main() {
     // Map from stream-key -> LocalProxy handle.
     let mut proxies: HashMap<String, LocalProxy> = HashMap::new();
     reconcile_proxies(&initial_subs, &mut proxies, &event_bus, &state.logger).await;
+
+    // Auto-connect on startup if a profile with URL and token exists.
+    if has_profile {
+        state.logger.log("Auto-connecting to server");
+        state.request_connect().await;
+    }
 
     // -------------------------------------------------------------------------
     // 3. Start Axum control API on 127.0.0.1:9090
@@ -215,6 +226,10 @@ async fn main() {
     // Track last-known subscriptions to detect changes.
     let mut last_subs: Vec<Subscription> = initial_subs;
 
+    // Track the attempt number at which the last successful connection was made,
+    // so we can compute retry backoff for auto-reconnect.
+    let mut last_success_attempt: u64 = 0;
+
     loop {
         tokio::select! {
             biased;
@@ -275,6 +290,19 @@ async fn main() {
                 match result {
                     ConnectionState::Connecting => {
                         let attempt = state.current_connect_attempt();
+
+                        // Exponential backoff for retries after failed/dropped connections.
+                        let retries = attempt.saturating_sub(last_success_attempt + 1);
+                        if retries > 0 {
+                            let delay_secs = std::cmp::min(1u64 << retries.min(4), 30);
+                            state.logger.log(format!("Reconnecting in {delay_secs}s"));
+                            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                            // Bail out if a newer attempt was issued while we slept.
+                            if !is_current_connect_attempt(&state, attempt).await {
+                                continue;
+                            }
+                        }
+
                         // Cancel any existing session first.
                         cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
 
@@ -340,6 +368,7 @@ async fn main() {
                                                     state.logger.log("Discarding stale connect attempt");
                                                     continue;
                                                 }
+                                                last_success_attempt = attempt;
                                                 state.logger.log(format!("Connected (session {session_id})"));
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
@@ -374,14 +403,22 @@ async fn main() {
                                                             );
                                                         }
                                                     }
-                                                    let should_disconnect = {
-                                                        let cs = st.connection_state.read().await;
-                                                        *cs == ConnectionState::Connected
-                                                            || *cs == ConnectionState::Disconnecting
+                                                    let prev_state = {
+                                                        st.connection_state.read().await.clone()
                                                     };
-                                                    if should_disconnect {
-                                                        st.set_connection_state(ConnectionState::Disconnected).await;
-                                                        st.emit_streams_snapshot().await;
+                                                    match prev_state {
+                                                        ConnectionState::Connected => {
+                                                            // Unexpected drop — auto-reconnect.
+                                                            st.logger.log("Connection lost, will reconnect");
+                                                            st.request_connect().await;
+                                                            st.emit_streams_snapshot().await;
+                                                        }
+                                                        ConnectionState::Disconnecting => {
+                                                            // User-initiated disconnect.
+                                                            st.set_connection_state(ConnectionState::Disconnected).await;
+                                                            st.emit_streams_snapshot().await;
+                                                        }
+                                                        _ => {}
                                                     }
                                                 });
                                                 session_task = Some(handle);

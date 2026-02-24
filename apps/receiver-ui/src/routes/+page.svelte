@@ -727,7 +727,7 @@
               Connect
             </button>
             <button
-              class={btnSecondary}
+              class="px-3 py-1.5 text-sm font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
               onclick={handleDisconnect}
               disabled={connectBusy || connectionState === "disconnected"}
             >
