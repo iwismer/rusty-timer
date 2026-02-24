@@ -19,7 +19,7 @@ env:
 jobs:
   resolve-matrix:
     name: Resolve build matrix
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       service: ${{ steps.parse.outputs.service }}
       version: ${{ steps.parse.outputs.version }}
@@ -71,14 +71,14 @@ jobs:
           SERVICE="${{ steps.parse.outputs.service }}"
           case "$SERVICE" in
             forwarder|emulator)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"self-hosted","target":"x86_64-unknown-linux-gnu"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
               ;;
             receiver|streamer)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"self-hosted","target":"x86_64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
               ;;
             server)
               # Keep a valid matrix output, but skip binary build/package jobs.
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"self-hosted","target":"x86_64-unknown-linux-gnu"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]}'
               ;;
             *)
               echo "::error::Unknown service: $SERVICE"
@@ -190,7 +190,7 @@ jobs:
     name: Build and Push Server Docker Image
     needs: resolve-matrix
     if: needs.resolve-matrix.outputs.service == 'server'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -225,7 +225,7 @@ jobs:
       needs.resolve-matrix.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped') &&
       (needs['server-docker'].result == 'success' || needs['server-docker'].result == 'skipped')
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         if: needs.resolve-matrix.outputs.service != 'server'
