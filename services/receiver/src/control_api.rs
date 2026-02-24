@@ -854,11 +854,17 @@ async fn put_subscriptions(
             let db = state.db.lock().await;
             let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
             let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
-                connection_state: conn,
+                connection_state: conn.clone(),
                 streams_count,
             });
             drop(db);
             state.emit_streams_snapshot().await;
+            if matches!(
+                conn,
+                ConnectionState::Connected | ConnectionState::Connecting
+            ) {
+                state.request_connect().await;
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
