@@ -1379,10 +1379,11 @@ async fn put_subscriptions_connected_transitions_to_connecting() {
 }
 
 #[tokio::test]
-async fn put_subscriptions_disconnected_does_not_trigger_reconnect() {
+async fn put_subscriptions_disconnected_triggers_reconnect() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
     let app = build_router(Arc::clone(&state));
+    let before_attempt = state.current_connect_attempt();
 
     assert_eq!(
         put_json(
@@ -1399,7 +1400,75 @@ async fn put_subscriptions_disconnected_does_not_trigger_reconnect() {
     );
     assert_eq!(
         *state.connection_state.read().await,
-        ConnectionState::Disconnected
+        ConnectionState::Connecting
+    );
+    assert!(
+        state.current_connect_attempt() > before_attempt,
+        "subscription update while disconnected should request a connect attempt"
+    );
+}
+
+#[tokio::test]
+async fn put_subscriptions_connecting_reissues_connect_attempt() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    state.request_connect().await;
+    let before_attempt = state.current_connect_attempt();
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions": [
+                    {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null}
+                ]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Connecting
+    );
+    assert!(
+        state.current_connect_attempt() > before_attempt,
+        "subscription update while connecting should request a fresh connect attempt"
+    );
+}
+
+#[tokio::test]
+async fn put_subscriptions_disconnect_in_progress_does_not_reconnect() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+    *state.connection_state.write().await = ConnectionState::Disconnecting;
+    let before_attempt = state.current_connect_attempt();
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions": [
+                    {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null}
+                ]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Disconnecting
+    );
+    assert_eq!(
+        state.current_connect_attempt(),
+        before_attempt,
+        "subscription update should not reconnect while disconnecting"
     );
 }
 
