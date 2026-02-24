@@ -62,6 +62,7 @@ pub struct AppState {
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
     connect_attempt: AtomicU64,
+    retry_streak: AtomicU64,
 }
 
 impl AppState {
@@ -84,6 +85,7 @@ impl AppState {
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
             connect_attempt: AtomicU64::new(0),
+            retry_streak: AtomicU64::new(0),
         });
         (state, shutdown_rx)
     }
@@ -92,14 +94,42 @@ impl AppState {
         self.connect_attempt.load(Ordering::SeqCst)
     }
 
+    pub fn current_retry_streak(&self) -> u64 {
+        self.retry_streak.load(Ordering::SeqCst)
+    }
+
+    pub fn reset_retry_streak(&self) {
+        self.retry_streak.store(0, Ordering::SeqCst);
+    }
+
     pub async fn request_connect(&self) {
+        self.reset_retry_streak();
         self.connect_attempt.fetch_add(1, Ordering::SeqCst);
         self.set_connection_state(ConnectionState::Connecting).await;
     }
 
-    /// Update connection state, broadcast status change, and emit a log entry.
-    pub async fn set_connection_state(&self, new_state: ConnectionState) {
-        *self.connection_state.write().await = new_state.clone();
+    pub async fn request_retry_connect(&self) {
+        self.retry_streak.fetch_add(1, Ordering::SeqCst);
+        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+        self.set_connection_state(ConnectionState::Connecting).await;
+    }
+
+    pub async fn request_reconnect_if_connected(&self) -> bool {
+        {
+            let mut connection_state = self.connection_state.write().await;
+            if *connection_state != ConnectionState::Connected {
+                return false;
+            }
+            self.retry_streak.fetch_add(1, Ordering::SeqCst);
+            self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+            *connection_state = ConnectionState::Connecting;
+        }
+        self.emit_connection_state_side_effects(ConnectionState::Connecting)
+            .await;
+        true
+    }
+
+    async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
         let streams_count = {
             let db = self.db.lock().await;
             db.load_subscriptions().map(|s| s.len()).unwrap_or(0)
@@ -115,6 +145,12 @@ impl AppState {
             ConnectionState::Disconnecting => "Disconnecting",
         };
         self.logger.log(label);
+    }
+
+    /// Update connection state, broadcast status change, and emit a log entry.
+    pub async fn set_connection_state(&self, new_state: ConnectionState) {
+        *self.connection_state.write().await = new_state.clone();
+        self.emit_connection_state_side_effects(new_state).await;
     }
 
     /// Build the merged streams response from local subscriptions and upstream server.
