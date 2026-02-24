@@ -850,15 +850,24 @@ async fn put_subscriptions(
     match db.replace_subscriptions(&subs) {
         Ok(()) => {
             drop(db);
-            let conn = state.connection_state.read().await.clone();
+            let conn_for_status = state.connection_state.read().await.clone();
             let db = state.db.lock().await;
             let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
             let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
-                connection_state: conn,
+                connection_state: conn_for_status,
                 streams_count,
             });
             drop(db);
             state.emit_streams_snapshot().await;
+            let conn_for_reconnect = state.connection_state.read().await.clone();
+            if matches!(
+                conn_for_reconnect,
+                ConnectionState::Connected
+                    | ConnectionState::Connecting
+                    | ConnectionState::Disconnected
+            ) {
+                state.request_connect().await;
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

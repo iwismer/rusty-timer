@@ -977,20 +977,29 @@ async fn get_streams_connected_merges_server_and_local_streams() {
     )
     .await;
 
+    // Insert subscriptions directly via the DB to avoid triggering a reconnect
+    // (put_subscriptions now calls request_connect() when connected).
+    {
+        let mut db = state.db.lock().await;
+        db.replace_subscriptions(&[
+            receiver::Subscription {
+                forwarder_id: "f1".to_owned(),
+                reader_ip: "192.168.1.100:10000".to_owned(),
+                local_port_override: None,
+            },
+            receiver::Subscription {
+                forwarder_id: "f3".to_owned(),
+                reader_ip: "192.168.1.250:10000".to_owned(),
+                local_port_override: Some(9950),
+            },
+        ])
+        .unwrap();
+    }
+
     *state.upstream_url.write().await = Some(ws_url);
     *state.connection_state.write().await = receiver::control_api::ConnectionState::Connected;
 
     let app = build_router(state);
-    let body = json!({
-        "subscriptions":[
-            {"forwarder_id":"f1","reader_ip":"192.168.1.100:10000","local_port_override":null},
-            {"forwarder_id":"f3","reader_ip":"192.168.1.250:10000","local_port_override":9950}
-        ]
-    });
-    assert_eq!(
-        put_json(app.clone(), "/api/v1/subscriptions", body).await,
-        StatusCode::NO_CONTENT
-    );
 
     let (status, val) = get_json(app, "/api/v1/streams").await;
     assert_eq!(status, StatusCode::OK);
@@ -1341,6 +1350,126 @@ async fn put_subscriptions_concurrent_writes_emit_current_count() {
         }
     }
     assert!(saw_status, "Expected at least one status_changed event");
+}
+
+#[tokio::test]
+async fn put_subscriptions_connected_transitions_to_connecting() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    *state.connection_state.write().await = ConnectionState::Connected;
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions": [
+                    {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null}
+                ]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Connecting
+    );
+}
+
+#[tokio::test]
+async fn put_subscriptions_disconnected_triggers_reconnect() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+    let before_attempt = state.current_connect_attempt();
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions": [
+                    {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null}
+                ]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Connecting
+    );
+    assert!(
+        state.current_connect_attempt() > before_attempt,
+        "subscription update while disconnected should request a connect attempt"
+    );
+}
+
+#[tokio::test]
+async fn put_subscriptions_connecting_reissues_connect_attempt() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    state.request_connect().await;
+    let before_attempt = state.current_connect_attempt();
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions": [
+                    {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null}
+                ]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Connecting
+    );
+    assert!(
+        state.current_connect_attempt() > before_attempt,
+        "subscription update while connecting should request a fresh connect attempt"
+    );
+}
+
+#[tokio::test]
+async fn put_subscriptions_disconnect_in_progress_does_not_reconnect() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+    *state.connection_state.write().await = ConnectionState::Disconnecting;
+    let before_attempt = state.current_connect_attempt();
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions": [
+                    {"forwarder_id": "f1", "reader_ip": "10.0.0.1:10000", "local_port_override": null}
+                ]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Disconnecting
+    );
+    assert_eq!(
+        state.current_connect_attempt(),
+        before_attempt,
+        "subscription update should not reconnect while disconnecting"
+    );
 }
 
 // ---------------------------------------------------------------------------
