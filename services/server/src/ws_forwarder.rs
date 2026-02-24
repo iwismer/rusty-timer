@@ -323,6 +323,14 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     );
                                 }
                                 if previous_display_name != current_display_name {
+                                    match &current_display_name {
+                                        Some(name) => state.logger.log(format!(
+                                            "forwarder \"{device_id}\" display name set to \"{name}\""
+                                        )),
+                                        None => state.logger.log(format!(
+                                            "forwarder \"{device_id}\" display name cleared"
+                                        )),
+                                    }
                                     let display_name_patch = match &current_display_name {
                                         Some(name) => OptionalStringPatch::Set(name.clone()),
                                         None => OptionalStringPatch::Clear,
