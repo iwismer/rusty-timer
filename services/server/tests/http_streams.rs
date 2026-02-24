@@ -32,12 +32,12 @@ async fn insert_stream(pool: &sqlx::PgPool, forwarder_id: &str, reader_ip: &str)
 
 async fn insert_event(pool: &sqlx::PgPool, stream_id: uuid::Uuid, epoch: i64, seq: i64) {
     sqlx::query(
-        "INSERT INTO events (stream_id, stream_epoch, seq, raw_read_line, read_type) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO events (stream_id, stream_epoch, seq, raw_frame, read_type) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(stream_id)
     .bind(epoch)
     .bind(seq)
-    .bind(format!("LINE_e{}_s{}", epoch, seq))
+    .bind(format!("LINE_e{}_s{}", epoch, seq).into_bytes())
     .bind("RAW")
     .execute(pool)
     .await
@@ -301,7 +301,7 @@ async fn test_get_metrics_for_stream() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("LINE_{}", seq),
+                raw_frame: format!("LINE_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -319,7 +319,7 @@ async fn test_get_metrics_for_stream() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: "LINE_1".to_owned(),
+            raw_frame: "LINE_1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -466,7 +466,7 @@ async fn test_forwarder_display_name_on_event_batch_created_stream() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-18T10:00:00.000Z".to_owned(),
-            raw_read_line: "LINE_1".to_owned(),
+            raw_frame: "LINE_1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))

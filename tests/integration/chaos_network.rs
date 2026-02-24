@@ -119,7 +119,7 @@ async fn chaos_network_flap_events_not_lost() {
                         stream_epoch: 1,
                         seq,
                         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                        raw_read_line: format!("CHAOS_LINE_{}", seq),
+                        raw_frame: format!("CHAOS_LINE_{}", seq).into_bytes(),
                         read_type: "RAW".to_owned(),
                     }],
                 }))
@@ -162,7 +162,7 @@ async fn chaos_network_flap_events_not_lost() {
                         stream_epoch: 1,
                         seq,
                         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                        raw_read_line: format!("CHAOS_LINE_{}", seq),
+                        raw_frame: format!("CHAOS_LINE_{}", seq).into_bytes(),
                         read_type: "RAW".to_owned(),
                     }],
                 }))
@@ -235,7 +235,7 @@ async fn chaos_network_rapid_reconnects_no_duplication() {
                         stream_epoch: 1,
                         seq,
                         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                        raw_read_line: format!("RAPID_LINE_{}", seq),
+                        raw_frame: format!("RAPID_LINE_{}", seq).into_bytes(),
                         read_type: "RAW".to_owned(),
                     }],
                 }))
@@ -313,7 +313,7 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("RCV_CHAOS_LINE_{}", seq),
+                raw_frame: format!("RCV_CHAOS_LINE_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -483,7 +483,7 @@ async fn chaos_two_streams_independent_under_flap() {
                             stream_epoch: 1,
                             seq,
                             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                            raw_read_line: format!("S1_LINE_{}", seq),
+                            raw_frame: format!("S1_LINE_{}", seq).into_bytes(),
                             read_type: "RAW".to_owned(),
                         },
                         ReadEvent {
@@ -492,7 +492,7 @@ async fn chaos_two_streams_independent_under_flap() {
                             stream_epoch: 1,
                             seq,
                             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                            raw_read_line: format!("S2_LINE_{}", seq),
+                            raw_frame: format!("S2_LINE_{}", seq).into_bytes(),
                             read_type: "RAW".to_owned(),
                         },
                     ],
@@ -537,7 +537,7 @@ async fn chaos_two_streams_independent_under_flap() {
                         stream_epoch: 1,
                         seq: 4,
                         reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
-                        raw_read_line: "S1_LINE_4".to_owned(),
+                        raw_frame: b"S1_LINE_4".to_vec(),
                         read_type: "RAW".to_owned(),
                     },
                     ReadEvent {
@@ -546,7 +546,7 @@ async fn chaos_two_streams_independent_under_flap() {
                         stream_epoch: 1,
                         seq: 4,
                         reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
-                        raw_read_line: "S2_LINE_4".to_owned(),
+                        raw_frame: b"S2_LINE_4".to_vec(),
                         read_type: "RAW".to_owned(),
                     },
                 ],

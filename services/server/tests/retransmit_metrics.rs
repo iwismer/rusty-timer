@@ -56,7 +56,7 @@ async fn test_metrics_invariant_maintained() {
         stream_epoch: 1,
         seq,
         reader_timestamp: format!("2026-02-17T10:00:0{}.000Z", seq),
-        raw_read_line: format!("LINE_{}", seq),
+        raw_frame: format!("LINE_{}", seq).into_bytes(),
         read_type: "RAW".to_owned(),
     };
     for seq in 1..=3u64 {
@@ -148,7 +148,7 @@ async fn test_multi_stream_metrics_independent() {
                     stream_epoch: 1,
                     seq,
                     reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                    raw_read_line: format!("S1_{}", seq),
+                    raw_frame: format!("S1_{}", seq).into_bytes(),
                     read_type: "RAW".to_owned(),
                 }],
             }))
@@ -162,7 +162,7 @@ async fn test_multi_stream_metrics_independent() {
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-        raw_read_line: "S2_1".to_owned(),
+        raw_frame: "S2_1".as_bytes().to_vec(),
         read_type: "RAW".to_owned(),
     };
     client

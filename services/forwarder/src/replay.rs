@@ -109,17 +109,17 @@ mod tests {
 
         let seq1 = journal.next_seq("10.0.0.10:10000").unwrap();
         journal
-            .insert_event("10.0.0.10:10000", 1, seq1, None, "epoch1-seq1", "RAW")
+            .insert_event("10.0.0.10:10000", 1, seq1, None, b"epoch1-seq1", "RAW")
             .unwrap();
         let seq2 = journal.next_seq("10.0.0.10:10000").unwrap();
         journal
-            .insert_event("10.0.0.10:10000", 1, seq2, None, "epoch1-seq2", "RAW")
+            .insert_event("10.0.0.10:10000", 1, seq2, None, b"epoch1-seq2", "RAW")
             .unwrap();
 
         journal.bump_epoch("10.0.0.10:10000", 2).unwrap();
         let seq3 = journal.next_seq("10.0.0.10:10000").unwrap();
         journal
-            .insert_event("10.0.0.10:10000", 2, seq3, None, "epoch2-seq1", "RAW")
+            .insert_event("10.0.0.10:10000", 2, seq3, None, b"epoch2-seq1", "RAW")
             .unwrap();
 
         let replay = ReplayEngine::new()
@@ -144,7 +144,7 @@ mod tests {
         for _ in 0..3 {
             let seq = journal.next_seq("10.0.0.20:10000").unwrap();
             journal
-                .insert_event("10.0.0.20:10000", 1, seq, None, "epoch1", "RAW")
+                .insert_event("10.0.0.20:10000", 1, seq, None, b"epoch1", "RAW")
                 .unwrap();
         }
         journal.update_ack_cursor("10.0.0.20:10000", 1, 1).unwrap();
@@ -153,7 +153,7 @@ mod tests {
         for _ in 0..2 {
             let seq = journal.next_seq("10.0.0.20:10000").unwrap();
             journal
-                .insert_event("10.0.0.20:10000", 2, seq, None, "epoch2", "RAW")
+                .insert_event("10.0.0.20:10000", 2, seq, None, b"epoch2", "RAW")
                 .unwrap();
         }
 

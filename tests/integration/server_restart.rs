@@ -98,7 +98,7 @@ async fn server_restart_events_survive_in_postgres() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("PRE_RESTART_LINE_{}", seq),
+                raw_frame: format!("PRE_RESTART_LINE_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -214,7 +214,7 @@ async fn server_restart_new_forwarder_connection_works() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("PRE_{}", seq),
+                raw_frame: format!("PRE_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -253,7 +253,7 @@ async fn server_restart_new_forwarder_connection_works() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
-                raw_read_line: format!("POST_{}", seq),
+                raw_frame: format!("POST_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))

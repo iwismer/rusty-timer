@@ -72,7 +72,7 @@ fn append_read_to_journal(
     journal: &mut Journal,
     stream_key: &str,
     reader_timestamp: Option<&str>,
-    raw_line: &str,
+    raw_frame: &[u8],
     read_type: &str,
 ) -> Result<(i64, i64), JournalAppendError> {
     let (epoch, _) = journal
@@ -87,7 +87,7 @@ fn append_read_to_journal(
             epoch,
             seq,
             reader_timestamp,
-            raw_line,
+            raw_frame,
             read_type,
         )
         .map_err(|e| JournalAppendError::Insert(e.to_string()))?;
@@ -177,14 +177,14 @@ async fn run_reader(
         }
 
         let mut reader = BufReader::new(stream);
-        let mut line_buf = String::new();
+        let mut frame_buf = Vec::new();
 
         loop {
-            line_buf.clear();
+            frame_buf.clear();
 
             // Wait for a line or shutdown
             let read_result = tokio::select! {
-                result = reader.read_line(&mut line_buf) => result,
+                result = reader.read_until(b'\n', &mut frame_buf) => result,
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
@@ -214,7 +214,24 @@ async fn run_reader(
                 Ok(_) => {}
             }
 
-            let raw_line = line_buf.trim_end_matches(['\r', '\n']).to_owned();
+            let raw_payload = frame_buf
+                .strip_suffix(b"\r\n")
+                .or_else(|| frame_buf.strip_suffix(b"\n"))
+                .unwrap_or(&frame_buf);
+            if raw_payload.is_empty() {
+                continue;
+            }
+
+            let raw_line = match std::str::from_utf8(raw_payload) {
+                Ok(s) => s.to_owned(),
+                Err(_) => {
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} skipped non-utf8 frame", reader_ip),
+                    );
+                    continue;
+                }
+            };
             if raw_line.is_empty() {
                 continue;
             }
@@ -244,7 +261,7 @@ async fn run_reader(
                     &mut j,
                     &stream_key,
                     reader_timestamp.as_deref(),
-                    &raw_line,
+                    &frame_buf,
                     &parsed_read_type,
                 )
             };
@@ -285,7 +302,7 @@ async fn run_reader(
 
             // Fan out the exact bytes read from the reader, preserving
             // upstream line framing (for example CRLF).
-            let raw_bytes = line_buf.as_bytes().to_vec();
+            let raw_bytes = frame_buf.clone();
             if let Err(e) = FanoutServer::push_to_addr(fanout_addr, raw_bytes).await {
                 warn!(reader_ip = %reader_ip, error = %e, "local fanout push failed");
                 // Non-fatal: local fanout failure doesn't break uplink path
@@ -547,7 +564,7 @@ async fn run_uplink(
                     stream_epoch: ev.stream_epoch as u64,
                     seq: ev.seq as u64,
                     reader_timestamp: ev.reader_timestamp.clone().unwrap_or_default(),
-                    raw_read_line: ev.raw_read_line.clone(),
+                    raw_frame: ev.raw_frame.clone(),
                     read_type: ev.read_type.clone(),
                 })
                 .collect();
@@ -731,7 +748,7 @@ async fn run_uplink(
                                             .reader_timestamp
                                             .clone()
                                             .unwrap_or_default(),
-                                        raw_read_line: ev.raw_read_line.clone(),
+                                        raw_frame: ev.raw_frame.clone(),
                                         read_type: ev.read_type.clone(),
                                     });
                                     if batch.len() >= cfg.uplink.batch_max_events as usize {
@@ -1240,7 +1257,7 @@ mod tests {
                 1,
                 1,
                 Some("2026-01-01T00:00:00Z"),
-                "aa400000000123450a2a01123018455927a7",
+                b"aa400000000123450a2a01123018455927a7",
                 "RAW",
             )
             .expect("insert replay event");
@@ -1474,7 +1491,7 @@ mod tests {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
-                raw_read_line: format!("LINE_{seq}"),
+                raw_frame: format!("LINE_{seq}").into_bytes(),
                 read_type: "RAW".to_owned(),
             })
             .collect();
@@ -1495,7 +1512,7 @@ mod tests {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
-                raw_read_line: format!("LINE_{seq}"),
+                raw_frame: format!("LINE_{seq}").into_bytes(),
                 read_type: "RAW".to_owned(),
             })
             .collect();
@@ -1515,7 +1532,7 @@ mod tests {
             &mut journal,
             "10.0.0.42",
             Some("2026-01-01T00:00:00Z"),
-            "aa400000000123450a2a01123018455927a7",
+            b"aa400000000123450a2a01123018455927a7",
             "raw",
         );
 
@@ -1715,6 +1732,16 @@ mod tests {
             "expected 2 events in journal, got {}",
             events.len()
         );
+        assert_eq!(
+            events[0].raw_frame,
+            b"aa400000000123450a2a01123018455927a7\n".to_vec(),
+            "first event must preserve LF terminator in journal payload"
+        );
+        assert_eq!(
+            events[1].raw_frame,
+            b"aa400000000123450a2a01123018455927a7FS\n".to_vec(),
+            "second event must preserve LF terminator in journal payload"
+        );
         assert_eq!(events[0].read_type, "raw");
         assert_eq!(events[1].read_type, "fsls");
     }
@@ -1799,6 +1826,89 @@ mod tests {
         assert_eq!(
             received, expected,
             "fanout should preserve CRLF framing from reader stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_reader_fanout_preserves_lf_from_reader() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let reader_port = listener.local_addr().expect("listener local_addr").port();
+        let stream_key = format!("127.0.0.1:{reader_port}");
+
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+        status.init_readers(&[(stream_key, 10001)]).await;
+
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
+
+        let fanout = FanoutServer::bind("127.0.0.1:0")
+            .await
+            .expect("bind fanout");
+        let fanout_addr = fanout.local_addr();
+        tokio::spawn(async move {
+            fanout.run().await;
+        });
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let lg = status.logger();
+        let reader_task = tokio::spawn(run_reader(
+            "127.0.0.1".to_owned(),
+            reader_port,
+            fanout_addr,
+            journal,
+            shutdown_rx,
+            status,
+            lg,
+        ));
+
+        let (mut reader_stream, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
+            .await
+            .expect("reader connect timeout")
+            .expect("accept reader connection");
+
+        let mut consumer = tokio::net::TcpStream::connect(fanout_addr)
+            .await
+            .expect("connect fanout consumer");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let expected = b"aa400000000123450a2a01123018455927a7\n";
+        for _ in 0..5 {
+            reader_stream
+                .write_all(expected)
+                .await
+                .expect("write reader frame");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut received = vec![0u8; expected.len()];
+        timeout(
+            std::time::Duration::from_secs(1),
+            consumer.read_exact(&mut received),
+        )
+        .await
+        .expect("fanout read timeout")
+        .expect("fanout read exact");
+
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(1), reader_task)
+            .await
+            .expect("reader shutdown timeout")
+            .expect("reader task join");
+
+        assert_eq!(
+            received, expected,
+            "fanout should preserve LF framing from reader stream"
         );
     }
 
@@ -2053,6 +2163,7 @@ token_file = "/tmp/test-token"
     #[tokio::test]
     async fn run_uplink_does_not_resend_batch_after_config_get_then_ack() {
         let reader_ip = "10.0.0.9:10000".to_string();
+        let expected_raw_frame = b"aa400000000123450a2a01123018455927a7\r\n".to_vec();
         let temp_dir = tempdir().expect("create tempdir");
         let db_path = temp_dir.path().join("forwarder.sqlite3");
         let config_path = temp_dir.path().join("forwarder.toml");
@@ -2084,6 +2195,7 @@ token_file = "/tmp/test-token"
         let (result_tx, result_rx) = oneshot::channel::<bool>();
         let (ready_tx, ready_rx) = oneshot::channel::<()>();
         let reader_ip_for_server = reader_ip.clone();
+        let expected_raw_frame_server = expected_raw_frame.clone();
 
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
@@ -2118,6 +2230,7 @@ token_file = "/tmp/test-token"
                     assert_eq!(batch.events.len(), 1);
                     assert_eq!(batch.events[0].reader_ip, reader_ip_for_server);
                     assert_eq!(batch.events[0].seq, 1);
+                    assert_eq!(batch.events[0].raw_frame, expected_raw_frame_server);
                 }
                 other => panic!("expected ForwarderEventBatch, got {:?}", other),
             }
@@ -2255,7 +2368,7 @@ token_file = "/tmp/test-token"
                 1,
                 1,
                 Some("2026-01-01T00:00:00Z"),
-                "aa400000000123450a2a01123018455927a7",
+                &expected_raw_frame,
                 "RAW",
             )
             .expect("insert pending event");

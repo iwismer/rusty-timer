@@ -568,7 +568,7 @@ async fn test_receiver_receives_realtime_events() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: "RT_LINE_1".to_owned(),
+            raw_frame: "RT_LINE_1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -580,7 +580,7 @@ async fn test_receiver_receives_realtime_events() {
     match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1);
-            assert_eq!(batch.events[0].raw_read_line, "RT_LINE_1");
+            assert_eq!(batch.events[0].raw_frame, b"RT_LINE_1".to_vec());
             assert_eq!(batch.events[0].seq, 1);
         }
         Ok(Ok(other)) => panic!("expected ReceiverEventBatch, got {:?}", other),
@@ -662,7 +662,7 @@ async fn test_receiver_ack_updates_cursor() {
             stream_epoch: 1,
             seq: 5,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: "ACK_LINE".to_owned(),
+            raw_frame: "ACK_LINE".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))

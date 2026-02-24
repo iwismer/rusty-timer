@@ -67,7 +67,7 @@ async fn resume_policy_replays_from_persisted_cursor_state() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
-                raw_read_line: line.to_owned(),
+                raw_frame: line.as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         }))

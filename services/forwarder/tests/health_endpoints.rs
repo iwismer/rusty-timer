@@ -272,10 +272,10 @@ async fn epoch_reset_preserves_old_epoch_events() {
 
     // Insert some events in epoch 1 (unacked)
     journal
-        .insert_event("192.168.1.10", 1, 1, None, "READ1", "raw")
+        .insert_event("192.168.1.10", 1, 1, None, b"READ1", "raw")
         .expect("insert failed");
     journal
-        .insert_event("192.168.1.10", 1, 2, None, "READ2", "raw")
+        .insert_event("192.168.1.10", 1, 2, None, b"READ2", "raw")
         .expect("insert failed");
 
     let shared_journal = Arc::new(Mutex::new(journal));

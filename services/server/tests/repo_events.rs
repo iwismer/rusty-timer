@@ -28,7 +28,7 @@ async fn upsert_event_distinguishes_insert_retransmit_and_integrity_conflict() {
         1,
         1,
         "2026-02-20T10:00:00.000Z",
-        "raw-line-1",
+        b"raw-line-1",
         "RAW",
     )
     .await
@@ -42,7 +42,7 @@ async fn upsert_event_distinguishes_insert_retransmit_and_integrity_conflict() {
         1,
         1,
         "2026-02-20T10:00:00.000Z",
-        "raw-line-1",
+        b"raw-line-1",
         "RAW",
     )
     .await
@@ -56,7 +56,7 @@ async fn upsert_event_distinguishes_insert_retransmit_and_integrity_conflict() {
         1,
         1,
         "2026-02-20T10:00:00.000Z",
-        "raw-line-1-mutated",
+        b"raw-line-1-mutated",
         "RAW",
     )
     .await
@@ -83,7 +83,7 @@ async fn upsert_event_advances_epoch_and_updates_stream_epoch() {
         1,
         1,
         "2026-02-20T10:00:00.000Z",
-        "epoch1-line",
+        b"epoch1-line",
         "RAW",
     )
     .await
@@ -95,7 +95,7 @@ async fn upsert_event_advances_epoch_and_updates_stream_epoch() {
         2,
         1,
         "2026-02-20T10:00:01.000Z",
-        "epoch2-line",
+        b"epoch2-line",
         "RAW",
     )
     .await
@@ -126,7 +126,7 @@ async fn cursor_queries_return_ordered_ranges_and_latest_cursor() {
         1,
         1,
         "2026-02-20T10:00:00.000Z",
-        "e1s1",
+        b"e1s1",
         "RAW",
     )
     .await
@@ -137,7 +137,7 @@ async fn cursor_queries_return_ordered_ranges_and_latest_cursor() {
         1,
         2,
         "2026-02-20T10:00:01.000Z",
-        "e1s2",
+        b"e1s2",
         "RAW",
     )
     .await
@@ -148,7 +148,7 @@ async fn cursor_queries_return_ordered_ranges_and_latest_cursor() {
         1,
         3,
         "2026-02-20T10:00:02.000Z",
-        "e1s3",
+        b"e1s3",
         "RAW",
     )
     .await
@@ -159,7 +159,7 @@ async fn cursor_queries_return_ordered_ranges_and_latest_cursor() {
         2,
         1,
         "2026-02-20T10:00:03.000Z",
-        "e2s1",
+        b"e2s1",
         "RAW",
     )
     .await
@@ -170,7 +170,7 @@ async fn cursor_queries_return_ordered_ranges_and_latest_cursor() {
         2,
         2,
         "2026-02-20T10:00:04.000Z",
-        "e2s2",
+        b"e2s2",
         "RAW",
     )
     .await
@@ -221,7 +221,7 @@ async fn stream_upsert_is_idempotent_online_toggles_and_unique_chip_count_ignore
         1,
         1,
         "2026-02-20T10:00:00.000Z",
-        "aa400000000123450a2a01123018455927a7",
+        b"aa400000000123450a2a01123018455927a7",
         "RAW",
     )
     .await
@@ -232,7 +232,7 @@ async fn stream_upsert_is_idempotent_online_toggles_and_unique_chip_count_ignore
         1,
         2,
         "2026-02-20T10:00:01.000Z",
-        "not-a-chip-line",
+        b"not-a-chip-line",
         "RAW",
     )
     .await

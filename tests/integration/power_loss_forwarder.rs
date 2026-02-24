@@ -85,7 +85,7 @@ fn power_loss_events_survive_abrupt_drop() {
                 1,
                 seq,
                 Some("2026-02-17T10:00:00Z"),
-                &format!("POWER_LOSS_LINE_{}", i),
+                format!("POWER_LOSS_LINE_{}", i).as_bytes(),
                 "RAW",
             )
             .unwrap();
@@ -105,8 +105,8 @@ fn power_loss_events_survive_abrupt_drop() {
         );
         for (i, ev) in unacked.iter().enumerate() {
             assert_eq!(
-                ev.raw_read_line,
-                format!("POWER_LOSS_LINE_{}", i + 1),
+                ev.raw_frame,
+                format!("POWER_LOSS_LINE_{}", i + 1).into_bytes(),
                 "event {} content must be intact",
                 i + 1
             );
@@ -134,7 +134,7 @@ fn power_loss_ack_cursor_survives_abrupt_drop() {
 
         for _ in 1..=5 {
             let seq = j.next_seq("10.100.100.2").unwrap();
-            j.insert_event("10.100.100.2", 1, seq, None, "ack_cursor_test", "RAW")
+            j.insert_event("10.100.100.2", 1, seq, None, b"ack_cursor_test", "RAW")
                 .unwrap();
         }
         // Ack through seq 3.
@@ -188,7 +188,7 @@ fn power_loss_restart_replays_all_unacked_events() {
                 1,
                 seq,
                 None,
-                &format!("RESTART_LINE_{}", i),
+                format!("RESTART_LINE_{}", i).as_bytes(),
                 "RAW",
             )
             .unwrap();
@@ -235,7 +235,7 @@ fn power_loss_multiple_streams_independent_recovery() {
         // Stream 1: 4 events, acked through seq 3.
         for _ in 0..4 {
             let seq = j.next_seq("10.100.100.4").unwrap();
-            j.insert_event("10.100.100.4", 1, seq, None, "s1_line", "RAW")
+            j.insert_event("10.100.100.4", 1, seq, None, b"s1_line", "RAW")
                 .unwrap();
         }
         j.update_ack_cursor("10.100.100.4", 1, 3).unwrap();
@@ -243,7 +243,7 @@ fn power_loss_multiple_streams_independent_recovery() {
         // Stream 2: 3 events, none acked.
         for _ in 0..3 {
             let seq = j.next_seq("10.100.100.5").unwrap();
-            j.insert_event("10.100.100.5", 1, seq, None, "s2_line", "RAW")
+            j.insert_event("10.100.100.5", 1, seq, None, b"s2_line", "RAW")
                 .unwrap();
         }
         // Kill.

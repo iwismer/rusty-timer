@@ -39,7 +39,7 @@ CREATE TABLE events (
     stream_epoch     BIGINT NOT NULL,
     seq              BIGINT NOT NULL,
     reader_timestamp TEXT,
-    raw_read_line    TEXT NOT NULL,
+    raw_frame       BYTEA NOT NULL,
     read_type        TEXT NOT NULL,
     received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (stream_id, stream_epoch, seq)

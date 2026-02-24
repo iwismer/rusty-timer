@@ -31,7 +31,7 @@ fn disk_watermark_acked_pruned_first() {
     // Insert 10 events.
     for _ in 0..10 {
         let seq = j.next_seq("10.200.200.1").unwrap();
-        j.insert_event("10.200.200.1", 1, seq, None, "watermark_line", "RAW")
+        j.insert_event("10.200.200.1", 1, seq, None, b"watermark_line", "RAW")
             .unwrap();
     }
 
@@ -69,7 +69,7 @@ fn disk_watermark_unacked_preserved_while_acked_available() {
     // Insert 8 events.
     for _ in 0..8 {
         let seq = j.next_seq("10.200.200.2").unwrap();
-        j.insert_event("10.200.200.2", 1, seq, None, "preserve_unacked", "RAW")
+        j.insert_event("10.200.200.2", 1, seq, None, b"preserve_unacked", "RAW")
             .unwrap();
     }
 
@@ -113,7 +113,7 @@ fn disk_watermark_total_count_decreases_after_prune() {
     // Insert 12 events.
     for _ in 0..12 {
         let seq = j.next_seq("10.200.200.3").unwrap();
-        j.insert_event("10.200.200.3", 1, seq, None, "count_line", "RAW")
+        j.insert_event("10.200.200.3", 1, seq, None, b"count_line", "RAW")
             .unwrap();
     }
 
@@ -149,7 +149,7 @@ fn disk_watermark_prune_limit_not_exceeded() {
     // Insert 5 events.
     for _ in 0..5 {
         let seq = j.next_seq("10.200.200.4").unwrap();
-        j.insert_event("10.200.200.4", 1, seq, None, "limit_line", "RAW")
+        j.insert_event("10.200.200.4", 1, seq, None, b"limit_line", "RAW")
             .unwrap();
     }
 
@@ -181,7 +181,7 @@ fn disk_watermark_streams_pruned_independently() {
     // Stream A: 5 events, all acked.
     for _ in 0..5 {
         let seq = j.next_seq("10.200.200.5").unwrap();
-        j.insert_event("10.200.200.5", 1, seq, None, "stream_a", "RAW")
+        j.insert_event("10.200.200.5", 1, seq, None, b"stream_a", "RAW")
             .unwrap();
     }
     j.update_ack_cursor("10.200.200.5", 1, 5).unwrap();
@@ -189,7 +189,7 @@ fn disk_watermark_streams_pruned_independently() {
     // Stream B: 4 events, none acked.
     for _ in 0..4 {
         let seq = j.next_seq("10.200.200.6").unwrap();
-        j.insert_event("10.200.200.6", 1, seq, None, "stream_b", "RAW")
+        j.insert_event("10.200.200.6", 1, seq, None, b"stream_b", "RAW")
             .unwrap();
     }
 
@@ -235,7 +235,7 @@ fn disk_watermark_prune_empty_is_noop() {
     // Insert events but don't ack — pruning should also return 0.
     for _ in 0..3 {
         let seq = j.next_seq("10.200.200.7").unwrap();
-        j.insert_event("10.200.200.7", 1, seq, None, "no_ack", "RAW")
+        j.insert_event("10.200.200.7", 1, seq, None, b"no_ack", "RAW")
             .unwrap();
     }
     let pruned2 = j.prune_acked("10.200.200.7", 10).unwrap();
@@ -260,7 +260,7 @@ fn disk_watermark_prune_cycle_simulation() {
     // Round 1: Insert 20 events, ack 10, prune 10.
     for _ in 0..20 {
         let seq = j.next_seq("10.200.200.8").unwrap();
-        j.insert_event("10.200.200.8", 1, seq, None, "cycle_line", "RAW")
+        j.insert_event("10.200.200.8", 1, seq, None, b"cycle_line", "RAW")
             .unwrap();
     }
     j.update_ack_cursor("10.200.200.8", 1, 10).unwrap();
@@ -275,7 +275,7 @@ fn disk_watermark_prune_cycle_simulation() {
     // Round 2: Insert 5 more events (total: 10+5=15), ack 5 more, prune 5.
     for _ in 0..5 {
         let seq = j.next_seq("10.200.200.8").unwrap();
-        j.insert_event("10.200.200.8", 1, seq, None, "cycle_line_r2", "RAW")
+        j.insert_event("10.200.200.8", 1, seq, None, b"cycle_line_r2", "RAW")
             .unwrap();
     }
     assert_eq!(j.total_event_count().unwrap(), 15);

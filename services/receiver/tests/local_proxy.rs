@@ -4,14 +4,14 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-fn make_event(fwd: &str, ip: &str, seq: u64, raw: &str) -> ReadEvent {
+fn make_event(fwd: &str, ip: &str, seq: u64, raw: &[u8]) -> ReadEvent {
     ReadEvent {
         forwarder_id: fwd.to_owned(),
         reader_ip: ip.to_owned(),
         stream_epoch: 1,
         seq,
         reader_timestamp: "T".to_owned(),
-        raw_read_line: raw.to_owned(),
+        raw_frame: raw.to_vec(),
         read_type: "RAW".to_owned(),
     }
 }
@@ -51,7 +51,7 @@ async fn proxy_delivers_event_to_single_consumer() {
         "f",
         "192.168.1.100:10000",
         1,
-        "aa01,00:01:23.456",
+        b"aa01,00:01:23.456",
     ))
     .unwrap();
     let mut buf = vec![0u8; 64];
@@ -73,7 +73,7 @@ async fn proxy_preserves_exact_bytes() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let raw = "aa01,00:01:23.456";
+    let raw = b"aa01,00:01:23.456";
     tx.send(make_event("f", "192.168.1.100:10000", 1, raw))
         .unwrap();
     let mut buf = vec![0u8; 128];
@@ -81,8 +81,7 @@ async fn proxy_preserves_exact_bytes() {
         .await
         .expect("read timed out")
         .unwrap();
-    let received = std::str::from_utf8(&buf[..n]).unwrap();
-    assert_eq!(received, format!("{raw}\r\n"), "bytes must be exact");
+    assert_eq!(&buf[..n], raw, "bytes must be exact");
 }
 
 #[tokio::test]
@@ -101,7 +100,7 @@ async fn proxy_multiple_consumers_all_receive() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    tx.send(make_event("f", "192.168.1.100:10000", 1, "broadcast-line"))
+    tx.send(make_event("f", "192.168.1.100:10000", 1, b"broadcast-line"))
         .unwrap();
     let mut buf = vec![0u8; 64];
     for (i, c) in [&mut c1, &mut c2, &mut c3].iter_mut().enumerate() {
@@ -132,7 +131,7 @@ async fn proxy_multiple_events_in_sequence() {
             "f",
             "192.168.1.100:10000",
             i,
-            &format!("line{i}"),
+            format!("line{i}").as_bytes(),
         ))
         .unwrap();
     }

@@ -200,7 +200,7 @@ async fn test_race_current_resume_does_not_backfill_prior_epoch() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-22T10:00:00.000Z".to_owned(),
-            raw_read_line: "OLD_EPOCH".to_owned(),
+            raw_frame: "OLD_EPOCH".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -254,7 +254,7 @@ async fn test_race_current_resume_does_not_backfill_prior_epoch() {
             stream_epoch: 2,
             seq: 1,
             reader_timestamp: "2026-02-22T10:00:01.000Z".to_owned(),
-            raw_read_line: "CURRENT_EPOCH".to_owned(),
+            raw_frame: "CURRENT_EPOCH".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -266,7 +266,7 @@ async fn test_race_current_resume_does_not_backfill_prior_epoch() {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             let event = &batch.events[0];
             assert_eq!(event.stream_epoch, 2);
-            assert_eq!(event.raw_read_line, "CURRENT_EPOCH");
+            assert_eq!(event.raw_frame, b"CURRENT_EPOCH".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),
@@ -298,7 +298,7 @@ async fn test_race_current_resume_without_cursor_accepts_live_events_after_stale
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-22T10:00:00.000Z".to_owned(),
-            raw_read_line: "SEED_E1".to_owned(),
+            raw_frame: "SEED_E1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -347,7 +347,7 @@ async fn test_race_current_resume_without_cursor_accepts_live_events_after_stale
             stream_epoch: 1,
             seq: 2,
             reader_timestamp: "2026-02-22T10:00:01.000Z".to_owned(),
-            raw_read_line: "LIVE_E1".to_owned(),
+            raw_frame: "LIVE_E1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -360,7 +360,7 @@ async fn test_race_current_resume_without_cursor_accepts_live_events_after_stale
             let event = &batch.events[0];
             assert_eq!(event.stream_epoch, 1);
             assert_eq!(event.seq, 2);
-            assert_eq!(event.raw_read_line, "LIVE_E1");
+            assert_eq!(event.raw_frame, b"LIVE_E1".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),
@@ -384,7 +384,7 @@ async fn test_race_current_resume_without_cursor_replays_persisted_current_epoch
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-22T10:00:00.000Z".to_owned(),
-            raw_read_line: "OLD_E1".to_owned(),
+            raw_frame: "OLD_E1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -408,7 +408,7 @@ async fn test_race_current_resume_without_cursor_replays_persisted_current_epoch
             stream_epoch: 2,
             seq: 1,
             reader_timestamp: "2026-02-22T10:00:01.000Z".to_owned(),
-            raw_read_line: "CURRENT_E2".to_owned(),
+            raw_frame: "CURRENT_E2".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -443,7 +443,7 @@ async fn test_race_current_resume_without_cursor_replays_persisted_current_epoch
             let event = &batch.events[0];
             assert_eq!(event.stream_epoch, 2);
             assert_eq!(event.seq, 1);
-            assert_eq!(event.raw_read_line, "CURRENT_E2");
+            assert_eq!(event.raw_frame, b"CURRENT_E2".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch replay, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),
@@ -499,7 +499,7 @@ async fn test_race_current_live_events_are_filtered_after_epoch_moves_out_of_sco
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T10:00:01.000Z".to_owned(),
-            raw_read_line: "STALE_EPOCH".to_owned(),
+            raw_frame: "STALE_EPOCH".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -576,7 +576,7 @@ async fn test_race_current_refresh_not_starved_under_continuous_live_traffic() {
                             stream_epoch: 1,
                             seq,
                             reader_timestamp: "2026-02-23T10:00:01.000Z".to_owned(),
-                            raw_read_line: format!("STEADY_{seq}"),
+                            raw_frame: format!("STEADY_{seq}").into_bytes(),
                             read_type: "RAW".to_owned(),
                         }],
                     }))
@@ -771,7 +771,7 @@ async fn test_race_current_selection_refreshes_to_new_stream_mappings_without_se
             stream_epoch: 2,
             seq: 1,
             reader_timestamp: "2026-02-23T10:00:02.000Z".to_owned(),
-            raw_read_line: "R1_AFTER_REFRESH".to_owned(),
+            raw_frame: "R1_AFTER_REFRESH".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -788,7 +788,7 @@ async fn test_race_current_selection_refreshes_to_new_stream_mappings_without_se
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T10:00:03.000Z".to_owned(),
-            raw_read_line: "R2_AFTER_REFRESH".to_owned(),
+            raw_frame: "R2_AFTER_REFRESH".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -807,8 +807,8 @@ async fn test_race_current_selection_refreshes_to_new_stream_mappings_without_se
         match msg {
             WsMessage::ReceiverEventBatch(batch) => {
                 for event in batch.events {
-                    assert_ne!(event.raw_read_line, "R1_AFTER_REFRESH");
-                    if event.raw_read_line == "R2_AFTER_REFRESH" {
+                    assert_ne!(event.raw_frame, b"R1_AFTER_REFRESH".to_vec());
+                    if event.raw_frame == b"R2_AFTER_REFRESH".to_vec() {
                         got_reader2 = true;
                     }
                 }
@@ -934,7 +934,7 @@ async fn test_race_current_live_only_delivers_events_when_no_prior_events_exist(
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T12:00:00.000Z".to_owned(),
-            raw_read_line: "FIRST_EVER".to_owned(),
+            raw_frame: "FIRST_EVER".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -946,7 +946,7 @@ async fn test_race_current_live_only_delivers_events_when_no_prior_events_exist(
     match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1);
-            assert_eq!(batch.events[0].raw_read_line, "FIRST_EVER");
+            assert_eq!(batch.events[0].raw_frame, b"FIRST_EVER".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),
@@ -976,7 +976,7 @@ async fn test_race_current_live_only_delivers_stale_epoch_events_when_stream_epo
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
-            raw_read_line: "SEED_E1".to_owned(),
+            raw_frame: "SEED_E1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -1032,7 +1032,7 @@ async fn test_race_current_live_only_delivers_stale_epoch_events_when_stream_epo
             stream_epoch: 1,
             seq: 2,
             reader_timestamp: "2026-02-23T10:00:01.000Z".to_owned(),
-            raw_read_line: "STALE_E1_LIVE".to_owned(),
+            raw_frame: "STALE_E1_LIVE".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -1046,7 +1046,7 @@ async fn test_race_current_live_only_delivers_stale_epoch_events_when_stream_epo
     match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1);
-            assert_eq!(batch.events[0].raw_read_line, "STALE_E1_LIVE");
+            assert_eq!(batch.events[0].raw_frame, b"STALE_E1_LIVE".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),
@@ -1114,7 +1114,7 @@ async fn test_live_only_no_events_stale_epoch_cursor_does_not_filter_old_epoch()
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T12:00:00.000Z".to_owned(),
-            raw_read_line: "OLD_EPOCH_EVENT".to_owned(),
+            raw_frame: "OLD_EPOCH_EVENT".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -1125,7 +1125,7 @@ async fn test_live_only_no_events_stale_epoch_cursor_does_not_filter_old_epoch()
     match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1);
-            assert_eq!(batch.events[0].raw_read_line, "OLD_EPOCH_EVENT");
+            assert_eq!(batch.events[0].raw_frame, b"OLD_EPOCH_EVENT".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),

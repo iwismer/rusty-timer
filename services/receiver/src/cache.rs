@@ -171,7 +171,7 @@ mod tests {
             stream_epoch: 1,
             seq: s,
             reader_timestamp: "T".to_owned(),
-            raw_read_line: format!("l{s}"),
+            raw_frame: format!("l{s}").into_bytes(),
             read_type: "RAW".to_owned(),
         }
     }
