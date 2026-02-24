@@ -290,11 +290,9 @@ async fn main() {
                         let delay_secs = compute_reconnect_delay_secs(retries);
                         if delay_secs > 0 {
                             state.logger.log(format!("Reconnecting in {delay_secs}s"));
-                            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                            // Bail out if a newer attempt was issued while we slept.
-                            if !is_current_connect_attempt(&state, attempt).await {
-                                continue;
-                            }
+                        }
+                        if !wait_for_reconnect_delay_or_abort(&state, attempt, retries).await {
+                            continue;
                         }
 
                         // Cancel any existing session first.
@@ -482,6 +480,33 @@ fn compute_reconnect_delay_secs(retries: u64) -> u64 {
         0
     } else {
         std::cmp::min(1u64 << (retries - 1).min(5), 30)
+    }
+}
+
+async fn wait_for_reconnect_delay_or_abort(
+    state: &Arc<AppState>,
+    attempt: u64,
+    retries: u64,
+) -> bool {
+    let delay_secs = compute_reconnect_delay_secs(retries);
+    if delay_secs == 0 {
+        return is_current_connect_attempt(state, attempt).await;
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(delay_secs);
+    let poll_interval = std::time::Duration::from_millis(100);
+    loop {
+        if !is_current_connect_attempt(state, attempt).await {
+            return false;
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return true;
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(std::cmp::min(remaining, poll_interval)).await;
     }
 }
 
@@ -811,6 +836,74 @@ mod tests {
         assert_eq!(compute_reconnect_delay_secs(5), 16);
         assert_eq!(compute_reconnect_delay_secs(6), 30);
         assert_eq!(compute_reconnect_delay_secs(10), 30);
+    }
+
+    #[tokio::test]
+    async fn reconnect_backoff_wait_aborts_when_state_changes() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        let attempt = state.current_connect_attempt();
+
+        let state_for_wait = Arc::clone(&state);
+        let wait_handle = tokio::spawn(async move {
+            wait_for_reconnect_delay_or_abort(&state_for_wait, attempt, 6).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        state
+            .set_connection_state(ConnectionState::Disconnecting)
+            .await;
+
+        let completed = tokio::time::timeout(std::time::Duration::from_millis(250), wait_handle)
+            .await
+            .expect("wait helper should finish quickly")
+            .expect("wait task should not panic");
+        assert!(!completed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_backoff_wait_completes_when_attempt_stays_current() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        let attempt = state.current_connect_attempt();
+
+        let state_for_wait = Arc::clone(&state);
+        let wait_handle = tokio::spawn(async move {
+            wait_for_reconnect_delay_or_abort(&state_for_wait, attempt, 1).await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+
+        let completed = wait_handle.await.expect("wait task should not panic");
+        assert!(completed);
+    }
+
+    #[tokio::test]
+    async fn reconnect_backoff_wait_aborts_when_attempt_becomes_stale() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        let stale_attempt = state.current_connect_attempt();
+
+        let state_for_wait = Arc::clone(&state);
+        let wait_handle = tokio::spawn(async move {
+            wait_for_reconnect_delay_or_abort(&state_for_wait, stale_attempt, 6).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        state.request_connect().await;
+
+        let completed = tokio::time::timeout(std::time::Duration::from_millis(250), wait_handle)
+            .await
+            .expect("wait helper should finish quickly")
+            .expect("wait task should not panic");
+        assert!(!completed);
     }
 
     #[tokio::test]
