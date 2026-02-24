@@ -27,7 +27,7 @@ concurrency:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       forwarder-ui: ${{ steps.filter.outputs.forwarder-ui }}
       receiver-ui: ${{ steps.filter.outputs.receiver-ui }}
@@ -64,7 +64,7 @@ jobs:
     name: Forwarder UI Tests
     needs: changes
     if: needs.changes.outputs.forwarder-ui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,7 +99,7 @@ jobs:
     name: Receiver UI Checks
     needs: changes
     if: needs.changes.outputs.receiver-ui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -134,7 +134,7 @@ jobs:
     name: Server UI Tests
     needs: changes
     if: needs.changes.outputs.server-ui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -169,7 +169,7 @@ jobs:
     name: Shared UI Tests
     needs: changes
     if: needs.changes.outputs.shared-ui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4

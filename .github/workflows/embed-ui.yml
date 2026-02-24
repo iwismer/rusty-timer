@@ -38,7 +38,7 @@ env:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       forwarder: ${{ steps.filter.outputs.forwarder }}
       receiver: ${{ steps.filter.outputs.receiver }}
@@ -68,7 +68,7 @@ jobs:
     name: Forwarder embed-ui build
     needs: changes
     if: needs.changes.outputs.forwarder == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
     name: Receiver embed-ui build
     needs: changes
     if: needs.changes.outputs.receiver == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
