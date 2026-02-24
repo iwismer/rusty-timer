@@ -71,6 +71,30 @@ fn created_reader_ips_for_logging<'a>(
         .collect()
 }
 
+fn display_name_change_log_entry(
+    device_id: &str,
+    current_display_name: Option<&str>,
+    persisted: bool,
+) -> (rt_ui_log::UiLogLevel, String) {
+    if !persisted {
+        return (
+            rt_ui_log::UiLogLevel::Warn,
+            format!("forwarder \"{device_id}\" display name changed but failed to persist"),
+        );
+    }
+
+    match current_display_name {
+        Some(name) => (
+            rt_ui_log::UiLogLevel::Info,
+            format!("forwarder \"{device_id}\" display name set to \"{name}\""),
+        ),
+        None => (
+            rt_ui_log::UiLogLevel::Info,
+            format!("forwarder \"{device_id}\" display name cleared"),
+        ),
+    }
+}
+
 async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
     let token_str = match token {
         Some(t) => t,
@@ -309,28 +333,30 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Ok(WsMessage::ForwarderHello(new_hello)) => {
                                 let previous_display_name = current_display_name.clone();
                                 current_display_name = new_hello.display_name.clone();
-                                if let Err(e) = update_forwarder_display_name(
+                                let display_name_persisted = match update_forwarder_display_name(
                                     &state.pool,
                                     &device_id,
                                     current_display_name.as_deref(),
                                 )
                                 .await
                                 {
-                                    error!(
-                                        device_id = %device_id,
-                                        error = %e,
-                                        "failed to update forwarder display name"
-                                    );
-                                }
-                                if previous_display_name != current_display_name {
-                                    match &current_display_name {
-                                        Some(name) => state.logger.log(format!(
-                                            "forwarder \"{device_id}\" display name set to \"{name}\""
-                                        )),
-                                        None => state.logger.log(format!(
-                                            "forwarder \"{device_id}\" display name cleared"
-                                        )),
+                                    Ok(_) => true,
+                                    Err(e) => {
+                                        error!(
+                                            device_id = %device_id,
+                                            error = %e,
+                                            "failed to update forwarder display name"
+                                        );
+                                        false
                                     }
+                                };
+                                if previous_display_name != current_display_name {
+                                    let (level, msg) = display_name_change_log_entry(
+                                        &device_id,
+                                        current_display_name.as_deref(),
+                                        display_name_persisted,
+                                    );
+                                    state.logger.log_at(level, msg);
                                     let display_name_patch = match &current_display_name {
                                         Some(name) => OptionalStringPatch::Set(name.clone()),
                                         None => OptionalStringPatch::Clear,
@@ -696,6 +722,23 @@ async fn handle_event_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_name_change_log_entry_uses_info_on_persist_success() {
+        let (level, msg) = display_name_change_log_entry("fwd-1", Some("Start"), true);
+        assert_eq!(level, rt_ui_log::UiLogLevel::Info);
+        assert_eq!(msg, "forwarder \"fwd-1\" display name set to \"Start\"");
+    }
+
+    #[test]
+    fn display_name_change_log_entry_uses_warn_on_persist_failure() {
+        let (level, msg) = display_name_change_log_entry("fwd-1", Some("Start"), false);
+        assert_eq!(level, rt_ui_log::UiLogLevel::Warn);
+        assert_eq!(
+            msg,
+            "forwarder \"fwd-1\" display name changed but failed to persist"
+        );
+    }
 
     #[test]
     fn created_reader_ips_only_includes_successful_upserts_in_requested_order() {

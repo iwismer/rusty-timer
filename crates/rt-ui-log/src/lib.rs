@@ -50,6 +50,15 @@ pub struct UiLogger<T: Clone + Send + 'static> {
     max_entries: usize,
 }
 
+fn sanitize_ui_log_message(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl<T: Clone + Send> UiLogger<T> {
     /// Create a broadcast-only logger (no buffer).
     pub fn new(
@@ -81,11 +90,12 @@ impl<T: Clone + Send> UiLogger<T> {
     /// Format a timestamped, level-tagged log entry, print to tracing at the
     /// appropriate level, broadcast, and optionally buffer.
     pub fn log_at(&self, level: UiLogLevel, msg: impl Display) {
+        let sanitized = sanitize_ui_log_message(&msg.to_string());
         let entry = format!(
             "{} [{}] {}",
             chrono::Utc::now().format("%H:%M:%S"),
             level,
-            msg,
+            sanitized,
         );
         match level {
             UiLogLevel::Trace => tracing::trace!("{}", entry),
@@ -211,6 +221,28 @@ mod tests {
         logger.log("mapped");
         let event = rx.try_recv().unwrap();
         assert!(event.entry.ends_with(" mapped"));
+    }
+
+    #[test]
+    fn log_sanitizes_newlines_and_carriage_returns() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let logger = UiLogger::new(tx, |entry| entry);
+        logger.log("hello\nworld\rboom");
+        let entry = rx.try_recv().unwrap();
+        assert!(!entry.contains('\n'));
+        assert!(!entry.contains('\r'));
+        assert!(entry.ends_with(" hello world boom"), "unexpected: {entry}");
+    }
+
+    #[test]
+    fn log_sanitizes_other_control_chars() {
+        let (tx, mut rx) = broadcast::channel::<String>(4);
+        let logger = UiLogger::new(tx, |entry| entry);
+        logger.log("a\u{001b}b\u{0000}c");
+        let entry = rx.try_recv().unwrap();
+        assert!(!entry.contains('\u{001b}'));
+        assert!(!entry.contains('\0'));
+        assert!(entry.ends_with(" a b c"), "unexpected: {entry}");
     }
 
     #[test]
