@@ -1,10 +1,10 @@
 use super::response::{bad_request, gateway_timeout, json_error, not_found};
 use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use std::time::Duration;
 

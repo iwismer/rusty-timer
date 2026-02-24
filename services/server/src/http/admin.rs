@@ -1,13 +1,13 @@
-use super::response::{bad_request, conflict, internal_error, not_found, HttpResult};
+use super::response::{HttpResult, bad_request, conflict, internal_error, not_found};
 use crate::dashboard_events::DashboardEvent;
 use crate::state::AppState;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::TryRngCore;
 use rt_protocol::HttpErrorEnvelope;
 use serde::Deserialize;

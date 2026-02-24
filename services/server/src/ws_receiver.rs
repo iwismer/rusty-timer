@@ -14,17 +14,17 @@ use crate::{
     },
 };
 use axum::extract::{
-    ws::{Message, WebSocket, WebSocketUpgrade},
     State,
+    ws::{Message, WebSocket, WebSocketUpgrade},
 };
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use rt_protocol::{
-    error_codes, EpochScope, ReadEvent, ReceiverAck, ReceiverEventBatch, ReceiverSelection,
-    ReceiverSelectionApplied, ReplayPolicy, ReplayTarget, StreamRef, WsMessage,
+    EpochScope, ReadEvent, ReceiverAck, ReceiverEventBatch, ReceiverSelection,
+    ReceiverSelectionApplied, ReplayPolicy, ReplayTarget, StreamRef, WsMessage, error_codes,
 };
-use sqlx::types::Uuid as SqlUuid;
 use sqlx::Row;
+use sqlx::types::Uuid as SqlUuid;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{error, info, warn};

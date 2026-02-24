@@ -4,7 +4,7 @@ use rt_protocol::{
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{RwLock, broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::dashboard_events::DashboardEvent;

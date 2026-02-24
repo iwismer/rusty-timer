@@ -1,16 +1,16 @@
 use futures_util::{SinkExt, StreamExt};
 use receiver::cache::StreamCounts;
 use receiver::db::Db;
-use receiver::session::{connect, run_session_loop, SessionError};
+use receiver::session::{SessionError, connect, run_session_loop};
 use receiver::ui_events::ReceiverUiEvent;
 use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, WsMessage};
 use rt_test_utils::MockWsServer;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 async fn run_raw_ws_server_once<F, Fut>(handler: F) -> (std::net::SocketAddr, JoinHandle<()>)

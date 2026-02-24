@@ -13,11 +13,11 @@ pub use state::AppState;
 use std::path::PathBuf;
 
 use axum::{
+    Router,
     extract::Request,
     http::{Method, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, patch, post},
-    Router,
 };
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
