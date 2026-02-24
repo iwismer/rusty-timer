@@ -52,10 +52,7 @@ async fn main() {
     {
         let db = state.db.lock().await;
         let profile = db.load_profile().ok().flatten();
-        has_profile = profile
-            .as_ref()
-            .map(|p| !p.server_url.is_empty() && !p.token.is_empty())
-            .unwrap_or(false);
+        has_profile = profile_has_connect_credentials(profile.as_ref());
         if let Some(ref p) = profile {
             *state.upstream_url.write().await = Some(p.server_url.clone());
             info!(url = %p.server_url, "restored profile");
@@ -293,8 +290,8 @@ async fn main() {
 
                         // Exponential backoff for retries after failed/dropped connections.
                         let retries = attempt.saturating_sub(last_success_attempt + 1);
-                        if retries > 0 {
-                            let delay_secs = std::cmp::min(1u64 << retries.min(4), 30);
+                        let delay_secs = compute_reconnect_delay_secs(retries);
+                        if delay_secs > 0 {
                             state.logger.log(format!("Reconnecting in {delay_secs}s"));
                             tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                             // Bail out if a newer attempt was issued while we slept.
@@ -344,7 +341,7 @@ async fn main() {
                                 match connect_async(ws_request).await {
                                     Err(e) => {
                                         state.logger.log_at(UiLogLevel::Error, format!("Connection failed: {e}"));
-                                        let _ = set_disconnected_if_attempt_current(&state, attempt)
+                                        let _ = retry_connect_if_attempt_current(&state, attempt)
                                             .await;
                                     }
                                     Ok((ws, _)) => {
@@ -356,7 +353,7 @@ async fn main() {
                                         match (session_result, ws) {
                                             (Err(e), _) => {
                                                 state.logger.log_at(UiLogLevel::Error, format!("Handshake failed: {e}"));
-                                                let _ = set_disconnected_if_attempt_current(
+                                                let _ = retry_connect_if_attempt_current(
                                                     &state, attempt,
                                                 )
                                                 .await;
@@ -403,22 +400,16 @@ async fn main() {
                                                             );
                                                         }
                                                     }
-                                                    let prev_state = {
-                                                        st.connection_state.read().await.clone()
-                                                    };
-                                                    match prev_state {
-                                                        ConnectionState::Connected => {
-                                                            // Unexpected drop — auto-reconnect.
-                                                            st.logger.log("Connection lost, will reconnect");
-                                                            st.request_connect().await;
-                                                            st.emit_streams_snapshot().await;
-                                                        }
-                                                        ConnectionState::Disconnecting => {
-                                                            // User-initiated disconnect.
-                                                            st.set_connection_state(ConnectionState::Disconnected).await;
-                                                            st.emit_streams_snapshot().await;
-                                                        }
-                                                        _ => {}
+                                                    if request_reconnect_if_connected(&st).await {
+                                                        // Unexpected drop — auto-reconnect.
+                                                        st.logger.log("Connection lost, will reconnect");
+                                                        st.emit_streams_snapshot().await;
+                                                    } else if *st.connection_state.read().await
+                                                        == ConnectionState::Disconnecting
+                                                    {
+                                                        // User-initiated disconnect.
+                                                        st.set_connection_state(ConnectionState::Disconnected).await;
+                                                        st.emit_streams_snapshot().await;
                                                     }
                                                 });
                                                 session_task = Some(handle);
@@ -426,7 +417,7 @@ async fn main() {
                                             }
                                             (Ok(_), None) => {
                                                 state.logger.log_at(UiLogLevel::Error, "Handshake succeeded but connection lost");
-                                                let _ = set_disconnected_if_attempt_current(
+                                                let _ = retry_connect_if_attempt_current(
                                                     &state, attempt,
                                                 )
                                                 .await;
@@ -487,6 +478,33 @@ async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
 async fn is_current_connect_attempt(state: &Arc<AppState>, attempt: u64) -> bool {
     state.current_connect_attempt() == attempt
         && *state.connection_state.read().await == ConnectionState::Connecting
+}
+
+fn compute_reconnect_delay_secs(retries: u64) -> u64 {
+    if retries == 0 {
+        0
+    } else {
+        std::cmp::min(1u64 << retries.min(5), 30)
+    }
+}
+
+fn profile_has_connect_credentials(profile: Option<&receiver::db::Profile>) -> bool {
+    profile.is_some_and(|profile| {
+        !profile.server_url.trim().is_empty() && !profile.token.trim().is_empty()
+    })
+}
+
+async fn request_reconnect_if_connected(state: &Arc<AppState>) -> bool {
+    state.request_reconnect_if_connected().await
+}
+
+async fn retry_connect_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
+    if !is_current_connect_attempt(state, attempt).await {
+        state.logger.log("Ignoring stale connect retry request");
+        return false;
+    }
+    state.request_connect().await;
+    true
 }
 
 async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
@@ -732,6 +750,96 @@ async fn reconcile_proxies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropped_session_does_not_reconnect_when_disconnect_in_progress() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        state
+            .set_connection_state(ConnectionState::Disconnecting)
+            .await;
+        let before_attempt = state.current_connect_attempt();
+
+        let reissued = request_reconnect_if_connected(&state).await;
+
+        assert!(!reissued);
+        assert_eq!(state.current_connect_attempt(), before_attempt);
+        assert_eq!(
+            *state.connection_state.read().await,
+            ConnectionState::Disconnecting
+        );
+    }
+
+    #[tokio::test]
+    async fn recoverable_failure_reissues_connect_for_current_attempt() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        let attempt = state.current_connect_attempt();
+
+        let retried = retry_connect_if_attempt_current(&state, attempt).await;
+
+        assert!(retried);
+        assert!(state.current_connect_attempt() > attempt);
+        assert_eq!(
+            *state.connection_state.read().await,
+            ConnectionState::Connecting
+        );
+    }
+
+    #[tokio::test]
+    async fn recoverable_failure_does_not_reissue_when_attempt_is_stale() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        let stale_attempt = state.current_connect_attempt();
+        state.request_connect().await;
+
+        let retried = retry_connect_if_attempt_current(&state, stale_attempt).await;
+
+        assert!(!retried);
+    }
+
+    #[test]
+    fn reconnect_backoff_caps_at_thirty_seconds() {
+        assert_eq!(compute_reconnect_delay_secs(0), 0);
+        assert_eq!(compute_reconnect_delay_secs(1), 2);
+        assert_eq!(compute_reconnect_delay_secs(2), 4);
+        assert_eq!(compute_reconnect_delay_secs(3), 8);
+        assert_eq!(compute_reconnect_delay_secs(4), 16);
+        assert_eq!(compute_reconnect_delay_secs(5), 30);
+        assert_eq!(compute_reconnect_delay_secs(10), 30);
+    }
+
+    #[test]
+    fn profile_with_url_and_token_is_required_for_autoconnect() {
+        assert!(!profile_has_connect_credentials(None));
+        assert!(!profile_has_connect_credentials(Some(
+            &receiver::db::Profile {
+                server_url: "ws://server".to_owned(),
+                token: String::new(),
+                update_mode: "check-only".to_owned(),
+            }
+        )));
+        assert!(!profile_has_connect_credentials(Some(
+            &receiver::db::Profile {
+                server_url: String::new(),
+                token: "token".to_owned(),
+                update_mode: "check-only".to_owned(),
+            }
+        )));
+        assert!(profile_has_connect_credentials(Some(
+            &receiver::db::Profile {
+                server_url: "ws://server".to_owned(),
+                token: "token".to_owned(),
+                update_mode: "check-only".to_owned(),
+            }
+        )));
+    }
 
     #[tokio::test]
     async fn stale_connect_attempt_failure_does_not_force_disconnected() {

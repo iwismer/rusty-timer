@@ -890,6 +890,27 @@ async fn post_disconnect_returns_200_when_disconnected() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn post_disconnect_does_not_reissue_connect_attempt() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    state.request_connect().await;
+    state.set_connection_state(ConnectionState::Connected).await;
+    let before_attempt = state.current_connect_attempt();
+
+    assert_eq!(
+        post_empty(app, "/api/v1/disconnect").await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Disconnecting
+    );
+    assert_eq!(state.current_connect_attempt(), before_attempt);
+}
 #[tokio::test]
 async fn get_logs_empty_initially() {
     let (status, val) = get_json(setup(), "/api/v1/logs").await;
