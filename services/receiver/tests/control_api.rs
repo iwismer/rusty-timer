@@ -1,11 +1,11 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use receiver::control_api::{build_router, AppState, ConnectionState};
 use receiver::Db;
+use receiver::control_api::{AppState, ConnectionState, build_router};
 use rt_updater::UpdateMode;
-use serde_json::{json, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tower::ServiceExt;
 fn setup() -> axum::Router {

@@ -2,7 +2,7 @@
 
 use axum::http::StatusCode;
 use http_body_util::BodyExt;
-use receiver::control_api::{build_router, AppState};
+use receiver::control_api::{AppState, build_router};
 use std::sync::Arc;
 
 fn make_state() -> Arc<AppState> {

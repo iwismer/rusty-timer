@@ -1,12 +1,12 @@
-use super::response::{bad_request, internal_error, not_found, HttpResponse};
+use super::response::{HttpResponse, bad_request, internal_error, not_found};
 use crate::repo::forwarder_races;
 use crate::repo::reads::{self, DedupMode};
 use crate::state::AppState;
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::Deserialize;
 use sqlx::Row;

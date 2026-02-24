@@ -6,7 +6,7 @@ use axum::{
 use futures_util::stream::Stream;
 use std::convert::Infallible;
 use std::time::Duration;
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 pub async fn dashboard_sse(
     State(state): State<AppState>,

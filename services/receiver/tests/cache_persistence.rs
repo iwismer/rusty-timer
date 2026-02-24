@@ -28,11 +28,13 @@ fn profile_update_replaces_existing() {
 }
 #[test]
 fn profile_load_returns_none_when_empty() {
-    assert!(Db::open_in_memory()
-        .unwrap()
-        .load_profile()
-        .unwrap()
-        .is_none());
+    assert!(
+        Db::open_in_memory()
+            .unwrap()
+            .load_profile()
+            .unwrap()
+            .is_none()
+    );
 }
 #[test]
 fn subscriptions_save_and_load() {

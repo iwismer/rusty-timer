@@ -3,7 +3,7 @@ use std::net::SocketAddrV4;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 fn reconnect_delay_ms(connect_failures: u32) -> u64 {
     if connect_failures == 0 {
