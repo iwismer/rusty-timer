@@ -80,6 +80,15 @@ pub async fn set_forwarder_race(
         return internal_error(e);
     }
 
+    match race_id {
+        Some(rid) => state.logger.log(format!(
+            "forwarder \"{forwarder_id}\" assigned to race {rid}"
+        )),
+        None => state
+            .logger
+            .log(format!("forwarder \"{forwarder_id}\" unassigned from race")),
+    }
+
     // Broadcast SSE event
     let _ = state
         .dashboard_tx

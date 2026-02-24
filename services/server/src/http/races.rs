@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use tracing::info;
 use uuid::Uuid;
 
 pub async fn list_races(State(state): State<AppState>) -> impl IntoResponse {
@@ -48,7 +47,9 @@ pub async fn create_race(
 
     match repo::create_race(&state.pool, &name).await {
         Ok(row) => {
-            info!(race_id = %row.race_id, name = %row.name, "race created");
+            state
+                .logger
+                .log(format!("race \"{}\" created ({})", row.name, row.race_id));
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!({
@@ -74,7 +75,10 @@ pub async fn delete_race(
     }
 
     match repo::delete_race(&state.pool, race_id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            state.logger.log(format!("race {race_id} deleted"));
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => not_found("race not found"),
         Err(e) => internal_error(e),
     }
@@ -190,7 +194,9 @@ pub async fn upload_participants(
 
     match repo::replace_participants(&state.pool, race_id, &refs).await {
         Ok(count) => {
-            info!(race_id = %race_id, count = %count, "participants uploaded");
+            state
+                .logger
+                .log(format!("{count} participants uploaded for race {race_id}"));
             (
                 StatusCode::OK,
                 Json(serde_json::json!({ "imported": count })),
@@ -234,7 +240,9 @@ pub async fn upload_chips(
 
     match repo::replace_chips(&state.pool, race_id, &refs).await {
         Ok(count) => {
-            info!(race_id = %race_id, count = %count, "bibchips uploaded");
+            state
+                .logger
+                .log(format!("{count} bibchips uploaded for race {race_id}"));
             (
                 StatusCode::OK,
                 Json(serde_json::json!({ "imported": count })),
