@@ -1332,17 +1332,6 @@ mod tests {
         perms.set_mode(0o000);
         std::fs::set_permissions(&blocked_dir, perms).expect("set blocked permissions");
 
-        // Root bypasses Unix file permission checks, making this test meaningless.
-        if std::fs::read_dir(&blocked_dir).is_ok() {
-            let mut restore = std::fs::metadata(&blocked_dir)
-                .expect("metadata")
-                .permissions();
-            restore.set_mode(0o700);
-            std::fs::set_permissions(&blocked_dir, restore).expect("restore permissions");
-            eprintln!("skipping: running as root; permission checks are bypassed");
-            return;
-        }
-
         *state.update_status.write().await = UpdateStatus::Downloaded {
             version: "1.2.3".to_owned(),
         };
