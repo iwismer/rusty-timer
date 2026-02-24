@@ -28,9 +28,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
+  test:
+    name: Lint & Unit Tests
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,27 +47,12 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
 
-  test:
-    name: Unit Tests
-    needs: lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
-
       - name: Run unit tests
         run: cargo test --workspace --lib
 
   test-windows:
     name: Unit Tests (Windows)
     if: github.event_name == 'push'
-    needs: lint
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -84,7 +69,6 @@ jobs:
 
   integration:
     name: Integration Tests
-    needs: lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -98,4 +82,3 @@ jobs:
 
       - name: Run integration tests (requires Docker)
         run: cargo test --workspace --tests -- --test-threads=4
-

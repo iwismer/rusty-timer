@@ -1,0 +1,129 @@
+name: Embed UI CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "apps/forwarder-ui/**"
+      - "apps/receiver-ui/**"
+      - "apps/shared-ui/**"
+      - "services/forwarder/**"
+      - "services/receiver/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/embed-ui.yml"
+      - "!**/*.md"
+      - "!**/LICENSE*"
+  pull_request:
+    branches: [master]
+    paths:
+      - "apps/forwarder-ui/**"
+      - "apps/receiver-ui/**"
+      - "apps/shared-ui/**"
+      - "services/forwarder/**"
+      - "services/receiver/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/embed-ui.yml"
+      - "!**/*.md"
+      - "!**/LICENSE*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: self-hosted
+    outputs:
+      forwarder: ${{ steps.filter.outputs.forwarder }}
+      receiver: ${{ steps.filter.outputs.receiver }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            forwarder:
+              - "apps/forwarder-ui/**"
+              - "apps/shared-ui/**"
+              - "services/forwarder/**"
+              - "package.json"
+              - "package-lock.json"
+            receiver:
+              - "apps/receiver-ui/**"
+              - "apps/shared-ui/**"
+              - "services/receiver/**"
+              - "package.json"
+              - "package-lock.json"
+
+  forwarder-embed-ui:
+    name: Forwarder embed-ui build
+    needs: changes
+    if: needs.changes.outputs.forwarder == 'true'
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Rollup Linux optional dependency workaround
+        if: runner.os == 'Linux'
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
+
+      - name: Build and test forwarder with embedded UI
+        run: cargo test -p forwarder --features embed-ui --test ui_embed_fallback
+
+  receiver-embed-ui:
+    name: Receiver embed-ui build
+    needs: changes
+    if: needs.changes.outputs.receiver == 'true'
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Rollup Linux optional dependency workaround
+        if: runner.os == 'Linux'
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
+
+      - name: Build and test receiver with embedded UI
+        run: cargo test -p receiver --features embed-ui --test ui_embed_fallback
