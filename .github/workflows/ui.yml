@@ -1,0 +1,193 @@
+name: UI CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "apps/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ui.yml"
+      - "!**/*.md"
+      - "!**/LICENSE*"
+  pull_request:
+    branches: [master]
+    paths:
+      - "apps/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ui.yml"
+      - "!**/*.md"
+      - "!**/LICENSE*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      forwarder-ui: ${{ steps.filter.outputs.forwarder-ui }}
+      receiver-ui: ${{ steps.filter.outputs.receiver-ui }}
+      server-ui: ${{ steps.filter.outputs.server-ui }}
+      shared-ui: ${{ steps.filter.outputs.shared-ui }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            forwarder-ui:
+              - "apps/forwarder-ui/**"
+              - "apps/shared-ui/**"
+              - "package.json"
+              - "package-lock.json"
+            receiver-ui:
+              - "apps/receiver-ui/**"
+              - "apps/shared-ui/**"
+              - "package.json"
+              - "package-lock.json"
+            server-ui:
+              - "apps/server-ui/**"
+              - "apps/shared-ui/**"
+              - "package.json"
+              - "package-lock.json"
+            shared-ui:
+              - "apps/shared-ui/**"
+
+  forwarder-ui:
+    name: Forwarder UI Tests
+    needs: changes
+    if: needs.changes.outputs.forwarder-ui == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Rollup Linux optional dependency workaround
+        if: runner.os == 'Linux'
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
+
+      - name: Prettier check
+        run: npm run lint
+        working-directory: apps/forwarder-ui
+
+      - name: Svelte type check
+        run: npm run check
+        working-directory: apps/forwarder-ui
+
+      - name: Vitest
+        run: npm test
+        working-directory: apps/forwarder-ui
+
+  receiver-ui:
+    name: Receiver UI Checks
+    needs: changes
+    if: needs.changes.outputs.receiver-ui == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Rollup Linux optional dependency workaround
+        if: runner.os == 'Linux'
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
+
+      - name: Prettier check
+        run: npm run lint
+        working-directory: apps/receiver-ui
+
+      - name: Svelte type check
+        run: npm run check
+        working-directory: apps/receiver-ui
+
+      - name: Vitest
+        run: npm test
+        working-directory: apps/receiver-ui
+
+  server-ui:
+    name: Server UI Tests
+    needs: changes
+    if: needs.changes.outputs.server-ui == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Rollup Linux optional dependency workaround
+        if: runner.os == 'Linux'
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
+
+      - name: Prettier check
+        run: npm run lint
+        working-directory: apps/server-ui
+
+      - name: Svelte type check
+        run: npm run check
+        working-directory: apps/server-ui
+
+      - name: Vitest
+        run: npm test
+        working-directory: apps/server-ui
+
+  shared-ui:
+    name: Shared UI Tests
+    needs: changes
+    if: needs.changes.outputs.shared-ui == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Rollup Linux optional dependency workaround
+        if: runner.os == 'Linux'
+        run: npm install --no-save @rollup/rollup-linux-x64-gnu lightningcss-linux-x64-gnu @tailwindcss/oxide-linux-x64-gnu
+
+      - name: Vitest
+        run: npm test
+        working-directory: apps/shared-ui
