@@ -82,7 +82,7 @@ async fn proxy_preserves_exact_bytes() {
         .expect("read timed out")
         .unwrap();
     let received = std::str::from_utf8(&buf[..n]).unwrap();
-    assert_eq!(received, format!("{raw}\n"), "bytes must be exact");
+    assert_eq!(received, format!("{raw}\r\n"), "bytes must be exact");
 }
 
 #[tokio::test]

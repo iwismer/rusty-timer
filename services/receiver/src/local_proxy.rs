@@ -2,7 +2,7 @@
 //!
 //! Opens a TCP listener on the assigned port for each subscribed stream.
 //! Accepts local consumer connections and forwards events as they arrive via broadcast.
-//! Preserves exact bytes/framing (no line-ending normalization).
+//! Emits CRLF-terminated IPICO lines for local TCP consumers.
 //! Supports multiple simultaneous local consumers per stream.
 //! Ports open as soon as subscriptions exist, even before server connection is established.
 
@@ -59,13 +59,13 @@ impl LocalProxy {
     }
 }
 
-/// Serve one local TCP consumer: forward each event's raw_read_line as bytes + newline.
+/// Serve one local TCP consumer: forward each event's raw_read_line as bytes + CRLF.
 async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<ReadEvent>) {
     loop {
         match rx.recv().await {
             Ok(event) => {
                 let mut line = event.raw_read_line.into_bytes();
-                line.push(b'\n');
+                line.extend_from_slice(b"\r\n");
                 if stream.write_all(&line).await.is_err() {
                     break; // client disconnected
                 }
@@ -146,7 +146,7 @@ mod tests {
             .expect("read should not timeout")
             .unwrap();
         let received = std::str::from_utf8(&buf[..n]).unwrap();
-        assert_eq!(received, format!("{raw}\n"));
+        assert_eq!(received, format!("{raw}\r\n"));
     }
 
     #[tokio::test]

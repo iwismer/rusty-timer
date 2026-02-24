@@ -283,8 +283,9 @@ async fn run_reader(
                 "event journaled"
             );
 
-            // Fan out raw bytes to local TCP consumers
-            let raw_bytes = format!("{}\n", raw_line).into_bytes();
+            // Fan out the exact bytes read from the reader, preserving
+            // upstream line framing (for example CRLF).
+            let raw_bytes = line_buf.as_bytes().to_vec();
             if let Err(e) = FanoutServer::push_to_addr(fanout_addr, raw_bytes).await {
                 warn!(reader_ip = %reader_ip, error = %e, "local fanout push failed");
                 // Non-fatal: local fanout failure doesn't break uplink path
@@ -1716,6 +1717,89 @@ mod tests {
         );
         assert_eq!(events[0].read_type, "raw");
         assert_eq!(events[1].read_type, "fsls");
+    }
+
+    #[tokio::test]
+    async fn run_reader_fanout_preserves_crlf_from_reader() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let reader_port = listener.local_addr().expect("listener local_addr").port();
+        let stream_key = format!("127.0.0.1:{reader_port}");
+
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+        status.init_readers(&[(stream_key, 10001)]).await;
+
+        let temp_dir = tempdir().expect("create tempdir");
+        let db_path = temp_dir.path().join("forwarder.sqlite3");
+        let journal = Arc::new(Mutex::new(Journal::open(&db_path).expect("open journal")));
+
+        let fanout = FanoutServer::bind("127.0.0.1:0")
+            .await
+            .expect("bind fanout");
+        let fanout_addr = fanout.local_addr();
+        tokio::spawn(async move {
+            fanout.run().await;
+        });
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let lg = status.logger();
+        let reader_task = tokio::spawn(run_reader(
+            "127.0.0.1".to_owned(),
+            reader_port,
+            fanout_addr,
+            journal,
+            shutdown_rx,
+            status,
+            lg,
+        ));
+
+        let (mut reader_stream, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
+            .await
+            .expect("reader connect timeout")
+            .expect("accept reader connection");
+
+        let mut consumer = tokio::net::TcpStream::connect(fanout_addr)
+            .await
+            .expect("connect fanout consumer");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let expected = b"aa400000000123450a2a01123018455927a7\r\n";
+        for _ in 0..5 {
+            reader_stream
+                .write_all(expected)
+                .await
+                .expect("write reader frame");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut received = vec![0u8; expected.len()];
+        timeout(
+            std::time::Duration::from_secs(1),
+            consumer.read_exact(&mut received),
+        )
+        .await
+        .expect("fanout read timeout")
+        .expect("fanout read exact");
+
+        let _ = shutdown_tx.send(true);
+        timeout(std::time::Duration::from_secs(1), reader_task)
+            .await
+            .expect("reader shutdown timeout")
+            .expect("reader task join");
+
+        assert_eq!(
+            received, expected,
+            "fanout should preserve CRLF framing from reader stream"
+        );
     }
 
     #[tokio::test]
