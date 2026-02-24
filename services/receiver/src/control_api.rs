@@ -62,6 +62,7 @@ pub struct AppState {
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
     connect_attempt: AtomicU64,
+    retry_streak: AtomicU64,
 }
 
 impl AppState {
@@ -84,6 +85,7 @@ impl AppState {
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
             connect_attempt: AtomicU64::new(0),
+            retry_streak: AtomicU64::new(0),
         });
         (state, shutdown_rx)
     }
@@ -92,7 +94,22 @@ impl AppState {
         self.connect_attempt.load(Ordering::SeqCst)
     }
 
+    pub fn current_retry_streak(&self) -> u64 {
+        self.retry_streak.load(Ordering::SeqCst)
+    }
+
+    pub fn reset_retry_streak(&self) {
+        self.retry_streak.store(0, Ordering::SeqCst);
+    }
+
     pub async fn request_connect(&self) {
+        self.reset_retry_streak();
+        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
+        self.set_connection_state(ConnectionState::Connecting).await;
+    }
+
+    pub async fn request_retry_connect(&self) {
+        self.retry_streak.fetch_add(1, Ordering::SeqCst);
         self.connect_attempt.fetch_add(1, Ordering::SeqCst);
         self.set_connection_state(ConnectionState::Connecting).await;
     }
@@ -103,6 +120,7 @@ impl AppState {
             if *connection_state != ConnectionState::Connected {
                 return false;
             }
+            self.retry_streak.fetch_add(1, Ordering::SeqCst);
             self.connect_attempt.fetch_add(1, Ordering::SeqCst);
             *connection_state = ConnectionState::Connecting;
         }

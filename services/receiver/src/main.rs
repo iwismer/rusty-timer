@@ -223,10 +223,6 @@ async fn main() {
     // Track last-known subscriptions to detect changes.
     let mut last_subs: Vec<Subscription> = initial_subs;
 
-    // Track the attempt number at which the last successful connection was made,
-    // so we can compute retry backoff for auto-reconnect.
-    let mut last_success_attempt: u64 = 0;
-
     loop {
         tokio::select! {
             biased;
@@ -288,8 +284,9 @@ async fn main() {
                     ConnectionState::Connecting => {
                         let attempt = state.current_connect_attempt();
 
-                        // Exponential backoff for retries after failed/dropped connections.
-                        let retries = attempt.saturating_sub(last_success_attempt + 1);
+                        // Exponential backoff for automatic retries. Manual connect
+                        // requests reset the retry streak and remain immediate.
+                        let retries = state.current_retry_streak();
                         let delay_secs = compute_reconnect_delay_secs(retries);
                         if delay_secs > 0 {
                             state.logger.log(format!("Reconnecting in {delay_secs}s"));
@@ -365,7 +362,7 @@ async fn main() {
                                                     state.logger.log("Discarding stale connect attempt");
                                                     continue;
                                                 }
-                                                last_success_attempt = attempt;
+                                                state.reset_retry_streak();
                                                 state.logger.log(format!("Connected (session {session_id})"));
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
@@ -484,7 +481,7 @@ fn compute_reconnect_delay_secs(retries: u64) -> u64 {
     if retries == 0 {
         0
     } else {
-        std::cmp::min(1u64 << retries.min(5), 30)
+        std::cmp::min(1u64 << (retries - 1).min(5), 30)
     }
 }
 
@@ -503,7 +500,7 @@ async fn retry_connect_if_attempt_current(state: &Arc<AppState>, attempt: u64) -
         state.logger.log("Ignoring stale connect retry request");
         return false;
     }
-    state.request_connect().await;
+    state.request_retry_connect().await;
     true
 }
 
@@ -807,12 +804,36 @@ mod tests {
     #[test]
     fn reconnect_backoff_caps_at_thirty_seconds() {
         assert_eq!(compute_reconnect_delay_secs(0), 0);
-        assert_eq!(compute_reconnect_delay_secs(1), 2);
-        assert_eq!(compute_reconnect_delay_secs(2), 4);
-        assert_eq!(compute_reconnect_delay_secs(3), 8);
-        assert_eq!(compute_reconnect_delay_secs(4), 16);
-        assert_eq!(compute_reconnect_delay_secs(5), 30);
+        assert_eq!(compute_reconnect_delay_secs(1), 1);
+        assert_eq!(compute_reconnect_delay_secs(2), 2);
+        assert_eq!(compute_reconnect_delay_secs(3), 4);
+        assert_eq!(compute_reconnect_delay_secs(4), 8);
+        assert_eq!(compute_reconnect_delay_secs(5), 16);
+        assert_eq!(compute_reconnect_delay_secs(6), 30);
         assert_eq!(compute_reconnect_delay_secs(10), 30);
+    }
+
+    #[tokio::test]
+    async fn manual_connect_resets_retry_backoff_state() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db);
+
+        state.request_connect().await;
+        let attempt = state.current_connect_attempt();
+        let retried = retry_connect_if_attempt_current(&state, attempt).await;
+        assert!(retried);
+        assert_eq!(state.current_retry_streak(), 1);
+        assert_eq!(
+            compute_reconnect_delay_secs(state.current_retry_streak()),
+            1
+        );
+
+        state.request_connect().await;
+        assert_eq!(state.current_retry_streak(), 0);
+        assert_eq!(
+            compute_reconnect_delay_secs(state.current_retry_streak()),
+            0
+        );
     }
 
     #[test]
