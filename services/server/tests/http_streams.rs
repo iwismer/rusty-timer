@@ -589,6 +589,68 @@ async fn test_forwarder_display_name_refreshes_all_forwarder_streams() {
 }
 
 #[tokio::test]
+async fn test_logs_endpoint_sanitizes_forwarder_display_name_log_entry() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    insert_token(
+        &pool,
+        "fwd-dn-log-sanitize",
+        "forwarder",
+        b"fwd-dn-log-sanitize-token",
+    )
+    .await;
+    let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&fwd_url, "fwd-dn-log-sanitize-token")
+        .await
+        .unwrap();
+
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-log-sanitize".to_owned(),
+        reader_ips: vec!["10.44.0.1".to_owned()],
+        display_name: Some("Start Line".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-dn-log-sanitize".to_owned(),
+        reader_ips: vec!["10.44.0.1".to_owned()],
+        display_name: Some("Line 1\n[ERROR] forged".to_owned()),
+    }))
+    .await
+    .unwrap();
+    let hb = fwd.recv_message().await.unwrap();
+    assert!(matches!(hb, WsMessage::Heartbeat(_)));
+
+    let resp = reqwest::get(format!("http://{}/api/v1/logs", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let entries = body["entries"].as_array().unwrap();
+
+    let display_name_entry = entries
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|entry| {
+            entry.contains("forwarder \"fwd-dn-log-sanitize\" display name set to")
+                && entry.contains("Line 1")
+        })
+        .expect("expected display-name log entry");
+
+    assert!(!display_name_entry.contains('\n'));
+    assert!(!display_name_entry.contains('\r'));
+    assert!(display_name_entry.contains("Line 1 [ERROR] forged"));
+}
+
+#[tokio::test]
 async fn test_dashboard_fallback_unknown_api_path_stays_not_found() {
     let dashboard_dir = write_dashboard_fixture();
     let addr = make_server_with_dashboard(dashboard_dir.clone()).await;

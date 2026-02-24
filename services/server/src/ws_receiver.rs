@@ -826,11 +826,10 @@ async fn apply_receiver_selection(
     if socket.send(Message::Text(payload.into())).await.is_err() {
         return Err("failed to send receiver_selection_applied".into());
     }
-    info!(
-        device_id = %device_id,
-        targets = subscriptions.len(),
-        "applied receiver selection"
-    );
+    state.logger.log(format!(
+        "receiver {device_id} selection applied ({} streams)",
+        subscriptions.len()
+    ));
     let _ = state
         .update_receiver_session_selection(session_id, selection_snapshot)
         .await;

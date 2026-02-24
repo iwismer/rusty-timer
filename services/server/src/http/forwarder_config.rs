@@ -102,6 +102,7 @@ async fn send_config_set_command(
     section: String,
     payload: serde_json::Value,
 ) -> axum::response::Response {
+    let log_section = section.clone();
     let senders = state.forwarder_command_senders.read().await;
     let tx = match senders.get(forwarder_id) {
         Some(tx) => tx.clone(),
@@ -131,6 +132,9 @@ async fn send_config_set_command(
     match tokio::time::timeout(CONFIG_REQUEST_TIMEOUT, reply_rx).await {
         Ok(Ok(ForwarderProxyReply::Response(resp))) => {
             let status = if resp.ok {
+                state.logger.log(format!(
+                    "forwarder \"{forwarder_id}\" config/{log_section} updated"
+                ));
                 StatusCode::OK
             } else {
                 match resp
@@ -196,6 +200,9 @@ pub async fn restart_forwarder(
     match tokio::time::timeout(RESTART_REQUEST_TIMEOUT, reply_rx).await {
         Ok(Ok(ForwarderProxyReply::Response(resp))) => {
             let status = if resp.ok {
+                state
+                    .logger
+                    .log(format!("forwarder \"{forwarder_id}\" restart requested"));
                 StatusCode::OK
             } else {
                 StatusCode::BAD_REQUEST

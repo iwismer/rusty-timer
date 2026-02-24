@@ -61,6 +61,10 @@ pub async fn put_stream_epoch_race(
             return internal_error(e);
         }
 
+        state.logger.log(format!(
+            "stream {stream_id} epoch {epoch} assigned to race {race_id}"
+        ));
+
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -81,6 +85,10 @@ pub async fn put_stream_epoch_race(
     {
         return internal_error(e);
     }
+
+    state.logger.log(format!(
+        "stream {stream_id} epoch {epoch} unassigned from race"
+    ));
 
     (
         StatusCode::OK,
@@ -221,7 +229,11 @@ pub async fn activate_next_stream_epoch_for_race(
     )
     .await
     {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            state.logger.log(format!(
+                "activated epoch {next_epoch} for stream {stream_id} on race {race_id}"
+            ));
+        }
         Ok(Err(_)) => {
             return conflict(
                 "race activation committed, but failed to deliver epoch reset command",

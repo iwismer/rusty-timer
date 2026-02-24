@@ -83,6 +83,9 @@ pub async fn patch_stream(
     .await
     {
         Ok(Some(_)) => {
+            state
+                .logger
+                .log(format!("stream {stream_id} renamed to \"{display_alias}\""));
             let _ =
                 state
                     .dashboard_tx
@@ -269,6 +272,15 @@ pub async fn put_epoch_name(
     };
     if let Err(e) = query_result {
         return internal_error(e);
+    }
+
+    match &normalized_name {
+        Some(name) => state.logger.log(format!(
+            "epoch {epoch} on stream {stream_id} named \"{name}\""
+        )),
+        None => state
+            .logger
+            .log(format!("epoch {epoch} on stream {stream_id} name cleared")),
     }
 
     (

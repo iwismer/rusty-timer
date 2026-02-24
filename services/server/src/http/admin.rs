@@ -504,5 +504,6 @@ pub async fn delete_all_races(State(state): State<AppState>) -> impl IntoRespons
     }
 
     let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+    state.logger.log("all races deleted");
     StatusCode::NO_CONTENT.into_response()
 }
