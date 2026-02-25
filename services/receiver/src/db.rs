@@ -1,6 +1,4 @@
-use rt_protocol::{
-    ReceiverSelection, ReceiverSetSelection, ReplayPolicy, ReplayTarget, ResumeCursor,
-};
+use rt_protocol::{ReceiverMode, ReplayTarget, ResumeCursor};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -19,8 +17,6 @@ pub enum DbError {
     Json(#[from] serde_json::Error),
     #[error("Profile missing")]
     ProfileMissing,
-    #[error("Invalid receiver selection: {0}")]
-    InvalidReceiverSelection(String),
 }
 pub type DbResult<T> = Result<T, DbError>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,53 +42,6 @@ pub struct Db {
     conn: Connection,
 }
 
-fn default_selection() -> ReceiverSelection {
-    ReceiverSelection::Manual {
-        streams: Vec::new(),
-    }
-}
-
-fn default_selection_json() -> String {
-    serde_json::to_string(&default_selection()).expect("manual selection is serializable")
-}
-
-fn default_replay_policy() -> ReplayPolicy {
-    ReplayPolicy::Resume
-}
-
-fn replay_policy_to_string(policy: ReplayPolicy) -> String {
-    serde_json::to_string(&policy)
-        .unwrap_or_else(|_| "\"resume\"".to_owned())
-        .trim_matches('"')
-        .to_owned()
-}
-
-fn parse_replay_policy(raw: &str) -> ReplayPolicy {
-    serde_json::from_str::<ReplayPolicy>(&format!("\"{raw}\""))
-        .unwrap_or_else(|_| default_replay_policy())
-}
-
-fn normalize_receiver_selection(
-    selection: ReceiverSetSelection,
-) -> Result<ReceiverSetSelection, DbError> {
-    let replay_targets =
-        match selection.replay_policy {
-            ReplayPolicy::Targeted => match selection.replay_targets {
-                Some(targets) if !targets.is_empty() => Some(targets),
-                _ => return Err(DbError::InvalidReceiverSelection(
-                    "replay_targets must be present and non-empty when replay_policy is targeted"
-                        .to_owned(),
-                )),
-            },
-            _ => None,
-        };
-
-    Ok(ReceiverSetSelection {
-        selection: selection.selection,
-        replay_policy: selection.replay_policy,
-        replay_targets,
-    })
-}
 impl Db {
     pub fn open(path: &Path) -> DbResult<Self> {
         let c = Connection::open(path)?;
@@ -131,58 +80,81 @@ impl Db {
         Ok(rows.next().transpose()?)
     }
     pub fn save_profile(&self, url: &str, tok: &str, update_mode: &str) -> DbResult<()> {
-        let existing_selection = self.load_receiver_selection_raw()?;
-        let (selection_json, replay_policy, replay_targets_json) = existing_selection
-            .map(|s| (s.selection_json, s.replay_policy, s.replay_targets_json))
-            .unwrap_or_else(|| (default_selection_json(), "resume".to_owned(), None));
+        let receiver_mode_json = self
+            .load_receiver_mode()?
+            .map(|mode| serde_json::to_string(&mode))
+            .transpose()?;
         self.conn.execute_batch("DELETE FROM profile")?;
         self.conn.execute(
-            "INSERT INTO profile (server_url, token, update_mode, selection_json, replay_policy, replay_targets_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![url, tok, update_mode, selection_json, replay_policy, replay_targets_json],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json],
         )?;
         Ok(())
     }
-    pub fn load_receiver_selection(&self) -> DbResult<ReceiverSetSelection> {
-        let Some(raw) = self.load_receiver_selection_raw()? else {
-            return Ok(ReceiverSetSelection {
-                selection: default_selection(),
-                replay_policy: default_replay_policy(),
-                replay_targets: None,
-            });
+
+    pub fn load_receiver_mode(&self) -> DbResult<Option<ReceiverMode>> {
+        let raw: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT receiver_mode_json FROM profile LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(Some(raw_json)) = raw else {
+            return Ok(None);
         };
-
-        let selection = serde_json::from_str::<ReceiverSelection>(&raw.selection_json)
-            .unwrap_or_else(|_| default_selection());
-        let replay_policy = parse_replay_policy(&raw.replay_policy);
-        let replay_targets = raw
-            .replay_targets_json
-            .as_deref()
-            .map(serde_json::from_str::<Vec<ReplayTarget>>)
-            .transpose()?;
-
-        normalize_receiver_selection(ReceiverSetSelection {
-            selection,
-            replay_policy,
-            replay_targets,
-        })
+        if raw_json.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str::<ReceiverMode>(&raw_json)?))
     }
-    pub fn save_receiver_selection(&self, selection: &ReceiverSetSelection) -> DbResult<()> {
-        let normalized = normalize_receiver_selection(selection.clone())?;
-        let selection_json = serde_json::to_string(&normalized.selection)?;
-        let replay_policy = replay_policy_to_string(normalized.replay_policy);
-        let replay_targets_json = normalized
-            .replay_targets
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
 
+    pub fn save_receiver_mode(&self, mode: &ReceiverMode) -> DbResult<()> {
+        let persisted_mode = match mode {
+            ReceiverMode::TargetedReplay { .. } => ReceiverMode::TargetedReplay {
+                targets: Vec::<ReplayTarget>::new(),
+            },
+            other => other.clone(),
+        };
+        let json = serde_json::to_string(&persisted_mode)?;
         let updated = self.conn.execute(
-            "UPDATE profile SET selection_json = ?1, replay_policy = ?2, replay_targets_json = ?3",
-            rusqlite::params![selection_json, replay_policy, replay_targets_json],
+            "UPDATE profile SET receiver_mode_json = ?1",
+            rusqlite::params![json],
         )?;
         if updated == 0 {
             return Err(DbError::ProfileMissing);
         }
+        Ok(())
+    }
+
+    pub fn load_earliest_epochs(&self) -> DbResult<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT forwarder_id, reader_ip, earliest_epoch FROM earliest_epochs ORDER BY forwarder_id, reader_ip",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn save_earliest_epoch(&self, fwd: &str, ip: &str, epoch: i64) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO earliest_epochs (forwarder_id, reader_ip, earliest_epoch) VALUES (?1, ?2, ?3)",
+            rusqlite::params![fwd, ip, epoch],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_earliest_epoch(&self, fwd: &str, ip: &str) -> DbResult<()> {
+        self.conn.execute(
+            "DELETE FROM earliest_epochs WHERE forwarder_id = ?1 AND reader_ip = ?2",
+            rusqlite::params![fwd, ip],
+        )?;
         Ok(())
     }
     pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
@@ -277,45 +249,11 @@ impl Db {
         )?;
         apply_profile_column_migration(
             &self.conn,
-            "ALTER TABLE profile ADD COLUMN selection_json TEXT NOT NULL DEFAULT '{\"mode\":\"manual\",\"streams\":[]}';",
-            "selection_json",
-        )?;
-        apply_profile_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN replay_policy TEXT NOT NULL DEFAULT 'resume';",
-            "replay_policy",
-        )?;
-        apply_profile_column_migration(
-            &self.conn,
-            "ALTER TABLE profile ADD COLUMN replay_targets_json TEXT;",
-            "replay_targets_json",
+            "ALTER TABLE profile ADD COLUMN receiver_mode_json TEXT;",
+            "receiver_mode_json",
         )?;
         Ok(())
     }
-
-    fn load_receiver_selection_raw(&self) -> DbResult<Option<ReceiverSelectionRow>> {
-        self.conn
-            .query_row(
-                "SELECT selection_json, replay_policy, replay_targets_json FROM profile LIMIT 1",
-                [],
-                |row| {
-                    Ok(ReceiverSelectionRow {
-                        selection_json: row.get(0)?,
-                        replay_policy: row.get(1)?,
-                        replay_targets_json: row.get(2)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(DbError::from)
-    }
-}
-
-#[derive(Debug)]
-struct ReceiverSelectionRow {
-    selection_json: String,
-    replay_policy: String,
-    replay_targets_json: Option<String>,
 }
 
 fn apply_profile_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
@@ -369,35 +307,54 @@ mod tests {
     }
 
     #[test]
-    fn selection_defaults_to_manual_resume() {
+    fn receiver_mode_round_trip() {
         let db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download")
             .unwrap();
-        let selection = db.load_receiver_selection().unwrap();
-        assert_eq!(
-            selection.selection,
-            ReceiverSelection::Manual {
-                streams: Vec::new()
-            }
-        );
-        assert_eq!(selection.replay_policy, ReplayPolicy::Resume);
-        assert!(selection.replay_targets.is_none());
+        let mode = ReceiverMode::Live {
+            streams: vec![],
+            earliest_epochs: vec![],
+        };
+        db.save_receiver_mode(&mode).unwrap();
+
+        let loaded = db.load_receiver_mode().unwrap().unwrap();
+        assert_eq!(loaded, mode);
     }
 
     #[test]
-    fn load_receiver_selection_rejects_targeted_without_targets() {
+    fn targeted_replay_mode_is_persisted_without_targets() {
         let db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download")
             .unwrap();
-        db.conn
-            .execute(
-                "UPDATE profile SET replay_policy = 'targeted', replay_targets_json = NULL",
-                [],
-            )
-            .unwrap();
+        let targeted = ReceiverMode::TargetedReplay {
+            targets: vec![ReplayTarget {
+                forwarder_id: "f1".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                stream_epoch: 3,
+                from_seq: 1,
+            }],
+        };
 
-        let err = db.load_receiver_selection().unwrap_err();
-        assert!(matches!(err, DbError::InvalidReceiverSelection(_)));
+        db.save_receiver_mode(&targeted).unwrap();
+        assert_eq!(
+            db.load_receiver_mode().unwrap().unwrap(),
+            ReceiverMode::TargetedReplay {
+                targets: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn earliest_epoch_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        assert_eq!(
+            db.load_earliest_epochs().unwrap(),
+            vec![("f1".to_owned(), "10.0.0.1".to_owned(), 7)]
+        );
+
+        db.delete_earliest_epoch("f1", "10.0.0.1").unwrap();
+        assert!(db.load_earliest_epochs().unwrap().is_empty());
     }
 
     #[test]

@@ -1,9 +1,9 @@
-use rt_protocol::*;
-use rt_test_utils::MockWsServer;
+use rt_protocol::{ReceiverMode, ReplayTarget};
 use rusqlite::Connection;
 use std::path::Path;
 
 const SCHEMA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/storage/schema.sql");
+
 fn open_db(path: &Path) -> Connection {
     let c = Connection::open(path).unwrap();
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; PRAGMA foreign_keys=ON;").unwrap();
@@ -11,6 +11,7 @@ fn open_db(path: &Path) -> Connection {
         .unwrap();
     c
 }
+
 #[test]
 fn profile_stored_and_loaded() {
     let d = tempfile::tempdir().unwrap();
@@ -27,137 +28,65 @@ fn profile_stored_and_loaded() {
 }
 
 #[test]
-fn profile_selection_defaults_to_manual_resume() {
+fn receiver_mode_persists_via_receiver_db() {
     let d = tempfile::tempdir().unwrap();
-    let c = open_db(&d.path().join("r.db"));
-    c.execute(
-        "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
-        rusqlite::params!["wss://s.com", "t"],
-    )
-    .unwrap();
+    let db_path = d.path().join("receiver.db");
 
-    let (selection_json, replay_policy): (String, String) = c
-        .query_row(
-            "SELECT selection_json, replay_policy FROM profile LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    let db = receiver::db::Db::open(&db_path).unwrap();
+    db.save_profile("wss://persist.example", "tok", "check-and-download")
         .unwrap();
-    let selection: ReceiverSelection = serde_json::from_str(&selection_json).unwrap();
+    db.save_receiver_mode(&ReceiverMode::Race {
+        race_id: "race-1".to_owned(),
+    })
+    .unwrap();
+
+    let reopened = receiver::db::Db::open(&db_path).unwrap();
     assert_eq!(
-        selection,
-        ReceiverSelection::Manual {
-            streams: Vec::new()
-        }
+        reopened.load_receiver_mode().unwrap(),
+        Some(ReceiverMode::Race {
+            race_id: "race-1".to_owned()
+        })
     );
-    assert_eq!(replay_policy, "resume");
 }
 
 #[test]
-fn profile_selection_rejects_targeted_without_replay_targets() {
-    let d = tempfile::tempdir().unwrap();
-    let db_path = d.path().join("r.db");
-    let c = open_db(&db_path);
-    c.execute(
-        "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
-        rusqlite::params!["wss://s.com", "t"],
-    )
+fn targeted_replay_mode_persists_empty_targets() {
+    let db = receiver::db::Db::open_in_memory().unwrap();
+    db.save_profile("wss://persist.example", "tok", "check-and-download")
+        .unwrap();
+    db.save_receiver_mode(&ReceiverMode::TargetedReplay {
+        targets: vec![ReplayTarget {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            stream_epoch: 9,
+            from_seq: 1,
+        }],
+    })
     .unwrap();
-    c.execute(
-        "UPDATE profile SET replay_policy = 'targeted', replay_targets_json = NULL",
-        [],
-    )
-    .unwrap();
-    drop(c);
 
-    let db = receiver::db::Db::open(&db_path).unwrap();
-    let err = db.load_receiver_selection().unwrap_err();
-    assert!(matches!(
-        err,
-        receiver::db::DbError::InvalidReceiverSelection(_)
-    ));
-}
-
-#[test]
-fn profile_selection_rejects_targeted_with_empty_replay_targets() {
-    let d = tempfile::tempdir().unwrap();
-    let db_path = d.path().join("r.db");
-    let c = open_db(&db_path);
-    c.execute(
-        "INSERT INTO profile (server_url, token) VALUES (?1, ?2)",
-        rusqlite::params!["wss://s.com", "t"],
-    )
-    .unwrap();
-    c.execute(
-        "UPDATE profile SET replay_policy = 'targeted', replay_targets_json = '[]'",
-        [],
-    )
-    .unwrap();
-    drop(c);
-
-    let db = receiver::db::Db::open(&db_path).unwrap();
-    let err = db.load_receiver_selection().unwrap_err();
-    assert!(matches!(
-        err,
-        receiver::db::DbError::InvalidReceiverSelection(_)
-    ));
-}
-
-#[test]
-fn profile_selection_defaults_survive_legacy_db_migration_path() {
-    let d = tempfile::tempdir().unwrap();
-    let db_path = d.path().join("legacy.db");
-    let c = Connection::open(&db_path).unwrap();
-    c.execute_batch(
-        "
-        PRAGMA journal_mode=WAL;
-        PRAGMA synchronous=FULL;
-        PRAGMA wal_autocheckpoint=1000;
-        PRAGMA foreign_keys=ON;
-        CREATE TABLE profile (
-            server_url TEXT NOT NULL,
-            token TEXT NOT NULL
-        );
-        INSERT INTO profile (server_url, token) VALUES ('wss://legacy.example', 'legacy-token');
-        ",
-    )
-    .unwrap();
-    drop(c);
-
-    let db = receiver::db::Db::open(&db_path).unwrap();
-    let selection = db.load_receiver_selection().unwrap();
     assert_eq!(
-        selection.selection,
-        ReceiverSelection::Manual {
-            streams: Vec::new()
-        }
+        db.load_receiver_mode().unwrap(),
+        Some(ReceiverMode::TargetedReplay { targets: vec![] })
     );
-    assert_eq!(selection.replay_policy, ReplayPolicy::Resume);
-    assert!(selection.replay_targets.is_none());
 }
 
 #[test]
-fn profile_selection_defaults_survive_db_reopen_via_receiver_db() {
+fn earliest_epochs_survive_reopen() {
     let d = tempfile::tempdir().unwrap();
-    let db_path = d.path().join("r.db");
+    let db_path = d.path().join("receiver.db");
 
     {
         let db = receiver::db::Db::open(&db_path).unwrap();
-        db.save_profile("wss://persist.example", "tok", "check-and-download")
-            .unwrap();
+        db.save_earliest_epoch("f1", "10.0.0.1", 3).unwrap();
     }
 
     let reopened = receiver::db::Db::open(&db_path).unwrap();
-    let selection = reopened.load_receiver_selection().unwrap();
     assert_eq!(
-        selection.selection,
-        ReceiverSelection::Manual {
-            streams: Vec::new()
-        }
+        reopened.load_earliest_epochs().unwrap(),
+        vec![("f1".to_owned(), "10.0.0.1".to_owned(), 3)]
     );
-    assert_eq!(selection.replay_policy, ReplayPolicy::Resume);
-    assert!(selection.replay_targets.is_none());
 }
+
 #[test]
 fn profile_persists_across_db_reopen() {
     let d = tempfile::tempdir().unwrap();
@@ -176,6 +105,7 @@ fn profile_persists_across_db_reopen() {
         .unwrap();
     assert_eq!(url, "wss://p.com");
 }
+
 #[test]
 fn subscriptions_stored_and_loaded() {
     let d = tempfile::tempdir().unwrap();
@@ -195,150 +125,19 @@ fn subscriptions_stored_and_loaded() {
         .unwrap();
     assert_eq!(n, 2);
 }
-#[test]
-fn subscriptions_survive_reopen() {
-    let d = tempfile::tempdir().unwrap();
-    let p = d.path().join("r.db");
-    {
-        let c = open_db(&p);
-        c.execute(
-            "INSERT INTO subscriptions (forwarder_id, reader_ip) VALUES (?1, ?2)",
-            rusqlite::params!["f", "10.0.0.1"],
-        )
-        .unwrap();
-    }
-    let c = Connection::open(&p).unwrap();
-    let n: i64 = c
-        .query_row(
-            "SELECT COUNT(*) FROM subscriptions WHERE forwarder_id='f'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(n, 1);
-}
+
 #[test]
 fn cursor_stored_and_loaded() {
     let d = tempfile::tempdir().unwrap();
     let c = open_db(&d.path().join("r.db"));
     c.execute("INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params!["f","i",3i64,17i64]).unwrap();
-    let (e,s): (i64,i64) = c.query_row("SELECT stream_epoch, acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let (e, s): (i64, i64) = c
+        .query_row(
+            "SELECT stream_epoch, acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(e, 3);
     assert_eq!(s, 17);
-}
-#[test]
-fn cursor_survives_reopen() {
-    let d = tempfile::tempdir().unwrap();
-    let p = d.path().join("r.db");
-    {
-        let c = open_db(&p);
-        c.execute("INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params!["f","i",2i64,1024i64]).unwrap();
-    }
-    let c = Connection::open(&p).unwrap();
-    let s: i64 = c
-        .query_row(
-            "SELECT acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(s, 1024);
-}
-#[test]
-fn cursor_upsert_advances_position() {
-    let d = tempfile::tempdir().unwrap();
-    let c = open_db(&d.path().join("r.db"));
-    c.execute("INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params!["f","i",1i64,5i64]).unwrap();
-    c.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params!["f","i",1i64,25i64]).unwrap();
-    let s: i64 = c
-        .query_row(
-            "SELECT acked_through_seq FROM cursors WHERE forwarder_id='f' AND reader_ip='i'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(s, 25);
-}
-#[test]
-fn multiple_cursors_for_different_streams() {
-    let d = tempfile::tempdir().unwrap();
-    let c = open_db(&d.path().join("r.db"));
-    for (f, i, e, s) in [
-        ("f", "i1", 1i64, 100i64),
-        ("f", "i2", 2, 50),
-        ("f2", "i1", 1, 200),
-    ] {
-        c.execute("INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![f,i,e,s]).unwrap();
-    }
-    let n: i64 = c
-        .query_row("SELECT COUNT(*) FROM cursors", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 3);
-}
-#[test]
-fn load_resume_cursors_from_db() {
-    let d = tempfile::tempdir().unwrap();
-    let c = open_db(&d.path().join("r.db"));
-    c.execute("INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params!["f","i1",3i64,150i64]).unwrap();
-    c.execute("INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params!["f","i2",1i64,40i64]).unwrap();
-    let mut stmt = c
-        .prepare("SELECT forwarder_id, reader_ip, stream_epoch, acked_through_seq FROM cursors")
-        .unwrap();
-    let loaded: Vec<ResumeCursor> = stmt
-        .query_map([], |r| {
-            Ok(ResumeCursor {
-                forwarder_id: r.get(0)?,
-                reader_ip: r.get(1)?,
-                stream_epoch: r.get::<_, i64>(2)? as u64,
-                last_seq: r.get::<_, i64>(3)? as u64,
-            })
-        })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
-    assert_eq!(loaded.len(), 2);
-}
-#[tokio::test]
-async fn ws_session_sends_receiver_hello_with_resume_cursors() {
-    use rt_test_utils::MockWsClient;
-    let s = MockWsServer::start().await.unwrap();
-    let mut c = MockWsClient::connect(&format!("ws://{}", s.local_addr()))
-        .await
-        .unwrap();
-    c.send_message(&WsMessage::ReceiverHello(ReceiverHello {
-        receiver_id: "rcv-001".to_owned(),
-        resume: vec![ResumeCursor {
-            forwarder_id: "f".to_owned(),
-            reader_ip: "i".to_owned(),
-            stream_epoch: 2,
-            last_seq: 99,
-        }],
-    }))
-    .await
-    .unwrap();
-    match c.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(h) => {
-            assert!(!h.session_id.is_empty());
-            assert_eq!(h.device_id, "rcv-001");
-        }
-        other => panic!("{:?}", other),
-    }
-}
-#[tokio::test]
-async fn ws_session_sends_receiver_hello_empty_resume_on_first_connect() {
-    use rt_test_utils::MockWsClient;
-    let s = MockWsServer::start().await.unwrap();
-    let mut c = MockWsClient::connect(&format!("ws://{}", s.local_addr()))
-        .await
-        .unwrap();
-    c.send_message(&WsMessage::ReceiverHello(ReceiverHello {
-        receiver_id: "rcv-fresh".to_owned(),
-        resume: vec![],
-    }))
-    .await
-    .unwrap();
-    assert!(matches!(
-        c.recv_message().await.unwrap(),
-        WsMessage::Heartbeat(_)
-    ));
 }

@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS profile (
     update_mode TEXT NOT NULL DEFAULT 'check-and-download',
     selection_json TEXT NOT NULL DEFAULT '{"mode":"manual","streams":[]}',
     replay_policy TEXT NOT NULL DEFAULT 'resume',
-    replay_targets_json TEXT
+    replay_targets_json TEXT,
+    receiver_mode_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -28,5 +29,12 @@ CREATE TABLE IF NOT EXISTS cursors (
     reader_ip         TEXT NOT NULL,
     stream_epoch      BIGINT NOT NULL,
     acked_through_seq BIGINT NOT NULL,
+    PRIMARY KEY (forwarder_id, reader_ip)
+);
+
+CREATE TABLE IF NOT EXISTS earliest_epochs (
+    forwarder_id   TEXT NOT NULL,
+    reader_ip      TEXT NOT NULL,
+    earliest_epoch BIGINT NOT NULL,
     PRIMARY KEY (forwarder_id, reader_ip)
 );
