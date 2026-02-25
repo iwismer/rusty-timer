@@ -25,11 +25,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
     let router = Router::new()
         .route("/ws/v1/forwarders", get(ws_forwarder::ws_forwarder_handler))
-        .route("/ws/v1/receivers", get(ws_receiver::ws_receiver_handler))
-        .route(
-            "/ws/v1.1/receivers",
-            get(ws_receiver::ws_receiver_v11_handler),
-        )
+        .route("/ws/v1.2/receivers", get(ws_receiver::ws_receiver_handler))
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
         .route("/api/v1/streams", get(http::streams::list_streams))
