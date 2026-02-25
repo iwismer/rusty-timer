@@ -3,13 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Page from "../routes/+page.svelte";
 
-const apiMocks = vi.hoisted(() => ({
-  getStatus: vi.fn().mockResolvedValue({
-    connection_state: "disconnected",
-    local_ok: true,
-    streams_count: 1,
-  }),
-  getStreams: vi.fn().mockResolvedValue({
+const fixtures = vi.hoisted(() => ({
+  activeStreamsResponse: {
     streams: [
       {
         forwarder_id: "fwd-1",
@@ -21,7 +16,29 @@ const apiMocks = vi.hoisted(() => ({
     ],
     degraded: false,
     upstream_error: null,
+  },
+  pausedStreamsResponse: {
+    streams: [
+      {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        subscribed: false,
+        local_port: null,
+        paused: true,
+      },
+    ],
+    degraded: false,
+    upstream_error: null,
+  },
+}));
+
+const apiMocks = vi.hoisted(() => ({
+  getStatus: vi.fn().mockResolvedValue({
+    connection_state: "disconnected",
+    local_ok: true,
+    streams_count: 1,
   }),
+  getStreams: vi.fn().mockResolvedValue(fixtures.activeStreamsResponse),
   getLogs: vi.fn().mockResolvedValue({ entries: [] }),
   getProfile: vi.fn().mockResolvedValue(null),
   getUpdateStatus: vi.fn().mockResolvedValue(null),
@@ -197,28 +214,95 @@ describe("receiver page mode controls", () => {
   });
 
   it("does not clobber unsaved local mode edits when loadAll hydration resolves", async () => {
-    const loadModeDeferred = deferred<{
+    const firstHydrationDeferred = deferred<{
       mode: "race";
       race_id: string;
     }>();
+    apiMocks.getMode.mockImplementationOnce(() => firstHydrationDeferred.promise);
 
     render(Page);
 
     const modeSelect = await screen.findByTestId("mode-select");
-    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
-    expect(callbacks).toBeTruthy();
-
-    apiMocks.getMode.mockImplementationOnce(() => loadModeDeferred.promise);
-    callbacks.onResync();
 
     await fireEvent.change(modeSelect, { target: { value: "targeted_replay" } });
 
-    loadModeDeferred.resolve({ mode: "race", race_id: "race-1" });
+    firstHydrationDeferred.resolve({ mode: "race", race_id: "race-1" });
 
     await waitFor(() => {
       expect((modeSelect as HTMLSelectElement).value).toBe("targeted_replay");
     });
     expect(screen.queryByTestId("race-id-select")).not.toBeInTheDocument();
+  });
+
+  it("ignores stale loadAll snapshot started during pause-all action", async () => {
+    const staleLoadDeferred = deferred<typeof fixtures.activeStreamsResponse>();
+    const pauseAllDeferred = deferred<void>();
+
+    apiMocks.pauseAll.mockImplementationOnce(() => pauseAllDeferred.promise);
+    apiMocks.getStreams
+      .mockResolvedValueOnce(fixtures.activeStreamsResponse)
+      .mockImplementationOnce(() => staleLoadDeferred.promise)
+      .mockResolvedValueOnce(fixtures.pausedStreamsResponse);
+
+    render(Page);
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    const pauseAll = await screen.findByTestId("pause-all-btn");
+    const streamButton = await screen.findByTestId(
+      "pause-resume-fwd-1/10.0.0.1:10000",
+    );
+    expect(streamButton).toHaveTextContent("Pause");
+
+    await fireEvent.click(pauseAll);
+    callbacks.onResync();
+    pauseAllDeferred.resolve();
+
+    await waitFor(() => {
+      expect(apiMocks.pauseAll).toHaveBeenCalledTimes(1);
+      expect(streamButton).toHaveTextContent("Resume");
+    });
+
+    staleLoadDeferred.resolve(fixtures.activeStreamsResponse);
+
+    await waitFor(() => {
+      expect(streamButton).toHaveTextContent("Resume");
+    });
+  });
+
+  it("releases stream action busy state when pause stream rejects", async () => {
+    const rejection = new Error("pause failed");
+    apiMocks.pauseStream.mockRejectedValueOnce(rejection);
+
+    render(Page);
+
+    const button = await screen.findByTestId("pause-resume-fwd-1/10.0.0.1:10000");
+    await fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(apiMocks.pauseStream).toHaveBeenCalledTimes(1);
+      expect(button).not.toBeDisabled();
+    });
+    expect(screen.getByText(String(rejection))).toBeInTheDocument();
+  });
+
+  it("releases stream action busy state when pause-all rejects", async () => {
+    const rejection = new Error("pause-all failed");
+    apiMocks.pauseAll.mockRejectedValueOnce(rejection);
+
+    render(Page);
+
+    const pauseAll = await screen.findByTestId("pause-all-btn");
+    const resumeAll = await screen.findByTestId("resume-all-btn");
+    await fireEvent.click(pauseAll);
+
+    await waitFor(() => {
+      expect(apiMocks.pauseAll).toHaveBeenCalledTimes(1);
+      expect(pauseAll).not.toBeDisabled();
+      expect(resumeAll).not.toBeDisabled();
+    });
+    expect(screen.getByText(String(rejection))).toBeInTheDocument();
   });
 
   it("disables earliest epoch controls in race mode", async () => {

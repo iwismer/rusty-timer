@@ -46,6 +46,7 @@
   let modeApplyQueued = $state(false);
   let savedModePayload = $state<string | null>(null);
   let modeHydrationVersion = 0;
+  let modeEditVersion = 0;
   let streamActionBusy = $state(false);
   let streamRefreshVersion = 0;
 
@@ -125,6 +126,10 @@
     hydrateMode(mode);
     savedModePayload = JSON.stringify(mode);
     modeHydrationVersion += 1;
+  }
+
+  function markModeEdited(): void {
+    modeEditVersion += 1;
   }
 
   function modePayload(): ReceiverMode {
@@ -245,6 +250,8 @@
     loadAllInFlight = true;
     try {
       const modeVersionAtLoadStart = modeHydrationVersion;
+      const modeEditVersionAtLoadStart = modeEditVersion;
+      const streamRefreshVersionAtLoadStart = streamRefreshVersion;
       const [nextStatus, nextStreams, nextLogs, nextMode, nextRaces] =
         await Promise.all([
           api.getStatus(),
@@ -252,15 +259,18 @@
           api.getLogs(),
           api.getMode().catch(() => null),
           api.getRaces().catch(() => ({ races: [] })),
-        ]);
+      ]);
       status = nextStatus;
-      streams = nextStreams;
+      if (streamRefreshVersion === streamRefreshVersionAtLoadStart) {
+        streams = nextStreams;
+      }
       logs = nextLogs;
       races = nextRaces.races;
 
       if (
         nextMode &&
         !modeDirty &&
+        modeEditVersion === modeEditVersionAtLoadStart &&
         modeHydrationVersion === modeVersionAtLoadStart
       ) {
         applyHydratedMode(nextMode);
@@ -295,6 +305,7 @@
   }
 
   function toggleLiveStreamSelection(forwarder_id: string, reader_ip: string): void {
+    markModeEdited();
     const key = streamKey(forwarder_id, reader_ip);
     if (selectedLiveStreamKeys.includes(key)) {
       selectedLiveStreamKeys = selectedLiveStreamKeys.filter((k) => k !== key);
@@ -774,6 +785,7 @@
               data-testid="mode-select"
               class="{inputClass} mt-1"
               bind:value={modeDraft}
+              onchange={markModeEdited}
               disabled={modeBusy}
             >
               <option value="live">Live</option>
@@ -789,6 +801,7 @@
                 data-testid="race-id-select"
                 class="{inputClass} mt-1"
                 bind:value={raceIdDraft}
+                onchange={markModeEdited}
                 disabled={modeBusy}
               >
                 <option value="">Select race...</option>
@@ -933,6 +946,7 @@
                       min="0"
                       class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-24 focus:outline-none focus:ring-1 focus:ring-accent"
                       bind:value={targetedEpochInputs[key]}
+                      oninput={markModeEdited}
                       placeholder="epoch"
                     />
                     <button
@@ -966,6 +980,7 @@
                       min="0"
                       class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-24 focus:outline-none focus:ring-1 focus:ring-accent"
                       bind:value={earliestEpochInputs[key]}
+                      oninput={markModeEdited}
                       placeholder="earliest"
                       disabled={modeDraft === "race"}
                     />
