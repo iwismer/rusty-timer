@@ -234,6 +234,27 @@ describe("receiver page mode controls", () => {
     expect(resumeAll.className).toContain("bg-status-ok-bg");
   });
 
+  it("disables Resume All when all streams are already resumed", async () => {
+    render(Page);
+
+    const pauseAll = await screen.findByTestId("pause-all-btn");
+    const resumeAll = await screen.findByTestId("resume-all-btn");
+
+    expect(pauseAll).not.toBeDisabled();
+    expect(resumeAll).toBeDisabled();
+  });
+
+  it("disables Pause All when all streams are already paused", async () => {
+    apiMocks.getStreams.mockResolvedValueOnce(fixtures.pausedStreamsResponse);
+    render(Page);
+
+    const pauseAll = await screen.findByTestId("pause-all-btn");
+    const resumeAll = await screen.findByTestId("resume-all-btn");
+
+    expect(pauseAll).toBeDisabled();
+    expect(resumeAll).not.toBeDisabled();
+  });
+
   it("styles per-row Pause as warn and Resume as ok", async () => {
     render(Page);
     const activeRowButton = await screen.findByTestId(
@@ -294,7 +315,7 @@ describe("receiver page mode controls", () => {
 
     await waitFor(() => {
       expect(pauseAll).not.toBeDisabled();
-      expect(resumeAll).not.toBeDisabled();
+      expect(resumeAll).toBeDisabled();
     });
   });
 
@@ -475,7 +496,7 @@ describe("receiver page mode controls", () => {
     await waitFor(() => {
       expect(apiMocks.pauseAll).toHaveBeenCalledTimes(1);
       expect(pauseAll).not.toBeDisabled();
-      expect(resumeAll).not.toBeDisabled();
+      expect(resumeAll).toBeDisabled();
     });
     expect(screen.getByText(String(rejection))).toBeInTheDocument();
   });

@@ -748,6 +748,11 @@
     streams?.streams.filter((s) => s.subscribed).length ?? 0,
   );
   let totalCount = $derived(streams?.streams.length ?? 0);
+  let pausedCount = $derived(
+    streams?.streams.filter((stream) => stream.paused).length ?? 0,
+  );
+  let allStreamsPaused = $derived(totalCount > 0 && pausedCount === totalCount);
+  let allStreamsResumed = $derived(totalCount > 0 && pausedCount === 0);
 
   const inputClass =
     "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
@@ -980,7 +985,7 @@
                 data-testid="pause-all-btn"
                 class={btnWarn}
                 onclick={() => void pauseOrResumeAll("pause")}
-                disabled={streamActionBusy}
+                disabled={streamActionBusy || allStreamsPaused}
               >
                 Pause All
               </button>
@@ -988,7 +993,7 @@
                 data-testid="resume-all-btn"
                 class={btnOk}
                 onclick={() => void pauseOrResumeAll("resume")}
-                disabled={streamActionBusy}
+                disabled={streamActionBusy || allStreamsResumed}
               >
                 Resume All
               </button>
