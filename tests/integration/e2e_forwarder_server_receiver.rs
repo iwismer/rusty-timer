@@ -87,19 +87,41 @@ async fn receiver_handshake(
     receiver_id: &str,
     resume: Vec<ResumeCursor>,
 ) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let streams: Vec<StreamRef> = resume
+        .iter()
+        .filter_map(|cursor| {
+            let key = (cursor.forwarder_id.clone(), cursor.reader_ip.clone());
+            if seen.insert(key.clone()) {
+                Some(StreamRef {
+                    forwarder_id: key.0,
+                    reader_ip: key.1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
     client
-        .send_message(&WsMessage::ReceiverHello(ReceiverHello {
+        .send_message(&WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
             receiver_id: receiver_id.to_owned(),
+            mode: ReceiverMode::Live {
+                streams,
+                earliest_epochs: vec![],
+            },
             resume,
         }))
         .await
         .unwrap();
-    match client.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(hb) => {
-            assert!(!hb.session_id.is_empty(), "session_id must not be empty");
-            hb.session_id
+    loop {
+        match client.recv_message().await.unwrap() {
+            WsMessage::Heartbeat(hb) => {
+                assert!(!hb.session_id.is_empty(), "session_id must not be empty");
+                break hb.session_id;
+            }
+            WsMessage::ReceiverModeApplied(_) => {}
+            other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
         }
-        other => panic!("expected Heartbeat after receiver hello, got {:?}", other),
     }
 }
 
@@ -180,7 +202,7 @@ async fn e2e_single_stream_forwarder_to_mock_receiver() {
     assert_eq!(count, 1, "event should be stored in server DB");
 
     // --- Receiver lane (mock client): subscribe via hello resume cursor ---
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut rcv_client = MockWsClient::connect_with_token(&rcv_url, "rcv-e2e-token-01")
         .await
         .unwrap();
@@ -298,7 +320,7 @@ async fn e2e_two_stream_forwarder_to_mock_receiver() {
     assert_eq!(count, 2, "both events should be stored");
 
     // Receiver subscribes to both streams via hello resume cursors.
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut rcv_client = MockWsClient::connect_with_token(&rcv_url, "rcv-e2e-token-02")
         .await
         .unwrap();
@@ -334,7 +356,7 @@ async fn e2e_two_stream_forwarder_to_mock_receiver() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
             Ok(Ok(other)) => panic!("unexpected message: {:?}", other),
             Ok(Err(e)) => panic!("recv error: {}", e),
             Err(_) => break,
@@ -373,15 +395,11 @@ async fn e2e_headless_receiver_sqlite_smoke() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Receiver subscribe mid-session (add stream after connection).
+// Test: Legacy receiver_subscribe rejected on v1.2 session.
 // ---------------------------------------------------------------------------
 
-/// E2E test: receiver subscribes to a stream mid-session via receiver_subscribe.
-///
-/// 1. Forwarder sends an event on a stream.
-/// 2. Receiver connects without subscribing initially (empty resume).
-/// 3. Receiver sends receiver_subscribe for the stream.
-/// 4. Receiver receives the event batch.
+/// E2E test: sending legacy `receiver_subscribe` after v1.2 hello returns a
+/// non-retryable protocol error.
 #[tokio::test]
 async fn e2e_receiver_subscribe_mid_session() {
     let container = Postgres::default().start().await.unwrap();
@@ -426,7 +444,7 @@ async fn e2e_receiver_subscribe_mid_session() {
     fwd_client.recv_message().await.unwrap();
 
     // Receiver connects with empty resume list.
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut rcv_client = MockWsClient::connect_with_token(&rcv_url, "rcv-e2e-token-03")
         .await
         .unwrap();
@@ -444,19 +462,27 @@ async fn e2e_receiver_subscribe_mid_session() {
         .await
         .unwrap();
 
-    // Should receive the event batch.
-    let msg = tokio::time::timeout(Duration::from_secs(5), rcv_client.recv_message())
-        .await
-        .expect("timed out waiting for event after subscribe")
-        .unwrap();
-    match msg {
-        WsMessage::ReceiverEventBatch(batch) => {
-            assert!(
-                !batch.events.is_empty(),
-                "should receive at least one event"
-            );
-            assert_eq!(batch.events[0].reader_ip, "192.168.30.1");
+    // Should be rejected as unexpected legacy message kind.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_protocol_error = false;
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(Duration::from_millis(500), rcv_client.recv_message())
+            .await
+            .expect("timed out waiting for protocol error after subscribe")
+            .unwrap();
+        match msg {
+            WsMessage::Error(err) => {
+                assert_eq!(err.code, error_codes::PROTOCOL_ERROR);
+                assert!(!err.retryable, "legacy subscribe should be non-retryable");
+                saw_protocol_error = true;
+                break;
+            }
+            WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_) => {}
+            other => panic!("expected Error(PROTOCOL_ERROR), got {:?}", other),
         }
-        other => panic!("expected ReceiverEventBatch, got {:?}", other),
     }
+    assert!(
+        saw_protocol_error,
+        "expected protocol error after subscribe"
+    );
 }

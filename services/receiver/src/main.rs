@@ -376,16 +376,17 @@ async fn main() {
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
-                                                    let result = receiver::session::run_session_loop(
-                                                        ws,
-                                                        session_id,
-                                                        db_arc,
+                                                    let deps = receiver::session::SessionLoopDeps {
+                                                        db: db_arc,
                                                         event_tx,
-                                                        counts,
+                                                        stream_counts: counts,
                                                         ui_tx,
-                                                        cancel_rx,
+                                                        shutdown: cancel_rx,
                                                         paused_streams,
                                                         all_paused,
+                                                    };
+                                                    let result = receiver::session::run_session_loop(
+                                                        ws, session_id, deps,
                                                     )
                                                     .await;
                                                     match result {

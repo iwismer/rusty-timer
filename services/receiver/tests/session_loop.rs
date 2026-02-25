@@ -1,7 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use receiver::cache::StreamCounts;
 use receiver::db::Db;
-use receiver::session::{SessionError, run_session_loop};
+use receiver::session::{SessionError, SessionLoopDeps, run_session_loop};
 use receiver::ui_events::ReceiverUiEvent;
 use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, ReceiverModeApplied, WsMessage};
 use std::collections::HashMap;
@@ -108,13 +108,15 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
     run_session_loop(
         ws,
         "session-1".to_owned(),
-        db.clone(),
-        event_tx,
-        StreamCounts::new(),
-        ui_tx,
-        shutdown_rx,
-        paused_streams,
-        all_paused,
+        SessionLoopDeps {
+            db: db.clone(),
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+        },
     )
     .await
     .unwrap();
@@ -192,13 +194,15 @@ async fn run_session_loop_drops_events_when_all_paused() {
     run_session_loop(
         ws,
         "session-paused".to_owned(),
-        db.clone(),
-        event_tx,
-        StreamCounts::new(),
-        ui_tx,
-        shutdown_rx,
-        paused_streams,
-        all_paused,
+        SessionLoopDeps {
+            db: db.clone(),
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+        },
     )
     .await
     .unwrap();
@@ -237,13 +241,15 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
     let result = run_session_loop(
         ws,
         "session-2".to_owned(),
-        db,
-        event_tx,
-        StreamCounts::new(),
-        ui_tx,
-        shutdown_rx,
-        paused_streams,
-        all_paused,
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+        },
     )
     .await;
     assert!(matches!(result, Err(SessionError::ConnectionClosed)));
@@ -278,13 +284,15 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
     let result = run_session_loop(
         ws,
         "session-3".to_owned(),
-        db,
-        event_tx,
-        StreamCounts::new(),
-        ui_tx,
-        shutdown_rx,
-        paused_streams,
-        all_paused,
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+        },
     )
     .await;
     assert!(result.is_ok());
@@ -321,13 +329,15 @@ async fn run_session_loop_replies_to_ping_with_pong() {
     let result = run_session_loop(
         ws,
         "session-4".to_owned(),
-        db,
-        event_tx,
-        StreamCounts::new(),
-        ui_tx,
-        shutdown_rx,
-        paused_streams,
-        all_paused,
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+        },
     )
     .await;
 
@@ -357,13 +367,15 @@ async fn run_session_loop_stops_on_shutdown_signal() {
     let handle = tokio::spawn(run_session_loop(
         ws,
         "session-5".to_owned(),
-        db,
-        event_tx,
-        StreamCounts::new(),
-        ui_tx,
-        shutdown_rx,
-        paused_streams,
-        all_paused,
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+        },
     ));
 
     shutdown_tx.send(true).unwrap();
@@ -405,13 +417,15 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
     let result = run_session_loop(
         ws,
         "session-6".to_owned(),
-        db,
-        event_tx,
-        StreamCounts::new(),
-        ui_tx,
-        shutdown_rx,
-        paused_streams,
-        all_paused,
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+        },
     )
     .await;
 

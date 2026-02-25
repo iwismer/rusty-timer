@@ -146,7 +146,9 @@ describe("receiver page mode controls", () => {
   it("pauses stream in live mode", async () => {
     render(Page);
 
-    const button = await screen.findByTestId("pause-resume-fwd-1/10.0.0.1:10000");
+    const button = await screen.findByTestId(
+      "pause-resume-fwd-1/10.0.0.1:10000",
+    );
     await fireEvent.click(button);
 
     await waitFor(() => {
@@ -174,7 +176,9 @@ describe("receiver page mode controls", () => {
 
     render(Page);
 
-    const button = await screen.findByTestId("pause-resume-fwd-1/10.0.0.1:10000");
+    const button = await screen.findByTestId(
+      "pause-resume-fwd-1/10.0.0.1:10000",
+    );
     await fireEvent.click(button);
     await fireEvent.click(button);
 
@@ -218,13 +222,17 @@ describe("receiver page mode controls", () => {
       mode: "race";
       race_id: string;
     }>();
-    apiMocks.getMode.mockImplementationOnce(() => firstHydrationDeferred.promise);
+    apiMocks.getMode.mockImplementationOnce(
+      () => firstHydrationDeferred.promise,
+    );
 
     render(Page);
 
     const modeSelect = await screen.findByTestId("mode-select");
 
-    await fireEvent.change(modeSelect, { target: { value: "targeted_replay" } });
+    await fireEvent.change(modeSelect, {
+      target: { value: "targeted_replay" },
+    });
 
     firstHydrationDeferred.resolve({ mode: "race", race_id: "race-1" });
 
@@ -291,7 +299,9 @@ describe("receiver page mode controls", () => {
     expect(callbacks).toBeTruthy();
 
     const modeSelect = await screen.findByTestId("mode-select");
-    await fireEvent.change(modeSelect, { target: { value: "targeted_replay" } });
+    await fireEvent.change(modeSelect, {
+      target: { value: "targeted_replay" },
+    });
     callbacks.onResync();
     await waitFor(() => {
       expect(apiMocks.getMode).toHaveBeenCalledTimes(2);
@@ -320,7 +330,8 @@ describe("receiver page mode controls", () => {
   });
 
   it("does not let stale loadAll streams overwrite a newer SSE snapshot", async () => {
-    const staleStreamsDeferred = deferred<typeof fixtures.activeStreamsResponse>();
+    const staleStreamsDeferred =
+      deferred<typeof fixtures.activeStreamsResponse>();
     apiMocks.getStreams
       .mockResolvedValueOnce(fixtures.activeStreamsResponse)
       .mockImplementationOnce(() => staleStreamsDeferred.promise);
@@ -358,7 +369,9 @@ describe("receiver page mode controls", () => {
 
     render(Page);
 
-    const button = await screen.findByTestId("pause-resume-fwd-1/10.0.0.1:10000");
+    const button = await screen.findByTestId(
+      "pause-resume-fwd-1/10.0.0.1:10000",
+    );
     await fireEvent.click(button);
 
     await waitFor(() => {
@@ -390,7 +403,9 @@ describe("receiver page mode controls", () => {
     apiMocks.getMode.mockResolvedValueOnce({ mode: "race", race_id: "race-1" });
     render(Page);
 
-    const earliest = await screen.findByTestId("earliest-epoch-fwd-1/10.0.0.1:10000");
+    const earliest = await screen.findByTestId(
+      "earliest-epoch-fwd-1/10.0.0.1:10000",
+    );
     const setEarliest = await screen.findByTestId(
       "apply-earliest-fwd-1/10.0.0.1:10000",
     );
@@ -403,9 +418,13 @@ describe("receiver page mode controls", () => {
     render(Page);
 
     const modeSelect = await screen.findByTestId("mode-select");
-    await fireEvent.change(modeSelect, { target: { value: "targeted_replay" } });
+    await fireEvent.change(modeSelect, {
+      target: { value: "targeted_replay" },
+    });
 
-    const epochInput = await screen.findByTestId("targeted-epoch-fwd-1/10.0.0.1:10000");
+    const epochInput = await screen.findByTestId(
+      "targeted-epoch-fwd-1/10.0.0.1:10000",
+    );
     await fireEvent.input(epochInput, { target: { value: "7" } });
 
     const replayButton = await screen.findByTestId(
@@ -417,7 +436,11 @@ describe("receiver page mode controls", () => {
       expect(apiMocks.putMode).toHaveBeenCalledWith({
         mode: "targeted_replay",
         targets: [
-          { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000", stream_epoch: 7 },
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            stream_epoch: 7,
+          },
         ],
       });
     });
@@ -448,10 +471,16 @@ describe("receiver page mode controls", () => {
     render(Page);
 
     const modeSelect = await screen.findByTestId("mode-select");
-    await fireEvent.change(modeSelect, { target: { value: "targeted_replay" } });
+    await fireEvent.change(modeSelect, {
+      target: { value: "targeted_replay" },
+    });
 
-    const epoch1 = await screen.findByTestId("targeted-epoch-fwd-1/10.0.0.1:10000");
-    const epoch2 = await screen.findByTestId("targeted-epoch-fwd-2/10.0.0.2:10000");
+    const epoch1 = await screen.findByTestId(
+      "targeted-epoch-fwd-1/10.0.0.1:10000",
+    );
+    const epoch2 = await screen.findByTestId(
+      "targeted-epoch-fwd-2/10.0.0.2:10000",
+    );
     await fireEvent.input(epoch1, { target: { value: "3" } });
     await fireEvent.input(epoch2, { target: { value: "9" } });
 
@@ -462,8 +491,16 @@ describe("receiver page mode controls", () => {
       expect(apiMocks.putMode).toHaveBeenCalledWith({
         mode: "targeted_replay",
         targets: [
-          { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000", stream_epoch: 3 },
-          { forwarder_id: "fwd-2", reader_ip: "10.0.0.2:10000", stream_epoch: 9 },
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            stream_epoch: 3,
+          },
+          {
+            forwarder_id: "fwd-2",
+            reader_ip: "10.0.0.2:10000",
+            stream_epoch: 9,
+          },
         ],
       });
     });

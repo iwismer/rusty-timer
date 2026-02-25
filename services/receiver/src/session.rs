@@ -24,6 +24,16 @@ pub struct Session {
     pub device_id: String,
 }
 
+pub struct SessionLoopDeps {
+    pub db: Arc<Mutex<Db>>,
+    pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
+    pub stream_counts: crate::cache::StreamCounts,
+    pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
+    pub shutdown: watch::Receiver<bool>,
+    pub paused_streams: Arc<RwLock<HashSet<String>>>,
+    pub all_paused: Arc<RwLock<bool>>,
+}
+
 fn apply_batch_counts(
     stream_counts: &crate::cache::StreamCounts,
     events: &[ReadEvent],
@@ -77,13 +87,7 @@ fn apply_batch_counts(
 pub async fn run_session_loop<S>(
     mut ws: S,
     session_id: String,
-    db: Arc<Mutex<Db>>,
-    event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
-    stream_counts: crate::cache::StreamCounts,
-    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
-    mut shutdown: watch::Receiver<bool>,
-    paused_streams: Arc<RwLock<HashSet<String>>>,
-    all_paused: Arc<RwLock<bool>>,
+    mut deps: SessionLoopDeps,
 ) -> Result<(), SessionError>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
@@ -93,7 +97,7 @@ where
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.changed() => { if *shutdown.borrow() { break; } }
+            _ = deps.shutdown.changed() => { if *deps.shutdown.borrow() { break; } }
             msg = ws.next() => {
                 match msg {
                     None => break,
@@ -102,8 +106,8 @@ where
                         match serde_json::from_str::<WsMessage>(&t) {
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
-                                let all_paused_now = *all_paused.read().await;
-                                let paused_set = paused_streams.read().await;
+                                let all_paused_now = *deps.all_paused.read().await;
+                                let paused_set = deps.paused_streams.read().await;
                                 let forwarded_events: Vec<ReadEvent> = b
                                     .events
                                     .iter()
@@ -120,23 +124,23 @@ where
                                     continue;
                                 }
 
-                                for e in &forwarded_events { let _ = event_tx.send(e.clone()); }
-                                let updates = apply_batch_counts(&stream_counts, &forwarded_events);
+                                for e in &forwarded_events { let _ = deps.event_tx.send(e.clone()); }
+                                let updates = apply_batch_counts(&deps.stream_counts, &forwarded_events);
                                 if !updates.is_empty() {
-                                    let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamCountsUpdated {
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamCountsUpdated {
                                         updates,
                                     });
                                 }
                                 let mut hw: HashMap<(String,String,u64),u64> = HashMap::new();
                                 for e in &forwarded_events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();
-                                { let d=db.lock().await; for((f,i,ep),ls) in &hw { if let Err(e)=d.save_cursor(f,i,*ep,*ls){error!(error=%e);} acks.push(AckEntry{forwarder_id:f.clone(),reader_ip:i.clone(),stream_epoch:*ep,last_seq:*ls}); } }
+                                { let d=deps.db.lock().await; for((f,i,ep),ls) in &hw { if let Err(e)=d.save_cursor(f,i,*ep,*ls){error!(error=%e);} acks.push(AckEntry{forwarder_id:f.clone(),reader_ip:i.clone(),stream_epoch:*ep,last_seq:*ls}); } }
                                 let ack=WsMessage::ReceiverAck(ReceiverAck{session_id:session_id.clone(),entries:acks});
                                 ws.send(Message::Text(serde_json::to_string(&ack)?.into())).await?;
                             }
                             Ok(WsMessage::ReceiverModeApplied(applied)) => {
                                 info!(mode=%applied.mode_summary, streams=applied.resolved_stream_count, "server applied mode");
-                                let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
+                                let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
                                     entry: format!(
                                         "server applied mode: {} (resolved streams: {})",
                                         applied.mode_summary, applied.resolved_stream_count
@@ -144,7 +148,7 @@ where
                                 });
                                 for warning in applied.warnings {
                                     warn!(warning = %warning, "server mode warning");
-                                    let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
                                         entry: format!("server mode warning: {warning}"),
                                     });
                                 }

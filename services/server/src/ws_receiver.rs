@@ -447,7 +447,7 @@ async fn apply_mode(
             streams,
             earliest_epochs,
         } => {
-            let (targets, mut warnings) = resolve_live_targets(state, streams).await?;
+            let (targets, warnings) = resolve_live_targets(state, streams).await?;
             let earliest_map = earliest_epoch_map(earliest_epochs);
 
             let mut next_subscriptions = Vec::with_capacity(targets.len());
@@ -472,7 +472,7 @@ async fn apply_mode(
             let applied = WsMessage::ReceiverModeApplied(ReceiverModeApplied {
                 mode_summary: mode_summary(&hello.mode),
                 resolved_stream_count: next_subscriptions.len(),
-                warnings: std::mem::take(&mut warnings),
+                warnings,
             });
             socket
                 .send(Message::Text(serde_json::to_string(&applied)?.into()))
@@ -520,7 +520,7 @@ async fn apply_mode(
             })
         }
         ReceiverMode::TargetedReplay { targets } => {
-            let (resolved_targets, mut warnings) =
+            let (resolved_targets, warnings) =
                 resolve_targeted_replay_targets(state, targets).await?;
 
             let mut transient_subscriptions =
@@ -537,7 +537,7 @@ async fn apply_mode(
             let applied = WsMessage::ReceiverModeApplied(ReceiverModeApplied {
                 mode_summary: mode_summary(&hello.mode),
                 resolved_stream_count: transient_subscriptions.len(),
-                warnings: std::mem::take(&mut warnings),
+                warnings,
             });
             socket
                 .send(Message::Text(serde_json::to_string(&applied)?.into()))

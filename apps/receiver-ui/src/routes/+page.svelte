@@ -198,7 +198,8 @@
   }
 
   let modeDirty = $derived(
-    savedModePayload !== null && JSON.stringify(modePayload()) !== savedModePayload,
+    savedModePayload !== null &&
+      JSON.stringify(modePayload()) !== savedModePayload,
   );
 
   function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
@@ -261,7 +262,7 @@
           api.getLogs(),
           api.getMode().catch(() => null),
           api.getRaces().catch(() => ({ races: [] })),
-      ]);
+        ]);
       status = nextStatus;
       if (streamRefreshVersion === streamRefreshVersionAtLoadStart) {
         streams = nextStreams;
@@ -307,7 +308,10 @@
     }
   }
 
-  function toggleLiveStreamSelection(forwarder_id: string, reader_ip: string): void {
+  function toggleLiveStreamSelection(
+    forwarder_id: string,
+    reader_ip: string,
+  ): void {
     markModeEdited();
     const key = streamKey(forwarder_id, reader_ip);
     if (selectedLiveStreamKeys.includes(key)) {
@@ -348,7 +352,10 @@
     modeBusy = false;
   }
 
-  async function setEarliestEpoch(forwarder_id: string, reader_ip: string): Promise<void> {
+  async function setEarliestEpoch(
+    forwarder_id: string,
+    reader_ip: string,
+  ): Promise<void> {
     if (modeDraft === "race") {
       return;
     }
@@ -362,7 +369,11 @@
 
     try {
       error = null;
-      await api.putEarliestEpoch({ forwarder_id, reader_ip, earliest_epoch: parsed });
+      await api.putEarliestEpoch({
+        forwarder_id,
+        reader_ip,
+        earliest_epoch: parsed,
+      });
       earliestEpochInputs = { ...earliestEpochInputs, [key]: String(parsed) };
     } catch (e) {
       error = String(e);
@@ -425,7 +436,10 @@
     }
   }
 
-  async function replayStream(forwarder_id: string, reader_ip: string): Promise<void> {
+  async function replayStream(
+    forwarder_id: string,
+    reader_ip: string,
+  ): Promise<void> {
     const key = streamKey(forwarder_id, reader_ip);
     const parsed = parseNonNegativeInt(targetedEpochInputs[key] ?? "");
     if (parsed === null) {
@@ -683,10 +697,16 @@
     <Card title="Status">
       <section data-testid="status-section">
         {#if status}
-          <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
+          <dl
+            class="grid gap-2 text-sm"
+            style="grid-template-columns: auto 1fr;"
+          >
             <dt class="text-text-muted">Connection</dt>
             <dd data-testid="connection-state">
-              <StatusBadge label={connectionState} state={connectionBadgeState} />
+              <StatusBadge
+                label={connectionState}
+                state={connectionBadgeState}
+              />
             </dd>
             <dt class="text-text-muted">Local DB</dt>
             <dd>
@@ -913,7 +933,9 @@
               <div class="px-4 py-3 flex items-center gap-3">
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
-                    <span class="text-sm font-medium text-text-primary truncate">
+                    <span
+                      class="text-sm font-medium text-text-primary truncate"
+                    >
                       {stream.display_alias ??
                         `${stream.forwarder_id} / ${stream.reader_ip}`}
                     </span>
@@ -966,7 +988,9 @@
                     </button>
                   {:else}
                     {#if modeDraft === "live"}
-                      <label class="text-xs text-text-muted inline-flex items-center gap-1">
+                      <label
+                        class="text-xs text-text-muted inline-flex items-center gap-1"
+                      >
                         <input
                           data-testid="live-stream-toggle-{key}"
                           type="checkbox"
