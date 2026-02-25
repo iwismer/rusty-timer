@@ -3,7 +3,7 @@ use receiver::cache::StreamCounts;
 use receiver::db::Db;
 use receiver::session::{SessionError, run_session_loop};
 use receiver::ui_events::ReceiverUiEvent;
-use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, WsMessage};
+use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, ReceiverModeApplied, WsMessage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -370,6 +370,79 @@ async fn run_session_loop_stops_on_shutdown_signal() {
 
     let result = handle.await.unwrap();
     assert!(result.is_ok());
+    join_server_task(task).await;
+}
+
+#[tokio::test]
+async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+        let msg = WsMessage::ReceiverModeApplied(ReceiverModeApplied {
+            mode_summary: "race=race-42".to_owned(),
+            resolved_stream_count: 3,
+            warnings: vec![
+                "stream fwd-1/10.0.0.1 unavailable".to_owned(),
+                "replay capped at 1000 events".to_owned(),
+            ],
+        });
+        ws.send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+            .await
+            .unwrap();
+        ws.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(false));
+
+    let result = run_session_loop(
+        ws,
+        "session-6".to_owned(),
+        db,
+        event_tx,
+        StreamCounts::new(),
+        ui_tx,
+        shutdown_rx,
+        paused_streams,
+        all_paused,
+    )
+    .await;
+
+    assert!(result.is_ok());
+
+    let mut log_entries = Vec::new();
+    while let Ok(event) = ui_rx.try_recv() {
+        if let ReceiverUiEvent::LogEntry { entry } = event {
+            log_entries.push(entry);
+        }
+    }
+
+    assert!(
+        log_entries
+            .iter()
+            .any(|entry| entry.contains("race=race-42") && entry.contains("3")),
+        "expected mode summary log entry, got: {log_entries:?}"
+    );
+    assert!(
+        log_entries
+            .iter()
+            .any(|entry| entry.contains("stream fwd-1/10.0.0.1 unavailable")),
+        "expected first warning log entry, got: {log_entries:?}"
+    );
+    assert!(
+        log_entries
+            .iter()
+            .any(|entry| entry.contains("replay capped at 1000 events")),
+        "expected second warning log entry, got: {log_entries:?}"
+    );
+
     join_server_task(task).await;
 }
 

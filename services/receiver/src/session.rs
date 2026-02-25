@@ -136,8 +136,17 @@ where
                             }
                             Ok(WsMessage::ReceiverModeApplied(applied)) => {
                                 info!(mode=%applied.mode_summary, streams=applied.resolved_stream_count, "server applied mode");
+                                let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
+                                    entry: format!(
+                                        "server applied mode: {} (resolved streams: {})",
+                                        applied.mode_summary, applied.resolved_stream_count
+                                    ),
+                                });
                                 for warning in applied.warnings {
                                     warn!(warning = %warning, "server mode warning");
+                                    let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
+                                        entry: format!("server mode warning: {warning}"),
+                                    });
                                 }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
