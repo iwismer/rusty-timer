@@ -152,8 +152,10 @@ fn default_replay_from_seq() -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Optional bound to start at the earliest epoch when replaying.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EarliestEpochOverride {
+    pub forwarder_id: String,
+    pub reader_ip: String,
     pub earliest_epoch: i64,
 }
 
@@ -161,14 +163,14 @@ pub struct EarliestEpochOverride {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ReceiverMode {
-    /// Subscribe to live traffic only (no replay).
-    Live,
-    /// Race-scoped mode with optional earliest epoch bound.
-    Race {
-        race_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        earliest_epoch_override: Option<EarliestEpochOverride>,
+    /// Subscribe to live traffic with explicit streams and optional earliest epoch overrides.
+    Live {
+        streams: Vec<StreamRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earliest_epochs: Vec<EarliestEpochOverride>,
     },
+    /// Race-scoped mode.
+    Race { race_id: String },
     /// Explicit targeted replay set.
     TargetedReplay { targets: Vec<ReplayTarget> },
 }
@@ -186,8 +188,8 @@ pub struct ReceiverHelloV12 {
 /// Server acknowledgement of applied receiver mode in v1.2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverModeApplied {
-    pub mode: ReceiverMode,
-    pub resolved_target_count: usize,
+    pub mode_summary: String,
+    pub resolved_stream_count: usize,
     #[serde(default)]
     pub warnings: Vec<String>,
 }

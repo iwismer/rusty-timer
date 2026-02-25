@@ -1,4 +1,4 @@
-use rt_protocol::{ReplayTarget, WsMessage};
+use rt_protocol::{ReplayTarget, StreamRef, WsMessage};
 
 // Helper: round-trip any serde type via JSON and assert equality
 fn round_trip<T>(value: &T) -> T
@@ -13,17 +13,36 @@ where
 
 #[test]
 fn receiver_mode_live_round_trip() {
-    // Build a minimal Live mode
-    let mode = rt_protocol::ReceiverMode::Live;
+    // Live with explicit streams and optional earliest_epoch overrides
+    let streams = vec![
+        StreamRef {
+            forwarder_id: "fwd-1".to_string(),
+            reader_ip: "10.0.0.1".to_string(),
+        },
+        StreamRef {
+            forwarder_id: "fwd-2".to_string(),
+            reader_ip: "10.0.0.2".to_string(),
+        },
+    ];
+
+    let earliest_epochs = vec![rt_protocol::EarliestEpochOverride {
+        forwarder_id: "fwd-1".to_string(),
+        reader_ip: "10.0.0.1".to_string(),
+        earliest_epoch: 5,
+    }];
+
+    let mode = rt_protocol::ReceiverMode::Live {
+        streams,
+        earliest_epochs,
+    };
     let _ = round_trip(&mode);
 }
 
 #[test]
 fn receiver_mode_race_round_trip() {
-    // Race with an optional earliest epoch override
+    // Race-scoped mode (no earliest epoch override in v1.2)
     let mode = rt_protocol::ReceiverMode::Race {
         race_id: "race-123".to_string(),
-        earliest_epoch_override: Some(rt_protocol::EarliestEpochOverride { earliest_epoch: 42 }),
     };
     let _ = round_trip(&mode);
 }
@@ -46,7 +65,13 @@ fn receiver_mode_targeted_replay_round_trip() {
 fn receiver_hello_v12_wrapped_in_wsmessage_round_trip() {
     let hello = rt_protocol::ReceiverHelloV12 {
         receiver_id: "rx-1".to_string(),
-        mode: rt_protocol::ReceiverMode::Live,
+        mode: rt_protocol::ReceiverMode::Live {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-1".to_string(),
+                reader_ip: "10.0.0.1".to_string(),
+            }],
+            earliest_epochs: vec![],
+        },
         resume: vec![],
     };
     let msg = WsMessage::ReceiverHelloV12(hello);
