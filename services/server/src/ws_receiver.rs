@@ -77,21 +77,33 @@ enum ActiveMode {
 }
 
 struct RaceBaseline {
-    known_epochs: HashMap<Uuid, HashSet<i64>>,
+    max_epochs: HashMap<Uuid, i64>,
 }
 
 impl RaceBaseline {
     fn includes(&self, stream_id: Uuid, stream_epoch: i64) -> bool {
-        self.known_epochs
+        self.max_epochs
             .get(&stream_id)
-            .is_some_and(|epochs| epochs.contains(&stream_epoch))
+            .is_some_and(|max_epoch| stream_epoch <= *max_epoch)
     }
 
     fn record(&mut self, stream_id: Uuid, stream_epoch: i64) -> bool {
-        self.known_epochs
-            .entry(stream_id)
-            .or_default()
-            .insert(stream_epoch)
+        use std::collections::hash_map::Entry;
+
+        match self.max_epochs.entry(stream_id) {
+            Entry::Occupied(mut entry) => {
+                if stream_epoch > *entry.get() {
+                    entry.insert(stream_epoch);
+                    true
+                } else {
+                    false
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(stream_epoch);
+                true
+            }
+        }
     }
 }
 
@@ -577,32 +589,17 @@ async fn apply_race_refresh_forward_only(
         return Ok(false);
     }
 
-    let mut next_subscriptions = Vec::with_capacity(targets.len());
-    for target in targets {
-        if let Some(existing) = subscriptions
-            .iter()
-            .find(|sub| sub.stream_id == target.stream_id)
-        {
-            let tx = state.get_or_create_broadcast(target.stream_id).await;
-            next_subscriptions.push(StreamSub {
-                stream_id: existing.stream_id,
-                last_epoch: existing.last_epoch,
-                last_seq: existing.last_seq,
-                rx: tx.subscribe(),
-            });
-            baseline.record(target.stream_id, target.current_stream_epoch);
-        } else {
-            let should_replay = !baseline.includes(target.stream_id, target.current_stream_epoch);
-            let start_cursor = fetch_cursor(&state.pool, device_id, target.stream_id)
-                .await?
-                .unwrap_or((1, 0));
-            let mut new_sub = subscribe_by_stream_id(state, target.stream_id, start_cursor).await;
-            if should_replay {
-                replay_backlog(socket, state, session_id, &mut new_sub).await?;
-            }
-            next_subscriptions.push(new_sub);
-            baseline.record(target.stream_id, target.current_stream_epoch);
-        }
+    let (mut next_subscriptions, new_targets) =
+        plan_race_refresh_subscriptions(targets, std::mem::take(subscriptions), baseline);
+
+    for target in new_targets {
+        let start_cursor = fetch_cursor(&state.pool, device_id, target.stream_id)
+            .await?
+            .unwrap_or((1, 0));
+        let mut new_sub = subscribe_by_stream_id(state, target.stream_id, start_cursor).await;
+        // New subscriptions (including remove/re-add) must replay from persisted cursor.
+        replay_backlog(socket, state, session_id, &mut new_sub).await?;
+        next_subscriptions.push(new_sub);
     }
 
     *subscriptions = next_subscriptions;
@@ -625,6 +622,30 @@ async fn apply_race_refresh_forward_only(
         .await;
 
     Ok(true)
+}
+
+fn plan_race_refresh_subscriptions(
+    targets: Vec<ResolvedStreamTarget>,
+    subscriptions: Vec<StreamSub>,
+    baseline: &mut RaceBaseline,
+) -> (Vec<StreamSub>, Vec<ResolvedStreamTarget>) {
+    let mut existing_subscriptions: HashMap<Uuid, StreamSub> = subscriptions
+        .into_iter()
+        .map(|sub| (sub.stream_id, sub))
+        .collect();
+    let mut next_subscriptions = Vec::with_capacity(targets.len());
+    let mut new_targets = Vec::new();
+
+    for target in targets {
+        if let Some(existing) = existing_subscriptions.remove(&target.stream_id) {
+            next_subscriptions.push(existing);
+        } else {
+            new_targets.push(target.clone());
+        }
+        baseline.record(target.stream_id, target.current_stream_epoch);
+    }
+
+    (next_subscriptions, new_targets)
 }
 
 fn race_refresh_needed(
@@ -722,19 +743,23 @@ async fn resolve_race_targets(
         return Ok((
             Vec::new(),
             RaceBaseline {
-                known_epochs: HashMap::new(),
+                max_epochs: HashMap::new(),
             },
         ));
     };
 
     let rows = list_race_selection_streams(&state.pool, race_uuid, false).await?;
     let mut targets = Vec::with_capacity(rows.len());
-    let mut known_epochs: HashMap<Uuid, HashSet<i64>> = HashMap::with_capacity(rows.len());
+    let mut max_epochs: HashMap<Uuid, i64> = HashMap::with_capacity(rows.len());
     for row in rows {
-        known_epochs
+        max_epochs
             .entry(row.stream_id)
-            .or_default()
-            .insert(row.stream_epoch);
+            .and_modify(|max_epoch| {
+                if row.stream_epoch > *max_epoch {
+                    *max_epoch = row.stream_epoch;
+                }
+            })
+            .or_insert(row.stream_epoch);
         targets.push(ResolvedStreamTarget {
             stream_id: row.stream_id,
             forwarder_id: row.forwarder_id,
@@ -742,7 +767,7 @@ async fn resolve_race_targets(
             current_stream_epoch: row.stream_epoch,
         });
     }
-    Ok((targets, RaceBaseline { known_epochs }))
+    Ok((targets, RaceBaseline { max_epochs }))
 }
 
 async fn resolve_targeted_replay_targets(
@@ -975,8 +1000,12 @@ async fn replay_targeted_backlog(
 
 #[cfg(test)]
 mod tests {
-    use super::{RaceBaseline, ResolvedStreamTarget, StreamSub, race_refresh_needed};
-    use std::collections::{HashMap, HashSet};
+    use super::{
+        RaceBaseline, ResolvedStreamTarget, StreamSub, plan_race_refresh_subscriptions,
+        race_refresh_needed,
+    };
+    use rt_protocol::ReadEvent;
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     fn target(stream_id: Uuid, current_stream_epoch: i64) -> ResolvedStreamTarget {
@@ -989,11 +1018,13 @@ mod tests {
     }
 
     fn baseline(entries: &[(Uuid, &[i64])]) -> RaceBaseline {
-        let mut known_epochs: HashMap<Uuid, HashSet<i64>> = HashMap::new();
+        let mut max_epochs: HashMap<Uuid, i64> = HashMap::new();
         for (stream_id, epochs) in entries {
-            known_epochs.insert(*stream_id, epochs.iter().copied().collect());
+            if let Some(max_epoch) = epochs.iter().copied().max() {
+                max_epochs.insert(*stream_id, max_epoch);
+            }
         }
-        RaceBaseline { known_epochs }
+        RaceBaseline { max_epochs }
     }
 
     fn sub(stream_id: Uuid) -> StreamSub {
@@ -1029,6 +1060,62 @@ mod tests {
         assert!(
             race_refresh_needed(&targets, &subscriptions, &baseline),
             "stream re-add must refresh even when epoch was already known"
+        );
+    }
+
+    #[test]
+    fn race_refresh_plan_keeps_existing_subscription_receiver_buffer() {
+        let stream_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        tx.send(ReadEvent {
+            forwarder_id: "fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            stream_epoch: 2,
+            seq: 3,
+            reader_timestamp: "2026-02-25T12:00:00.000Z".to_owned(),
+            raw_read_line: "QUEUED_BEFORE_REFRESH".to_owned(),
+            read_type: "RAW".to_owned(),
+        })
+        .unwrap();
+
+        let subscriptions = vec![StreamSub {
+            stream_id,
+            last_epoch: 1,
+            last_seq: 1,
+            rx,
+        }];
+        let mut baseline = baseline(&[(stream_id, &[1])]);
+        let targets = vec![target(stream_id, 2)];
+
+        let (mut next_subscriptions, new_targets) =
+            plan_race_refresh_subscriptions(targets, subscriptions, &mut baseline);
+
+        assert!(
+            new_targets.is_empty(),
+            "existing stream should not be rebuilt"
+        );
+        let queued = next_subscriptions[0]
+            .rx
+            .try_recv()
+            .expect("queued event should still be readable");
+        assert_eq!(queued.raw_read_line, "QUEUED_BEFORE_REFRESH");
+    }
+
+    #[test]
+    fn race_baseline_tracking_is_bounded_per_stream() {
+        let stream_id = Uuid::new_v4();
+        let mut baseline = RaceBaseline {
+            max_epochs: HashMap::new(),
+        };
+
+        for epoch in 1..=512 {
+            baseline.record(stream_id, epoch);
+        }
+
+        assert_eq!(
+            baseline.max_epochs.get(&stream_id).copied(),
+            Some(512),
+            "baseline should keep bounded state per stream across many epoch updates"
         );
     }
 }
