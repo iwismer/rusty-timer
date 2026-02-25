@@ -46,6 +46,8 @@
   let modeApplyQueued = $state(false);
   let savedModePayload = $state<string | null>(null);
   let modeHydrationVersion = 0;
+  let streamActionBusy = $state(false);
+  let streamRefreshVersion = 0;
 
   let loadAllInFlight = false;
   let loadAllQueued = false;
@@ -256,7 +258,11 @@
       logs = nextLogs;
       races = nextRaces.races;
 
-      if (nextMode && modeHydrationVersion === modeVersionAtLoadStart) {
+      if (
+        nextMode &&
+        !modeDirty &&
+        modeHydrationVersion === modeVersionAtLoadStart
+      ) {
         applyHydratedMode(nextMode);
       }
 
@@ -349,6 +355,12 @@
   }
 
   async function pauseOrResumeStream(stream: api.StreamEntry): Promise<void> {
+    if (streamActionBusy) {
+      return;
+    }
+
+    streamActionBusy = true;
+    const refreshVersion = ++streamRefreshVersion;
     try {
       error = null;
       if (stream.paused) {
@@ -362,13 +374,24 @@
           reader_ip: stream.reader_ip,
         });
       }
-      streams = await api.getStreams();
+      const latestStreams = await api.getStreams();
+      if (refreshVersion === streamRefreshVersion) {
+        streams = latestStreams;
+      }
     } catch (e) {
       error = String(e);
+    } finally {
+      streamActionBusy = false;
     }
   }
 
   async function pauseOrResumeAll(action: "pause" | "resume"): Promise<void> {
+    if (streamActionBusy) {
+      return;
+    }
+
+    streamActionBusy = true;
+    const refreshVersion = ++streamRefreshVersion;
     try {
       error = null;
       if (action === "pause") {
@@ -376,9 +399,14 @@
       } else {
         await api.resumeAll();
       }
-      streams = await api.getStreams();
+      const latestStreams = await api.getStreams();
+      if (refreshVersion === streamRefreshVersion) {
+        streams = latestStreams;
+      }
     } catch (e) {
       error = String(e);
+    } finally {
+      streamActionBusy = false;
     }
   }
 
@@ -823,6 +851,7 @@
                 data-testid="pause-all-btn"
                 class={btnSecondary}
                 onclick={() => void pauseOrResumeAll("pause")}
+                disabled={streamActionBusy}
               >
                 Pause All
               </button>
@@ -830,6 +859,7 @@
                 data-testid="resume-all-btn"
                 class={btnSecondary}
                 onclick={() => void pauseOrResumeAll("resume")}
+                disabled={streamActionBusy}
               >
                 Resume All
               </button>
@@ -952,6 +982,7 @@
                       data-testid="pause-resume-{key}"
                       class={btnSecondary}
                       onclick={() => pauseOrResumeStream(stream)}
+                      disabled={streamActionBusy}
                     >
                       {stream.paused ? "Resume" : "Pause"}
                     </button>

@@ -59,6 +59,16 @@ vi.mock("$lib/sse", () => ({
   destroySSE: sseMocks.destroySSE,
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("receiver page mode controls", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -139,6 +149,76 @@ describe("receiver page mode controls", () => {
     await waitFor(() => {
       expect(apiMocks.pauseAll).toHaveBeenCalled();
     });
+  });
+
+  it("prevents overlapping pause/resume stream actions while one is in flight", async () => {
+    const pauseDeferred = deferred<void>();
+    apiMocks.pauseStream.mockImplementationOnce(() => pauseDeferred.promise);
+
+    render(Page);
+
+    const button = await screen.findByTestId("pause-resume-fwd-1/10.0.0.1:10000");
+    await fireEvent.click(button);
+    await fireEvent.click(button);
+
+    expect(apiMocks.pauseStream).toHaveBeenCalledTimes(1);
+    expect(button).toBeDisabled();
+
+    pauseDeferred.resolve();
+
+    await waitFor(() => {
+      expect(button).not.toBeDisabled();
+    });
+  });
+
+  it("prevents overlapping pause/resume all actions while one is in flight", async () => {
+    const pauseAllDeferred = deferred<void>();
+    apiMocks.pauseAll.mockImplementationOnce(() => pauseAllDeferred.promise);
+
+    render(Page);
+
+    const pauseAll = await screen.findByTestId("pause-all-btn");
+    const resumeAll = await screen.findByTestId("resume-all-btn");
+
+    await fireEvent.click(pauseAll);
+    await fireEvent.click(resumeAll);
+
+    expect(apiMocks.pauseAll).toHaveBeenCalledTimes(1);
+    expect(apiMocks.resumeAll).not.toHaveBeenCalled();
+    expect(pauseAll).toBeDisabled();
+    expect(resumeAll).toBeDisabled();
+
+    pauseAllDeferred.resolve();
+
+    await waitFor(() => {
+      expect(pauseAll).not.toBeDisabled();
+      expect(resumeAll).not.toBeDisabled();
+    });
+  });
+
+  it("does not clobber unsaved local mode edits when loadAll hydration resolves", async () => {
+    const loadModeDeferred = deferred<{
+      mode: "race";
+      race_id: string;
+    }>();
+
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("mode-select");
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    apiMocks.getMode.mockImplementationOnce(() => loadModeDeferred.promise);
+    callbacks.onResync();
+
+    await fireEvent.change(modeSelect, { target: { value: "targeted_replay" } });
+
+    loadModeDeferred.resolve({ mode: "race", race_id: "race-1" });
+
+    await waitFor(() => {
+      expect((modeSelect as HTMLSelectElement).value).toBe("targeted_replay");
+    });
+    expect(screen.queryByTestId("race-id-select")).not.toBeInTheDocument();
   });
 
   it("disables earliest epoch controls in race mode", async () => {
