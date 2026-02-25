@@ -47,6 +47,7 @@
   let savedModePayload = $state<string | null>(null);
   let modeHydrationVersion = 0;
   let modeEditVersion = 0;
+  let modeMutationVersion = 0;
   let streamActionBusy = $state(false);
   let streamRefreshVersion = 0;
 
@@ -251,6 +252,7 @@
     try {
       const modeVersionAtLoadStart = modeHydrationVersion;
       const modeEditVersionAtLoadStart = modeEditVersion;
+      const modeMutationVersionAtLoadStart = modeMutationVersion;
       const streamRefreshVersionAtLoadStart = streamRefreshVersion;
       const [nextStatus, nextStreams, nextLogs, nextMode, nextRaces] =
         await Promise.all([
@@ -271,7 +273,8 @@
         nextMode &&
         !modeDirty &&
         modeEditVersion === modeEditVersionAtLoadStart &&
-        modeHydrationVersion === modeVersionAtLoadStart
+        modeHydrationVersion === modeVersionAtLoadStart &&
+        modeMutationVersion === modeMutationVersionAtLoadStart
       ) {
         applyHydratedMode(nextMode);
       }
@@ -331,6 +334,7 @@
 
       try {
         await api.putMode(payload);
+        modeMutationVersion += 1;
         savedModePayload = JSON.stringify(payload);
         error = null;
       } catch (e) {
@@ -436,6 +440,7 @@
         targets: [{ forwarder_id, reader_ip, stream_epoch: parsed }],
       };
       await api.putMode(payload);
+      modeMutationVersion += 1;
       savedModePayload = JSON.stringify(payload);
     } catch (e) {
       error = String(e);
@@ -470,6 +475,7 @@
         targets,
       };
       await api.putMode(payload);
+      modeMutationVersion += 1;
       savedModePayload = JSON.stringify(payload);
     } catch (e) {
       error = String(e);
@@ -585,6 +591,7 @@
         status = s;
       },
       onStreamsSnapshot: (s) => {
+        streamRefreshVersion += 1;
         streams = s;
       },
       onLogEntry: (entry) => {

@@ -271,6 +271,87 @@ describe("receiver page mode controls", () => {
     });
   });
 
+  it("does not let stale loadAll mode hydration overwrite a newer applied mode", async () => {
+    const staleModeDeferred = deferred<{
+      mode: "live";
+      streams: [];
+      earliest_epochs: [];
+    }>();
+    apiMocks.getMode
+      .mockResolvedValueOnce({
+        mode: "live",
+        streams: [],
+        earliest_epochs: [],
+      })
+      .mockImplementationOnce(() => staleModeDeferred.promise);
+
+    render(Page);
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    const modeSelect = await screen.findByTestId("mode-select");
+    await fireEvent.change(modeSelect, { target: { value: "targeted_replay" } });
+    callbacks.onResync();
+    await waitFor(() => {
+      expect(apiMocks.getMode).toHaveBeenCalledTimes(2);
+    });
+
+    const apply = await screen.findByTestId("save-mode-btn");
+    await fireEvent.click(apply);
+
+    await waitFor(() => {
+      expect(apiMocks.putMode).toHaveBeenCalledWith({
+        mode: "targeted_replay",
+        targets: [],
+      });
+      expect((modeSelect as HTMLSelectElement).value).toBe("targeted_replay");
+    });
+
+    staleModeDeferred.resolve({
+      mode: "live",
+      streams: [],
+      earliest_epochs: [],
+    });
+
+    await waitFor(() => {
+      expect((modeSelect as HTMLSelectElement).value).toBe("targeted_replay");
+    });
+  });
+
+  it("does not let stale loadAll streams overwrite a newer SSE snapshot", async () => {
+    const staleStreamsDeferred = deferred<typeof fixtures.activeStreamsResponse>();
+    apiMocks.getStreams
+      .mockResolvedValueOnce(fixtures.activeStreamsResponse)
+      .mockImplementationOnce(() => staleStreamsDeferred.promise);
+
+    render(Page);
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    const streamButton = await screen.findByTestId(
+      "pause-resume-fwd-1/10.0.0.1:10000",
+    );
+    expect(streamButton).toHaveTextContent("Pause");
+
+    callbacks.onResync();
+    await waitFor(() => {
+      expect(apiMocks.getStreams).toHaveBeenCalledTimes(2);
+    });
+    callbacks.onStreamsSnapshot(fixtures.pausedStreamsResponse);
+
+    await waitFor(() => {
+      expect(streamButton).toHaveTextContent("Resume");
+    });
+
+    staleStreamsDeferred.resolve(fixtures.activeStreamsResponse);
+
+    await waitFor(() => {
+      expect(streamButton).toHaveTextContent("Resume");
+    });
+  });
+
   it("releases stream action busy state when pause stream rejects", async () => {
     const rejection = new Error("pause failed");
     apiMocks.pauseStream.mockRejectedValueOnce(rejection);
