@@ -1,12 +1,8 @@
 # Rusty Timer
 
 [![Rust CI](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ci.yml)
-[![Server UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/server-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/server-ui.yml)
-[![Receiver UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/receiver-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/receiver-ui.yml)
-[![Forwarder UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/forwarder-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/forwarder-ui.yml)
-[![Shared UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/shared-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/shared-ui.yml)
-[![Receiver Embed UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/receiver-embed-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/receiver-embed-ui.yml)
-[![Forwarder Embed UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/forwarder-embed-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/forwarder-embed-ui.yml)
+[![UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml)
+[![Embed UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml)
 
 Timing utilities for the IPICO chip timing system, with a full remote forwarding suite for distributing race reads across a network.
 
