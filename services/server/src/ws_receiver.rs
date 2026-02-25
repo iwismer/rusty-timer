@@ -77,7 +77,22 @@ enum ActiveMode {
 }
 
 struct RaceBaseline {
-    known_epochs: HashMap<Uuid, i64>,
+    known_epochs: HashMap<Uuid, HashSet<i64>>,
+}
+
+impl RaceBaseline {
+    fn includes(&self, stream_id: Uuid, stream_epoch: i64) -> bool {
+        self.known_epochs
+            .get(&stream_id)
+            .is_some_and(|epochs| epochs.contains(&stream_epoch))
+    }
+
+    fn record(&mut self, stream_id: Uuid, stream_epoch: i64) -> bool {
+        self.known_epochs
+            .entry(stream_id)
+            .or_default()
+            .insert(stream_epoch)
+    }
 }
 
 fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
@@ -558,10 +573,7 @@ async fn apply_race_refresh_forward_only(
     subscriptions: &mut Vec<StreamSub>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let (targets, _) = resolve_race_targets(state, race_id).await?;
-    let new_stream_ids: HashSet<Uuid> = targets.iter().map(|target| target.stream_id).collect();
-    let old_stream_ids: HashSet<Uuid> = subscriptions.iter().map(|sub| sub.stream_id).collect();
-
-    if new_stream_ids == old_stream_ids {
+    if !race_refresh_needed(&targets, subscriptions, baseline) {
         return Ok(false);
     }
 
@@ -578,24 +590,18 @@ async fn apply_race_refresh_forward_only(
                 last_seq: existing.last_seq,
                 rx: tx.subscribe(),
             });
+            baseline.record(target.stream_id, target.current_stream_epoch);
         } else {
-            let baseline_epoch = baseline.known_epochs.get(&target.stream_id).copied();
-            if baseline_epoch.is_some_and(|known_epoch| target.current_stream_epoch <= known_epoch)
-            {
-                continue;
-            }
-
+            let should_replay = !baseline.includes(target.stream_id, target.current_stream_epoch);
             let start_cursor = fetch_cursor(&state.pool, device_id, target.stream_id)
                 .await?
                 .unwrap_or((1, 0));
             let mut new_sub = subscribe_by_stream_id(state, target.stream_id, start_cursor).await;
-            replay_backlog(socket, state, session_id, &mut new_sub).await?;
+            if should_replay {
+                replay_backlog(socket, state, session_id, &mut new_sub).await?;
+            }
             next_subscriptions.push(new_sub);
-            baseline
-                .known_epochs
-                .entry(target.stream_id)
-                .and_modify(|known| *known = (*known).max(target.current_stream_epoch))
-                .or_insert(target.current_stream_epoch);
+            baseline.record(target.stream_id, target.current_stream_epoch);
         }
     }
 
@@ -619,6 +625,23 @@ async fn apply_race_refresh_forward_only(
         .await;
 
     Ok(true)
+}
+
+fn race_refresh_needed(
+    targets: &[ResolvedStreamTarget],
+    subscriptions: &[StreamSub],
+    baseline: &RaceBaseline,
+) -> bool {
+    let target_stream_ids: HashSet<Uuid> = targets.iter().map(|target| target.stream_id).collect();
+    let subscribed_stream_ids: HashSet<Uuid> =
+        subscriptions.iter().map(|sub| sub.stream_id).collect();
+    if target_stream_ids != subscribed_stream_ids {
+        return true;
+    }
+
+    targets
+        .iter()
+        .any(|target| !baseline.includes(target.stream_id, target.current_stream_epoch))
 }
 
 fn earliest_epoch_map(overrides: &[EarliestEpochOverride]) -> HashMap<(String, String), i64> {
@@ -706,12 +729,12 @@ async fn resolve_race_targets(
 
     let rows = list_race_selection_streams(&state.pool, race_uuid, false).await?;
     let mut targets = Vec::with_capacity(rows.len());
-    let mut known_epochs: HashMap<Uuid, i64> = HashMap::with_capacity(rows.len());
+    let mut known_epochs: HashMap<Uuid, HashSet<i64>> = HashMap::with_capacity(rows.len());
     for row in rows {
         known_epochs
             .entry(row.stream_id)
-            .and_modify(|known| *known = (*known).max(row.stream_epoch))
-            .or_insert(row.stream_epoch);
+            .or_default()
+            .insert(row.stream_epoch);
         targets.push(ResolvedStreamTarget {
             stream_id: row.stream_id,
             forwarder_id: row.forwarder_id,
@@ -948,6 +971,66 @@ async fn replay_targeted_backlog(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RaceBaseline, ResolvedStreamTarget, StreamSub, race_refresh_needed};
+    use std::collections::{HashMap, HashSet};
+    use uuid::Uuid;
+
+    fn target(stream_id: Uuid, current_stream_epoch: i64) -> ResolvedStreamTarget {
+        ResolvedStreamTarget {
+            stream_id,
+            forwarder_id: "fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            current_stream_epoch,
+        }
+    }
+
+    fn baseline(entries: &[(Uuid, &[i64])]) -> RaceBaseline {
+        let mut known_epochs: HashMap<Uuid, HashSet<i64>> = HashMap::new();
+        for (stream_id, epochs) in entries {
+            known_epochs.insert(*stream_id, epochs.iter().copied().collect());
+        }
+        RaceBaseline { known_epochs }
+    }
+
+    fn sub(stream_id: Uuid) -> StreamSub {
+        let (_, rx) = tokio::sync::broadcast::channel(1);
+        StreamSub {
+            stream_id,
+            last_epoch: 0,
+            last_seq: 0,
+            rx,
+        }
+    }
+
+    #[test]
+    fn race_refresh_needed_when_same_stream_has_new_epoch() {
+        let stream_id = Uuid::new_v4();
+        let targets = vec![target(stream_id, 8)];
+        let subscriptions = vec![sub(stream_id)];
+        let baseline = baseline(&[(stream_id, &[7])]);
+
+        assert!(
+            race_refresh_needed(&targets, &subscriptions, &baseline),
+            "same stream id with a new epoch must refresh"
+        );
+    }
+
+    #[test]
+    fn race_refresh_needed_when_stream_readded_with_known_epoch() {
+        let stream_id = Uuid::new_v4();
+        let targets = vec![target(stream_id, 7)];
+        let subscriptions: Vec<StreamSub> = Vec::new();
+        let baseline = baseline(&[(stream_id, &[7])]);
+
+        assert!(
+            race_refresh_needed(&targets, &subscriptions, &baseline),
+            "stream re-add must refresh even when epoch was already known"
+        );
+    }
 }
 
 async fn handle_receiver_ack(
