@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use receiver::Db;
-use receiver::control_api::{AppState, build_router};
+use receiver::control_api::{AppState, ConnectionState, build_router};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -218,6 +218,79 @@ async fn pause_and_resume_stream_endpoints_update_stream_state() {
 
     let (_, resumed) = get_json(app, "/api/v1/streams").await;
     assert_eq!(resumed["streams"][0]["paused"], false);
+}
+
+#[tokio::test]
+async fn resume_stream_does_not_force_connecting_state() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1:10000", None).unwrap();
+    }
+    state.set_connection_state(ConnectionState::Connected).await;
+    let app = build_router(Arc::clone(&state));
+
+    assert_eq!(
+        post_json(
+            app.clone(),
+            "/api/v1/streams/resume",
+            json!({"forwarder_id":"f1","reader_ip":"10.0.0.1:10000"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (_, status) = get_json(app, "/api/v1/status").await;
+    assert_eq!(status["connection_state"], "connected");
+}
+
+#[tokio::test]
+async fn resume_stream_after_pause_all_unpauses_only_target_stream() {
+    let app = setup();
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions":[
+                    {"forwarder_id":"f1","reader_ip":"10.0.0.1:10000","local_port_override":null},
+                    {"forwarder_id":"f2","reader_ip":"10.0.0.2:10000","local_port_override":null}
+                ]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        post_empty(app.clone(), "/api/v1/streams/pause-all").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        post_json(
+            app.clone(),
+            "/api/v1/streams/resume",
+            json!({"forwarder_id":"f1","reader_ip":"10.0.0.1:10000"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (_, streams) = get_json(app, "/api/v1/streams").await;
+    let entries = streams["streams"].as_array().unwrap();
+    let mut paused_by_key = std::collections::HashMap::new();
+    for entry in entries {
+        let key = format!(
+            "{}/{}",
+            entry["forwarder_id"].as_str().unwrap(),
+            entry["reader_ip"].as_str().unwrap()
+        );
+        paused_by_key.insert(key, entry["paused"].as_bool().unwrap());
+    }
+
+    assert_eq!(paused_by_key.get("f1/10.0.0.1:10000").copied(), Some(false));
+    assert_eq!(paused_by_key.get("f2/10.0.0.2:10000").copied(), Some(true));
 }
 
 #[tokio::test]

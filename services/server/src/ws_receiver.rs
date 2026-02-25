@@ -21,7 +21,8 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use rt_protocol::{
     EarliestEpochOverride, ReadEvent, ReceiverAck, ReceiverEventBatch, ReceiverHelloV12,
-    ReceiverMode, ReceiverModeApplied, ReplayTarget, StreamRef, WsMessage, error_codes,
+    ReceiverMode, ReceiverModeApplied, ReceiverSubscribe, ReplayTarget, StreamRef, WsMessage,
+    error_codes,
 };
 use sqlx::{Row, types::Uuid as SqlUuid};
 use std::collections::{HashMap, HashSet};
@@ -334,6 +335,25 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                         error!(device_id = %device_id, error = %e, "error handling receiver ack");
                                     }
                                 }
+                                Ok(WsMessage::ReceiverSubscribe(subscribe)) => {
+                                    match apply_receiver_subscribe(
+                                        &mut socket,
+                                        &state,
+                                        &device_id,
+                                        &session_id,
+                                        &active_mode,
+                                        subscribe,
+                                        &mut subscriptions,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {}
+                                        Err(e) => {
+                                            error!(device_id = %device_id, error = %e, "error applying receiver_subscribe");
+                                            break;
+                                        }
+                                    }
+                                }
                                 Ok(WsMessage::Heartbeat(_)) => {}
                                 Ok(WsMessage::ReceiverHelloV12(_)) => {
                                     send_ws_error(
@@ -557,6 +577,62 @@ async fn apply_mode(
             Ok(ActiveMode::TargetedReplay)
         }
     }
+}
+
+async fn apply_receiver_subscribe(
+    socket: &mut WebSocket,
+    state: &AppState,
+    device_id: &str,
+    session_id: &str,
+    active_mode: &ActiveMode,
+    subscribe: ReceiverSubscribe,
+    subscriptions: &mut Vec<StreamSub>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if subscribe.session_id != session_id {
+        send_ws_error(
+            socket,
+            error_codes::PROTOCOL_ERROR,
+            "receiver_subscribe session_id mismatch",
+            false,
+        )
+        .await;
+        return Err("receiver_subscribe session_id mismatch".into());
+    }
+
+    if matches!(active_mode, ActiveMode::TargetedReplay) {
+        send_ws_error(
+            socket,
+            error_codes::PROTOCOL_ERROR,
+            "receiver_subscribe not allowed in targeted_replay mode",
+            false,
+        )
+        .await;
+        return Err("receiver_subscribe not allowed in targeted_replay mode".into());
+    }
+
+    let (targets, warnings) = resolve_live_targets(state, &subscribe.streams).await?;
+    for warning in warnings {
+        warn!(device_id = %device_id, warning = %warning, "receiver_subscribe warning");
+    }
+
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let mut by_stream_id: HashMap<Uuid, StreamSub> = subscriptions
+        .drain(..)
+        .map(|sub| (sub.stream_id, sub))
+        .collect();
+
+    for target in targets {
+        let start_cursor = compute_live_start_cursor(state, device_id, &target, None).await?;
+        let mut sub = subscribe_by_stream_id(state, target.stream_id, start_cursor).await;
+        replay_backlog(socket, state, session_id, &mut sub).await?;
+        by_stream_id.insert(target.stream_id, sub);
+    }
+
+    *subscriptions = by_stream_id.into_values().collect();
+    Ok(())
 }
 
 async fn apply_race_mode_forward_only(

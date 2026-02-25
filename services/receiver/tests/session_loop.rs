@@ -1,9 +1,11 @@
 use futures_util::{SinkExt, StreamExt};
 use receiver::cache::StreamCounts;
 use receiver::db::Db;
-use receiver::session::{SessionError, SessionLoopDeps, run_session_loop};
+use receiver::session::{SessionCommand, SessionError, SessionLoopDeps, run_session_loop};
 use receiver::ui_events::ReceiverUiEvent;
-use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, ReceiverModeApplied, WsMessage};
+use rt_protocol::{
+    ErrorMessage, ReadEvent, ReceiverEventBatch, ReceiverModeApplied, StreamRef, WsMessage,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -116,6 +118,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             shutdown: shutdown_rx,
             paused_streams,
             all_paused,
+            control_rx: None,
         },
     )
     .await
@@ -202,6 +205,7 @@ async fn run_session_loop_drops_events_when_all_paused() {
             shutdown: shutdown_rx,
             paused_streams,
             all_paused,
+            control_rx: None,
         },
     )
     .await
@@ -249,6 +253,7 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
             shutdown: shutdown_rx,
             paused_streams,
             all_paused,
+            control_rx: None,
         },
     )
     .await;
@@ -292,6 +297,7 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
             shutdown: shutdown_rx,
             paused_streams,
             all_paused,
+            control_rx: None,
         },
     )
     .await;
@@ -337,6 +343,7 @@ async fn run_session_loop_replies_to_ping_with_pong() {
             shutdown: shutdown_rx,
             paused_streams,
             all_paused,
+            control_rx: None,
         },
     )
     .await;
@@ -375,6 +382,7 @@ async fn run_session_loop_stops_on_shutdown_signal() {
             shutdown: shutdown_rx,
             paused_streams,
             all_paused,
+            control_rx: None,
         },
     ));
 
@@ -425,6 +433,7 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
             shutdown: shutdown_rx,
             paused_streams,
             all_paused,
+            control_rx: None,
         },
     )
     .await;
@@ -457,6 +466,76 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
         "expected second warning log entry, got: {log_entries:?}"
     );
 
+    join_server_task(task).await;
+}
+
+#[tokio::test]
+async fn run_session_loop_sends_receiver_subscribe_on_replay_command() {
+    let (subscribe_tx, subscribe_rx) = oneshot::channel();
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+        let incoming = ws.next().await.unwrap().unwrap();
+        let text = match incoming {
+            Message::Text(text) => text,
+            other => panic!("expected text command message, got: {other:?}"),
+        };
+
+        let parsed = serde_json::from_str::<WsMessage>(&text).unwrap();
+        let subscribe = match parsed {
+            WsMessage::ReceiverSubscribe(subscribe) => subscribe,
+            other => panic!("expected receiver_subscribe, got: {other:?}"),
+        };
+        subscribe_tx.send(subscribe).unwrap();
+        ws.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(false));
+    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let handle = tokio::spawn(run_session_loop(
+        ws,
+        "session-replay".to_owned(),
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            paused_streams,
+            all_paused,
+            control_rx: Some(control_rx),
+        },
+    ));
+
+    control_tx
+        .send(SessionCommand::ReplayStreams {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+            }],
+        })
+        .unwrap();
+
+    let subscribe = subscribe_rx.await.unwrap();
+    assert_eq!(subscribe.session_id, "session-replay");
+    assert_eq!(
+        subscribe.streams,
+        vec![StreamRef {
+            forwarder_id: "fwd-1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+        }]
+    );
+
+    let result = handle.await.unwrap();
+    assert!(result.is_ok());
     join_server_task(task).await;
 }
 
