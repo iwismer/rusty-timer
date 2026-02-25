@@ -1,7 +1,7 @@
 // rt-protocol: Remote forwarding protocol types and serialization.
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
-// deserialization. The enum variants map 1:1 to the frozen v1/v1.1 message
+// deserialization. The enum variants map 1:1 to the frozen v1/v1.2 message
 // kinds.
 
 use serde::{Deserialize, Serialize};
@@ -133,37 +133,7 @@ pub struct StreamRef {
     pub reader_ip: String,
 }
 
-/// Receiver selection strategy for v1.1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum ReceiverSelection {
-    /// Explicit stream list.
-    Manual { streams: Vec<StreamRef> },
-    /// Race-scoped stream selection resolved by the server.
-    Race {
-        race_id: String,
-        epoch_scope: EpochScope,
-    },
-}
-
-/// Epoch scope used by race selection in v1.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EpochScope {
-    All,
-    Current,
-}
-
-/// Replay behavior used by receiver v1.1 selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplayPolicy {
-    Resume,
-    LiveOnly,
-    Targeted,
-}
-
-/// Explicit replay target for v1.1 targeted replay policy.
+/// Explicit replay target for targeted replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayTarget {
     pub forwarder_id: String,
@@ -177,30 +147,46 @@ fn default_replay_from_seq() -> i64 {
     1
 }
 
-/// Receiver hello / re-hello message for v1.1 selection protocol.
+// ---------------------------------------------------------------------------
+// Receiver v1.2 mode-based protocol types
+// ---------------------------------------------------------------------------
+
+/// Optional bound to start at the earliest epoch when replaying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EarliestEpochOverride {
+    pub earliest_epoch: i64,
+}
+
+/// Receiver operating mode for v1.2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverHelloV11 {
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ReceiverMode {
+    /// Subscribe to live traffic only (no replay).
+    Live,
+    /// Race-scoped mode with optional earliest epoch bound.
+    Race {
+        race_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        earliest_epoch_override: Option<EarliestEpochOverride>,
+    },
+    /// Explicit targeted replay set.
+    TargetedReplay { targets: Vec<ReplayTarget> },
+}
+
+/// Receiver hello / re-hello message for v1.2 mode-based protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverHelloV12 {
     pub receiver_id: String,
-    pub selection: ReceiverSelection,
-    pub replay_policy: ReplayPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_targets: Option<Vec<ReplayTarget>>,
+    pub mode: ReceiverMode,
+    /// Resume cursors for streams the receiver already has data for.
+    #[serde(default)]
+    pub resume: Vec<ResumeCursor>,
 }
 
-/// Mid-session selection update for receiver v1.1.
+/// Server acknowledgement of applied receiver mode in v1.2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverSetSelection {
-    pub selection: ReceiverSelection,
-    pub replay_policy: ReplayPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_targets: Option<Vec<ReplayTarget>>,
-}
-
-/// Server acknowledgement of applied receiver selection in v1.1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverSelectionApplied {
-    pub selection: ReceiverSelection,
-    pub replay_policy: ReplayPolicy,
+pub struct ReceiverModeApplied {
+    pub mode: ReceiverMode,
     pub resolved_target_count: usize,
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -343,7 +329,7 @@ pub struct RestartResponse {
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
-/// All WebSocket message kinds in the v1 and v1.1 receiver protocols.
+/// All WebSocket message kinds in the v1 and v1.2 receiver protocols.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -358,9 +344,8 @@ pub enum WsMessage {
     ForwarderEventBatch(ForwarderEventBatch),
     ForwarderAck(ForwarderAck),
     ReceiverHello(ReceiverHello),
-    ReceiverHelloV11(ReceiverHelloV11),
-    ReceiverSetSelection(ReceiverSetSelection),
-    ReceiverSelectionApplied(ReceiverSelectionApplied),
+    ReceiverHelloV12(ReceiverHelloV12),
+    ReceiverModeApplied(ReceiverModeApplied),
     ReceiverSubscribe(ReceiverSubscribe),
     ReceiverEventBatch(ReceiverEventBatch),
     ReceiverAck(ReceiverAck),
