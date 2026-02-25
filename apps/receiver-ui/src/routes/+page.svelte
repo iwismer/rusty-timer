@@ -38,9 +38,14 @@
 
   let races = $state<RaceEntry[]>([]);
   let modeDraft = $state<ReceiverMode["mode"]>("live");
-  let selectedLiveStreamKeys = $state<string[]>([]);
   let raceIdDraft = $state("");
   let earliestEpochInputs = $state<Record<string, string>>({});
+  let earliestEpochOptions = $state<
+    Record<string, api.ReplayTargetEpochOption[]>
+  >({});
+  let earliestEpochLoading = $state<Record<string, boolean>>({});
+  let earliestEpochLoadErrors = $state<Record<string, string>>({});
+  let earliestEpochSaving = $state<Record<string, boolean>>({});
   let targetedEpochInputs = $state<Record<string, string>>({});
   let modeBusy = $state(false);
   let modeApplyQueued = $state(false);
@@ -92,12 +97,87 @@
     return parsed;
   }
 
+  function formatEarliestEpochOption(
+    option: api.ReplayTargetEpochOption,
+  ): string {
+    const name = option.name?.trim();
+    return name && name.length > 0
+      ? `${option.stream_epoch} (${name})`
+      : String(option.stream_epoch);
+  }
+
+  function selectedEarliestEpochValue(stream: api.StreamEntry): string {
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    const configured = earliestEpochInputs[key];
+    const options = earliestEpochOptions[key] ?? [];
+
+    if (
+      configured &&
+      options.some((option) => String(option.stream_epoch) === configured)
+    ) {
+      return configured;
+    }
+    if (options.length === 0) {
+      return "";
+    }
+    if (
+      stream.stream_epoch !== undefined &&
+      options.some((option) => option.stream_epoch === stream.stream_epoch)
+    ) {
+      return String(stream.stream_epoch);
+    }
+
+    const newest = options.reduce(
+      (max, option) => Math.max(max, option.stream_epoch),
+      options[0]?.stream_epoch ?? 0,
+    );
+    return String(newest);
+  }
+
+  async function prefetchEarliestEpochOptions(
+    streamList: api.StreamEntry[],
+    forceRefreshKeys: Set<string> = new Set<string>(),
+  ): Promise<void> {
+    const tasks = streamList.map(async (stream) => {
+      const key = streamKey(stream.forwarder_id, stream.reader_ip);
+      const forceRefresh = forceRefreshKeys.has(key);
+      if (
+        (!forceRefresh && earliestEpochOptions[key]) ||
+        earliestEpochLoading[key]
+      ) {
+        return;
+      }
+
+      earliestEpochLoading = { ...earliestEpochLoading, [key]: true };
+      earliestEpochLoadErrors = { ...earliestEpochLoadErrors, [key]: "" };
+
+      try {
+        const response = await api.getReplayTargetEpochs({
+          forwarder_id: stream.forwarder_id,
+          reader_ip: stream.reader_ip,
+        });
+        earliestEpochOptions = {
+          ...earliestEpochOptions,
+          [key]: [...response.epochs].sort(
+            (a, b) => b.stream_epoch - a.stream_epoch,
+          ),
+        };
+      } catch (e) {
+        earliestEpochLoadErrors = {
+          ...earliestEpochLoadErrors,
+          [key]: String(e),
+        };
+      } finally {
+        earliestEpochLoading = { ...earliestEpochLoading, [key]: false };
+      }
+    });
+
+    await Promise.allSettled(tasks);
+  }
+
   function hydrateMode(mode: ReceiverMode): void {
     modeDraft = mode.mode;
     if (mode.mode === "live") {
-      selectedLiveStreamKeys = mode.streams.map((s) =>
-        streamKey(s.forwarder_id, s.reader_ip),
-      );
       earliestEpochInputs = Object.fromEntries(
         mode.earliest_epochs.map((row) => [
           streamKey(row.forwarder_id, row.reader_ip),
@@ -163,9 +243,10 @@
       };
     }
 
-    const streams = selectedLiveStreamKeys
-      .map(parseStreamKey)
-      .filter((stream): stream is api.StreamRef => stream !== null);
+    const liveStreams = (streams?.streams ?? []).map((stream) => ({
+      forwarder_id: stream.forwarder_id,
+      reader_ip: stream.reader_ip,
+    }));
 
     const earliest_epochs = Object.entries(earliestEpochInputs)
       .map(([key, value]) => {
@@ -192,7 +273,7 @@
 
     return {
       mode: "live",
-      streams,
+      streams: liveStreams,
       earliest_epochs,
     };
   }
@@ -266,6 +347,7 @@
       status = nextStatus;
       if (streamRefreshVersion === streamRefreshVersionAtLoadStart) {
         streams = nextStreams;
+        void prefetchEarliestEpochOptions(nextStreams.streams);
       }
       logs = nextLogs;
       races = nextRaces.races;
@@ -308,19 +390,6 @@
     }
   }
 
-  function toggleLiveStreamSelection(
-    forwarder_id: string,
-    reader_ip: string,
-  ): void {
-    markModeEdited();
-    const key = streamKey(forwarder_id, reader_ip);
-    if (selectedLiveStreamKeys.includes(key)) {
-      selectedLiveStreamKeys = selectedLiveStreamKeys.filter((k) => k !== key);
-      return;
-    }
-    selectedLiveStreamKeys = [...selectedLiveStreamKeys, key];
-  }
-
   async function applyMode(): Promise<void> {
     modeApplyQueued = true;
     if (modeBusy) return;
@@ -352,31 +421,39 @@
     modeBusy = false;
   }
 
-  async function setEarliestEpoch(
-    forwarder_id: string,
-    reader_ip: string,
+  async function changeEarliestEpoch(
+    stream: api.StreamEntry,
+    rawValue: string,
   ): Promise<void> {
     if (modeDraft === "race") {
       return;
     }
 
-    const key = streamKey(forwarder_id, reader_ip);
-    const parsed = parseNonNegativeInt(earliestEpochInputs[key] ?? "");
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    if (earliestEpochSaving[key]) {
+      return;
+    }
+
+    const parsed = parseNonNegativeInt(rawValue);
     if (parsed === null) {
       error = "Earliest epoch must be a non-negative integer.";
       return;
     }
 
+    earliestEpochSaving = { ...earliestEpochSaving, [key]: true };
     try {
       error = null;
       await api.putEarliestEpoch({
-        forwarder_id,
-        reader_ip,
+        forwarder_id: stream.forwarder_id,
+        reader_ip: stream.reader_ip,
         earliest_epoch: parsed,
       });
       earliestEpochInputs = { ...earliestEpochInputs, [key]: String(parsed) };
+      markModeEdited();
     } catch (e) {
       error = String(e);
+    } finally {
+      earliestEpochSaving = { ...earliestEpochSaving, [key]: false };
     }
   }
 
@@ -403,6 +480,7 @@
       const latestStreams = await api.getStreams();
       if (refreshVersion === streamRefreshVersion) {
         streams = latestStreams;
+        void prefetchEarliestEpochOptions(latestStreams.streams);
       }
     } catch (e) {
       error = String(e);
@@ -428,6 +506,7 @@
       const latestStreams = await api.getStreams();
       if (refreshVersion === streamRefreshVersion) {
         streams = latestStreams;
+        void prefetchEarliestEpochOptions(latestStreams.streams);
       }
     } catch (e) {
       error = String(e);
@@ -605,8 +684,14 @@
         status = s;
       },
       onStreamsSnapshot: (s) => {
+        const refreshAllKeys = new Set(
+          s.streams.map((stream) =>
+            streamKey(stream.forwarder_id, stream.reader_ip),
+          ),
+        );
         streamRefreshVersion += 1;
         streams = s;
+        void prefetchEarliestEpochOptions(s.streams, refreshAllKeys);
       },
       onLogEntry: (entry) => {
         if (logs) {
@@ -670,6 +755,10 @@
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
   const btnSecondary =
     "px-3 py-1.5 text-sm font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
+  const btnWarn =
+    "px-3 py-1.5 text-sm font-medium rounded-md bg-status-warn-bg text-status-warn border border-status-warn-border cursor-pointer hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
+  const btnOk =
+    "px-3 py-1.5 text-sm font-medium rounded-md bg-status-ok-bg text-status-ok border border-status-ok-border cursor-pointer hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
 </script>
 
 <main class="max-w-[900px] mx-auto px-8 py-6">
@@ -841,8 +930,8 @@
 
           {#if modeDraft === "live"}
             <p class="text-xs text-text-muted m-0">
-              Live mode uses stream checkboxes in the table below and supports
-              earliest-epoch overrides.
+              Live mode includes all available streams automatically and
+              supports earliest-epoch overrides.
             </p>
           {:else if modeDraft === "race"}
             <p class="text-xs text-text-muted m-0">
@@ -889,7 +978,7 @@
             {#if modeDraft === "live" || modeDraft === "race"}
               <button
                 data-testid="pause-all-btn"
-                class={btnSecondary}
+                class={btnWarn}
                 onclick={() => void pauseOrResumeAll("pause")}
                 disabled={streamActionBusy}
               >
@@ -897,7 +986,7 @@
               </button>
               <button
                 data-testid="resume-all-btn"
-                class={btnSecondary}
+                class={btnOk}
                 onclick={() => void pauseOrResumeAll("resume")}
                 disabled={streamActionBusy}
               >
@@ -953,6 +1042,11 @@
                   <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                     {stream.forwarder_id} / {stream.reader_ip}
                   </p>
+                  {#if stream.local_port !== null}
+                    <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
+                      local port: {stream.local_port}
+                    </p>
+                  {/if}
                   {#if stream.stream_epoch !== undefined}
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                       epoch: {stream.stream_epoch}{#if stream.current_epoch_name && stream.current_epoch_name.trim().length > 0}
@@ -987,46 +1081,37 @@
                       Replay
                     </button>
                   {:else}
-                    {#if modeDraft === "live"}
-                      <label
-                        class="text-xs text-text-muted inline-flex items-center gap-1"
-                      >
-                        <input
-                          data-testid="live-stream-toggle-{key}"
-                          type="checkbox"
-                          checked={selectedLiveStreamKeys.includes(key)}
-                          onchange={() =>
-                            toggleLiveStreamSelection(
-                              stream.forwarder_id,
-                              stream.reader_ip,
-                            )}
-                        />
-                        Include
-                      </label>
-                    {/if}
-
-                    <input
+                    {@const options = earliestEpochOptions[key] ?? []}
+                    {@const selectedEarliest =
+                      selectedEarliestEpochValue(stream)}
+                    <select
                       data-testid="earliest-epoch-{key}"
-                      type="number"
-                      min="0"
-                      class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-24 focus:outline-none focus:ring-1 focus:ring-accent"
-                      bind:value={earliestEpochInputs[key]}
-                      oninput={markModeEdited}
-                      placeholder="earliest"
-                      disabled={modeDraft === "race"}
-                    />
-                    <button
-                      data-testid="apply-earliest-{key}"
-                      class={btnSecondary}
-                      onclick={() =>
-                        setEarliestEpoch(stream.forwarder_id, stream.reader_ip)}
+                      class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                      value={selectedEarliest}
+                      onchange={(event) =>
+                        void changeEarliestEpoch(
+                          stream,
+                          event.currentTarget.value,
+                        )}
                       disabled={modeDraft === "race"}
                     >
-                      Set Earliest
-                    </button>
+                      {#if earliestEpochLoading[key]}
+                        <option value="">Loading epochs...</option>
+                      {:else if earliestEpochLoadErrors[key]}
+                        <option value="">Epochs unavailable</option>
+                      {:else if options.length === 0}
+                        <option value="">No epochs available</option>
+                      {:else}
+                        {#each options as option}
+                          <option value={String(option.stream_epoch)}>
+                            {formatEarliestEpochOption(option)}
+                          </option>
+                        {/each}
+                      {/if}
+                    </select>
                     <button
                       data-testid="pause-resume-{key}"
-                      class={btnSecondary}
+                      class={stream.paused ? btnOk : btnWarn}
                       onclick={() => pauseOrResumeStream(stream)}
                       disabled={streamActionBusy}
                     >

@@ -282,6 +282,15 @@ pub async fn put_epoch_name(
             .logger
             .log(format!("epoch {epoch} on stream {stream_id} name cleared")),
     }
+    let _ = state
+        .dashboard_tx
+        .send(crate::dashboard_events::DashboardEvent::StreamUpdated {
+            stream_id,
+            online: None,
+            stream_epoch: None,
+            display_alias: None,
+            forwarder_display_name: None,
+        });
 
     (
         StatusCode::OK,

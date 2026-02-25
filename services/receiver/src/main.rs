@@ -208,6 +208,12 @@ async fn main() {
             }
         });
     }
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_upstream_dashboard_sse_refresher(state).await;
+        });
+    }
 
     // -------------------------------------------------------------------------
     // Event loop: watch connection_state + reconcile subscriptions
@@ -219,7 +225,6 @@ async fn main() {
     // Interval for subscription reconciliation polling.
     let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_millis(500));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     // Track last-known subscriptions to detect changes.
     let mut last_subs: Vec<Subscription> = initial_subs;
 
@@ -512,6 +517,155 @@ async fn wait_for_reconnect_delay_or_abort(
 
         let remaining = deadline.saturating_duration_since(now);
         tokio::time::sleep(std::cmp::min(remaining, poll_interval)).await;
+    }
+}
+
+fn should_refresh_stream_snapshot_for_dashboard_event(event_name: &str) -> bool {
+    matches!(event_name, "stream_created" | "stream_updated" | "resync")
+}
+
+fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) -> Option<String> {
+    if line.is_empty() {
+        return pending_event.take();
+    }
+    if line.starts_with(':') {
+        return None;
+    }
+    if let Some(rest) = line.strip_prefix("event:") {
+        let event_name = rest.trim();
+        if event_name.is_empty() {
+            pending_event.take();
+        } else {
+            *pending_event = Some(event_name.to_owned());
+        }
+    }
+    None
+}
+
+fn http_base_url(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        _ => return None,
+    };
+    let host = url.host_str()?;
+    match url.port() {
+        Some(port) => Some(format!("{scheme}://{host}:{port}")),
+        None => Some(format!("{scheme}://{host}")),
+    }
+}
+
+async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            state.logger.log_at(
+                UiLogLevel::Warn,
+                format!("failed to create upstream SSE client: {e}"),
+            );
+            return;
+        }
+    };
+
+    loop {
+        if *state.connection_state.read().await != ConnectionState::Connected {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
+        let profile = {
+            let db = state.db.lock().await;
+            db.load_profile().ok().flatten()
+        };
+        let Some(profile) = profile else {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        };
+
+        let Some(base_url) = http_base_url(&profile.server_url) else {
+            state.logger.log_at(
+                UiLogLevel::Warn,
+                format!(
+                    "cannot derive upstream HTTP URL from profile server_url: {}",
+                    profile.server_url
+                ),
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        };
+        let events_url = format!("{base_url}/api/v1/events");
+
+        match consume_upstream_dashboard_events(&state, &client, &events_url, &profile.token).await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                if *state.connection_state.read().await == ConnectionState::Connected {
+                    state.logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("upstream dashboard SSE refresh disconnected: {e}"),
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn consume_upstream_dashboard_events(
+    state: &Arc<AppState>,
+    client: &reqwest::Client,
+    events_url: &str,
+    token: &str,
+) -> Result<(), String> {
+    let response = client
+        .get(events_url)
+        .bearer_auth(token)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("upstream returned {}", response.status()));
+    }
+
+    let mut response = response;
+    let mut pending_line_bytes: Vec<u8> = Vec::new();
+    let mut pending_event: Option<String> = None;
+
+    loop {
+        if *state.connection_state.read().await != ConnectionState::Connected {
+            return Ok(());
+        }
+
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|e| format!("read failed: {e}"))?;
+        let Some(chunk) = chunk else {
+            return Err("connection closed".to_owned());
+        };
+        pending_line_bytes.extend_from_slice(&chunk);
+
+        while let Some(line_end_idx) = pending_line_bytes.iter().position(|byte| *byte == b'\n') {
+            let mut line_bytes: Vec<u8> = pending_line_bytes.drain(..=line_end_idx).collect();
+            if line_bytes.last().copied() == Some(b'\n') {
+                line_bytes.pop();
+            }
+            if line_bytes.last().copied() == Some(b'\r') {
+                line_bytes.pop();
+            }
+
+            let line = String::from_utf8_lossy(&line_bytes).into_owned();
+            if let Some(event_name) = consume_sse_line_for_event(&line, &mut pending_event)
+                && should_refresh_stream_snapshot_for_dashboard_event(&event_name)
+            {
+                state.emit_streams_snapshot().await;
+            }
+        }
     }
 }
 
@@ -1148,6 +1302,62 @@ mod tests {
                 update_mode: "check-only".to_owned(),
             }
         )));
+    }
+
+    #[test]
+    fn dashboard_event_filter_only_refreshes_on_stream_metadata_changes() {
+        assert!(should_refresh_stream_snapshot_for_dashboard_event(
+            "stream_created"
+        ));
+        assert!(should_refresh_stream_snapshot_for_dashboard_event(
+            "stream_updated"
+        ));
+        assert!(should_refresh_stream_snapshot_for_dashboard_event("resync"));
+
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "metrics_updated"
+        ));
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "forwarder_race_assigned"
+        ));
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "log_entry"
+        ));
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "unknown_event"
+        ));
+    }
+
+    #[test]
+    fn sse_event_parsing_emits_completed_event_name_on_frame_boundary() {
+        let mut pending_event = None;
+        assert_eq!(
+            consume_sse_line_for_event("event: stream_updated", &mut pending_event),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event("data: {\"type\":\"stream_updated\"}", &mut pending_event),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event("", &mut pending_event),
+            Some("stream_updated".to_owned())
+        );
+        assert_eq!(pending_event, None);
+    }
+
+    #[test]
+    fn sse_event_parsing_ignores_comments_and_data_only_frames() {
+        let mut pending_event = None;
+        assert_eq!(
+            consume_sse_line_for_event(": keepalive", &mut pending_event),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event("data: keepalive", &mut pending_event),
+            None
+        );
+        assert_eq!(consume_sse_line_for_event("", &mut pending_event), None);
     }
 
     #[tokio::test]

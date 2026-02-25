@@ -11,6 +11,7 @@ const fixtures = vi.hoisted(() => ({
         reader_ip: "10.0.0.1:10000",
         subscribed: false,
         local_port: null,
+        stream_epoch: 5,
         paused: false,
       },
     ],
@@ -24,6 +25,7 @@ const fixtures = vi.hoisted(() => ({
         reader_ip: "10.0.0.1:10000",
         subscribed: false,
         local_port: null,
+        stream_epoch: 5,
         paused: true,
       },
     ],
@@ -49,6 +51,13 @@ const apiMocks = vi.hoisted(() => ({
   }),
   getRaces: vi.fn().mockResolvedValue({
     races: [{ race_id: "race-1", name: "Race 1", created_at: "2026-01-01" }],
+  }),
+  getReplayTargetEpochs: vi.fn().mockResolvedValue({
+    epochs: [
+      { stream_epoch: 9, name: "Open", first_seen_at: null, race_names: [] },
+      { stream_epoch: 5, name: "Main", first_seen_at: null, race_names: [] },
+      { stream_epoch: 3, name: null, first_seen_at: null, race_names: [] },
+    ],
   }),
   putMode: vi.fn().mockResolvedValue(undefined),
   putProfile: vi.fn().mockResolvedValue(undefined),
@@ -111,24 +120,58 @@ describe("receiver page mode controls", () => {
     expect((raceSelect as HTMLSelectElement).value).toBe("race-1");
   });
 
-  it("applies live mode with selected stream on Apply Mode", async () => {
+  it("applies live mode with all available streams on Apply Mode", async () => {
+    apiMocks.getStreams.mockResolvedValueOnce({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+          stream_epoch: 5,
+          paused: false,
+        },
+        {
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+          stream_epoch: 7,
+          paused: false,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
     render(Page);
 
-    const include = await screen.findByTestId(
-      "live-stream-toggle-fwd-1/10.0.0.1:10000",
-    );
-    await fireEvent.click(include);
-
     const apply = await screen.findByTestId("save-mode-btn");
+    await waitFor(() => {
+      expect(apply).not.toBeDisabled();
+    });
     await fireEvent.click(apply);
 
     await waitFor(() => {
       expect(apiMocks.putMode).toHaveBeenCalledWith({
         mode: "live",
-        streams: [{ forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000" }],
+        streams: [
+          { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000" },
+          { forwarder_id: "fwd-2", reader_ip: "10.0.0.2:10000" },
+        ],
         earliest_epochs: [],
       });
     });
+  });
+
+  it("does not render live mode include checkbox", async () => {
+    render(Page);
+
+    await screen.findByTestId("earliest-epoch-fwd-1/10.0.0.1:10000");
+
+    expect(
+      screen.queryByTestId("live-stream-toggle-fwd-1/10.0.0.1:10000"),
+    ).not.toBeInTheDocument();
   });
 
   it("reacts to ModeChanged SSE events", async () => {
@@ -168,6 +211,44 @@ describe("receiver page mode controls", () => {
     await waitFor(() => {
       expect(apiMocks.pauseAll).toHaveBeenCalled();
     });
+  });
+
+  it("prefetches epoch options for loaded streams", async () => {
+    render(Page);
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledWith({
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+      });
+    });
+  });
+
+  it("styles Pause All as warn and Resume All as ok", async () => {
+    render(Page);
+
+    const pauseAll = await screen.findByTestId("pause-all-btn");
+    const resumeAll = await screen.findByTestId("resume-all-btn");
+
+    expect(pauseAll.className).toContain("bg-status-warn-bg");
+    expect(resumeAll.className).toContain("bg-status-ok-bg");
+  });
+
+  it("styles per-row Pause as warn and Resume as ok", async () => {
+    render(Page);
+    const activeRowButton = await screen.findByTestId(
+      "pause-resume-fwd-1/10.0.0.1:10000",
+    );
+    expect(activeRowButton).toHaveTextContent("Pause");
+    expect(activeRowButton.className).toContain("bg-status-warn-bg");
+
+    apiMocks.getStreams.mockResolvedValueOnce(fixtures.pausedStreamsResponse);
+    await fireEvent.click(activeRowButton);
+
+    await waitFor(() => {
+      expect(activeRowButton).toHaveTextContent("Resume");
+    });
+    expect(activeRowButton.className).toContain("bg-status-ok-bg");
   });
 
   it("prevents overlapping pause/resume stream actions while one is in flight", async () => {
@@ -399,19 +480,157 @@ describe("receiver page mode controls", () => {
     expect(screen.getByText(String(rejection))).toBeInTheDocument();
   });
 
-  it("disables earliest epoch controls in race mode", async () => {
+  it("replaces set earliest button with a dropdown", async () => {
+    render(Page);
+
+    const earliest = await screen.findByTestId(
+      "earliest-epoch-fwd-1/10.0.0.1:10000",
+    );
+
+    expect(earliest.tagName).toBe("SELECT");
+    expect(
+      screen.queryByTestId("apply-earliest-fwd-1/10.0.0.1:10000"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("defaults earliest dropdown to current stream epoch when available", async () => {
+    render(Page);
+
+    const earliest = await screen.findByTestId(
+      "earliest-epoch-fwd-1/10.0.0.1:10000",
+    );
+
+    await waitFor(() => {
+      expect((earliest as HTMLSelectElement).value).toBe("5");
+    });
+  });
+
+  it("updates earliest epoch immediately when dropdown changes", async () => {
+    render(Page);
+
+    const earliest = await screen.findByTestId(
+      "earliest-epoch-fwd-1/10.0.0.1:10000",
+    );
+    await fireEvent.change(earliest, { target: { value: "3" } });
+
+    await waitFor(() => {
+      expect(apiMocks.putEarliestEpoch).toHaveBeenCalledWith({
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        earliest_epoch: 3,
+      });
+    });
+  });
+
+  it("shows epoch name in earliest epoch dropdown options", async () => {
+    render(Page);
+
+    const earliest = await screen.findByTestId(
+      "earliest-epoch-fwd-1/10.0.0.1:10000",
+    );
+
+    await waitFor(() => {
+      expect(earliest).toHaveTextContent("5 (Main)");
+    });
+  });
+
+  it("shows local port when stream has one", async () => {
+    apiMocks.getStreams.mockResolvedValueOnce({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 41111,
+          stream_epoch: 5,
+          paused: false,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+    render(Page);
+
+    expect(await screen.findByText("local port: 41111")).toBeInTheDocument();
+  });
+
+  it("refetches epoch options when stream epoch changes in snapshot", async () => {
+    render(Page);
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledTimes(1);
+    });
+
+    callbacks.onStreamsSnapshot({
+      streams: [
+        {
+          ...fixtures.activeStreamsResponse.streams[0],
+          stream_epoch: 6,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("refetches epoch options when current epoch name changes in snapshot", async () => {
+    render(Page);
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledTimes(1);
+    });
+
+    callbacks.onStreamsSnapshot({
+      streams: [
+        {
+          ...fixtures.activeStreamsResponse.streams[0],
+          current_epoch_name: "Renamed Epoch",
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("refetches epoch options when a streams snapshot arrives, even if metadata is unchanged", async () => {
+    render(Page);
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledTimes(1);
+    });
+
+    callbacks.onStreamsSnapshot({
+      ...fixtures.activeStreamsResponse,
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getReplayTargetEpochs).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("disables earliest dropdown in race mode", async () => {
     apiMocks.getMode.mockResolvedValueOnce({ mode: "race", race_id: "race-1" });
     render(Page);
 
     const earliest = await screen.findByTestId(
       "earliest-epoch-fwd-1/10.0.0.1:10000",
     );
-    const setEarliest = await screen.findByTestId(
-      "apply-earliest-fwd-1/10.0.0.1:10000",
-    );
 
     expect(earliest).toBeDisabled();
-    expect(setEarliest).toBeDisabled();
   });
 
   it("replays a single stream in targeted replay mode", async () => {
