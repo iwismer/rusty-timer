@@ -33,13 +33,13 @@ async fn insert_event_at(
     received_at: &str,
 ) {
     sqlx::query(
-        "INSERT INTO events (stream_id, stream_epoch, seq, tag_id, raw_read_line, read_type, received_at) VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
+        "INSERT INTO events (stream_id, stream_epoch, seq, tag_id, raw_frame, read_type, received_at) VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
     )
     .bind(stream_id)
     .bind(epoch)
     .bind(seq)
     .bind("chip-a")
-    .bind(format!("LINE_e{}_s{}", epoch, seq))
+    .bind(format!("LINE_e{}_s{}", epoch, seq).into_bytes())
     .bind("RAW")
     .bind(received_at)
     .execute(pool)

@@ -70,7 +70,7 @@ async fn send_events(
                     stream_epoch,
                     seq,
                     reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                    raw_read_line: format!("LINE_{}_{}", stream_epoch, seq),
+                    raw_frame: format!("LINE_{}_{}", stream_epoch, seq).into_bytes(),
                     read_type: "RAW".to_owned(),
                 }],
             }))

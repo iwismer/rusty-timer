@@ -1153,7 +1153,7 @@ async fn replay_backlog(
                 stream_epoch: e.stream_epoch as u64,
                 seq: e.seq as u64,
                 reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
-                raw_read_line: e.raw_read_line.clone(),
+                raw_frame: e.raw_frame.clone(),
                 read_type: e.read_type.clone(),
             })
             .collect();
@@ -1219,7 +1219,7 @@ async fn replay_backlog_interruptible(
                 stream_epoch: e.stream_epoch as u64,
                 seq: e.seq as u64,
                 reader_timestamp: e.reader_timestamp.clone().unwrap_or_default(),
-                raw_read_line: e.raw_read_line.clone(),
+                raw_frame: e.raw_frame.clone(),
                 read_type: e.read_type.clone(),
             })
             .collect();
@@ -1288,7 +1288,7 @@ async fn replay_targeted_backlog(
                     stream_epoch: event.stream_epoch as u64,
                     seq: event.seq as u64,
                     reader_timestamp: event.reader_timestamp.clone().unwrap_or_default(),
-                    raw_read_line: event.raw_read_line.clone(),
+                    raw_frame: event.raw_frame.clone(),
                     read_type: event.read_type.clone(),
                 })
                 .collect();

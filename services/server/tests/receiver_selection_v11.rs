@@ -249,7 +249,7 @@ async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_str
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-22T10:00:00.000Z".to_owned(),
-            raw_read_line: "OLD_STREAM".to_owned(),
+            raw_frame: "OLD_STREAM".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -266,7 +266,7 @@ async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_str
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-22T10:00:00.000Z".to_owned(),
-            raw_read_line: "NEW_STREAM".to_owned(),
+            raw_frame: "NEW_STREAM".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -278,7 +278,7 @@ async fn test_v11_hello_and_set_selection_emit_selection_applied_and_replace_str
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1);
             assert_eq!(batch.events[0].reader_ip, "10.20.0.2:10000");
-            assert_eq!(batch.events[0].raw_read_line, "NEW_STREAM");
+            assert_eq!(batch.events[0].raw_frame, b"NEW_STREAM".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),

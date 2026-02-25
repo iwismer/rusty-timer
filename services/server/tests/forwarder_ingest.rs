@@ -61,7 +61,7 @@ async fn test_first_insert_stores_event_and_acks() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: "LINE1".to_owned(),
+                raw_frame: "LINE1".as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -120,7 +120,7 @@ async fn test_identical_retransmit_no_dup() {
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-        raw_read_line: "LINE1".to_owned(),
+        raw_frame: "LINE1".as_bytes().to_vec(),
         read_type: "RAW".to_owned(),
     };
     client
@@ -201,7 +201,7 @@ async fn test_mismatched_payload_rejected() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: "ORIGINAL_LINE".to_owned(),
+                raw_frame: "ORIGINAL_LINE".as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -218,7 +218,7 @@ async fn test_mismatched_payload_rejected() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: "DIFFERENT_LINE".to_owned(),
+                raw_frame: "DIFFERENT_LINE".as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -236,11 +236,11 @@ async fn test_mismatched_payload_rejected() {
     assert_eq!(entry.reader_ip, "192.168.1.30:10000");
     assert_eq!(entry.stream_epoch, 1);
     assert_eq!(entry.last_seq, 1);
-    let raw_line: String = sqlx::query_scalar("SELECT raw_read_line FROM events WHERE seq = 1")
+    let raw_frame: Vec<u8> = sqlx::query_scalar("SELECT raw_frame FROM events WHERE seq = 1")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(raw_line, "ORIGINAL_LINE");
+    assert_eq!(raw_frame, b"ORIGINAL_LINE".to_vec());
 }
 
 #[tokio::test]

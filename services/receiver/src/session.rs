@@ -184,7 +184,7 @@ mod tests {
             stream_epoch,
             seq,
             reader_timestamp: "2026-01-01T00:00:00.000Z".to_owned(),
-            raw_read_line: format!("raw-{seq}"),
+            raw_frame: format!("raw-{seq}").into_bytes(),
             read_type: "RAW".to_owned(),
         }
     }

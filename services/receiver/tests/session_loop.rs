@@ -89,7 +89,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-01T00:00:00.000Z".to_owned(),
-            raw_read_line: "raw-1".to_owned(),
+            raw_frame: b"raw-1".to_vec(),
             read_type: "RAW".to_owned(),
         },
         ReadEvent {
@@ -98,7 +98,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             stream_epoch: 1,
             seq: 3,
             reader_timestamp: "2026-02-01T00:00:01.000Z".to_owned(),
-            raw_read_line: "raw-2".to_owned(),
+            raw_frame: b"raw-2".to_vec(),
             read_type: "RAW".to_owned(),
         },
         ReadEvent {
@@ -107,7 +107,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             stream_epoch: 2,
             seq: 5,
             reader_timestamp: "2026-02-01T00:00:02.000Z".to_owned(),
-            raw_read_line: "raw-3".to_owned(),
+            raw_frame: b"raw-3".to_vec(),
             read_type: "RAW".to_owned(),
         },
     ];

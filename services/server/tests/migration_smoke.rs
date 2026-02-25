@@ -250,11 +250,15 @@ fn events_has_reader_timestamp() {
 }
 
 #[test]
-fn events_has_raw_read_line() {
+fn events_has_raw_frame() {
     let sql = read_migration();
+    let raw_frame_line = sql
+        .lines()
+        .find(|line| line.contains("raw_frame"))
+        .unwrap_or("");
     assert!(
-        sql.contains("raw_read_line") && sql.contains("TEXT NOT NULL"),
-        "events must have raw_read_line TEXT NOT NULL"
+        raw_frame_line.contains("BYTEA NOT NULL"),
+        "events must have raw_frame BYTEA NOT NULL"
     );
 }
 

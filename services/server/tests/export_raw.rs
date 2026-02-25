@@ -67,7 +67,7 @@ async fn test_export_raw_canonical_events_ordered() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("EXPORT_LINE_{}", seq),
+                raw_frame: format!("EXPORT_LINE_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -85,7 +85,7 @@ async fn test_export_raw_canonical_events_ordered() {
             stream_epoch: 1,
             seq: 2,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: "EXPORT_LINE_2".to_owned(),
+            raw_frame: "EXPORT_LINE_2".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -165,7 +165,7 @@ async fn test_export_epoch_raw_filters_to_requested_epoch() {
                 stream_epoch,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: line.to_owned(),
+                raw_frame: line.as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -184,7 +184,7 @@ async fn test_export_epoch_raw_filters_to_requested_epoch() {
             stream_epoch: 2,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
-            raw_read_line: "EPOCH_2_LINE_1".to_owned(),
+            raw_frame: "EPOCH_2_LINE_1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))

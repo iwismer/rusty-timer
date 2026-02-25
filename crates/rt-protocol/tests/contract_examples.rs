@@ -83,6 +83,21 @@ fn forwarder_event_batch_round_trip() {
 }
 
 #[test]
+fn read_event_raw_frame_round_trip() {
+    let msg = round_trip("contracts/ws/v1/examples/forwarder_event_batch.json");
+    match msg {
+        WsMessage::ForwarderEventBatch(inner) => {
+            assert!(!inner.events.is_empty());
+            assert!(
+                !inner.events[0].raw_frame.is_empty(),
+                "raw_frame bytes should round-trip"
+            );
+        }
+        other => panic!("Expected ForwarderEventBatch, got {:?}", other),
+    }
+}
+
+#[test]
 fn forwarder_ack_round_trip() {
     let msg = round_trip("contracts/ws/v1/examples/forwarder_ack.json");
     match msg {

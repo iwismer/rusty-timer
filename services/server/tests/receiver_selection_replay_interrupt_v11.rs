@@ -74,7 +74,7 @@ async fn live_only_policy_skips_backfill_on_connect() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
-            raw_read_line: "BACKFILL".to_owned(),
+            raw_frame: "BACKFILL".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -119,7 +119,7 @@ async fn live_only_policy_skips_backfill_on_connect() {
             stream_epoch: 1,
             seq: 2,
             reader_timestamp: "2026-02-23T10:00:01.000Z".to_owned(),
-            raw_read_line: "LIVE_ONLY".to_owned(),
+            raw_frame: "LIVE_ONLY".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -130,7 +130,7 @@ async fn live_only_policy_skips_backfill_on_connect() {
     match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1);
-            assert_eq!(batch.events[0].raw_read_line, "LIVE_ONLY");
+            assert_eq!(batch.events[0].raw_frame, b"LIVE_ONLY".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),
@@ -188,7 +188,7 @@ async fn live_only_delivers_events_when_no_prior_events_exist() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T12:00:00.000Z".to_owned(),
-            raw_read_line: "FIRST_EVER".to_owned(),
+            raw_frame: "FIRST_EVER".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -200,7 +200,7 @@ async fn live_only_delivers_events_when_no_prior_events_exist() {
     match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1);
-            assert_eq!(batch.events[0].raw_read_line, "FIRST_EVER");
+            assert_eq!(batch.events[0].raw_frame, b"FIRST_EVER".to_vec());
         }
         Ok(Ok(other)) => panic!("expected receiver_event_batch, got {:?}", other),
         Ok(Err(e)) => panic!("recv error: {}", e),
@@ -223,7 +223,7 @@ async fn targeted_policy_replays_only_explicit_stream_epochs() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
-                raw_read_line: "R1E1S1".to_owned(),
+                raw_frame: "R1E1S1".as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             },
         ),
@@ -235,7 +235,7 @@ async fn targeted_policy_replays_only_explicit_stream_epochs() {
                 stream_epoch: 1,
                 seq: 2,
                 reader_timestamp: "2026-02-23T10:00:01.000Z".to_owned(),
-                raw_read_line: "R1E1S2".to_owned(),
+                raw_frame: "R1E1S2".as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             },
         ),
@@ -247,7 +247,7 @@ async fn targeted_policy_replays_only_explicit_stream_epochs() {
                 stream_epoch: 2,
                 seq: 1,
                 reader_timestamp: "2026-02-23T10:00:02.000Z".to_owned(),
-                raw_read_line: "R1E2S1".to_owned(),
+                raw_frame: "R1E2S1".as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             },
         ),
@@ -259,7 +259,7 @@ async fn targeted_policy_replays_only_explicit_stream_epochs() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-23T10:00:03.000Z".to_owned(),
-                raw_read_line: "R2E1S1".to_owned(),
+                raw_frame: "R2E1S1".as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             },
         ),
@@ -320,7 +320,7 @@ async fn targeted_policy_replays_only_explicit_stream_epochs() {
     assert_eq!(event.reader_ip, "10.40.0.1:10000");
     assert_eq!(event.stream_epoch, 1);
     assert_eq!(event.seq, 2);
-    assert_eq!(event.raw_read_line, "R1E1S2");
+    assert_eq!(event.raw_frame, b"R1E1S2".to_vec());
 
     match tokio::time::timeout(Duration::from_millis(400), rcv.recv_message()).await {
         Err(_) => {}
@@ -345,7 +345,7 @@ async fn targeted_policy_replay_is_snapshot_bounded() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("R1E1S{seq}"),
+                raw_frame: format!("R1E1S{seq}").into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -395,8 +395,8 @@ async fn targeted_policy_replay_is_snapshot_bounded() {
     assert_eq!(first_replay.events.last().map(|e| e.seq), Some(500));
 
     sqlx::query(
-        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id)
-           SELECT $1, 1, gs, '2026-02-23T10:00:01.000Z', CONCAT('R1E1S', gs::text), 'RAW', NULL
+        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id)
+           SELECT $1, 1, gs, '2026-02-23T10:00:01.000Z', convert_to(CONCAT('R1E1S', gs::text), 'UTF8'), 'RAW', NULL
            FROM generate_series(1001, 1600) AS gs"#,
     )
     .bind(stream_id)
@@ -439,8 +439,8 @@ async fn set_selection_interrupts_long_targeted_replay_at_batch_boundary() {
     .unwrap();
 
     sqlx::query(
-        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id)
-           SELECT $1, 1, gs, '2026-02-23T10:00:00.000Z', CONCAT('R1E1S', gs::text), 'RAW', NULL
+        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id)
+           SELECT $1, 1, gs, '2026-02-23T10:00:00.000Z', convert_to(CONCAT('R1E1S', gs::text), 'UTF8'), 'RAW', NULL
            FROM generate_series(1, 200000) AS gs"#,
     )
     .bind(stream_one_id)
@@ -457,7 +457,7 @@ async fn set_selection_interrupts_long_targeted_replay_at_batch_boundary() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-23T10:00:00.000Z".to_owned(),
-            raw_read_line: "R2E1S1".to_owned(),
+            raw_frame: "R2E1S1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -590,8 +590,8 @@ async fn set_selection_replay_restart_uses_persisted_cursor_for_new_selection() 
     .unwrap();
 
     sqlx::query(
-        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id)
-           SELECT $1, 1, gs, '2026-02-23T10:00:00.000Z', CONCAT('R1E1S', gs::text), 'RAW', NULL
+        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id)
+           SELECT $1, 1, gs, '2026-02-23T10:00:00.000Z', convert_to(CONCAT('R1E1S', gs::text), 'UTF8'), 'RAW', NULL
            FROM generate_series(1, 200000) AS gs"#,
     )
     .bind(stream_one_id)
@@ -600,11 +600,11 @@ async fn set_selection_replay_restart_uses_persisted_cursor_for_new_selection() 
     .unwrap();
 
     sqlx::query(
-        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id)
+        r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id)
            VALUES
-           ($1, 1, 1, '2026-02-23T10:00:00.000Z', 'R2E1S1', 'RAW', NULL),
-           ($1, 1, 2, '2026-02-23T10:00:01.000Z', 'R2E1S2', 'RAW', NULL),
-           ($1, 1, 3, '2026-02-23T10:00:02.000Z', 'R2E1S3', 'RAW', NULL)"#,
+           ($1, 1, 1, '2026-02-23T10:00:00.000Z', convert_to('R2E1S1', 'UTF8'), 'RAW', NULL),
+           ($1, 1, 2, '2026-02-23T10:00:01.000Z', convert_to('R2E1S2', 'UTF8'), 'RAW', NULL),
+           ($1, 1, 3, '2026-02-23T10:00:02.000Z', convert_to('R2E1S3', 'UTF8'), 'RAW', NULL)"#,
     )
     .bind(stream_two_id)
     .execute(&pool)
@@ -631,7 +631,7 @@ async fn set_selection_replay_restart_uses_persisted_cursor_for_new_selection() 
             stream_epoch: 1,
             seq: 4,
             reader_timestamp: "2026-02-23T10:00:03.000Z".to_owned(),
-            raw_read_line: "R2E1S4".to_owned(),
+            raw_frame: "R2E1S4".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))

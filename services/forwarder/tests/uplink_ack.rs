@@ -88,7 +88,7 @@ async fn uplink_receives_ack_for_event_batch() {
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
-        raw_read_line: "aa400000000123450a2a01123018455927a7".to_owned(),
+        raw_frame: b"aa400000000123450a2a01123018455927a7".to_vec(),
         read_type: "RAW".to_owned(),
     }];
 
@@ -128,7 +128,7 @@ async fn uplink_ack_contains_high_water_marks() {
             stream_epoch: 1,
             seq: 3,
             reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
-            raw_read_line: "line1".to_owned(),
+            raw_frame: b"line1".to_vec(),
             read_type: "RAW".to_owned(),
         },
         rt_protocol::ReadEvent {
@@ -137,7 +137,7 @@ async fn uplink_ack_contains_high_water_marks() {
             stream_epoch: 1,
             seq: 7,
             reader_timestamp: "2026-01-01T00:00:01Z".to_owned(),
-            raw_read_line: "line2".to_owned(),
+            raw_frame: b"line2".to_vec(),
             read_type: "RAW".to_owned(),
         },
         rt_protocol::ReadEvent {
@@ -146,7 +146,7 @@ async fn uplink_ack_contains_high_water_marks() {
             stream_epoch: 1,
             seq: 5,
             reader_timestamp: "2026-01-01T00:00:02Z".to_owned(),
-            raw_read_line: "line3".to_owned(),
+            raw_frame: b"line3".to_vec(),
             read_type: "RAW".to_owned(),
         },
     ];
@@ -248,7 +248,7 @@ async fn send_batch_surfaces_epoch_reset_command() {
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
-        raw_read_line: "aa400000000123450a2a01123018455927a7".to_owned(),
+        raw_frame: b"aa400000000123450a2a01123018455927a7".to_vec(),
         read_type: "RAW".to_owned(),
     }];
 

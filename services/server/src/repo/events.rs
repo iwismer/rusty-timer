@@ -16,18 +16,25 @@ pub struct UpsertEventOutcome {
     pub epoch_advanced_to: Option<i64>,
 }
 
+fn parse_chip_from_frame(raw_frame: &[u8]) -> Option<ipico_core::read::ChipRead> {
+    let trimmed = raw_frame
+        .strip_suffix(b"\r\n")
+        .or_else(|| raw_frame.strip_suffix(b"\n"))
+        .unwrap_or(raw_frame);
+    let s = std::str::from_utf8(trimmed).ok()?;
+    ipico_core::read::ChipRead::try_from(s).ok()
+}
+
 pub async fn upsert_event(
     pool: &PgPool,
     stream_id: Uuid,
     stream_epoch: i64,
     seq: i64,
     reader_timestamp: &str,
-    raw_read_line: &str,
+    raw_frame: &[u8],
     read_type: &str,
 ) -> Result<UpsertEventOutcome, sqlx::Error> {
-    let tag_id = ipico_core::read::ChipRead::try_from(raw_read_line)
-        .ok()
-        .map(|r| r.tag_id);
+    let tag_id = parse_chip_from_frame(raw_frame).map(|r| r.tag_id);
     let mut tx = pool.begin().await?;
     let mut current_stream_epoch = sqlx::query_scalar::<_, i64>(
         "SELECT stream_epoch FROM streams WHERE stream_id = $1 FOR UPDATE",
@@ -54,8 +61,8 @@ pub async fn upsert_event(
         epoch_advanced_to = Some(stream_epoch);
     }
 
-    let existing_raw_read_line = sqlx::query_scalar::<_, String>(
-        "SELECT raw_read_line FROM events WHERE stream_id = $1 AND stream_epoch = $2 AND seq = $3",
+    let existing_raw_frame = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT raw_frame FROM events WHERE stream_id = $1 AND stream_epoch = $2 AND seq = $3",
     )
     .bind(stream_id)
     .bind(stream_epoch)
@@ -64,8 +71,8 @@ pub async fn upsert_event(
     .await?;
     let is_current_epoch = stream_epoch == current_stream_epoch;
 
-    let ingest_result = if let Some(existing_raw_read_line) = existing_raw_read_line {
-        if existing_raw_read_line == raw_read_line {
+    let ingest_result = if let Some(existing_raw_frame) = existing_raw_frame {
+        if existing_raw_frame == raw_frame {
             if is_current_epoch {
                 sqlx::query(
                     "UPDATE stream_metrics SET raw_count = raw_count + 1, retransmit_count = retransmit_count + 1, epoch_raw_count = epoch_raw_count + 1, epoch_retransmit_count = epoch_retransmit_count + 1 WHERE stream_id = $1",
@@ -87,13 +94,13 @@ pub async fn upsert_event(
         }
     } else {
         sqlx::query(
-            r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, tag_id) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            r#"INSERT INTO events (stream_id, stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
         )
         .bind(stream_id)
         .bind(stream_epoch)
         .bind(seq)
         .bind(reader_timestamp)
-        .bind(raw_read_line)
+        .bind(raw_frame)
         .bind(read_type)
         .bind(tag_id.as_deref())
         .execute(&mut *tx)
@@ -310,7 +317,7 @@ pub async fn fetch_events_after_cursor_limited(
     limit: i64,
 ) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
     let rows = sqlx::query(
-        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
+        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_frame, e.read_type,
                   s.forwarder_id, s.reader_ip
            FROM events e
            JOIN streams s ON s.stream_id = e.stream_id
@@ -331,7 +338,7 @@ pub async fn fetch_events_after_cursor_limited(
             stream_epoch: r.get("stream_epoch"),
             seq: r.get("seq"),
             reader_timestamp: r.get("reader_timestamp"),
-            raw_read_line: r.get("raw_read_line"),
+            raw_frame: r.get("raw_frame"),
             read_type: r.get("read_type"),
             forwarder_id: r.get("forwarder_id"),
             reader_ip: r.get("reader_ip"),
@@ -367,7 +374,7 @@ pub async fn fetch_events_after_cursor_through_cursor_limited(
     limit: i64,
 ) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
     let rows = sqlx::query(
-        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
+        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_frame, e.read_type,
                   s.forwarder_id, s.reader_ip
            FROM events e
            JOIN streams s ON s.stream_id = e.stream_id
@@ -392,7 +399,7 @@ pub async fn fetch_events_after_cursor_through_cursor_limited(
             stream_epoch: r.get("stream_epoch"),
             seq: r.get("seq"),
             reader_timestamp: r.get("reader_timestamp"),
-            raw_read_line: r.get("raw_read_line"),
+            raw_frame: r.get("raw_frame"),
             read_type: r.get("read_type"),
             forwarder_id: r.get("forwarder_id"),
             reader_ip: r.get("reader_ip"),
@@ -408,7 +415,7 @@ pub async fn fetch_events_for_stream_epoch_from_seq_limited(
     limit: i64,
 ) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
     let rows = sqlx::query(
-        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
+        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_frame, e.read_type,
                   s.forwarder_id, s.reader_ip
            FROM events e
            JOIN streams s ON s.stream_id = e.stream_id
@@ -431,7 +438,7 @@ pub async fn fetch_events_for_stream_epoch_from_seq_limited(
             stream_epoch: r.get("stream_epoch"),
             seq: r.get("seq"),
             reader_timestamp: r.get("reader_timestamp"),
-            raw_read_line: r.get("raw_read_line"),
+            raw_frame: r.get("raw_frame"),
             read_type: r.get("read_type"),
             forwarder_id: r.get("forwarder_id"),
             reader_ip: r.get("reader_ip"),
@@ -449,7 +456,7 @@ pub async fn fetch_events_for_stream_epoch_from_seq_through_cursor_limited(
     limit: i64,
 ) -> Result<Vec<crate::repo::EventRow>, sqlx::Error> {
     let rows = sqlx::query(
-        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_read_line, e.read_type,
+        r#"SELECT e.stream_epoch, e.seq, e.reader_timestamp, e.raw_frame, e.read_type,
                   s.forwarder_id, s.reader_ip
            FROM events e
            JOIN streams s ON s.stream_id = e.stream_id
@@ -475,7 +482,7 @@ pub async fn fetch_events_for_stream_epoch_from_seq_through_cursor_limited(
             stream_epoch: r.get("stream_epoch"),
             seq: r.get("seq"),
             reader_timestamp: r.get("reader_timestamp"),
-            raw_read_line: r.get("raw_read_line"),
+            raw_frame: r.get("raw_frame"),
             read_type: r.get("read_type"),
             forwarder_id: r.get("forwarder_id"),
             reader_ip: r.get("reader_ip"),

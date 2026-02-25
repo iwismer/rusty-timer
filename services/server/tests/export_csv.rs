@@ -62,7 +62,7 @@ async fn test_export_csv_header_and_rows() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
-            raw_read_line: "CSV_LINE_1".to_owned(),
+            raw_frame: "CSV_LINE_1".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -70,7 +70,7 @@ async fn test_export_csv_header_and_rows() {
     .unwrap();
     fwd.recv_message().await.unwrap();
 
-    // Second event with comma in raw_read_line to test CSV escaping
+    // Second event with comma in raw_frame to test CSV escaping
     fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
         session_id: session.clone(),
         batch_id: "b2".to_owned(),
@@ -80,7 +80,7 @@ async fn test_export_csv_header_and_rows() {
             stream_epoch: 1,
             seq: 2,
             reader_timestamp: "2026-02-17T10:00:02.000Z".to_owned(),
-            raw_read_line: "CSV,WITH,COMMAS".to_owned(),
+            raw_frame: b"CSV,WITH,COMMAS".to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -116,7 +116,7 @@ async fn test_export_csv_header_and_rows() {
     );
     // Check header
     assert_eq!(
-        lines[0], "stream_epoch,seq,reader_timestamp,raw_read_line,read_type",
+        lines[0], "stream_epoch,seq,reader_timestamp,raw_frame,read_type",
         "unexpected CSV header"
     );
     // Check first data row
