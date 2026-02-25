@@ -30,6 +30,9 @@ pub enum ReceiverUiEvent {
     StreamCountsUpdated {
         updates: Vec<StreamCountUpdate>,
     },
+    ModeChanged {
+        mode: rt_protocol::ReceiverMode,
+    },
 }
 
 #[cfg(test)]
@@ -100,5 +103,18 @@ mod tests {
         assert_eq!(json["updates"][0]["reader_ip"], "10.0.0.1");
         assert_eq!(json["updates"][0]["reads_total"], 42);
         assert_eq!(json["updates"][0]["reads_epoch"], 7);
+    }
+
+    #[test]
+    fn mode_changed_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::ModeChanged {
+            mode: rt_protocol::ReceiverMode::Race {
+                race_id: "race-1".to_owned(),
+            },
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "mode_changed");
+        assert_eq!(json["mode"]["mode"], "race");
+        assert_eq!(json["mode"]["race_id"], "race-1");
     }
 }

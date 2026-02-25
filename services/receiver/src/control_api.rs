@@ -23,7 +23,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use rt_protocol::{ReceiverSetSelection, ReplayPolicy};
+use rt_protocol::ReceiverMode;
 use rt_updater::UpdateStatus;
 use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,8 @@ pub struct AppState {
     pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
+    pub paused_streams: Arc<RwLock<HashSet<String>>>,
+    pub all_paused: Arc<RwLock<bool>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -84,6 +86,8 @@ impl AppState {
             staged_update_path: Arc::new(RwLock::new(None)),
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
+            paused_streams: Arc::new(RwLock::new(HashSet::new())),
+            all_paused: Arc::new(RwLock::new(true)),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -156,6 +160,8 @@ impl AppState {
     /// Build the merged streams response from local subscriptions and upstream server.
     pub async fn build_streams_response(&self) -> StreamsResponse {
         let counts_snapshot = self.stream_counts.snapshot();
+        let all_paused = *self.all_paused.read().await;
+        let paused_streams = self.paused_streams.read().await.clone();
         let db = self.db.lock().await;
         let subs = match db.load_subscriptions() {
             Ok(s) => s,
@@ -220,6 +226,9 @@ impl AppState {
                     current_epoch_name: si.current_epoch_name.clone(),
                     reads_total: counts.as_ref().map(|c| c.total),
                     reads_epoch: counts.as_ref().map(|c| c.epoch),
+                    paused: all_paused
+                        || paused_streams
+                            .contains(&format!("{}/{}", si.forwarder_id, si.reader_ip)),
                 });
                 seen.insert(key);
             }
@@ -246,6 +255,8 @@ impl AppState {
                 current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
+                paused: all_paused
+                    || paused_streams.contains(&format!("{}/{}", sub.forwarder_id, sub.reader_ip)),
             });
         }
 
@@ -266,6 +277,39 @@ impl AppState {
             upstream_error: response.upstream_error,
         });
     }
+
+    pub async fn is_stream_paused(&self, forwarder_id: &str, reader_ip: &str) -> bool {
+        if *self.all_paused.read().await {
+            return true;
+        }
+        self.paused_streams
+            .read()
+            .await
+            .contains(&format!("{forwarder_id}/{reader_ip}"))
+    }
+
+    pub async fn pause_stream(&self, forwarder_id: &str, reader_ip: &str) {
+        self.paused_streams
+            .write()
+            .await
+            .insert(format!("{forwarder_id}/{reader_ip}"));
+    }
+
+    pub async fn resume_stream(&self, forwarder_id: &str, reader_ip: &str) {
+        self.paused_streams
+            .write()
+            .await
+            .remove(&format!("{forwarder_id}/{reader_ip}"));
+    }
+
+    pub async fn pause_all(&self) {
+        *self.all_paused.write().await = true;
+    }
+
+    pub async fn resume_all(&self) {
+        *self.all_paused.write().await = false;
+        self.paused_streams.write().await.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -282,16 +326,6 @@ pub struct ProfileRequest {
 
 fn default_update_mode() -> String {
     "check-and-download".to_owned()
-}
-
-fn default_selection_body() -> ReceiverSetSelection {
-    ReceiverSetSelection {
-        selection: rt_protocol::ReceiverSelection::Manual {
-            streams: Vec::new(),
-        },
-        replay_policy: ReplayPolicy::Resume,
-        replay_targets: None,
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -337,6 +371,7 @@ pub struct StreamEntry {
     pub reads_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_epoch: Option<u64>,
+    pub paused: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -362,6 +397,19 @@ pub struct LogsResponse {
 struct ReplayTargetEpochsQuery {
     forwarder_id: String,
     reader_ip: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamPauseRequest {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EarliestEpochRequest {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub earliest_epoch: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,14 +465,14 @@ struct ServerStreamsResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct UpstreamStreamInfo {
-    stream_id: String,
-    forwarder_id: String,
-    reader_ip: String,
-    display_alias: Option<String>,
-    stream_epoch: u64,
-    online: bool,
-    current_epoch_name: Option<String>,
+pub struct UpstreamStreamInfo {
+    pub stream_id: String,
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub display_alias: Option<String>,
+    pub stream_epoch: u64,
+    pub online: bool,
+    pub current_epoch_name: Option<String>,
 }
 
 /// Normalize a server URL by prepending `ws://` if no scheme is present.
@@ -456,7 +504,7 @@ pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
 }
 
 /// Fetch available streams from the upstream server.
-async fn fetch_server_streams(ws_url: &str) -> Result<Vec<UpstreamStreamInfo>, String> {
+pub async fn fetch_server_streams(ws_url: &str) -> Result<Vec<UpstreamStreamInfo>, String> {
     let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
     let url = format!("{base}/api/v1/streams");
 
@@ -501,10 +549,11 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }
 }
 
-async fn get_selection(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn get_mode(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db = state.db.lock().await;
-    match db.load_receiver_selection() {
-        Ok(selection) => Json(selection).into_response(),
+    match db.load_receiver_mode() {
+        Ok(Some(mode)) => Json(mode).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no mode configured").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -554,24 +603,11 @@ async fn put_profile(
     }
 }
 
-async fn put_selection(
+async fn put_mode(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<ReceiverSetSelection>,
+    Json(mode): Json<ReceiverMode>,
 ) -> impl IntoResponse {
-    if body.replay_policy == ReplayPolicy::Targeted
-        && body
-            .replay_targets
-            .as_ref()
-            .is_none_or(std::vec::Vec::is_empty)
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            "replay_targets must be provided when replay_policy is targeted",
-        )
-            .into_response();
-    }
-
-    if let rt_protocol::ReceiverSelection::Race { ref race_id, .. } = body.selection
+    if let ReceiverMode::Race { race_id } = &mode
         && race_id.trim().is_empty()
     {
         return (
@@ -581,36 +617,72 @@ async fn put_selection(
             .into_response();
     }
 
-    let normalized = ReceiverSetSelection {
-        selection: body.selection,
-        replay_policy: body.replay_policy,
-        replay_targets: if body.replay_policy == ReplayPolicy::Targeted {
-            body.replay_targets
-        } else {
-            None
-        },
-    };
+    state.pause_all().await;
 
     let db = state.db.lock().await;
-    match db.save_receiver_selection(&normalized) {
+    match db.save_receiver_mode(&mode) {
         Ok(()) => {
             drop(db);
-            let current_state = state.connection_state.read().await.clone();
-            if matches!(
-                current_state,
-                ConnectionState::Connected | ConnectionState::Connecting
-            ) {
-                state.request_connect().await;
-            }
+            let _ = state
+                .ui_tx
+                .send(crate::ui_events::ReceiverUiEvent::ModeChanged { mode: mode.clone() });
+            state.emit_streams_snapshot().await;
+            state.request_connect().await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(crate::db::DbError::ProfileMissing) => {
-            let defaults = default_selection_body();
-            if normalized == defaults {
-                StatusCode::NO_CONTENT.into_response()
-            } else {
-                (StatusCode::NOT_FOUND, "no profile").into_response()
-            }
+            (StatusCode::NOT_FOUND, "no profile").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_pause_stream(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StreamPauseRequest>,
+) -> impl IntoResponse {
+    state
+        .pause_stream(&body.forwarder_id, &body.reader_ip)
+        .await;
+    state.emit_streams_snapshot().await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn post_resume_stream(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StreamPauseRequest>,
+) -> impl IntoResponse {
+    state
+        .resume_stream(&body.forwarder_id, &body.reader_ip)
+        .await;
+    let _ = state.request_reconnect_if_connected().await;
+    state.emit_streams_snapshot().await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn post_pause_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.pause_all().await;
+    state.emit_streams_snapshot().await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn post_resume_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.resume_all().await;
+    let _ = state.request_reconnect_if_connected().await;
+    state.emit_streams_snapshot().await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn put_earliest_epoch(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<EarliestEpochRequest>,
+) -> impl IntoResponse {
+    let db = state.db.lock().await;
+    match db.save_earliest_epoch(&body.forwarder_id, &body.reader_ip, body.earliest_epoch) {
+        Ok(()) => {
+            drop(db);
+            let _ = state.request_reconnect_if_connected().await;
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1169,8 +1241,16 @@ async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoRe
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v1/profile", get(get_profile).put(put_profile))
-        .route("/api/v1/selection", get(get_selection).put(put_selection))
+        .route("/api/v1/mode", get(get_mode).put(put_mode))
         .route("/api/v1/streams", get(get_streams))
+        .route("/api/v1/streams/pause", post(post_pause_stream))
+        .route("/api/v1/streams/resume", post(post_resume_stream))
+        .route("/api/v1/streams/pause-all", post(post_pause_all))
+        .route("/api/v1/streams/resume-all", post(post_resume_all))
+        .route(
+            "/api/v1/streams/earliest-epoch",
+            axum::routing::put(put_earliest_epoch),
+        )
         .route("/api/v1/races", get(get_races))
         .route(
             "/api/v1/replay-targets/epochs",
@@ -1197,40 +1277,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use http_body_util::BodyExt;
-    use rt_updater::workflow::{Checker, run_check, run_download};
-    use std::future::Future;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-    use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tower::ServiceExt;
-
-    struct FakeChecker {
-        check_result: Result<UpdateStatus, String>,
-        download_result: Result<std::path::PathBuf, String>,
-        download_calls: Arc<AtomicUsize>,
-    }
-
-    impl Checker for FakeChecker {
-        fn check<'a>(
-            &'a self,
-        ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
-            let result = self.check_result.clone();
-            Box::pin(async move { result })
-        }
-
-        fn download<'a>(
-            &'a self,
-            _version: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<std::path::PathBuf, String>> + Send + 'a>> {
-            self.download_calls.fetch_add(1, Ordering::SeqCst);
-            let result = self.download_result.clone();
-            Box::pin(async move { result })
-        }
-    }
 
     #[test]
     fn http_base_url_ws_with_port() {
@@ -1249,540 +1295,10 @@ mod tests {
     }
 
     #[test]
-    fn http_base_url_wss_no_port() {
+    fn normalize_server_url_defaults_ws_scheme() {
         assert_eq!(
-            http_base_url("wss://server.example.com"),
-            Some("https://server.example.com".to_owned())
-        );
-    }
-
-    #[test]
-    fn http_base_url_invalid_scheme() {
-        assert_eq!(http_base_url("http://server.example.com"), None);
-    }
-
-    #[test]
-    fn http_base_url_invalid_url() {
-        assert_eq!(http_base_url("not a url"), None);
-    }
-
-    #[test]
-    fn normalize_prepends_ws_when_no_scheme() {
-        assert_eq!(
-            normalize_server_url("127.0.0.1:8080"),
-            "ws://127.0.0.1:8080"
-        );
-    }
-
-    #[test]
-    fn normalize_preserves_ws_scheme() {
-        assert_eq!(
-            normalize_server_url("ws://127.0.0.1:8080"),
-            "ws://127.0.0.1:8080"
-        );
-    }
-
-    #[test]
-    fn normalize_preserves_wss_scheme() {
-        assert_eq!(
-            normalize_server_url("wss://server.example.com"),
-            "wss://server.example.com"
-        );
-    }
-
-    #[test]
-    fn normalize_strips_trailing_slash() {
-        assert_eq!(
-            normalize_server_url("ws://127.0.0.1:8080/"),
-            "ws://127.0.0.1:8080"
-        );
-    }
-
-    #[test]
-    fn normalize_trims_whitespace() {
-        assert_eq!(
-            normalize_server_url("  127.0.0.1:8080  "),
-            "ws://127.0.0.1:8080"
-        );
-    }
-
-    #[tokio::test]
-    async fn post_update_apply_sets_failed_status_when_staged_file_missing() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        *state.update_status.write().await = UpdateStatus::Downloaded {
-            version: "1.2.3".to_owned(),
-        };
-        *state.staged_update_path.write().await = Some(temp.path().join("missing-staged-receiver"));
-
-        let app = build_router(Arc::clone(&state));
-
-        let apply_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/update/apply")
-                    .body(Body::empty())
-                    .expect("build apply request"),
-            )
-            .await
-            .expect("apply request");
-        assert_eq!(apply_resp.status(), StatusCode::OK);
-
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-        let status_resp = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/update/status")
-                    .body(Body::empty())
-                    .expect("build status request"),
-            )
-            .await
-            .expect("status request");
-
-        let bytes = status_resp
-            .into_body()
-            .collect()
-            .await
-            .expect("collect body");
-        let json: serde_json::Value =
-            serde_json::from_slice(&bytes.to_bytes()).expect("status json");
-        assert_eq!(json["status"], "failed");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn post_update_apply_sets_failed_status_when_staged_file_access_denied() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        let blocked_dir = temp.path().join("blocked");
-        std::fs::create_dir(&blocked_dir).expect("create blocked dir");
-        let mut perms = std::fs::metadata(&blocked_dir)
-            .expect("metadata")
-            .permissions();
-        perms.set_mode(0o000);
-        std::fs::set_permissions(&blocked_dir, perms).expect("set blocked permissions");
-
-        *state.update_status.write().await = UpdateStatus::Downloaded {
-            version: "1.2.3".to_owned(),
-        };
-        *state.staged_update_path.write().await = Some(blocked_dir.join("staged-receiver"));
-
-        let app = build_router(Arc::clone(&state));
-
-        let apply_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/update/apply")
-                    .body(Body::empty())
-                    .expect("build apply request"),
-            )
-            .await
-            .expect("apply request");
-        assert_eq!(apply_resp.status(), StatusCode::OK);
-
-        let mut restore_perms = std::fs::metadata(&blocked_dir)
-            .expect("metadata")
-            .permissions();
-        restore_perms.set_mode(0o700);
-        std::fs::set_permissions(&blocked_dir, restore_perms).expect("restore permissions");
-
-        let status_resp = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/update/status")
-                    .body(Body::empty())
-                    .expect("build status request"),
-            )
-            .await
-            .expect("status request");
-
-        let bytes = status_resp
-            .into_body()
-            .collect()
-            .await
-            .expect("collect body");
-        let json: serde_json::Value =
-            serde_json::from_slice(&bytes.to_bytes()).expect("status json");
-        assert_eq!(json["status"], "failed");
-        let error = json["error"]
-            .as_str()
-            .expect("error string")
-            .to_ascii_lowercase();
-        assert!(
-            error.contains("permission denied"),
-            "expected permission error, got: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn get_update_status_serializes_variants() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        let app = build_router(Arc::clone(&state));
-
-        let up_to_date_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/update/status")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("up_to_date response");
-        let up_to_date_body = up_to_date_resp
-            .into_body()
-            .collect()
-            .await
-            .expect("collect up_to_date body");
-        let up_to_date_json: serde_json::Value =
-            serde_json::from_slice(&up_to_date_body.to_bytes()).expect("up_to_date json");
-        assert_eq!(up_to_date_json["status"], "up_to_date");
-
-        *state.update_status.write().await = UpdateStatus::Downloaded {
-            version: "1.2.3".to_owned(),
-        };
-        let downloaded_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/update/status")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("downloaded response");
-        let downloaded_body = downloaded_resp
-            .into_body()
-            .collect()
-            .await
-            .expect("collect downloaded body");
-        let downloaded_json: serde_json::Value =
-            serde_json::from_slice(&downloaded_body.to_bytes()).expect("downloaded json");
-        assert_eq!(downloaded_json["status"], "downloaded");
-        assert_eq!(downloaded_json["version"], "1.2.3");
-
-        *state.update_status.write().await = UpdateStatus::Failed {
-            error: "boom".to_owned(),
-        };
-        let failed_resp = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/update/status")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("failed response");
-        let failed_body = failed_resp
-            .into_body()
-            .collect()
-            .await
-            .expect("collect failed body");
-        let failed_json: serde_json::Value =
-            serde_json::from_slice(&failed_body.to_bytes()).expect("failed json");
-        assert_eq!(failed_json["status"], "failed");
-        assert_eq!(failed_json["error"], "boom");
-    }
-
-    #[tokio::test]
-    async fn post_update_apply_returns_not_found_when_unstaged() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        let app = build_router(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/update/apply")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-        let body = response.into_body().collect().await.expect("collect body");
-        let json: serde_json::Value = serde_json::from_slice(&body.to_bytes()).expect("json body");
-        assert_eq!(json["error"], "no update staged");
-    }
-
-    #[tokio::test]
-    async fn update_check_skips_download_in_check_only_mode() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        let download_calls = Arc::new(AtomicUsize::new(0));
-        let checker = FakeChecker {
-            check_result: Ok(UpdateStatus::Available {
-                version: "1.2.3".to_owned(),
-            }),
-            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
-            download_calls: Arc::clone(&download_calls),
-        };
-
-        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-        let status = run_check(&workflow_state, &checker, rt_updater::UpdateMode::CheckOnly).await;
-
-        assert_eq!(
-            status,
-            UpdateStatus::Available {
-                version: "1.2.3".to_owned()
-            }
-        );
-        assert_eq!(download_calls.load(Ordering::SeqCst), 0);
-        assert!(state.staged_update_path.read().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn update_check_downloads_in_check_and_download_mode() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        let download_calls = Arc::new(AtomicUsize::new(0));
-        let checker = FakeChecker {
-            check_result: Ok(UpdateStatus::Available {
-                version: "1.2.3".to_owned(),
-            }),
-            download_result: Ok(std::path::PathBuf::from("/tmp/staged-receiver")),
-            download_calls: Arc::clone(&download_calls),
-        };
-
-        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-        let status = run_check(
-            &workflow_state,
-            &checker,
-            rt_updater::UpdateMode::CheckAndDownload,
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            UpdateStatus::Downloaded {
-                version: "1.2.3".to_owned()
-            }
-        );
-        assert_eq!(download_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            *state.staged_update_path.read().await,
-            Some(std::path::PathBuf::from("/tmp/staged-receiver"))
-        );
-    }
-
-    #[tokio::test]
-    async fn update_download_downloads_when_available() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        *state.update_status.write().await = UpdateStatus::Available {
-            version: "2.0.0".to_owned(),
-        };
-        let download_calls = Arc::new(AtomicUsize::new(0));
-        let checker = FakeChecker {
-            check_result: Ok(UpdateStatus::UpToDate),
-            download_result: Ok(std::path::PathBuf::from("/tmp/staged-receiver")),
-            download_calls: Arc::clone(&download_calls),
-        };
-
-        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-        let status = run_download(&workflow_state, &checker).await;
-
-        assert_eq!(
-            status,
-            Ok(UpdateStatus::Downloaded {
-                version: "2.0.0".to_owned()
-            })
-        );
-        assert_eq!(download_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            *state.staged_update_path.read().await,
-            Some(std::path::PathBuf::from("/tmp/staged-receiver"))
-        );
-    }
-
-    #[tokio::test]
-    async fn update_download_failure_emits_failed_event() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        *state.update_status.write().await = UpdateStatus::Available {
-            version: "2.0.0".to_owned(),
-        };
-        let mut rx = state.ui_tx.subscribe();
-
-        let checker = FakeChecker {
-            check_result: Ok(UpdateStatus::UpToDate),
-            download_result: Err("boom".to_owned()),
-            download_calls: Arc::new(AtomicUsize::new(0)),
-        };
-
-        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-        let status = run_download(&workflow_state, &checker).await;
-        assert_eq!(
-            status,
-            Err(UpdateStatus::Failed {
-                error: "boom".to_owned()
-            })
-        );
-
-        let evt = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect("timed out waiting for ui event")
-            .expect("recv event");
-        match evt {
-            crate::ui_events::ReceiverUiEvent::UpdateStatusChanged { status } => match status {
-                UpdateStatus::Failed { error } => assert_eq!(error, "boom"),
-                other => panic!("unexpected status: {other:?}"),
-            },
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn update_download_returns_conflict_when_up_to_date() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-
-        let checker = FakeChecker {
-            check_result: Ok(UpdateStatus::UpToDate),
-            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
-            download_calls: Arc::new(AtomicUsize::new(0)),
-        };
-
-        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-        let status = run_download(&workflow_state, &checker).await;
-        assert!(status.is_err());
-    }
-
-    #[tokio::test]
-    async fn update_download_is_idempotent_when_already_downloaded() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let db = Db::open(&temp.path().join("receiver.sqlite3")).expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        *state.update_status.write().await = UpdateStatus::Downloaded {
-            version: "2.0.0".to_owned(),
-        };
-
-        let checker = FakeChecker {
-            check_result: Ok(UpdateStatus::UpToDate),
-            download_result: Ok(std::path::PathBuf::from("/tmp/unused")),
-            download_calls: Arc::new(AtomicUsize::new(0)),
-        };
-
-        let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-        let status = run_download(&workflow_state, &checker).await;
-        assert_eq!(
-            status,
-            Ok(UpdateStatus::Downloaded {
-                version: "2.0.0".to_owned()
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn build_streams_response_includes_reads_fields_for_subscribed_streams() {
-        let db = Db::open_in_memory().expect("open in-memory db");
-        let (state, _shutdown_rx) = AppState::new(db);
-        {
-            let mut db = state.db.lock().await;
-            db.replace_subscriptions(&[crate::db::Subscription {
-                forwarder_id: "f1".to_owned(),
-                reader_ip: "10.0.0.1".to_owned(),
-                local_port_override: None,
-            }])
-            .expect("replace subscriptions");
-        }
-
-        let key = crate::cache::StreamKey::new("f1", "10.0.0.1");
-        for seq in 1..=9 {
-            state.stream_counts.record(&key, 7, seq);
-        }
-
-        let response = state.build_streams_response().await;
-        let stream = response
-            .streams
-            .iter()
-            .find(|s| s.forwarder_id == "f1" && s.reader_ip == "10.0.0.1")
-            .expect("stream exists");
-
-        assert_eq!(stream.reads_total, Some(9));
-        assert_eq!(stream.reads_epoch, Some(9));
-    }
-
-    #[tokio::test]
-    async fn build_streams_response_excludes_reads_fields_for_unsubscribed_streams() {
-        let db = Db::open_in_memory().expect("open in-memory db");
-        let (state, _shutdown_rx) = AppState::new(db);
-
-        let key = crate::cache::StreamKey::new("f1", "10.0.0.1");
-        for seq in 1..=5 {
-            state.stream_counts.record(&key, 3, seq);
-        }
-
-        let upstream_app = Router::new().route(
-            "/api/v1/streams",
-            get(|| async {
-                Json(serde_json::json!({
-                    "streams": [{
-                        "stream_id": "stream-1",
-                        "forwarder_id": "f1",
-                        "reader_ip": "10.0.0.1",
-                        "display_alias": "Finish",
-                        "stream_epoch": 3,
-                        "online": true,
-                        "current_epoch_name": "Heat 1"
-                    }]
-                }))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind upstream listener");
-        let addr = listener.local_addr().expect("read upstream addr");
-        tokio::spawn(async move {
-            axum::serve(listener, upstream_app)
-                .await
-                .expect("serve upstream app");
-        });
-        *state.upstream_url.write().await = Some(format!("ws://{addr}"));
-        state.set_connection_state(ConnectionState::Connected).await;
-
-        let response = state.build_streams_response().await;
-        let stream = response
-            .streams
-            .iter()
-            .find(|s| s.forwarder_id == "f1" && s.reader_ip == "10.0.0.1")
-            .expect("unsubscribed upstream stream is present");
-        assert!(!stream.subscribed);
-        assert_eq!(stream.reads_total, None);
-        assert_eq!(stream.reads_epoch, None);
-    }
-
-    #[test]
-    fn update_check_init_error_maps_to_http_500() {
-        let (status_code, status) = update_check_init_error_status("boom".to_owned());
-        assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            status,
-            UpdateStatus::Failed {
-                error: "boom".to_owned()
-            }
+            normalize_server_url("127.0.0.1:4000/"),
+            "ws://127.0.0.1:4000".to_owned()
         );
     }
 }

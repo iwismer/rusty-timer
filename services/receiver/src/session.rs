@@ -1,12 +1,10 @@
 use crate::db::Db;
 use futures_util::{SinkExt, StreamExt};
-use rt_protocol::{
-    AckEntry, ReadEvent, ReceiverAck, ReceiverHelloV11, ReceiverSelection, StreamRef, WsMessage,
-};
+use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, WsMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio::sync::{Mutex, RwLock, watch};
+use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, error, info, warn};
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -76,47 +74,6 @@ fn apply_batch_counts(
     updates
 }
 
-pub async fn connect(url: &str, rid: &str, db: &Db) -> Result<Session, SessionError> {
-    let mut selection = db.load_receiver_selection().map_err(SessionError::Db)?;
-    if let ReceiverSelection::Manual { streams } = &mut selection.selection
-        && streams.is_empty()
-    {
-        let subs = db.load_subscriptions().map_err(SessionError::Db)?;
-        *streams = subs
-            .into_iter()
-            .map(|s| StreamRef {
-                forwarder_id: s.forwarder_id,
-                reader_ip: s.reader_ip,
-            })
-            .collect();
-    }
-    info!(rid, url, "connecting");
-    let (mut ws, _) = connect_async(url).await?;
-    let h = WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
-        receiver_id: rid.to_owned(),
-        selection: selection.selection,
-        replay_policy: selection.replay_policy,
-        replay_targets: selection.replay_targets,
-    });
-    ws.send(Message::Text(serde_json::to_string(&h)?.into()))
-        .await?;
-    let m = ws.next().await.ok_or(SessionError::ConnectionClosed)??;
-    let text = match m {
-        Message::Text(t) => t,
-        Message::Close(_) => return Err(SessionError::ConnectionClosed),
-        _ => return Err(SessionError::UnexpectedFirstMessage),
-    };
-    match serde_json::from_str::<WsMessage>(&text)? {
-        WsMessage::Heartbeat(hb) => {
-            info!(sid=%hb.session_id,"established");
-            Ok(Session {
-                session_id: hb.session_id,
-                device_id: hb.device_id,
-            })
-        }
-        _ => Err(SessionError::UnexpectedFirstMessage),
-    }
-}
 pub async fn run_session_loop<S>(
     mut ws: S,
     session_id: String,
@@ -125,6 +82,8 @@ pub async fn run_session_loop<S>(
     stream_counts: crate::cache::StreamCounts,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     mut shutdown: watch::Receiver<bool>,
+    paused_streams: Arc<RwLock<HashSet<String>>>,
+    all_paused: Arc<RwLock<bool>>,
 ) -> Result<(), SessionError>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
@@ -143,19 +102,43 @@ where
                         match serde_json::from_str::<WsMessage>(&t) {
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
-                                for e in &b.events { let _ = event_tx.send(e.clone()); }
-                                let updates = apply_batch_counts(&stream_counts, &b.events);
+                                let all_paused_now = *all_paused.read().await;
+                                let paused_set = paused_streams.read().await;
+                                let forwarded_events: Vec<ReadEvent> = b
+                                    .events
+                                    .iter()
+                                    .filter(|e| {
+                                        if all_paused_now {
+                                            return false;
+                                        }
+                                        !paused_set.contains(&format!("{}/{}", e.forwarder_id, e.reader_ip))
+                                    })
+                                    .cloned()
+                                    .collect();
+                                drop(paused_set);
+                                if forwarded_events.is_empty() {
+                                    continue;
+                                }
+
+                                for e in &forwarded_events { let _ = event_tx.send(e.clone()); }
+                                let updates = apply_batch_counts(&stream_counts, &forwarded_events);
                                 if !updates.is_empty() {
                                     let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamCountsUpdated {
                                         updates,
                                     });
                                 }
                                 let mut hw: HashMap<(String,String,u64),u64> = HashMap::new();
-                                for e in &b.events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
+                                for e in &forwarded_events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();
                                 { let d=db.lock().await; for((f,i,ep),ls) in &hw { if let Err(e)=d.save_cursor(f,i,*ep,*ls){error!(error=%e);} acks.push(AckEntry{forwarder_id:f.clone(),reader_ip:i.clone(),stream_epoch:*ep,last_seq:*ls}); } }
                                 let ack=WsMessage::ReceiverAck(ReceiverAck{session_id:session_id.clone(),entries:acks});
                                 ws.send(Message::Text(serde_json::to_string(&ack)?.into())).await?;
+                            }
+                            Ok(WsMessage::ReceiverModeApplied(applied)) => {
+                                info!(mode=%applied.mode_summary, streams=applied.resolved_stream_count, "server applied mode");
+                                for warning in applied.warnings {
+                                    warn!(warning = %warning, "server mode warning");
+                                }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }

@@ -1,14 +1,13 @@
 use futures_util::{SinkExt, StreamExt};
 use receiver::cache::StreamCounts;
 use receiver::db::Db;
-use receiver::session::{SessionError, connect, run_session_loop};
+use receiver::session::{SessionError, run_session_loop};
 use receiver::ui_events::ReceiverUiEvent;
 use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, WsMessage};
-use rt_test_utils::MockWsServer;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot, watch};
+use tokio::sync::{Mutex, RwLock, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -33,51 +32,6 @@ async fn join_server_task(task: JoinHandle<()>) {
         .await
         .expect("server task timed out")
         .expect("server task panicked");
-}
-
-#[tokio::test]
-async fn connect_returns_session_on_heartbeat_first_message() {
-    let server = MockWsServer::start().await.unwrap();
-    let db = Db::open_in_memory().unwrap();
-
-    let session = connect(&format!("ws://{}", server.local_addr()), "rcv-001", &db)
-        .await
-        .unwrap();
-
-    assert!(!session.session_id.is_empty());
-    assert_eq!(session.device_id, "rcv-001");
-}
-
-#[tokio::test]
-async fn connect_errors_when_first_message_is_non_text() {
-    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
-        let _ = ws.next().await;
-        ws.send(Message::Binary(vec![0xde, 0xad].into()))
-            .await
-            .unwrap();
-    })
-    .await;
-
-    let db = Db::open_in_memory().unwrap();
-    let result = connect(&format!("ws://{addr}"), "rcv-002", &db).await;
-
-    assert!(matches!(result, Err(SessionError::UnexpectedFirstMessage)));
-    join_server_task(task).await;
-}
-
-#[tokio::test]
-async fn connect_errors_when_server_closes_before_heartbeat() {
-    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
-        let _ = ws.next().await;
-        ws.send(Message::Close(None)).await.unwrap();
-    })
-    .await;
-
-    let db = Db::open_in_memory().unwrap();
-    let result = connect(&format!("ws://{addr}"), "rcv-003", &db).await;
-
-    assert!(matches!(result, Err(SessionError::ConnectionClosed)));
-    join_server_task(task).await;
 }
 
 #[tokio::test]
@@ -148,6 +102,8 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(16);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(false));
 
     run_session_loop(
         ws,
@@ -157,6 +113,8 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
         StreamCounts::new(),
         ui_tx,
         shutdown_rx,
+        paused_streams,
+        all_paused,
     )
     .await
     .unwrap();
@@ -197,6 +155,61 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
 }
 
 #[tokio::test]
+async fn run_session_loop_drops_events_when_all_paused() {
+    let (ack_tx, ack_rx) = oneshot::channel();
+    let (addr, task) = run_raw_ws_server_once(move |mut ws| async move {
+        let msg = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+            session_id: "session-paused".to_owned(),
+            events: vec![ReadEvent {
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                stream_epoch: 1,
+                seq: 1,
+                reader_timestamp: "2026-02-01T00:00:00.000Z".to_owned(),
+                raw_read_line: "raw-1".to_owned(),
+                read_type: "RAW".to_owned(),
+            }],
+        });
+        ws.send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        let _ = ws.send(Message::Close(None)).await;
+        let _ = ack_tx.send(());
+    })
+    .await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(true));
+
+    run_session_loop(
+        ws,
+        "session-paused".to_owned(),
+        db.clone(),
+        event_tx,
+        StreamCounts::new(),
+        ui_tx,
+        shutdown_rx,
+        paused_streams,
+        all_paused,
+    )
+    .await
+    .unwrap();
+
+    assert!(event_rx.try_recv().is_err());
+    assert!(db.lock().await.load_resume_cursors().unwrap().is_empty());
+    let _ = ack_rx.await;
+    join_server_task(task).await;
+}
+
+#[tokio::test]
 async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
     let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
         let msg = WsMessage::Error(ErrorMessage {
@@ -218,6 +231,8 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(false));
 
     let result = run_session_loop(
         ws,
@@ -227,6 +242,8 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
         StreamCounts::new(),
         ui_tx,
         shutdown_rx,
+        paused_streams,
+        all_paused,
     )
     .await;
     assert!(matches!(result, Err(SessionError::ConnectionClosed)));
@@ -255,6 +272,8 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(false));
 
     let result = run_session_loop(
         ws,
@@ -264,6 +283,8 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
         StreamCounts::new(),
         ui_tx,
         shutdown_rx,
+        paused_streams,
+        all_paused,
     )
     .await;
     assert!(result.is_ok());
@@ -294,6 +315,8 @@ async fn run_session_loop_replies_to_ping_with_pong() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(false));
 
     let result = run_session_loop(
         ws,
@@ -303,6 +326,8 @@ async fn run_session_loop_replies_to_ping_with_pong() {
         StreamCounts::new(),
         ui_tx,
         shutdown_rx,
+        paused_streams,
+        all_paused,
     )
     .await;
 
@@ -326,6 +351,8 @@ async fn run_session_loop_stops_on_shutdown_signal() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
+    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let all_paused = Arc::new(RwLock::new(false));
 
     let handle = tokio::spawn(run_session_loop(
         ws,
@@ -335,6 +362,8 @@ async fn run_session_loop_stops_on_shutdown_signal() {
         StreamCounts::new(),
         ui_tx,
         shutdown_rx,
+        paused_streams,
+        all_paused,
     ));
 
     shutdown_tx.send(true).unwrap();

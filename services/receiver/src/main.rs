@@ -308,7 +308,7 @@ async fn main() {
                             Some(base_url) => {
                                 // Build the full WS URL from the base URL.
                                 let ws_url = format!(
-                                    "{}/ws/v1.1/receivers",
+                                    "{}/ws/v1.2/receivers",
                                     base_url.trim_end_matches('/')
                                 );
                                 // Read the token from the saved profile so we can
@@ -371,6 +371,8 @@ async fn main() {
                                                 let bus = event_bus.clone();
                                                 let counts = state.stream_counts.clone();
                                                 let ui_tx = state.ui_tx.clone();
+                                                let paused_streams = Arc::clone(&state.paused_streams);
+                                                let all_paused = Arc::clone(&state.all_paused);
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
@@ -382,6 +384,8 @@ async fn main() {
                                                         counts,
                                                         ui_tx,
                                                         cancel_rx,
+                                                        paused_streams,
+                                                        all_paused,
                                                     )
                                                     .await;
                                                     match result {
@@ -561,38 +565,110 @@ where
         > + Unpin,
 {
     use futures_util::{SinkExt, StreamExt};
-    use rt_protocol::{ReceiverHelloV11, ReceiverSelection, StreamRef, WsMessage};
+    use rt_protocol::{
+        EarliestEpochOverride, ReceiverHelloV12, ReceiverMode, StreamRef, WsMessage,
+    };
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    let mut selection_config = match db.load_receiver_selection() {
-        Ok(s) => s,
+    let resume = match db.load_resume_cursors() {
+        Ok(cursors) => cursors,
         Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
     };
-
-    // Legacy compatibility: if manual mode has no explicit streams persisted,
-    // bootstrap from existing local subscriptions.
-    if let ReceiverSelection::Manual { streams } = &mut selection_config.selection
-        && streams.is_empty()
-    {
-        match db.load_subscriptions() {
-            Ok(subs) => {
-                *streams = subs
+    let mut mode = match db.load_receiver_mode() {
+        Ok(Some(mode)) => mode,
+        Ok(None) => {
+            let streams = match db.load_subscriptions() {
+                Ok(subs) => subs
                     .into_iter()
                     .map(|s| StreamRef {
                         forwarder_id: s.forwarder_id,
                         reader_ip: s.reader_ip,
                     })
-                    .collect();
+                    .collect(),
+                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            };
+            ReceiverMode::Live {
+                streams,
+                earliest_epochs: vec![],
             }
-            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
         }
+        Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+    };
+
+    if let ReceiverMode::Live {
+        ref mut streams,
+        ref mut earliest_epochs,
+    } = mode
+    {
+        if streams.is_empty() {
+            match db.load_subscriptions() {
+                Ok(subs) => {
+                    *streams = subs
+                        .into_iter()
+                        .map(|s| StreamRef {
+                            forwarder_id: s.forwarder_id,
+                            reader_ip: s.reader_ip,
+                        })
+                        .collect();
+                }
+                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            }
+        }
+
+        let mut map: HashMap<(String, String), i64> = match db.load_earliest_epochs() {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(fwd, ip, epoch)| ((fwd, ip), epoch))
+                .collect(),
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+
+        let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
+        if let Some(url) = profile_url
+            && let Ok(server_streams) = receiver::control_api::fetch_server_streams(&url).await
+        {
+            let server_epoch_by_stream: HashMap<(String, String), i64> = server_streams
+                .into_iter()
+                .map(|stream| {
+                    (
+                        (stream.forwarder_id, stream.reader_ip),
+                        i64::try_from(stream.stream_epoch).unwrap_or(i64::MAX),
+                    )
+                })
+                .collect();
+
+            for stream in streams.iter() {
+                map.entry((stream.forwarder_id.clone(), stream.reader_ip.clone()))
+                    .or_insert_with(|| {
+                        server_epoch_by_stream
+                            .get(&(stream.forwarder_id.clone(), stream.reader_ip.clone()))
+                            .copied()
+                            .unwrap_or(0)
+                    });
+            }
+        }
+
+        *earliest_epochs = map
+            .into_iter()
+            .map(
+                |((forwarder_id, reader_ip), earliest_epoch)| EarliestEpochOverride {
+                    forwarder_id,
+                    reader_ip,
+                    earliest_epoch,
+                },
+            )
+            .collect();
+        earliest_epochs.sort_by(|a, b| {
+            a.forwarder_id
+                .cmp(&b.forwarder_id)
+                .then(a.reader_ip.cmp(&b.reader_ip))
+        });
     }
 
-    let hello = WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+    let hello = WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
         receiver_id: "receiver-main".to_owned(),
-        selection: selection_config.selection,
-        replay_policy: selection_config.replay_policy,
-        replay_targets: selection_config.replay_targets,
+        mode,
+        resume,
     });
 
     let hello_text = match serde_json::to_string(&hello) {
@@ -604,32 +680,42 @@ where
         return (Err(receiver::session::SessionError::Ws(e)), None);
     }
 
-    let msg = match ws.next().await {
-        None => return (Err(receiver::session::SessionError::ConnectionClosed), None),
-        Some(Err(e)) => return (Err(receiver::session::SessionError::Ws(e)), None),
-        Some(Ok(m)) => m,
-    };
+    loop {
+        let msg = match ws.next().await {
+            None => return (Err(receiver::session::SessionError::ConnectionClosed), None),
+            Some(Err(e)) => return (Err(receiver::session::SessionError::Ws(e)), None),
+            Some(Ok(m)) => m,
+        };
 
-    let text = match msg {
-        Message::Text(t) => t,
-        _ => {
-            return (
-                Err(receiver::session::SessionError::UnexpectedFirstMessage),
-                None,
-            );
-        }
-    };
+        let text = match msg {
+            Message::Text(t) => t,
+            _ => {
+                return (
+                    Err(receiver::session::SessionError::UnexpectedFirstMessage),
+                    None,
+                );
+            }
+        };
 
-    match serde_json::from_str::<WsMessage>(&text) {
-        Ok(WsMessage::Heartbeat(hb)) => {
-            info!(session_id = %hb.session_id, "handshake complete");
-            (Ok(hb.session_id), Some(ws))
+        match serde_json::from_str::<WsMessage>(&text) {
+            Ok(WsMessage::Heartbeat(hb)) => {
+                info!(session_id = %hb.session_id, "handshake complete");
+                return (Ok(hb.session_id), Some(ws));
+            }
+            Ok(WsMessage::ReceiverModeApplied(applied)) => {
+                info!(mode = %applied.mode_summary, streams = applied.resolved_stream_count, "mode applied before heartbeat");
+                for warning in applied.warnings {
+                    warn!(warning = %warning, "server mode warning");
+                }
+            }
+            Ok(_) => {
+                return (
+                    Err(receiver::session::SessionError::UnexpectedFirstMessage),
+                    None,
+                );
+            }
+            Err(e) => return (Err(receiver::session::SessionError::Json(e)), None),
         }
-        Ok(_) => (
-            Err(receiver::session::SessionError::UnexpectedFirstMessage),
-            None,
-        ),
-        Err(e) => (Err(receiver::session::SessionError::Json(e)), None),
     }
 }
 

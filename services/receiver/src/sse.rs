@@ -21,6 +21,7 @@ pub async fn receiver_sse(
                 ReceiverUiEvent::LogEntry { .. } => "log_entry",
                 ReceiverUiEvent::UpdateStatusChanged { .. } => "update_status_changed",
                 ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
+                ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
