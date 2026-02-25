@@ -158,6 +158,100 @@ async fn recv_first_event_batch(
     }
 }
 
+async fn collect_event_lines_until_idle(
+    client: &mut MockWsClient,
+    max_total: Duration,
+    idle_quiet_period: Duration,
+    require_event_batch: bool,
+) -> (Vec<String>, bool) {
+    let overall_deadline = tokio::time::Instant::now() + max_total;
+    let mut seen = Vec::new();
+    let mut saw_mode_applied = false;
+    let mut saw_event_batch = false;
+    let mut last_event_at = tokio::time::Instant::now();
+
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= overall_deadline {
+            break;
+        }
+
+        if saw_event_batch && now.duration_since(last_event_at) >= idle_quiet_period {
+            break;
+        }
+
+        let remaining_total = overall_deadline.saturating_duration_since(now);
+        let wait_for = if saw_event_batch {
+            let until_idle = idle_quiet_period.saturating_sub(now.duration_since(last_event_at));
+            until_idle.min(remaining_total)
+        } else {
+            remaining_total
+        };
+        assert!(
+            !wait_for.is_zero(),
+            "zero wait while collecting receiver events"
+        );
+
+        match tokio::time::timeout(wait_for, client.recv_message()).await {
+            Err(_) => {
+                if should_stop_collecting_on_timeout(
+                    require_event_batch,
+                    saw_event_batch,
+                    saw_mode_applied,
+                ) {
+                    break;
+                }
+                panic!("timeout waiting for receiver event batch");
+            }
+            Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+                for event in batch.events {
+                    seen.push(event.raw_read_line);
+                }
+                saw_event_batch = true;
+                last_event_at = tokio::time::Instant::now();
+            }
+            Ok(Ok(WsMessage::ReceiverModeApplied(_))) => {
+                saw_mode_applied = true;
+            }
+            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(other)) => {
+                panic!("unexpected message while collecting receiver events: {other:?}")
+            }
+            Ok(Err(err)) => panic!("recv error: {err}"),
+        }
+    }
+
+    assert!(
+        !require_event_batch || saw_event_batch,
+        "timeout waiting for receiver event batch"
+    );
+
+    (seen, saw_mode_applied)
+}
+
+fn should_stop_collecting_on_timeout(
+    require_event_batch: bool,
+    saw_event_batch: bool,
+    _saw_mode_applied: bool,
+) -> bool {
+    saw_event_batch || !require_event_batch
+}
+
+#[test]
+fn collect_timeout_stops_when_event_batch_already_seen() {
+    assert!(should_stop_collecting_on_timeout(true, true, false));
+}
+
+#[test]
+fn collect_timeout_panics_when_event_batch_required_and_not_seen() {
+    assert!(!should_stop_collecting_on_timeout(true, false, false));
+}
+
+#[test]
+fn collect_timeout_stops_for_optional_collection_even_if_quiet() {
+    assert!(should_stop_collecting_on_timeout(false, false, false));
+}
+
 #[tokio::test]
 async fn receiver_v12_live_uses_persisted_then_earliest_then_current_precedence() {
     let (pool, addr) = start_server().await;
@@ -506,5 +600,288 @@ async fn receiver_v12_race_includes_non_current_epoch_mapping_and_replays_on_new
     assert!(
         refreshed.is_ok(),
         "new race streams must replay backlog after refresh"
+    );
+}
+
+#[tokio::test]
+async fn receiver_v12_live_stale_resume_without_prior_events_still_streams_live_data() {
+    let (pool, addr) = start_server().await;
+    insert_token(
+        &pool,
+        "fwd-live-fallback",
+        "forwarder",
+        b"fwd-live-fallback-token",
+    )
+    .await;
+    insert_token(
+        &pool,
+        "rcv-live-fallback",
+        "receiver",
+        b"rcv-live-fallback-token",
+    )
+    .await;
+
+    let mut fwd = connect_forwarder(
+        addr,
+        "fwd-live-fallback-token",
+        "fwd-live-fallback",
+        "10.14.0.1:10000",
+    )
+    .await;
+    let fwd_session = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {other:?}"),
+    };
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-live-fallback".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-live-fallback".to_owned(),
+                reader_ip: "10.14.0.1:10000".to_owned(),
+            }],
+            earliest_epochs: vec![],
+        },
+        resume: vec![ResumeCursor {
+            forwarder_id: "fwd-live-fallback".to_owned(),
+            reader_ip: "10.14.0.1:10000".to_owned(),
+            stream_epoch: 99,
+            last_seq: 999,
+        }],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-live-fallback-token", hello).await;
+
+    // No prior events exist. A stale cursor must not prevent receiving subsequent live data.
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-live-fallback",
+        "10.14.0.1:10000",
+        1,
+        1,
+        "LIVE_FALLBACK_E1_S1",
+    )
+    .await;
+
+    let batch = recv_first_event_batch(&mut rcv, Duration::from_secs(5)).await;
+    assert!(
+        batch
+            .events
+            .iter()
+            .any(|event| event.raw_read_line == "LIVE_FALLBACK_E1_S1")
+    );
+}
+
+#[tokio::test]
+async fn receiver_v12_race_stale_resume_does_not_filter_replayed_older_epoch_data() {
+    let (pool, addr) = start_server().await;
+    insert_token(
+        &pool,
+        "fwd-race-stale",
+        "forwarder",
+        b"fwd-race-stale-token",
+    )
+    .await;
+    insert_token(&pool, "rcv-race-stale", "receiver", b"rcv-race-stale-token").await;
+
+    let race_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO races (race_id, name) VALUES ($1, $2)")
+        .bind(race_id)
+        .bind("Race Stale Cursor")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut fwd = connect_forwarder(
+        addr,
+        "fwd-race-stale-token",
+        "fwd-race-stale",
+        "10.15.0.1:10000",
+    )
+    .await;
+    let fwd_session = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {other:?}"),
+    };
+
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-race-stale",
+        "10.15.0.1:10000",
+        1,
+        1,
+        "RACE_STALE_E1_S1",
+    )
+    .await;
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-race-stale",
+        "10.15.0.1:10000",
+        2,
+        1,
+        "RACE_STALE_E2_S1",
+    )
+    .await;
+
+    let stream_id = wait_for_stream_id(&pool, "fwd-race-stale", "10.15.0.1:10000").await;
+    sqlx::query(
+        "INSERT INTO stream_epoch_races (stream_id, stream_epoch, race_id) VALUES ($1, $2, $3)",
+    )
+    .bind(stream_id)
+    .bind(1_i64)
+    .bind(race_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-race-stale".to_owned(),
+        mode: ReceiverMode::Race {
+            race_id: race_id.to_string(),
+        },
+        // Stale/high cursor must not suppress replay of race-mapped older epoch.
+        resume: vec![ResumeCursor {
+            forwarder_id: "fwd-race-stale".to_owned(),
+            reader_ip: "10.15.0.1:10000".to_owned(),
+            stream_epoch: 2,
+            last_seq: 999,
+        }],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-race-stale-token", hello).await;
+
+    let (replayed_lines, _saw_mode_applied) = collect_event_lines_until_idle(
+        &mut rcv,
+        Duration::from_secs(5),
+        Duration::from_millis(250),
+        true,
+    )
+    .await;
+    assert!(
+        replayed_lines.iter().any(|line| line == "RACE_STALE_E1_S1"),
+        "race replay should include mapped epoch data regardless of stale resume cursor"
+    );
+    assert!(
+        replayed_lines.iter().any(|line| line == "RACE_STALE_E2_S1"),
+        "race selection is stream-level in v1.2 and replays same-stream epochs once selected"
+    );
+}
+
+#[tokio::test]
+async fn receiver_v12_targeted_replay_is_snapshot_bounded_when_new_events_arrive_after_mode_apply()
+{
+    let (pool, addr) = start_server().await;
+    insert_token(
+        &pool,
+        "fwd-tr-snapshot",
+        "forwarder",
+        b"fwd-tr-snapshot-token",
+    )
+    .await;
+    insert_token(
+        &pool,
+        "rcv-tr-snapshot",
+        "receiver",
+        b"rcv-tr-snapshot-token",
+    )
+    .await;
+
+    let mut fwd = connect_forwarder(
+        addr,
+        "fwd-tr-snapshot-token",
+        "fwd-tr-snapshot",
+        "10.16.0.1:10000",
+    )
+    .await;
+    let fwd_session = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {other:?}"),
+    };
+
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-tr-snapshot",
+        "10.16.0.1:10000",
+        7,
+        1,
+        "TR_SNAP_E7_S1",
+    )
+    .await;
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-tr-snapshot",
+        "10.16.0.1:10000",
+        7,
+        2,
+        "TR_SNAP_E7_S2",
+    )
+    .await;
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-tr-snapshot".to_owned(),
+        mode: ReceiverMode::TargetedReplay {
+            targets: vec![ReplayTarget {
+                forwarder_id: "fwd-tr-snapshot".to_owned(),
+                reader_ip: "10.16.0.1:10000".to_owned(),
+                stream_epoch: 7,
+                from_seq: 1,
+            }],
+        },
+        resume: vec![],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-tr-snapshot-token", hello).await;
+
+    let (mut seen, mut saw_mode_applied) = collect_event_lines_until_idle(
+        &mut rcv,
+        Duration::from_secs(5),
+        Duration::from_millis(250),
+        false,
+    )
+    .await;
+    assert!(
+        !seen.is_empty() || saw_mode_applied,
+        "expected replay batch or ReceiverModeApplied"
+    );
+
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-tr-snapshot",
+        "10.16.0.1:10000",
+        7,
+        3,
+        "TR_SNAP_E7_S3_AFTER_APPLY",
+    )
+    .await;
+
+    let (post_apply_seen, post_apply_saw_mode_applied) = collect_event_lines_until_idle(
+        &mut rcv,
+        Duration::from_secs(5),
+        Duration::from_millis(300),
+        false,
+    )
+    .await;
+    seen.extend(post_apply_seen);
+    saw_mode_applied |= post_apply_saw_mode_applied;
+
+    assert!(
+        saw_mode_applied,
+        "expected ReceiverModeApplied during targeted replay session"
+    );
+
+    assert!(
+        seen.iter().any(|line| line == "TR_SNAP_E7_S1"),
+        "expected snapshot to include seq 1"
+    );
+    assert!(
+        seen.iter().any(|line| line == "TR_SNAP_E7_S2"),
+        "expected snapshot to include seq 2"
+    );
+    assert!(
+        !seen.iter().any(|line| line == "TR_SNAP_E7_S3_AFTER_APPLY"),
+        "targeted replay snapshot must be bounded and exclude events after mode apply"
     );
 }
