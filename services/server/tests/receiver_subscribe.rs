@@ -100,7 +100,7 @@ async fn send_forwarder_event(
             stream_epoch,
             seq,
             reader_timestamp: "2026-02-25T12:00:00.000Z".to_owned(),
-            raw_read_line: raw_line.to_owned(),
+            raw_frame: raw_line.as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -205,7 +205,7 @@ async fn collect_event_lines_until_idle(
             }
             Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
                 for event in batch.events {
-                    seen.push(event.raw_read_line);
+                    seen.push(String::from_utf8_lossy(&event.raw_frame).to_string());
                 }
                 saw_event_batch = true;
                 last_event_at = tokio::time::Instant::now();
@@ -359,7 +359,7 @@ async fn receiver_v12_targeted_replay_stays_open_but_does_not_stream_live_after_
 
     let replay = recv_first_event_batch(&mut rcv, Duration::from_secs(5)).await;
     assert_eq!(replay.events.len(), 1);
-    assert_eq!(replay.events[0].raw_read_line, "TR_E2_S1");
+    assert_eq!(replay.events[0].raw_frame, b"TR_E2_S1".to_vec());
 
     send_forwarder_event(
         &mut fwd,
@@ -547,7 +547,7 @@ async fn receiver_v12_race_includes_non_current_epoch_mapping_and_replays_on_new
         first_replay
             .events
             .iter()
-            .any(|event| event.raw_read_line == "RACE_A_E1_S1"),
+            .any(|event| event.raw_frame == b"RACE_A_E1_S1".to_vec()),
         "race mode must include non-current mapped epoch stream"
     );
 
@@ -581,7 +581,7 @@ async fn receiver_v12_race_includes_non_current_epoch_mapping_and_replays_on_new
                     if batch
                         .events
                         .iter()
-                        .any(|event| event.raw_read_line == "RACE_B_BACKLOG_E1_S1") =>
+                        .any(|event| event.raw_frame == b"RACE_B_BACKLOG_E1_S1".to_vec()) =>
                 {
                     break batch;
                 }
@@ -668,7 +668,7 @@ async fn receiver_v12_live_stale_resume_without_prior_events_still_streams_live_
         batch
             .events
             .iter()
-            .any(|event| event.raw_read_line == "LIVE_FALLBACK_E1_S1")
+            .any(|event| event.raw_frame == b"LIVE_FALLBACK_E1_S1".to_vec())
     );
 }
 

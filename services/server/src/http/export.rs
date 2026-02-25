@@ -6,6 +6,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 async fn ensure_stream_exists(pool: &sqlx::PgPool, stream_id: Uuid) -> HttpResult {
@@ -25,7 +26,7 @@ async fn ensure_stream_exists(pool: &sqlx::PgPool, stream_id: Uuid) -> HttpResul
 
 /// `GET /api/v1/streams/{stream_id}/export.txt`
 ///
-/// Streams canonical deduplicated events as bare `raw_read_line` values,
+/// Streams canonical deduplicated events as bare `raw_frame` values,
 /// one per line (`\n`-terminated), ordered by `(stream_epoch, seq)`.
 pub async fn export_raw(
     State(state): State<AppState>,
@@ -35,12 +36,12 @@ pub async fn export_raw(
         return response;
     }
 
-    let rows = sqlx::query!(
-        r#"SELECT raw_read_line FROM events
+    let rows = sqlx::query(
+        r#"SELECT raw_frame FROM events
            WHERE stream_id = $1
            ORDER BY stream_epoch ASC, seq ASC"#,
-        stream_id
     )
+    .bind(stream_id)
     .fetch_all(&state.pool)
     .await;
 
@@ -48,8 +49,9 @@ pub async fn export_raw(
         Err(e) => internal_error(e),
         Ok(rows) => {
             let mut buf = String::new();
-            for row in &rows {
-                buf.push_str(&row.raw_read_line);
+            for row in rows {
+                let raw_frame: Vec<u8> = row.get("raw_frame");
+                buf.push_str(&render_export_line(&raw_frame));
                 buf.push('\n');
             }
             Response::builder()
@@ -65,7 +67,7 @@ pub async fn export_raw(
 /// `GET /api/v1/streams/{stream_id}/export.csv`
 ///
 /// Streams canonical deduplicated events as CSV:
-/// - Header: `stream_epoch,seq,reader_timestamp,raw_read_line,read_type`
+/// - Header: `stream_epoch,seq,reader_timestamp,raw_frame,read_type`
 /// - RFC 4180 quoting: fields containing comma, double-quote, or newline are
 ///   wrapped in double-quotes; embedded double-quotes are doubled.
 /// - Ordered by `(stream_epoch, seq)`.
@@ -77,36 +79,40 @@ pub async fn export_csv(
         return response;
     }
 
-    let rows = sqlx::query!(
-        r#"SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type
+    let rows = sqlx::query(
+        r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type
            FROM events
            WHERE stream_id = $1
            ORDER BY stream_epoch ASC, seq ASC"#,
-        stream_id
     )
+    .bind(stream_id)
     .fetch_all(&state.pool)
     .await;
 
     match rows {
         Err(e) => internal_error(e),
         Ok(rows) => {
-            let mut buf =
-                String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");
-            for row in &rows {
-                let epoch = row.stream_epoch.to_string();
-                let seq = row.seq.to_string();
-                let ts = row.reader_timestamp.as_deref().unwrap_or("");
-                let line = &row.raw_read_line;
-                let read_type = &row.read_type;
+            let mut buf = String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type\n");
+            for row in rows {
+                let epoch: i64 = row.get("stream_epoch");
+                let seq: i64 = row.get("seq");
+                let reader_timestamp: Option<String> = row.get("reader_timestamp");
+                let raw_frame: Vec<u8> = row.get("raw_frame");
+                let read_type: String = row.get("read_type");
+
+                let epoch = epoch.to_string();
+                let seq = seq.to_string();
+                let ts = reader_timestamp.as_deref().unwrap_or("");
+                let line = render_export_line(&raw_frame);
                 buf.push_str(&csv_field(&epoch));
                 buf.push(',');
                 buf.push_str(&csv_field(&seq));
                 buf.push(',');
                 buf.push_str(&csv_field(ts));
                 buf.push(',');
-                buf.push_str(&csv_field(line));
+                buf.push_str(&csv_field(&line));
                 buf.push(',');
-                buf.push_str(&csv_field(read_type));
+                buf.push_str(&csv_field(&read_type));
                 buf.push('\n');
             }
             Response::builder()
@@ -122,7 +128,7 @@ pub async fn export_csv(
 /// `GET /api/v1/streams/{stream_id}/epochs/{epoch}/export.csv`
 ///
 /// Streams canonical deduplicated events for a single epoch as CSV:
-/// - Header: `stream_epoch,seq,reader_timestamp,raw_read_line,read_type`
+/// - Header: `stream_epoch,seq,reader_timestamp,raw_frame,read_type`
 /// - RFC 4180 quoting (same as whole-stream export).
 /// - Ordered by `seq`.
 /// - Returns valid CSV with headers even when the epoch has zero reads.
@@ -134,37 +140,41 @@ pub async fn export_epoch_csv(
         return response;
     }
 
-    let rows = sqlx::query!(
-        r#"SELECT stream_epoch, seq, reader_timestamp, raw_read_line, read_type
+    let rows = sqlx::query(
+        r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type
            FROM events
            WHERE stream_id = $1 AND stream_epoch = $2
            ORDER BY seq ASC"#,
-        stream_id,
-        epoch
     )
+    .bind(stream_id)
+    .bind(epoch)
     .fetch_all(&state.pool)
     .await;
 
     match rows {
         Err(e) => internal_error(e),
         Ok(rows) => {
-            let mut buf =
-                String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");
-            for row in &rows {
-                let ep = row.stream_epoch.to_string();
-                let seq = row.seq.to_string();
-                let ts = row.reader_timestamp.as_deref().unwrap_or("");
-                let line = &row.raw_read_line;
-                let read_type = &row.read_type;
+            let mut buf = String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type\n");
+            for row in rows {
+                let stream_epoch: i64 = row.get("stream_epoch");
+                let seq: i64 = row.get("seq");
+                let reader_timestamp: Option<String> = row.get("reader_timestamp");
+                let raw_frame: Vec<u8> = row.get("raw_frame");
+                let read_type: String = row.get("read_type");
+
+                let ep = stream_epoch.to_string();
+                let seq = seq.to_string();
+                let ts = reader_timestamp.as_deref().unwrap_or("");
+                let line = render_export_line(&raw_frame);
                 buf.push_str(&csv_field(&ep));
                 buf.push(',');
                 buf.push_str(&csv_field(&seq));
                 buf.push(',');
                 buf.push_str(&csv_field(ts));
                 buf.push(',');
-                buf.push_str(&csv_field(line));
+                buf.push_str(&csv_field(&line));
                 buf.push(',');
-                buf.push_str(&csv_field(read_type));
+                buf.push_str(&csv_field(&read_type));
                 buf.push('\n');
             }
             Response::builder()
@@ -180,7 +190,7 @@ pub async fn export_epoch_csv(
 /// `GET /api/v1/streams/{stream_id}/epochs/{epoch}/export.txt`
 ///
 /// Streams canonical deduplicated events for a single epoch as bare
-/// `raw_read_line` values, one per line (`\n`-terminated), ordered by `seq`.
+/// `raw_frame` values, one per line (`\n`-terminated), ordered by `seq`.
 pub async fn export_epoch_raw(
     State(state): State<AppState>,
     Path((stream_id, epoch)): Path<(Uuid, i64)>,
@@ -189,8 +199,8 @@ pub async fn export_epoch_raw(
         return response;
     }
 
-    let rows = sqlx::query_scalar::<_, String>(
-        r#"SELECT raw_read_line FROM events
+    let rows = sqlx::query_scalar::<_, Vec<u8>>(
+        r#"SELECT raw_frame FROM events
            WHERE stream_id = $1 AND stream_epoch = $2
            ORDER BY seq ASC"#,
     )
@@ -201,10 +211,10 @@ pub async fn export_epoch_raw(
 
     match rows {
         Err(e) => internal_error(e),
-        Ok(raw_lines) => {
+        Ok(raw_frames) => {
             let mut buf = String::new();
-            for raw_line in &raw_lines {
-                buf.push_str(raw_line);
+            for raw_frame in raw_frames {
+                buf.push_str(&render_export_line(&raw_frame));
                 buf.push('\n');
             }
             Response::builder()
@@ -215,6 +225,14 @@ pub async fn export_epoch_raw(
                 .into_response()
         }
     }
+}
+
+fn render_export_line(raw_frame: &[u8]) -> String {
+    let trimmed = raw_frame
+        .strip_suffix(b"\r\n")
+        .or_else(|| raw_frame.strip_suffix(b"\n"))
+        .unwrap_or(raw_frame);
+    String::from_utf8_lossy(trimmed).into_owned()
 }
 
 /// RFC 4180 CSV field quoting.

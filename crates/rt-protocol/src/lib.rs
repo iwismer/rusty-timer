@@ -33,8 +33,8 @@ pub struct ReadEvent {
     pub seq: u64,
     /// Device-reported timestamp; accepted as-is, no server adjustment.
     pub reader_timestamp: String,
-    /// UTF-8 text; ASCII IPICO payload expected.  Invalid UTF-8 is rejected.
-    pub raw_read_line: String,
+    /// Exact bytes received from the reader frame.
+    pub raw_frame: Vec<u8>,
     /// E.g. "RAW" or "FSLS".
     pub read_type: String,
 }

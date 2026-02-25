@@ -83,7 +83,7 @@ fn epoch_bump_does_not_delete_old_epoch_events() {
         1,
         seq1,
         Some("2026-01-01T00:00:00Z"),
-        "aa01line",
+        b"aa01line",
         "RAW",
     )
     .expect("insert event epoch 1");
@@ -168,7 +168,7 @@ fn insert_event_persists_all_fields() {
         1,
         seq,
         Some("2026-01-01T12:00:00Z"),
-        "aa400000000123450a2a01123018455927a7",
+        b"aa400000000123450a2a01123018455927a7",
         "RAW",
     )
     .expect("insert");
@@ -183,24 +183,20 @@ fn insert_event_persists_all_fields() {
         Some("2026-01-01T12:00:00Z".to_owned())
     );
     assert_eq!(
-        events[0].raw_read_line,
-        "aa400000000123450a2a01123018455927a7"
+        events[0].raw_frame,
+        b"aa400000000123450a2a01123018455927a7".to_vec()
     );
     assert_eq!(events[0].read_type, "RAW");
 }
 
 #[test]
-fn invalid_utf8_raw_read_line_is_rejected() {
+fn empty_raw_frame_is_rejected() {
     let (mut j, _f) = open_journal();
     j.ensure_stream_state("192.168.2.11", 1).unwrap();
     let seq = j.next_seq("192.168.2.11").unwrap();
 
-    // Simulate an invalid UTF-8 scenario via a non-UTF-8-friendly string.
-    // Since Rust strings are always valid UTF-8, we test that the journal
-    // rejects explicitly flagged invalid raw_read_line values.
-    // The journal must reject empty raw_read_line strings (as a proxy for invalid content).
-    let result = j.insert_event("192.168.2.11", 1, seq, None, "", "RAW");
-    assert!(result.is_err(), "empty raw_read_line must be rejected");
+    let result = j.insert_event("192.168.2.11", 1, seq, None, b"", "RAW");
+    assert!(result.is_err(), "empty raw_frame must be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +210,7 @@ fn update_ack_cursor_advances_acked_seq() {
 
     for i in 1..=5 {
         let seq = j.next_seq("192.168.2.20").unwrap();
-        j.insert_event("192.168.2.20", 1, seq, None, "line", "RAW")
+        j.insert_event("192.168.2.20", 1, seq, None, b"line", "RAW")
             .unwrap();
         assert_eq!(seq, i);
     }

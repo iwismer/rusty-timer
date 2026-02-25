@@ -126,7 +126,7 @@ async fn read_events_from_emulator(
             stream_epoch: 1,
             seq: seq as u64,
             reader_timestamp: chip.timestamp.to_string(),
-            raw_read_line: raw_line,
+            raw_frame: raw_line.into_bytes(),
             read_type: READ_TYPE.to_owned(),
         });
     }
@@ -252,8 +252,7 @@ async fn e2e_export_txt_and_csv() {
         "2001-12-30T18:45:40.990",
     ];
 
-    let mut expected_csv =
-        String::from("stream_epoch,seq,reader_timestamp,raw_read_line,read_type\n");
+    let mut expected_csv = String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type\n");
     for (i, read) in fixture_reads.iter().enumerate() {
         expected_csv.push_str(&format!(
             "1,{},{},{},{}\n",

@@ -50,7 +50,7 @@ fn events_survive_close_and_reopen() {
             1,
             seq,
             Some("2026-01-01T00:00:00Z"),
-            "test-line",
+            b"test-line",
             "RAW",
         )
         .unwrap();
@@ -60,7 +60,7 @@ fn events_survive_close_and_reopen() {
         let j = Journal::open(&path).unwrap();
         let unacked = j.unacked_events("10.0.0.5", 1, 0).unwrap();
         assert_eq!(unacked.len(), 1, "event must survive reopen");
-        assert_eq!(unacked[0].raw_read_line, "test-line");
+        assert_eq!(unacked[0].raw_frame, b"test-line".to_vec());
     }
 }
 
@@ -74,7 +74,7 @@ fn ack_cursor_survives_close_and_reopen() {
         j.ensure_stream_state("10.0.0.6", 1).unwrap();
         for _ in 1..=3 {
             let seq = j.next_seq("10.0.0.6").unwrap();
-            j.insert_event("10.0.0.6", 1, seq, None, "line", "RAW")
+            j.insert_event("10.0.0.6", 1, seq, None, b"line", "RAW")
                 .unwrap();
         }
         j.update_ack_cursor("10.0.0.6", 1, 2).unwrap(); // ack through seq 2
@@ -104,10 +104,10 @@ fn duplicate_stream_epoch_seq_is_rejected() {
     j.ensure_stream_state("10.0.0.7", 1).unwrap();
     let seq = j.next_seq("10.0.0.7").unwrap();
 
-    j.insert_event("10.0.0.7", 1, seq, None, "line", "RAW")
+    j.insert_event("10.0.0.7", 1, seq, None, b"line", "RAW")
         .unwrap();
     // Try to insert the same (stream_key, epoch, seq) again
-    let result = j.insert_event("10.0.0.7", 1, seq, None, "line-dup", "RAW");
+    let result = j.insert_event("10.0.0.7", 1, seq, None, b"line-dup", "RAW");
     assert!(
         result.is_err(),
         "duplicate (stream_key, epoch, seq) must be rejected"
@@ -126,7 +126,7 @@ fn prune_acked_events_first() {
 
     for _ in 1..=5 {
         let seq = j.next_seq("10.0.0.8").unwrap();
-        j.insert_event("10.0.0.8", 1, seq, None, "line", "RAW")
+        j.insert_event("10.0.0.8", 1, seq, None, b"line", "RAW")
             .unwrap();
     }
 
@@ -152,7 +152,7 @@ fn total_event_count_accessible() {
 
     for _ in 1..=7 {
         let seq = j.next_seq("10.0.0.9").unwrap();
-        j.insert_event("10.0.0.9", 1, seq, None, "line", "RAW")
+        j.insert_event("10.0.0.9", 1, seq, None, b"line", "RAW")
             .unwrap();
     }
 

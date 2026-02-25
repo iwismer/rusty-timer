@@ -65,7 +65,7 @@ async fn test_reset_only_takes_effect_on_first_new_epoch_read() {
         other => panic!("{:?}", other),
     };
 
-    for (seq, raw_read_line) in [(1u64, RAW_TAG_1), (2u64, RAW_TAG_2)] {
+    for (seq, raw_frame) in [(1u64, RAW_TAG_1), (2u64, RAW_TAG_2)] {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: session.clone(),
             batch_id: format!("e1-{}", seq),
@@ -75,7 +75,7 @@ async fn test_reset_only_takes_effect_on_first_new_epoch_read() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-18T10:00:00.000Z".to_owned(),
-                raw_read_line: raw_read_line.to_owned(),
+                raw_frame: raw_frame.as_bytes().to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -145,7 +145,7 @@ async fn test_reset_only_takes_effect_on_first_new_epoch_read() {
             stream_epoch: 2,
             seq: 1,
             reader_timestamp: "2026-02-18T10:01:00.000Z".to_owned(),
-            raw_read_line: RAW_TAG_2.to_owned(),
+            raw_frame: RAW_TAG_2.as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))

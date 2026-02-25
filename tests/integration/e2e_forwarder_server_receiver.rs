@@ -146,7 +146,7 @@ async fn e2e_single_stream_forwarder_to_mock_receiver() {
         stream_epoch: 1,
         seq: 1,
         reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-        raw_read_line: "09001234567890001 10:00:00.000 1".to_owned(),
+        raw_frame: b"09001234567890001 10:00:00.000 1".to_vec(),
         read_type: "RAW".to_owned(),
     };
 
@@ -262,7 +262,7 @@ async fn e2e_two_stream_forwarder_to_mock_receiver() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T11:00:00.000Z".to_owned(),
-                raw_read_line: "09001000000000001 11:00:00.000 1".to_owned(),
+                raw_frame: b"09001000000000001 11:00:00.000 1".to_vec(),
                 read_type: "RAW".to_owned(),
             },
             ReadEvent {
@@ -271,7 +271,7 @@ async fn e2e_two_stream_forwarder_to_mock_receiver() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T11:00:01.000Z".to_owned(),
-                raw_read_line: "09001000000000002 11:00:01.000 1".to_owned(),
+                raw_frame: b"09001000000000002 11:00:01.000 1".to_vec(),
                 read_type: "RAW".to_owned(),
             },
         ],
@@ -416,7 +416,7 @@ async fn e2e_receiver_subscribe_mid_session() {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T12:00:00.000Z".to_owned(),
-                raw_read_line: "09001000000000003 12:00:00.000 1".to_owned(),
+                raw_frame: b"09001000000000003 12:00:00.000 1".to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         }))

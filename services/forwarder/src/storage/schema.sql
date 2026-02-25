@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS journal (
     stream_epoch    BIGINT NOT NULL,
     seq             BIGINT NOT NULL,
     reader_timestamp TEXT,
-    raw_read_line   TEXT NOT NULL,
+    raw_frame       BLOB NOT NULL,
     read_type       TEXT NOT NULL,
     received_at     TEXT NOT NULL,
     UNIQUE(stream_key, stream_epoch, seq)

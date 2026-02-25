@@ -2,7 +2,7 @@
 //!
 //! Opens a TCP listener on the assigned port for each subscribed stream.
 //! Accepts local consumer connections and forwards events as they arrive via broadcast.
-//! Emits CRLF-terminated IPICO lines for local TCP consumers.
+//! Emits raw frames exactly as received for local TCP consumers.
 //! Supports multiple simultaneous local consumers per stream.
 //! Ports open as soon as subscriptions exist, even before server connection is established.
 
@@ -59,14 +59,12 @@ impl LocalProxy {
     }
 }
 
-/// Serve one local TCP consumer: forward each event's raw_read_line as bytes + CRLF.
+/// Serve one local TCP consumer: forward each event's raw_frame bytes unchanged.
 async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<ReadEvent>) {
     loop {
         match rx.recv().await {
             Ok(event) => {
-                let mut line = event.raw_read_line.into_bytes();
-                line.extend_from_slice(b"\r\n");
-                if stream.write_all(&line).await.is_err() {
+                if stream.write_all(&event.raw_frame).await.is_err() {
                     break; // client disconnected
                 }
             }
@@ -84,14 +82,14 @@ mod tests {
     use rt_protocol::ReadEvent;
     use tokio::io::AsyncReadExt;
 
-    fn make_event(raw: &str) -> ReadEvent {
+    fn make_event(raw: &[u8]) -> ReadEvent {
         ReadEvent {
             forwarder_id: "f".to_owned(),
             reader_ip: "192.168.1.1".to_owned(),
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "T".to_owned(),
-            raw_read_line: raw.to_owned(),
+            raw_frame: raw.to_vec(),
             read_type: "RAW".to_owned(),
         }
     }
@@ -117,7 +115,7 @@ mod tests {
         // Wait for proxy to accept the connection
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // Send an event
-        tx.send(make_event("aa01,00:01:23.456")).unwrap();
+        tx.send(make_event(b"aa01,00:01:23.456")).unwrap();
         // Read from client
         let mut buf = vec![0u8; 64];
         let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
@@ -138,15 +136,14 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let raw = "aa01,00:01:23.456";
+        let raw = b"aa01,00:01:23.456";
         tx.send(make_event(raw)).unwrap();
         let mut buf = vec![0u8; 128];
         let n = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf))
             .await
             .expect("read should not timeout")
             .unwrap();
-        let received = std::str::from_utf8(&buf[..n]).unwrap();
-        assert_eq!(received, format!("{raw}\r\n"));
+        assert_eq!(&buf[..n], raw);
     }
 
     #[tokio::test]
@@ -165,7 +162,7 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tx.send(make_event("line42")).unwrap();
+        tx.send(make_event(b"line42")).unwrap();
         let mut buf = vec![0u8; 64];
         for (i, c) in [&mut c1, &mut c2, &mut c3].iter_mut().enumerate() {
             let n = tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut buf))

@@ -28,7 +28,7 @@ fn replay_starts_after_ack_cursor() {
     // Insert 5 events
     for i in 1..=5 {
         let seq = j.next_seq("192.168.2.10").unwrap();
-        j.insert_event("192.168.2.10", 1, seq, None, "line", "RAW")
+        j.insert_event("192.168.2.10", 1, seq, None, b"line", "RAW")
             .unwrap();
         assert_eq!(seq, i);
     }
@@ -56,7 +56,7 @@ fn replay_returns_empty_when_fully_acked() {
 
     for _ in 1..=3 {
         let seq = j.next_seq("192.168.2.20").unwrap();
-        j.insert_event("192.168.2.20", 1, seq, None, "line", "RAW")
+        j.insert_event("192.168.2.20", 1, seq, None, b"line", "RAW")
             .unwrap();
     }
 
@@ -81,7 +81,7 @@ fn replay_includes_old_epoch_unacked_events() {
     // Write 2 events in epoch 1
     for _ in 1..=2 {
         let seq = j.next_seq("192.168.2.30").unwrap();
-        j.insert_event("192.168.2.30", 1, seq, None, "epoch1-event", "RAW")
+        j.insert_event("192.168.2.30", 1, seq, None, b"epoch1-event", "RAW")
             .unwrap();
     }
 
@@ -91,7 +91,7 @@ fn replay_includes_old_epoch_unacked_events() {
     // Write 2 events in epoch 2
     for _ in 1..=2 {
         let seq = j.next_seq("192.168.2.30").unwrap();
-        j.insert_event("192.168.2.30", 2, seq, None, "epoch2-event", "RAW")
+        j.insert_event("192.168.2.30", 2, seq, None, b"epoch2-event", "RAW")
             .unwrap();
     }
 
@@ -115,7 +115,7 @@ fn replay_cursor_advances_after_ack() {
 
     for _ in 1..=3 {
         let seq = j.next_seq("192.168.2.40").unwrap();
-        j.insert_event("192.168.2.40", 1, seq, None, "line", "RAW")
+        j.insert_event("192.168.2.40", 1, seq, None, b"line", "RAW")
             .unwrap();
     }
 

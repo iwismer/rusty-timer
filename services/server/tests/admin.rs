@@ -30,12 +30,12 @@ async fn insert_stream(pool: &sqlx::PgPool, forwarder_id: &str, reader_ip: &str)
 
 async fn insert_event(pool: &sqlx::PgPool, stream_id: uuid::Uuid, epoch: i64, seq: i64) {
     sqlx::query(
-        "INSERT INTO events (stream_id, stream_epoch, seq, raw_read_line, read_type) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO events (stream_id, stream_epoch, seq, raw_frame, read_type) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(stream_id)
     .bind(epoch)
     .bind(seq)
-    .bind(format!("LINE_e{}_s{}", epoch, seq))
+    .bind(format!("LINE_e{}_s{}", epoch, seq).into_bytes())
     .bind("RAW")
     .execute(pool)
     .await

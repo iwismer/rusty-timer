@@ -66,7 +66,7 @@ async fn test_receiver_resume_from_cursor() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("LINE_{}", seq),
+                raw_frame: format!("LINE_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -101,7 +101,7 @@ async fn test_receiver_resume_from_cursor() {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             assert_eq!(batch.events.len(), 1, "should replay only 1 event (seq=3)");
             assert_eq!(batch.events[0].seq, 3);
-            assert_eq!(batch.events[0].raw_read_line, "LINE_3");
+            assert_eq!(batch.events[0].raw_frame, b"LINE_3".to_vec());
         }
         Ok(Ok(other)) => panic!("expected ReceiverEventBatch, got {:?}", other),
         Ok(Err(e)) => panic!("{}", e),
@@ -166,7 +166,7 @@ async fn test_receiver_v1_resume_uses_hello_cursor_even_if_persisted_cursor_is_n
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("LEGACY_RESUME_{}", seq),
+                raw_frame: format!("LEGACY_RESUME_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -292,7 +292,7 @@ async fn test_receiver_no_cursor_gets_all() {
                 stream_epoch: 1,
                 seq,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: format!("ALL_LINE_{}", seq),
+                raw_frame: format!("ALL_LINE_{}", seq).into_bytes(),
                 read_type: "RAW".to_owned(),
             }],
         }))
@@ -381,7 +381,7 @@ async fn test_receiver_large_backlog_replay_is_chunked() {
             stream_epoch: 1,
             seq,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: format!("CHUNK_LINE_{}", seq),
+            raw_frame: format!("CHUNK_LINE_{}", seq).into_bytes(),
             read_type: "RAW".to_owned(),
         })
         .collect();
@@ -482,7 +482,7 @@ async fn test_receiver_tail_at_cursor_gets_no_replay() {
             stream_epoch: 1,
             seq,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: format!("TAIL_LINE_{}", seq),
+            raw_frame: format!("TAIL_LINE_{}", seq).into_bytes(),
             read_type: "RAW".to_owned(),
         })
         .collect();
@@ -569,7 +569,7 @@ async fn test_receiver_replay_lower_bound_is_exclusive() {
             stream_epoch: 1,
             seq,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: format!("LOWER_LINE_{}", seq),
+            raw_frame: format!("LOWER_LINE_{}", seq).into_bytes(),
             read_type: "RAW".to_owned(),
         })
         .collect();
@@ -655,7 +655,7 @@ async fn test_receiver_handoff_remains_monotonic() {
             stream_epoch: 1,
             seq,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: format!("MONO_BACKLOG_{}", seq),
+            raw_frame: format!("MONO_BACKLOG_{}", seq).into_bytes(),
             read_type: "RAW".to_owned(),
         })
         .collect();
@@ -695,7 +695,7 @@ async fn test_receiver_handoff_remains_monotonic() {
             stream_epoch: 1,
             seq,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: format!("MONO_LIVE_{}", seq),
+            raw_frame: format!("MONO_LIVE_{}", seq).into_bytes(),
             read_type: "RAW".to_owned(),
         })
         .collect();
@@ -791,7 +791,7 @@ async fn test_receiver_subscribe_progresses_under_heavy_replay() {
             stream_epoch: 1,
             seq,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: format!("MAIN_HEAVY_{}", seq),
+            raw_frame: format!("MAIN_HEAVY_{}", seq).into_bytes(),
             read_type: "RAW".to_owned(),
         })
         .collect();
@@ -812,7 +812,7 @@ async fn test_receiver_subscribe_progresses_under_heavy_replay() {
             stream_epoch: 1,
             seq,
             reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-            raw_read_line: format!("SIDE_{}", seq),
+            raw_frame: format!("SIDE_{}", seq).into_bytes(),
             read_type: "RAW".to_owned(),
         })
         .collect();
@@ -864,7 +864,7 @@ async fn test_receiver_subscribe_progresses_under_heavy_replay() {
                 1,
                 seq,
                 "2026-02-17T10:00:00.000Z",
-                &format!("MAIN_DB_{}", seq),
+                format!("MAIN_DB_{}", seq).as_bytes(),
                 "RAW",
             )
             .await;

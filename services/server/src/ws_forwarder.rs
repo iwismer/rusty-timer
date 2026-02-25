@@ -574,7 +574,7 @@ async fn handle_event_batch(
             event.stream_epoch as i64,
             event.seq as i64,
             &event.reader_timestamp,
-            &event.raw_read_line,
+            &event.raw_frame,
             &event.read_type,
         )
         .await?;

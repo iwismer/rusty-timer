@@ -904,7 +904,7 @@ async fn replay_backlog(
                 stream_epoch: event.stream_epoch as u64,
                 seq: event.seq as u64,
                 reader_timestamp: event.reader_timestamp.clone().unwrap_or_default(),
-                raw_read_line: event.raw_read_line.clone(),
+                raw_frame: event.raw_frame.clone(),
                 read_type: event.read_type.clone(),
             })
             .collect();
@@ -963,7 +963,7 @@ async fn replay_targeted_backlog(
                     stream_epoch: event.stream_epoch as u64,
                     seq: event.seq as u64,
                     reader_timestamp: event.reader_timestamp.clone().unwrap_or_default(),
-                    raw_read_line: event.raw_read_line.clone(),
+                    raw_frame: event.raw_frame.clone(),
                     read_type: event.read_type.clone(),
                 })
                 .collect();
@@ -1073,7 +1073,7 @@ mod tests {
             stream_epoch: 2,
             seq: 3,
             reader_timestamp: "2026-02-25T12:00:00.000Z".to_owned(),
-            raw_read_line: "QUEUED_BEFORE_REFRESH".to_owned(),
+            raw_frame: b"QUEUED_BEFORE_REFRESH".to_vec(),
             read_type: "RAW".to_owned(),
         })
         .unwrap();
@@ -1098,7 +1098,7 @@ mod tests {
             .rx
             .try_recv()
             .expect("queued event should still be readable");
-        assert_eq!(queued.raw_read_line, "QUEUED_BEFORE_REFRESH");
+        assert_eq!(queued.raw_frame, b"QUEUED_BEFORE_REFRESH".to_vec());
     }
 
     #[test]

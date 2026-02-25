@@ -145,7 +145,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T12:00:00.000Z".to_owned(),
-            raw_read_line: "SSE_TEST_LINE".to_owned(),
+            raw_frame: "SSE_TEST_LINE".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))

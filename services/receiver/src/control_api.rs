@@ -1019,10 +1019,6 @@ async fn get_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let current = state.connection_state.read().await.clone();
-    if current == ConnectionState::Connected {
-        return StatusCode::OK.into_response();
-    }
     state.request_connect().await;
     StatusCode::ACCEPTED.into_response()
 }

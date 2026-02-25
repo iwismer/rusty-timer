@@ -26,7 +26,7 @@ pub struct JournalEvent {
     pub stream_epoch: i64,
     pub seq: i64,
     pub reader_timestamp: Option<String>,
-    pub raw_read_line: String,
+    pub raw_frame: Vec<u8>,
     pub read_type: String,
     pub received_at: String,
 }
@@ -152,22 +152,20 @@ impl Journal {
 
     /// Insert a read event into the journal.
     ///
-    /// `raw_read_line` must be non-empty (proxy for UTF-8 validity since Rust
-    /// strings are always valid UTF-8; callers must reject invalid bytes before
-    /// converting to &str).
+    /// `raw_frame` must be non-empty.
     pub fn insert_event(
         &mut self,
         stream_key: &str,
         stream_epoch: i64,
         seq: i64,
         reader_timestamp: Option<&str>,
-        raw_read_line: &str,
+        raw_frame: &[u8],
         read_type: &str,
     ) -> Result<(), JournalError> {
-        // Enforce non-empty raw_read_line (guards against callers passing garbage)
-        if raw_read_line.is_empty() {
+        // Enforce non-empty raw_frame (guards against callers passing garbage)
+        if raw_frame.is_empty() {
             return Err(JournalError::InvalidData(
-                "raw_read_line must not be empty".to_owned(),
+                "raw_frame must not be empty".to_owned(),
             ));
         }
 
@@ -175,14 +173,14 @@ impl Journal {
 
         self.conn.execute(
             "INSERT INTO journal
-                 (stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at)
+                 (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 stream_key,
                 stream_epoch,
                 seq,
                 reader_timestamp,
-                raw_read_line,
+                raw_frame,
                 read_type,
                 received_at,
             ],
@@ -244,7 +242,7 @@ impl Journal {
         after_seq: i64,
     ) -> Result<Vec<JournalEvent>, JournalError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at
+            "SELECT id, stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at
              FROM journal
              WHERE stream_key = ?1 AND stream_epoch = ?2 AND seq > ?3
              ORDER BY seq ASC",
@@ -298,7 +296,7 @@ impl Journal {
         after_epoch: i64,
     ) -> Result<Vec<JournalEvent>, JournalError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, stream_key, stream_epoch, seq, reader_timestamp, raw_read_line, read_type, received_at
+            "SELECT id, stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at
              FROM journal
              WHERE stream_key = ?1 AND stream_epoch > ?2
              ORDER BY stream_epoch ASC, seq ASC",
@@ -376,7 +374,7 @@ fn map_event(row: &rusqlite::Row<'_>) -> Result<JournalEvent, rusqlite::Error> {
         stream_epoch: row.get(2)?,
         seq: row.get(3)?,
         reader_timestamp: row.get(4)?,
-        raw_read_line: row.get(5)?,
+        raw_frame: row.get(5)?,
         read_type: row.get(6)?,
         received_at: row.get(7)?,
     })

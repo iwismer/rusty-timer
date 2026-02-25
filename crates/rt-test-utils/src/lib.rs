@@ -116,7 +116,7 @@ mod tests {
                 stream_epoch: 1,
                 seq: 1,
                 reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                raw_read_line: "09001234567890123 12:00:00.000 1".to_owned(),
+                raw_frame: b"09001234567890123 12:00:00.000 1".to_vec(),
                 read_type: "RAW".to_owned(),
             }],
         });
@@ -259,7 +259,7 @@ mod tests {
                     stream_epoch: 1,
                     seq: 5,
                     reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
-                    raw_read_line: "line1".to_owned(),
+                    raw_frame: b"line1".to_vec(),
                     read_type: "RAW".to_owned(),
                 },
                 ReadEvent {
@@ -268,7 +268,7 @@ mod tests {
                     stream_epoch: 1,
                     seq: 6,
                     reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
-                    raw_read_line: "line2".to_owned(),
+                    raw_frame: b"line2".to_vec(),
                     read_type: "RAW".to_owned(),
                 },
                 ReadEvent {
@@ -277,7 +277,7 @@ mod tests {
                     stream_epoch: 1,
                     seq: 10,
                     reader_timestamp: "2026-02-17T10:00:02.000Z".to_owned(),
-                    raw_read_line: "line3".to_owned(),
+                    raw_frame: b"line3".to_vec(),
                     read_type: "RAW".to_owned(),
                 },
             ],
