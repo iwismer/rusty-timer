@@ -343,7 +343,7 @@ async fn main() {
                                         // Perform the receiver hello / heartbeat handshake.
                                         let (session_result, ws) = {
                                             let db = state.db.lock().await;
-                                            do_handshake(ws, &db).await
+                                            do_handshake(ws, &db, &state.ui_tx).await
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -552,6 +552,7 @@ async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64
 async fn do_handshake<S>(
     mut ws: S,
     db: &Db,
+    ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
 ) -> (Result<String, receiver::session::SessionError>, Option<S>)
 where
     S: futures_util::Stream<
@@ -704,8 +705,17 @@ where
             }
             Ok(WsMessage::ReceiverModeApplied(applied)) => {
                 info!(mode = %applied.mode_summary, streams = applied.resolved_stream_count, "mode applied before heartbeat");
+                let _ = ui_tx.send(receiver::ui_events::ReceiverUiEvent::LogEntry {
+                    entry: format!(
+                        "server applied mode: {} (resolved streams: {})",
+                        applied.mode_summary, applied.resolved_stream_count
+                    ),
+                });
                 for warning in applied.warnings {
                     warn!(warning = %warning, "server mode warning");
+                    let _ = ui_tx.send(receiver::ui_events::ReceiverUiEvent::LogEntry {
+                        entry: format!("server mode warning: {warning}"),
+                    });
                 }
             }
             Ok(_) => {
@@ -858,6 +868,104 @@ async fn reconcile_proxies(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use receiver::ui_events::ReceiverUiEvent;
+    use rt_protocol::{Heartbeat, ReceiverModeApplied, WsMessage};
+    use std::future::Future;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    async fn run_raw_ws_server_once<H, Fut>(handler: H) -> (std::net::SocketAddr, JoinHandle<()>)
+    where
+        H: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut
+            + Send
+            + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let ws = accept_async(stream).await.expect("ws accept");
+            handler(ws).await;
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn handshake_emits_mode_applied_warnings_to_ui_before_heartbeat() {
+        let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+            let _hello = ws.next().await.expect("hello frame").expect("hello ws");
+
+            let mode_applied = WsMessage::ReceiverModeApplied(ReceiverModeApplied {
+                mode_summary: "race=race-42".to_owned(),
+                resolved_stream_count: 3,
+                warnings: vec![
+                    "stream fwd-1/10.0.0.1 unavailable".to_owned(),
+                    "replay capped at 1000 events".to_owned(),
+                ],
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&mode_applied)
+                    .expect("serialize mode")
+                    .into(),
+            ))
+            .await
+            .expect("send mode");
+
+            let heartbeat = WsMessage::Heartbeat(Heartbeat {
+                session_id: "session-handshake".to_owned(),
+                device_id: "receiver-main".to_owned(),
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&heartbeat)
+                    .expect("serialize heartbeat")
+                    .into(),
+            ))
+            .await
+            .expect("send heartbeat");
+        })
+        .await;
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .expect("connect");
+        let db = Db::open_in_memory().expect("db");
+        let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx).await;
+        assert!(result.is_ok(), "handshake should succeed");
+
+        let mut log_entries = Vec::new();
+        while let Ok(event) = ui_rx.try_recv() {
+            if let ReceiverUiEvent::LogEntry { entry } = event {
+                log_entries.push(entry);
+            }
+        }
+
+        assert!(
+            log_entries
+                .iter()
+                .any(|entry| entry.contains("race=race-42") && entry.contains("3")),
+            "expected mode summary log entry, got: {log_entries:?}"
+        );
+        assert!(
+            log_entries
+                .iter()
+                .any(|entry| entry.contains("stream fwd-1/10.0.0.1 unavailable")),
+            "expected first warning log entry, got: {log_entries:?}"
+        );
+        assert!(
+            log_entries
+                .iter()
+                .any(|entry| entry.contains("replay capped at 1000 events")),
+            "expected second warning log entry, got: {log_entries:?}"
+        );
+
+        task.await.expect("server task");
+    }
 
     #[tokio::test]
     async fn dropped_session_does_not_reconnect_when_disconnect_in_progress() {
