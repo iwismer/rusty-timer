@@ -864,14 +864,22 @@ async fn post_connect_returns_202_when_disconnected() {
     );
 }
 #[tokio::test]
-async fn post_connect_returns_200_when_connected() {
+async fn post_connect_reconnects_when_already_connected() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
-    *state.connection_state.write().await = receiver::control_api::ConnectionState::Connected;
+    state.request_connect().await;
+    state.set_connection_state(ConnectionState::Connected).await;
+    let before_attempt = state.current_connect_attempt();
+
     assert_eq!(
-        post_empty(build_router(state), "/api/v1/connect").await,
-        StatusCode::OK
+        post_empty(build_router(Arc::clone(&state)), "/api/v1/connect").await,
+        StatusCode::ACCEPTED
     );
+    assert_eq!(
+        *state.connection_state.read().await,
+        ConnectionState::Connecting
+    );
+    assert!(state.current_connect_attempt() > before_attempt);
 }
 #[tokio::test]
 async fn post_disconnect_returns_202_when_connected() {
