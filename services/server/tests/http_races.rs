@@ -2,7 +2,6 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use rt_protocol::EpochScope;
 use serde_json::Value;
 use server::state::{ReceiverSelectionSnapshot, ReceiverSessionProtocol};
 use testcontainers::runners::AsyncRunner;
@@ -268,10 +267,9 @@ async fn delete_race_returns_conflict_while_actively_selected_by_receiver() {
         .register_receiver_session(
             "session-delete-guard",
             "receiver-a",
-            ReceiverSessionProtocol::V11,
-            ReceiverSelectionSnapshot::Race {
-                race_id: race_id.clone(),
-                epoch_scope: EpochScope::Current,
+            ReceiverSessionProtocol::V12,
+            ReceiverSelectionSnapshot::Mode {
+                mode_summary: format!("race ({race_id})"),
             },
         )
         .await;
@@ -300,10 +298,9 @@ async fn delete_race_returns_conflict_for_equivalent_noncanonical_uuid_selection
         .register_receiver_session(
             "session-delete-guard-noncanonical",
             "receiver-a",
-            ReceiverSessionProtocol::V11,
-            ReceiverSelectionSnapshot::Race {
-                race_id: race_id.to_uppercase(),
-                epoch_scope: EpochScope::Current,
+            ReceiverSessionProtocol::V12,
+            ReceiverSelectionSnapshot::Mode {
+                mode_summary: format!("race ({})", race_id.to_uppercase()),
             },
         )
         .await;
@@ -333,10 +330,9 @@ async fn delete_race_succeeds_after_receiver_disconnects_and_keeps_unrelated_beh
         .register_receiver_session(
             "session-disconnect",
             "receiver-b",
-            ReceiverSessionProtocol::V11,
-            ReceiverSelectionSnapshot::Race {
-                race_id: guarded_race_id.clone(),
-                epoch_scope: EpochScope::Current,
+            ReceiverSessionProtocol::V12,
+            ReceiverSelectionSnapshot::Mode {
+                mode_summary: format!("race ({guarded_race_id})"),
             },
         )
         .await;
