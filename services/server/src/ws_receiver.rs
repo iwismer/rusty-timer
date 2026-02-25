@@ -34,7 +34,7 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
 const REPLAY_BATCH_LIMIT: i64 = 500;
 const RACE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
-pub async fn ws_receiver_handler(
+pub async fn ws_receiver_v12_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -55,6 +55,7 @@ struct ResolvedStreamTarget {
     stream_id: Uuid,
     forwarder_id: String,
     reader_ip: String,
+    current_stream_epoch: i64,
 }
 
 #[derive(Clone)]
@@ -68,8 +69,15 @@ struct TargetedReplaySelection {
 
 enum ActiveMode {
     Live,
-    Race { race_id: String },
+    Race {
+        race_id: String,
+        baseline: RaceBaseline,
+    },
     TargetedReplay,
+}
+
+struct RaceBaseline {
+    known_epochs: HashMap<Uuid, i64>,
 }
 
 fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
@@ -353,7 +361,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                     }
                 }
                 _ = race_refresh_interval.tick() => {
-                    let Some(race_id) = active_mode_race_id(&active_mode) else {
+                    let ActiveMode::Race { race_id, baseline } = &mut active_mode else {
                         continue;
                     };
 
@@ -363,16 +371,11 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                         &device_id,
                         &session_id,
                         race_id,
+                        baseline,
                         &mut subscriptions,
                     )
                     .await {
-                        Ok(changed) => {
-                            if changed {
-                                active_mode = ActiveMode::Race {
-                                    race_id: race_id.to_owned(),
-                                };
-                            }
-                        }
+                        Ok(_changed) => {}
                         Err(e) => {
                             error!(device_id = %device_id, error = %e, "error refreshing race mode");
                             break;
@@ -392,13 +395,6 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     state
         .unregister_receiver_session(&session_id_for_cleanup)
         .await;
-}
-
-fn active_mode_race_id(active_mode: &ActiveMode) -> Option<&str> {
-    match active_mode {
-        ActiveMode::Race { race_id } => Some(race_id.as_str()),
-        _ => None,
-    }
 }
 
 fn mode_summary(mode: &ReceiverMode) -> String {
@@ -425,7 +421,6 @@ async fn apply_mode(
             earliest_epochs,
         } => {
             let (targets, mut warnings) = resolve_live_targets(state, streams).await?;
-            let resume_map = resume_cursor_map(&hello.resume);
             let earliest_map = earliest_epoch_map(earliest_epochs);
 
             let mut next_subscriptions = Vec::with_capacity(targets.len());
@@ -434,7 +429,6 @@ async fn apply_mode(
                     state,
                     device_id,
                     target,
-                    &resume_map,
                     earliest_map
                         .get(&(target.forwarder_id.clone(), target.reader_ip.clone()))
                         .copied(),
@@ -469,7 +463,12 @@ async fn apply_mode(
             Ok(ActiveMode::Live)
         }
         ReceiverMode::Race { race_id } => {
-            let next_subscriptions = apply_race_mode_forward_only(state, race_id).await?;
+            let (mut next_subscriptions, baseline) =
+                apply_race_mode_forward_only(state, device_id, race_id).await?;
+            for sub in &mut next_subscriptions {
+                replay_backlog(socket, state, session_id, sub).await?;
+            }
+
             let applied = WsMessage::ReceiverModeApplied(ReceiverModeApplied {
                 mode_summary: mode_summary(&hello.mode),
                 resolved_stream_count: next_subscriptions.len(),
@@ -490,33 +489,36 @@ async fn apply_mode(
                 .await;
             Ok(ActiveMode::Race {
                 race_id: race_id.clone(),
+                baseline,
             })
         }
         ReceiverMode::TargetedReplay { targets } => {
             let (resolved_targets, mut warnings) =
                 resolve_targeted_replay_targets(state, targets).await?;
 
-            let mut next_subscriptions =
+            let mut transient_subscriptions =
                 unique_targeted_subscriptions(state, &resolved_targets).await?;
             replay_targeted_backlog(
                 socket,
                 state,
                 session_id,
                 &resolved_targets,
-                &mut next_subscriptions,
+                &mut transient_subscriptions,
             )
             .await?;
 
             let applied = WsMessage::ReceiverModeApplied(ReceiverModeApplied {
                 mode_summary: mode_summary(&hello.mode),
-                resolved_stream_count: next_subscriptions.len(),
+                resolved_stream_count: transient_subscriptions.len(),
                 warnings: std::mem::take(&mut warnings),
             });
             socket
                 .send(Message::Text(serde_json::to_string(&applied)?.into()))
                 .await?;
 
-            *subscriptions = next_subscriptions;
+            // Targeted replay is a one-shot mode. Keep the connection open for
+            // heartbeat/acks only, but do not keep any live stream subscriptions.
+            subscriptions.clear();
             let _ = state
                 .update_receiver_session_selection(
                     session_id,
@@ -532,28 +534,30 @@ async fn apply_mode(
 
 async fn apply_race_mode_forward_only(
     state: &AppState,
+    device_id: &str,
     race_id: &str,
-) -> Result<Vec<StreamSub>, Box<dyn std::error::Error + Send + Sync>> {
-    let targets = resolve_race_targets(state, race_id).await?;
+) -> Result<(Vec<StreamSub>, RaceBaseline), Box<dyn std::error::Error + Send + Sync>> {
+    let (targets, baseline) = resolve_race_targets(state, race_id).await?;
     let mut subscriptions = Vec::with_capacity(targets.len());
     for target in targets {
-        let tail = fetch_max_event_cursor(&state.pool, target.stream_id)
+        let start_cursor = fetch_cursor(&state.pool, device_id, target.stream_id)
             .await?
             .unwrap_or((1, 0));
-        subscriptions.push(subscribe_by_stream_id(state, target.stream_id, tail).await);
+        subscriptions.push(subscribe_by_stream_id(state, target.stream_id, start_cursor).await);
     }
-    Ok(subscriptions)
+    Ok((subscriptions, baseline))
 }
 
 async fn apply_race_refresh_forward_only(
     socket: &mut WebSocket,
     state: &AppState,
-    _device_id: &str,
+    device_id: &str,
     session_id: &str,
     race_id: &str,
+    baseline: &mut RaceBaseline,
     subscriptions: &mut Vec<StreamSub>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let targets = resolve_race_targets(state, race_id).await?;
+    let (targets, _) = resolve_race_targets(state, race_id).await?;
     let new_stream_ids: HashSet<Uuid> = targets.iter().map(|target| target.stream_id).collect();
     let old_stream_ids: HashSet<Uuid> = subscriptions.iter().map(|sub| sub.stream_id).collect();
 
@@ -575,10 +579,23 @@ async fn apply_race_refresh_forward_only(
                 rx: tx.subscribe(),
             });
         } else {
-            let tail = fetch_max_event_cursor(&state.pool, target.stream_id)
+            let baseline_epoch = baseline.known_epochs.get(&target.stream_id).copied();
+            if baseline_epoch.is_some_and(|known_epoch| target.current_stream_epoch <= known_epoch)
+            {
+                continue;
+            }
+
+            let start_cursor = fetch_cursor(&state.pool, device_id, target.stream_id)
                 .await?
                 .unwrap_or((1, 0));
-            next_subscriptions.push(subscribe_by_stream_id(state, target.stream_id, tail).await);
+            let mut new_sub = subscribe_by_stream_id(state, target.stream_id, start_cursor).await;
+            replay_backlog(socket, state, session_id, &mut new_sub).await?;
+            next_subscriptions.push(new_sub);
+            baseline
+                .known_epochs
+                .entry(target.stream_id)
+                .and_modify(|known| *known = (*known).max(target.current_stream_epoch))
+                .or_insert(target.current_stream_epoch);
         }
     }
 
@@ -604,25 +621,6 @@ async fn apply_race_refresh_forward_only(
     Ok(true)
 }
 
-fn resume_cursor_map(
-    cursors: &[rt_protocol::ResumeCursor],
-) -> HashMap<(String, String), (i64, i64)> {
-    let mut map = HashMap::new();
-    for cursor in cursors {
-        let Ok(epoch) = i64::try_from(cursor.stream_epoch) else {
-            continue;
-        };
-        let Ok(last_seq) = i64::try_from(cursor.last_seq) else {
-            continue;
-        };
-        map.insert(
-            (cursor.forwarder_id.clone(), cursor.reader_ip.clone()),
-            (epoch, last_seq),
-        );
-    }
-    map
-}
-
 fn earliest_epoch_map(overrides: &[EarliestEpochOverride]) -> HashMap<(String, String), i64> {
     let mut map = HashMap::new();
     for override_row in overrides {
@@ -641,33 +639,16 @@ async fn compute_live_start_cursor(
     state: &AppState,
     device_id: &str,
     target: &ResolvedStreamTarget,
-    resume_map: &HashMap<(String, String), (i64, i64)>,
     earliest_epoch: Option<i64>,
 ) -> Result<(i64, i64), Box<dyn std::error::Error + Send + Sync>> {
-    let persisted = fetch_cursor(&state.pool, device_id, target.stream_id).await?;
-    let resumed = resume_map
-        .get(&(target.forwarder_id.clone(), target.reader_ip.clone()))
-        .copied();
-
-    let mut cursor = match (persisted, resumed) {
-        (Some(a), Some(b)) => {
-            if cursor_gt(a.0, a.1, b.0, b.1) {
-                a
-            } else {
-                b
-            }
-        }
-        (Some(a), None) => a,
-        (None, Some(b)) => b,
-        (None, None) => (1, 0),
+    // Cursor precedence: persisted > earliest override > current stream epoch.
+    let cursor = match fetch_cursor(&state.pool, device_id, target.stream_id).await? {
+        Some(persisted) => persisted,
+        None => match earliest_epoch {
+            Some(earliest) => (earliest, 0),
+            None => (target.current_stream_epoch, 0),
+        },
     };
-
-    if let Some(min_epoch) = earliest_epoch
-        && cursor.0 < min_epoch
-    {
-        cursor = (min_epoch, 0);
-    }
-
     Ok(cursor)
 }
 
@@ -684,18 +665,20 @@ async fn resolve_live_targets(
             continue;
         }
 
-        let row =
-            sqlx::query("SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2")
-                .bind(&stream.forwarder_id)
-                .bind(&stream.reader_ip)
-                .fetch_optional(&state.pool)
-                .await?;
+        let row = sqlx::query(
+            "SELECT stream_id, stream_epoch FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+        )
+        .bind(&stream.forwarder_id)
+        .bind(&stream.reader_ip)
+        .fetch_optional(&state.pool)
+        .await?;
 
         if let Some(row) = row {
             targets.push(ResolvedStreamTarget {
                 stream_id: row.get("stream_id"),
                 forwarder_id: stream.forwarder_id.clone(),
                 reader_ip: stream.reader_ip.clone(),
+                current_stream_epoch: row.get("stream_epoch"),
             });
         } else {
             warnings.push(format!(
@@ -711,21 +694,32 @@ async fn resolve_live_targets(
 async fn resolve_race_targets(
     state: &AppState,
     race_id: &str,
-) -> Result<Vec<ResolvedStreamTarget>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(Vec<ResolvedStreamTarget>, RaceBaseline), Box<dyn std::error::Error + Send + Sync>> {
     let Ok(race_uuid) = SqlUuid::parse_str(race_id) else {
-        return Ok(Vec::new());
+        return Ok((
+            Vec::new(),
+            RaceBaseline {
+                known_epochs: HashMap::new(),
+            },
+        ));
     };
 
-    let rows = list_race_selection_streams(&state.pool, race_uuid, true).await?;
+    let rows = list_race_selection_streams(&state.pool, race_uuid, false).await?;
     let mut targets = Vec::with_capacity(rows.len());
+    let mut known_epochs: HashMap<Uuid, i64> = HashMap::with_capacity(rows.len());
     for row in rows {
+        known_epochs
+            .entry(row.stream_id)
+            .and_modify(|known| *known = (*known).max(row.stream_epoch))
+            .or_insert(row.stream_epoch);
         targets.push(ResolvedStreamTarget {
             stream_id: row.stream_id,
             forwarder_id: row.forwarder_id,
             reader_ip: row.reader_ip,
+            current_stream_epoch: row.stream_epoch,
         });
     }
-    Ok(targets)
+    Ok((targets, RaceBaseline { known_epochs }))
 }
 
 async fn resolve_targeted_replay_targets(
