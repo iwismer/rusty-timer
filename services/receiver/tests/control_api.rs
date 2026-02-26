@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+const TEST_RACE_ID: &str = "11111111-1111-1111-1111-111111111111";
+
 fn setup() -> axum::Router {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
@@ -126,6 +128,30 @@ async fn put_mode_requires_profile() {
 }
 
 #[tokio::test]
+async fn put_mode_rejects_invalid_race_id_format() {
+    let app = setup();
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/mode",
+            json!({"mode":"race","race_id":"not-a-uuid"})
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn mode_switch_pauses_streams() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
@@ -164,7 +190,7 @@ async fn mode_switch_pauses_streams() {
         put_json(
             app.clone(),
             "/api/v1/mode",
-            json!({"mode":"race","race_id":"race-1"})
+            json!({"mode":"race","race_id":TEST_RACE_ID})
         )
         .await,
         StatusCode::NO_CONTENT
@@ -443,7 +469,7 @@ async fn put_mode_emits_mode_changed_event() {
         put_json(
             app,
             "/api/v1/mode",
-            json!({"mode":"race","race_id":"race-1"})
+            json!({"mode":"race","race_id":TEST_RACE_ID})
         )
         .await,
         StatusCode::NO_CONTENT
@@ -455,7 +481,7 @@ async fn put_mode_emits_mode_changed_event() {
             assert_eq!(
                 mode,
                 rt_protocol::ReceiverMode::Race {
-                    race_id: "race-1".to_owned()
+                    race_id: TEST_RACE_ID.to_owned()
                 }
             );
             break;

@@ -350,6 +350,17 @@ fn default_update_mode() -> String {
     "check-and-download".to_owned()
 }
 
+fn is_uuid_format(value: &str) -> bool {
+    if value.len() != 36 {
+        return false;
+    }
+
+    value.bytes().enumerate().all(|(index, byte)| match index {
+        8 | 13 | 18 | 23 => byte == b'-',
+        _ => byte.is_ascii_hexdigit(),
+    })
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProfileResponse {
     pub server_url: String,
@@ -629,14 +640,21 @@ async fn put_mode(
     State(state): State<Arc<AppState>>,
     Json(mode): Json<ReceiverMode>,
 ) -> impl IntoResponse {
-    if let ReceiverMode::Race { race_id } = &mode
-        && race_id.trim().is_empty()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            "race_id must not be empty when mode is race",
-        )
-            .into_response();
+    if let ReceiverMode::Race { race_id } = &mode {
+        if race_id.trim().is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "race_id must not be empty when mode is race",
+            )
+                .into_response();
+        }
+        if !is_uuid_format(race_id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "race_id must be a valid UUID when mode is race",
+            )
+                .into_response();
+        }
     }
 
     let db = state.db.lock().await;
