@@ -97,6 +97,19 @@
     return parsed;
   }
 
+  function isApiReturnedEpoch(key: string, epoch: number): boolean {
+    const options = earliestEpochOptions[key] ?? [];
+    return options.some((option) => option.stream_epoch === epoch);
+  }
+
+  function parseApiReturnedEpoch(key: string, raw: unknown): number | null {
+    const parsed = parseNonNegativeInt(raw);
+    if (parsed === null) {
+      return null;
+    }
+    return isApiReturnedEpoch(key, parsed) ? parsed : null;
+  }
+
   function formatEarliestEpochOption(
     option: api.ReplayTargetEpochOption,
   ): string {
@@ -123,6 +136,31 @@
     if (
       stream.stream_epoch !== undefined &&
       options.some((option) => option.stream_epoch === stream.stream_epoch)
+    ) {
+      return String(stream.stream_epoch);
+    }
+
+    const newest = options.reduce(
+      (max, option) => Math.max(max, option.stream_epoch),
+      options[0]?.stream_epoch ?? 0,
+    );
+    return String(newest);
+  }
+
+  function selectedTargetedEpochValue(stream: api.StreamEntry): string {
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    const configured = parseApiReturnedEpoch(key, targetedEpochInputs[key]);
+    const options = earliestEpochOptions[key] ?? [];
+
+    if (configured !== null) {
+      return String(configured);
+    }
+    if (options.length === 0) {
+      return "";
+    }
+    if (
+      stream.stream_epoch !== undefined &&
+      isApiReturnedEpoch(key, stream.stream_epoch)
     ) {
       return String(stream.stream_epoch);
     }
@@ -225,7 +263,7 @@
       const targets = Object.entries(targetedEpochInputs)
         .map(([key, value]) => {
           const stream = parseStreamKey(key);
-          const stream_epoch = parseNonNegativeInt(value);
+          const stream_epoch = parseApiReturnedEpoch(key, value);
           if (!stream || stream_epoch === null) {
             return null;
           }
@@ -515,14 +553,14 @@
     }
   }
 
-  async function replayStream(
-    forwarder_id: string,
-    reader_ip: string,
-  ): Promise<void> {
-    const key = streamKey(forwarder_id, reader_ip);
-    const parsed = parseNonNegativeInt(targetedEpochInputs[key] ?? "");
+  async function replayStream(stream: api.StreamEntry): Promise<void> {
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    const parsed = parseApiReturnedEpoch(
+      key,
+      selectedTargetedEpochValue(stream),
+    );
     if (parsed === null) {
-      error = "Target epoch must be a non-negative integer.";
+      error = "Select a valid target epoch before replaying.";
       return;
     }
 
@@ -530,7 +568,13 @@
       error = null;
       const payload: ReceiverMode = {
         mode: "targeted_replay",
-        targets: [{ forwarder_id, reader_ip, stream_epoch: parsed }],
+        targets: [
+          {
+            forwarder_id: stream.forwarder_id,
+            reader_ip: stream.reader_ip,
+            stream_epoch: parsed,
+          },
+        ],
       };
       await api.putMode(payload);
       modeMutationVersion += 1;
@@ -541,11 +585,14 @@
   }
 
   async function replayAll(): Promise<void> {
-    const targets = Object.entries(targetedEpochInputs)
-      .map(([key, value]) => {
-        const stream = parseStreamKey(key);
-        const stream_epoch = parseNonNegativeInt(value);
-        if (!stream || stream_epoch === null) {
+    const targets = (streams?.streams ?? [])
+      .map((stream) => {
+        const key = streamKey(stream.forwarder_id, stream.reader_ip);
+        const stream_epoch = parseApiReturnedEpoch(
+          key,
+          selectedTargetedEpochValue(stream),
+        );
+        if (stream_epoch === null) {
           return null;
         }
         return {
@@ -557,7 +604,7 @@
       .filter((row): row is api.ReplayTarget => row !== null);
 
     if (targets.length === 0) {
-      error = "Enter at least one valid target epoch before replaying all.";
+      error = "Select at least one valid target epoch before replaying all.";
       return;
     }
 
@@ -1068,20 +1115,39 @@
 
                 <div class="flex items-center gap-2 shrink-0">
                   {#if modeDraft === "targeted_replay"}
-                    <input
+                    {@const options = earliestEpochOptions[key] ?? []}
+                    {@const selectedTargeted =
+                      selectedTargetedEpochValue(stream)}
+                    <select
                       data-testid="targeted-epoch-{key}"
-                      type="number"
-                      min="0"
-                      class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-24 focus:outline-none focus:ring-1 focus:ring-accent"
-                      bind:value={targetedEpochInputs[key]}
-                      oninput={markModeEdited}
-                      placeholder="epoch"
-                    />
+                      class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                      value={selectedTargeted}
+                      onchange={(event) => {
+                        targetedEpochInputs = {
+                          ...targetedEpochInputs,
+                          [key]: event.currentTarget.value,
+                        };
+                        markModeEdited();
+                      }}
+                    >
+                      {#if earliestEpochLoading[key]}
+                        <option value="">Loading epochs...</option>
+                      {:else if earliestEpochLoadErrors[key]}
+                        <option value="">Epochs unavailable</option>
+                      {:else if options.length === 0}
+                        <option value="">No epochs available</option>
+                      {:else}
+                        {#each options as option}
+                          <option value={String(option.stream_epoch)}>
+                            {formatEarliestEpochOption(option)}
+                          </option>
+                        {/each}
+                      {/if}
+                    </select>
                     <button
                       data-testid="replay-stream-{key}"
                       class="{btnPrimary} !px-2.5 !py-1 !text-xs"
-                      onclick={() =>
-                        replayStream(stream.forwarder_id, stream.reader_ip)}
+                      onclick={() => replayStream(stream)}
                     >
                       Replay
                     </button>

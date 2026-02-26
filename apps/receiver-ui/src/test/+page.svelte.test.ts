@@ -662,10 +662,11 @@ describe("receiver page mode controls", () => {
       target: { value: "targeted_replay" },
     });
 
-    const epochInput = await screen.findByTestId(
+    const epochSelect = await screen.findByTestId(
       "targeted-epoch-fwd-1/10.0.0.1:10000",
     );
-    await fireEvent.input(epochInput, { target: { value: "7" } });
+    expect(epochSelect.tagName).toBe("SELECT");
+    await fireEvent.change(epochSelect, { target: { value: "9" } });
 
     const replayButton = await screen.findByTestId(
       "replay-stream-fwd-1/10.0.0.1:10000",
@@ -679,7 +680,7 @@ describe("receiver page mode controls", () => {
           {
             forwarder_id: "fwd-1",
             reader_ip: "10.0.0.1:10000",
-            stream_epoch: 7,
+            stream_epoch: 9,
           },
         ],
       });
@@ -721,8 +722,10 @@ describe("receiver page mode controls", () => {
     const epoch2 = await screen.findByTestId(
       "targeted-epoch-fwd-2/10.0.0.2:10000",
     );
-    await fireEvent.input(epoch1, { target: { value: "3" } });
-    await fireEvent.input(epoch2, { target: { value: "9" } });
+    expect(epoch1.tagName).toBe("SELECT");
+    expect(epoch2.tagName).toBe("SELECT");
+    await fireEvent.change(epoch1, { target: { value: "3" } });
+    await fireEvent.change(epoch2, { target: { value: "9" } });
 
     const replayAll = await screen.findByTestId("replay-all-btn");
     await fireEvent.click(replayAll);
@@ -740,6 +743,42 @@ describe("receiver page mode controls", () => {
             forwarder_id: "fwd-2",
             reader_ip: "10.0.0.2:10000",
             stream_epoch: 9,
+          },
+        ],
+      });
+    });
+  });
+
+  it("falls back to API-returned epoch when hydrated targeted epoch is unavailable", async () => {
+    render(Page);
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    callbacks.onModeChanged({
+      mode: "targeted_replay",
+      targets: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          stream_epoch: 7,
+        },
+      ],
+    });
+
+    const replayButton = await screen.findByTestId(
+      "replay-stream-fwd-1/10.0.0.1:10000",
+    );
+    await fireEvent.click(replayButton);
+
+    await waitFor(() => {
+      expect(apiMocks.putMode).toHaveBeenCalledWith({
+        mode: "targeted_replay",
+        targets: [
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            stream_epoch: 5,
           },
         ],
       });
