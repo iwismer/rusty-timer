@@ -61,17 +61,20 @@ All REST endpoints live under `/api/v1/`. WebSocket endpoints are under `/ws/v1/
 
 ### Announcer
 
-- `GET /api/v1/announcer/config` -- read announcer config
-- `PUT /api/v1/announcer/config` -- update announcer config
-- `POST /api/v1/announcer/reset` -- clear announcer runtime state
-- `GET /api/v1/announcer/state` -- public snapshot (config + current rows/count)
-- `GET /api/v1/announcer/events` -- announcer SSE updates (`announcer_update`)
+- `GET /api/v1/announcer/config` -- read announcer config (operator endpoint)
+- `PUT /api/v1/announcer/config` -- update announcer config (operator endpoint)
+- `POST /api/v1/announcer/reset` -- clear announcer runtime state (operator endpoint)
+- `GET /api/v1/announcer/state` -- full announcer snapshot including config/internal IDs
+- `GET /api/v1/announcer/events` -- full announcer SSE updates (`announcer_update`)
+- `GET /api/v1/public/announcer/state` -- sanitized snapshot for public `/announcer`
+- `GET /api/v1/public/announcer/events` -- sanitized announcer SSE updates (`announcer_update`)
 
 Announcer semantics:
 - Enabling requires at least one selected stream.
 - `enabled_until` is set on explicit enable and is not extended by later edits.
 - Runtime state (dedup/list/count) is in-memory and resets on process restart.
 - No historical backfill is emitted on enable/reset; only new canonical reads.
+- Public announcer payloads intentionally exclude config fields and internal IDs.
 
 ### Races
 
@@ -104,6 +107,7 @@ management. See `src/http/admin.rs` for the full list.
 
 - `GET /api/v1/events` -- SSE stream for the dashboard
 - `GET /api/v1/announcer/events` -- SSE stream for announcer rows
+- `GET /api/v1/public/announcer/events` -- sanitized SSE stream for public announcer
 
 ## Docker
 

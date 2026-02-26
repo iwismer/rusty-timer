@@ -36,11 +36,6 @@ vi.stubGlobal("EventSource", MockEventSource);
 
 function makeState(overrides?: Record<string, unknown>) {
   return {
-    enabled: true,
-    enabled_until: "2026-02-27T10:00:00Z",
-    selected_stream_ids: ["stream-1"],
-    max_list_size: 25,
-    updated_at: "2026-02-26T10:00:00Z",
     public_enabled: true,
     finisher_count: 0,
     rows: [],
@@ -87,13 +82,10 @@ describe("public announcer page", () => {
           finisher_count: 1,
           rows: [
             {
-              stream_id: "stream-1",
-              seq: 1,
-              chip_id: "000000111111",
+              announcement_id: 1,
               bib: 111,
               display_name: "Runner One",
               reader_timestamp: "10:00:00",
-              received_at: "2026-02-26T10:00:00Z",
             },
           ],
         }),
@@ -121,17 +113,14 @@ describe("public announcer page", () => {
     es.emit("announcer_update", {
       finisher_count: 1,
       row: {
-        stream_id: "stream-1",
-        seq: 2,
-        chip_id: "000000222222",
+        announcement_id: 1,
         bib: 222,
         display_name: "Runner Two",
         reader_timestamp: "10:00:01",
-        received_at: "2026-02-26T10:00:01Z",
       },
     });
 
-    const row = await screen.findByTestId("announcer-row-stream-1:2");
+    const row = await screen.findByTestId("announcer-row-1");
     await waitFor(() => {
       expect(row.className).toContain("flash-new");
     });
@@ -156,13 +145,10 @@ describe("public announcer page", () => {
     es.emit("announcer_update", {
       finisher_count: 1,
       row: {
-        stream_id: "stream-1",
-        seq: 2,
-        chip_id: "000000222222",
+        announcement_id: 1,
         bib: 222,
         display_name: "Runner Two",
         reader_timestamp: "10:00:01",
-        received_at: "2026-02-26T10:00:01Z",
       },
     });
 

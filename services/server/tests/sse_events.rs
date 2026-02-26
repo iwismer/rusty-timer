@@ -547,6 +547,131 @@ async fn test_announcer_sse_emits_resync_after_announcer_reset() {
 }
 
 #[tokio::test]
+async fn test_public_announcer_sse_emits_sanitized_announcer_update() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, online) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(stream_id)
+    .bind("fwd-public-announcer-sse")
+    .bind("192.168.200.2:10000")
+    .bind(false)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO stream_metrics (stream_id) VALUES ($1)")
+        .bind(stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE announcer_config SET enabled = true, selected_stream_ids = $1")
+        .bind(vec![stream_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state, None))
+            .await
+            .unwrap();
+    });
+
+    insert_token(
+        &pool,
+        "fwd-public-announcer-sse",
+        "forwarder",
+        b"public-announcer-sse-token",
+    )
+    .await;
+
+    let sse_url = format!("http://{}/api/v1/public/announcer/events", addr);
+    let mut sse_response = reqwest::Client::new().get(&sse_url).send().await.unwrap();
+    assert_eq!(sse_response.status(), 200);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let ws_url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut fwd = MockWsClient::connect_with_token(&ws_url, "public-announcer-sse-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-public-announcer-sse".to_owned(),
+        reader_ips: vec!["192.168.200.2:10000".to_owned()],
+        display_name: None,
+    }))
+    .await
+    .unwrap();
+
+    let session_id = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected Heartbeat, got {:?}", other),
+    };
+
+    fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+        session_id,
+        batch_id: "public-announcer-b1".to_owned(),
+        events: vec![ReadEvent {
+            forwarder_id: "fwd-public-announcer-sse".to_owned(),
+            reader_ip: "192.168.200.2:10000".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "2026-02-26T10:00:00.000Z".to_owned(),
+            raw_frame: "aa400000000123450a2a01123018455927a7".as_bytes().to_vec(),
+            read_type: "RAW".to_owned(),
+        }],
+    }))
+    .await
+    .unwrap();
+    let _ = fwd.recv_message().await.unwrap();
+
+    let mut collected = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                collected.push_str(&String::from_utf8_lossy(&chunk));
+                if collected.contains("event: announcer_update") {
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => panic!("error reading SSE chunk: {:?}", e),
+            Err(_) => break,
+        }
+    }
+
+    let payload = find_sse_event_data(&collected, "announcer_update")
+        .expect("missing announcer_update payload");
+    let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(json["finisher_count"].as_u64(), Some(1));
+    assert_eq!(json["row"]["display_name"].as_str(), Some("Unknown"));
+    assert!(
+        json["row"]["announcement_id"].as_u64().is_some(),
+        "announcement_id should be present and numeric"
+    );
+    assert_eq!(json["row"]["bib"], serde_json::json!(null));
+    assert_eq!(
+        json["row"]["reader_timestamp"].as_str(),
+        Some("2026-02-26T10:00:00.000Z")
+    );
+
+    for forbidden in ["chip_id", "stream_id", "seq", "received_at"] {
+        assert!(
+            json["row"].get(forbidden).is_none(),
+            "public SSE row leaked internal field: {forbidden}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

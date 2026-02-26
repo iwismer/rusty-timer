@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { getAnnouncerState } from "$lib/api";
-  import type { AnnouncerDelta, AnnouncerRow } from "$lib/api";
+  import { getPublicAnnouncerState } from "$lib/api";
+  import type { PublicAnnouncerDelta, PublicAnnouncerRow } from "$lib/api";
   import { connectAnnouncerEvents } from "$lib/announcer-client";
 
   let loading = $state(true);
   let loadError: string | null = $state(null);
   let publicEnabled = $state(false);
   let finisherCount = $state(0);
-  let rows: AnnouncerRow[] = $state([]);
+  let rows: PublicAnnouncerRow[] = $state([]);
   let maxListSize = $state(25);
   let flashRowKeys = $state(new Set<string>());
   let liveRevision = 0;
@@ -35,15 +35,15 @@
     loading = true;
     loadError = null;
     try {
-      const state = await getAnnouncerState();
+      const state = await getPublicAnnouncerState();
       publicEnabled = state.public_enabled;
-      maxListSize = state.max_list_size;
+      maxListSize = Math.max(maxListSize, state.rows.length);
 
       if (liveRevision === revisionAtStart) {
         finisherCount = state.finisher_count;
         rows = [...state.rows];
       } else {
-        const mergedByKey = new Map<string, AnnouncerRow>(
+        const mergedByKey = new Map<string, PublicAnnouncerRow>(
           rows.map((row) => [rowKey(row), row]),
         );
         for (const row of state.rows) {
@@ -52,7 +52,7 @@
             mergedByKey.set(key, row);
           }
         }
-        rows = [...mergedByKey.values()].slice(0, state.max_list_size);
+        rows = [...mergedByKey.values()].slice(0, maxListSize);
         finisherCount = Math.max(finisherCount, state.finisher_count);
       }
     } catch (err) {
@@ -62,7 +62,7 @@
     }
   }
 
-  function applyDelta(delta: AnnouncerDelta) {
+  function applyDelta(delta: PublicAnnouncerDelta) {
     liveRevision += 1;
     const key = rowKey(delta.row);
     const deduped = rows.filter((row) => rowKey(row) !== key);
@@ -82,8 +82,8 @@
     }, 1200);
   }
 
-  function rowKey(row: AnnouncerRow): string {
-    return `${row.stream_id}:${row.seq}`;
+  function rowKey(row: PublicAnnouncerRow): string {
+    return `${row.announcement_id}`;
   }
 </script>
 

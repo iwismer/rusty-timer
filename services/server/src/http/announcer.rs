@@ -24,6 +24,20 @@ const MIN_LIST_SIZE: i32 = 1;
 const MAX_LIST_SIZE: i32 = 500;
 const ENABLED_TTL_HOURS: i64 = 24;
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct PublicAnnouncerRow {
+    announcement_id: u64,
+    bib: Option<i32>,
+    display_name: String,
+    reader_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PublicAnnouncerDelta {
+    row: PublicAnnouncerRow,
+    finisher_count: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PutAnnouncerConfigRequest {
     enabled: bool,
@@ -134,6 +148,40 @@ pub async fn get_state(State(state): State<AppState>) -> impl IntoResponse {
     .into_response()
 }
 
+pub async fn get_public_state(State(state): State<AppState>) -> impl IntoResponse {
+    let config = match announcer_config::get_config(&state.pool).await {
+        Ok(config) => config,
+        Err(err) => return internal_error(err),
+    };
+    let now = Utc::now();
+    let public_enabled = is_public_enabled(&config, now);
+    let runtime = state.announcer_runtime.read().await;
+    let finisher_count = if public_enabled {
+        runtime.finisher_count()
+    } else {
+        0
+    };
+    let rows = if public_enabled {
+        runtime
+            .rows()
+            .iter()
+            .zip(0_u64..)
+            .map(|(row, offset)| {
+                public_row_from_runtime(row, finisher_count.saturating_sub(offset))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    Json(serde_json::json!({
+        "public_enabled": public_enabled,
+        "finisher_count": finisher_count,
+        "rows": rows,
+    }))
+    .into_response()
+}
+
 pub async fn announcer_sse(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -143,6 +191,32 @@ pub async fn announcer_sse(
             Ok(json) => Some(Ok(Event::default().event("announcer_update").data(json))),
             Err(_) => None,
         },
+        Ok(AnnouncerEvent::Resync) => Some(Ok(Event::default().event("resync").data("{}"))),
+        Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(StdDuration::from_secs(15))
+            .text("keepalive"),
+    )
+}
+
+pub async fn public_announcer_sse(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.announcer_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(AnnouncerEvent::Update(delta)) => {
+            let payload = PublicAnnouncerDelta {
+                row: public_row_from_runtime(&delta.row, delta.finisher_count),
+                finisher_count: delta.finisher_count,
+            };
+            match serde_json::to_string(&payload) {
+                Ok(json) => Some(Ok(Event::default().event("announcer_update").data(json))),
+                Err(_) => None,
+            }
+        }
         Ok(AnnouncerEvent::Resync) => Some(Ok(Event::default().event("resync").data("{}"))),
         Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
     });
@@ -186,4 +260,16 @@ fn config_response(config: AnnouncerConfigRow) -> serde_json::Value {
         "updated_at": config.updated_at.to_rfc3339(),
         "public_enabled": is_public_enabled(&config, Utc::now()),
     })
+}
+
+fn public_row_from_runtime(
+    row: &crate::announcer::AnnouncerRow,
+    announcement_id: u64,
+) -> PublicAnnouncerRow {
+    PublicAnnouncerRow {
+        announcement_id,
+        bib: row.bib,
+        display_name: row.display_name.clone(),
+        reader_timestamp: row.reader_timestamp.clone(),
+    }
 }

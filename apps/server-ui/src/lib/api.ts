@@ -90,6 +90,24 @@ export interface AnnouncerDelta {
   finisher_count: number;
 }
 
+export interface PublicAnnouncerRow {
+  announcement_id: number;
+  bib: number | null;
+  display_name: string;
+  reader_timestamp: string | null;
+}
+
+export interface PublicAnnouncerState {
+  public_enabled: boolean;
+  finisher_count: number;
+  rows: PublicAnnouncerRow[];
+}
+
+export interface PublicAnnouncerDelta {
+  row: PublicAnnouncerRow;
+  finisher_count: number;
+}
+
 // ----- Internal helpers -----
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -216,6 +234,11 @@ export async function resetAnnouncer(): Promise<void> {
 /** GET /api/v1/announcer/state */
 export async function getAnnouncerState(): Promise<AnnouncerState> {
   return apiFetch<AnnouncerState>("/api/v1/announcer/state");
+}
+
+/** GET /api/v1/public/announcer/state */
+export async function getPublicAnnouncerState(): Promise<PublicAnnouncerState> {
+  return apiFetch<PublicAnnouncerState>("/api/v1/public/announcer/state");
 }
 
 // ----- Forwarder config types -----

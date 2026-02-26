@@ -270,6 +270,32 @@ describe("server_api client", () => {
     );
   });
 
+  it("getPublicAnnouncerState calls GET /api/v1/public/announcer/state", async () => {
+    const { getPublicAnnouncerState } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        public_enabled: true,
+        finisher_count: 1,
+        rows: [
+          {
+            announcement_id: 1,
+            bib: 123,
+            display_name: "Runner Public",
+            reader_timestamp: "10:00:00",
+          },
+        ],
+      }),
+    );
+
+    const result = await getPublicAnnouncerState();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/public/announcer/state"),
+      expect.any(Object),
+    );
+    expect(result.public_enabled).toBe(true);
+    expect(result.rows[0]?.announcement_id).toBe(1);
+  });
+
   // ----- Admin: getTokens -----
   it("getTokens calls GET /api/v1/admin/tokens", async () => {
     const { getTokens } = await import("./api");

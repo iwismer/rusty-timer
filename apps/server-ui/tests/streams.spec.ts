@@ -492,7 +492,7 @@ test.describe("announcer public page", () => {
         body: JSON.stringify({ entries: [] }),
       });
     });
-    await page.route("**/api/v1/announcer/events", async (route) => {
+    await page.route("**/api/v1/public/announcer/events", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream",
@@ -502,16 +502,11 @@ test.describe("announcer public page", () => {
   });
 
   test("announcer-public disabled message renders", async ({ page }) => {
-    await page.route("**/api/v1/announcer/state", async (route) => {
+    await page.route("**/api/v1/public/announcer/state", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          enabled: false,
-          enabled_until: null,
-          selected_stream_ids: [],
-          max_list_size: 25,
-          updated_at: "2026-02-26T10:00:00Z",
           public_enabled: false,
           finisher_count: 0,
           rows: [],
@@ -526,27 +521,19 @@ test.describe("announcer public page", () => {
   test("announcer-public enabled page shows disclaimer and rows", async ({
     page,
   }) => {
-    await page.route("**/api/v1/announcer/state", async (route) => {
+    await page.route("**/api/v1/public/announcer/state", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          enabled: true,
-          enabled_until: "2026-02-27T10:00:00Z",
-          selected_stream_ids: ["stream-1"],
-          max_list_size: 25,
-          updated_at: "2026-02-26T10:00:00Z",
           public_enabled: true,
           finisher_count: 1,
           rows: [
             {
-              stream_id: "stream-1",
-              seq: 1,
-              chip_id: "000000333333",
+              announcement_id: 1,
               bib: 333,
               display_name: "Runner Three",
               reader_timestamp: "10:00:00",
-              received_at: "2026-02-26T10:00:00Z",
             },
           ],
         }),

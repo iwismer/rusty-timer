@@ -160,6 +160,125 @@ async fn disabled_public_state_redacts_seeded_runtime_rows() {
 }
 
 #[tokio::test]
+async fn public_state_endpoint_redacts_internal_fields_when_disabled() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let (_app_state, addr, _server_task) = start_server(pool).await;
+
+    let resp = reqwest::get(format!("http://{addr}/api/v1/public/announcer/state"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let obj = body
+        .as_object()
+        .expect("public announcer state should be object");
+
+    assert_eq!(obj.get("public_enabled"), Some(&serde_json::json!(false)));
+    assert_eq!(obj.get("finisher_count"), Some(&serde_json::json!(0)));
+    assert_eq!(obj.get("rows"), Some(&serde_json::json!([])));
+    assert_eq!(obj.len(), 3, "public state must only contain public fields");
+
+    for forbidden in [
+        "enabled",
+        "enabled_until",
+        "selected_stream_ids",
+        "max_list_size",
+        "updated_at",
+    ] {
+        assert!(
+            !obj.contains_key(forbidden),
+            "public state leaked internal field: {forbidden}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn public_state_endpoint_returns_sanitized_rows_when_enabled() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, online) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(stream_id)
+    .bind("fwd-public-state")
+    .bind("10.200.0.1:10000")
+    .bind(false)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE announcer_config SET enabled = true, selected_stream_ids = $1")
+        .bind(vec![stream_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (app_state, addr, _server_task) = start_server(pool).await;
+    {
+        let mut runtime = app_state.announcer_runtime.write().await;
+        let _ = runtime.ingest(
+            AnnouncerInputEvent {
+                stream_id,
+                seq: 55,
+                chip_id: "000000777777".to_owned(),
+                bib: Some(777),
+                display_name: "Public Runner".to_owned(),
+                reader_timestamp: Some("10:00:55".to_owned()),
+                received_at: chrono::Utc::now(),
+            },
+            25,
+        );
+    }
+
+    let resp = reqwest::get(format!("http://{addr}/api/v1/public/announcer/state"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    assert_eq!(body["public_enabled"], serde_json::json!(true));
+    assert_eq!(body["finisher_count"], serde_json::json!(1));
+    let rows = body["rows"]
+        .as_array()
+        .expect("public state rows should be array");
+    assert_eq!(rows.len(), 1);
+    let row = rows[0]
+        .as_object()
+        .expect("public state row should be object");
+    assert_eq!(
+        row.get("display_name"),
+        Some(&serde_json::json!("Public Runner"))
+    );
+    assert_eq!(row.get("bib"), Some(&serde_json::json!(777)));
+    assert_eq!(
+        row.get("reader_timestamp"),
+        Some(&serde_json::json!("10:00:55"))
+    );
+    assert!(
+        row.get("announcement_id")
+            .and_then(serde_json::Value::as_u64)
+            .is_some(),
+        "announcement_id should be present and numeric"
+    );
+    assert_eq!(row.len(), 4, "public row must only contain public fields");
+
+    for forbidden in ["chip_id", "stream_id", "seq", "received_at"] {
+        assert!(
+            !row.contains_key(forbidden),
+            "public row leaked internal field: {forbidden}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn config_update_with_different_stream_selection_resets_runtime() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

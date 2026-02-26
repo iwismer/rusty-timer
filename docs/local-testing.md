@@ -82,8 +82,10 @@ The server exposes:
 - `GET  /api/v1/announcer/config` — read announcer config
 - `PUT  /api/v1/announcer/config` — update announcer config
 - `POST /api/v1/announcer/reset` — reset announcer runtime state
-- `GET  /api/v1/announcer/state` — public announcer snapshot
-- `GET  /api/v1/announcer/events` — announcer SSE updates
+- `GET  /api/v1/announcer/state` — full announcer snapshot (internal/operator)
+- `GET  /api/v1/announcer/events` — full announcer SSE updates (internal/operator)
+- `GET  /api/v1/public/announcer/state` — sanitized public announcer snapshot
+- `GET  /api/v1/public/announcer/events` — sanitized public announcer SSE updates
 
 ---
 

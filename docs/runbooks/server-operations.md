@@ -148,11 +148,13 @@ controls at `/announcer-config`.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/v1/announcer/config` | Current persisted announcer configuration |
-| `PUT /api/v1/announcer/config` | Update config (enable/select streams/max list) |
-| `POST /api/v1/announcer/reset` | Clear announcer runtime list/count/dedup |
-| `GET /api/v1/announcer/state` | Snapshot used by public announcer screen |
-| `GET /api/v1/announcer/events` | Live SSE updates (`announcer_update`) |
+| `GET /api/v1/announcer/config` | Current persisted announcer configuration (operator endpoint) |
+| `PUT /api/v1/announcer/config` | Update config (enable/select streams/max list) (operator endpoint) |
+| `POST /api/v1/announcer/reset` | Clear announcer runtime list/count/dedup (operator endpoint) |
+| `GET /api/v1/announcer/state` | Full snapshot including config/internal IDs (operator/internal) |
+| `GET /api/v1/announcer/events` | Full live SSE updates (`announcer_update`) (operator/internal) |
+| `GET /api/v1/public/announcer/state` | Sanitized snapshot for public announcer screen |
+| `GET /api/v1/public/announcer/events` | Sanitized live SSE updates (`announcer_update`) for public screen |
 
 ### Enable + expiry semantics
 
