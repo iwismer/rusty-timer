@@ -1,5 +1,6 @@
 use super::response::{bad_request, internal_error};
 use crate::{
+    announcer::AnnouncerEvent,
     repo::announcer_config::{self, AnnouncerConfigRow, AnnouncerConfigUpdate},
     state::AppState,
 };
@@ -92,16 +93,14 @@ pub async fn put_config(
     };
 
     if should_reset_runtime(&previous, &updated, &selected_stream_ids) {
-        let mut runtime = state.announcer_runtime.write().await;
-        runtime.reset();
+        state.reset_announcer_runtime().await;
     }
 
     Json(config_response(updated)).into_response()
 }
 
 pub async fn post_reset(State(state): State<AppState>) -> impl IntoResponse {
-    let mut runtime = state.announcer_runtime.write().await;
-    runtime.reset();
+    state.reset_announcer_runtime().await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -132,10 +131,11 @@ pub async fn announcer_sse(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.announcer_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(delta) => match serde_json::to_string(&delta) {
+        Ok(AnnouncerEvent::Update(delta)) => match serde_json::to_string(&delta) {
             Ok(json) => Some(Ok(Event::default().event("announcer_update").data(json))),
             Err(_) => None,
         },
+        Ok(AnnouncerEvent::Resync) => Some(Ok(Event::default().event("resync").data("{}"))),
         Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
     });
 

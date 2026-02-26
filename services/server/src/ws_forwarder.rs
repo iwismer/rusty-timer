@@ -1,5 +1,5 @@
 use crate::{
-    announcer::AnnouncerInputEvent,
+    announcer::{AnnouncerEvent, AnnouncerInputEvent},
     auth::validate_token,
     dashboard_events::{DashboardEvent, OptionalStringPatch},
     repo::{
@@ -674,7 +674,7 @@ async fn handle_event_batch(
                         },
                         announcer_max_list_size,
                     ) {
-                        let _ = state.announcer_tx.send(delta);
+                        let _ = state.announcer_tx.send(AnnouncerEvent::Update(delta));
                     }
                 }
             }
@@ -725,7 +725,7 @@ async fn handle_event_batch(
         .keys()
         .any(|stream_id| announcer_selected_streams.contains(stream_id))
     {
-        state.announcer_runtime.write().await.reset();
+        state.reset_announcer_runtime().await;
     }
 
     for (stream_id, new_epoch) in epoch_transitions {

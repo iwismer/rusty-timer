@@ -32,6 +32,12 @@ pub struct AnnouncerDelta {
     pub finisher_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnouncerEvent {
+    Update(AnnouncerDelta),
+    Resync,
+}
+
 #[derive(Debug, Default)]
 pub struct AnnouncerRuntime {
     seen_chips: HashSet<String>,

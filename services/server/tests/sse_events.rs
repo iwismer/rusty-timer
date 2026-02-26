@@ -477,6 +477,76 @@ async fn test_announcer_sse_emits_announcer_update() {
 }
 
 #[tokio::test]
+async fn test_announcer_sse_emits_resync_after_announcer_reset() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let app_state = server::AppState::new(pool.clone());
+    {
+        let mut runtime = app_state.announcer_runtime.write().await;
+        let _ = runtime.ingest(
+            server::announcer::AnnouncerInputEvent {
+                stream_id: Uuid::new_v4(),
+                seq: 1,
+                chip_id: "000000123456".to_owned(),
+                bib: Some(123),
+                display_name: "Runner".to_owned(),
+                reader_timestamp: Some("10:00:00".to_owned()),
+                received_at: chrono::Utc::now(),
+            },
+            25,
+        );
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state, None))
+            .await
+            .unwrap();
+    });
+
+    let sse_url = format!("http://{}/api/v1/announcer/events", addr);
+    let mut sse_response = reqwest::Client::new().get(&sse_url).send().await.unwrap();
+    assert_eq!(sse_response.status(), 200);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let reset_resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/v1/announcer/reset"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset_resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let mut collected = String::new();
+    let mut saw_resync = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                collected.push_str(&String::from_utf8_lossy(&chunk));
+                if collected.contains("event: resync") {
+                    saw_resync = true;
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => panic!("error reading SSE chunk: {:?}", e),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        saw_resync,
+        "expected 'event: resync' in announcer SSE after reset, got:\n{}",
+        collected
+    );
+}
+
+#[tokio::test]
 async fn test_sse_emits_stream_updated_with_null_forwarder_display_name_on_clear() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

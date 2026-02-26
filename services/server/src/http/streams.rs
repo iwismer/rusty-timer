@@ -133,7 +133,7 @@ pub async fn reset_epoch(
                     if let Ok(config) = announcer_config::get_config(&state.pool).await
                         && config.selected_stream_ids.contains(&stream_id)
                     {
-                        state.announcer_runtime.write().await.reset();
+                        state.reset_announcer_runtime().await;
                     }
                     state
                         .logger

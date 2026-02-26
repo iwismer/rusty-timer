@@ -5,7 +5,10 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, oneshot};
 use uuid::Uuid;
 
-use crate::{announcer::AnnouncerRuntime, dashboard_events::DashboardEvent};
+use crate::{
+    announcer::{AnnouncerEvent, AnnouncerRuntime},
+    dashboard_events::DashboardEvent,
+};
 
 pub enum ForwarderProxyReply<T> {
     Response(T),
@@ -67,7 +70,7 @@ pub struct AppState {
     pub active_receiver_sessions: ReceiverSessionRegistry,
     pub announcer_runtime: AnnouncerRuntimeState,
     pub dashboard_tx: broadcast::Sender<DashboardEvent>,
-    pub announcer_tx: broadcast::Sender<crate::announcer::AnnouncerDelta>,
+    pub announcer_tx: broadcast::Sender<AnnouncerEvent>,
     pub logger: Arc<rt_ui_log::UiLogger<DashboardEvent>>,
 }
 
@@ -162,6 +165,14 @@ impl AppState {
             .write()
             .await
             .remove(session_id);
+    }
+
+    pub async fn reset_announcer_runtime(&self) {
+        {
+            let mut runtime = self.announcer_runtime.write().await;
+            runtime.reset();
+        }
+        let _ = self.announcer_tx.send(AnnouncerEvent::Resync);
     }
 
     pub async fn get_receiver_session(&self, session_id: &str) -> Option<ReceiverSessionRecord> {
