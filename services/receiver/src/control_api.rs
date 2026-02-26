@@ -699,6 +699,14 @@ async fn put_earliest_epoch(
     State(state): State<Arc<AppState>>,
     Json(body): Json<EarliestEpochRequest>,
 ) -> impl IntoResponse {
+    if body.earliest_epoch < 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "earliest_epoch must be a non-negative integer",
+        )
+            .into_response();
+    }
+
     let db = state.db.lock().await;
     match db.save_earliest_epoch(&body.forwarder_id, &body.reader_ip, body.earliest_epoch) {
         Ok(()) => {

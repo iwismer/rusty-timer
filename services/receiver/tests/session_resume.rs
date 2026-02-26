@@ -70,24 +70,21 @@ fn receiver_mode_persists_via_receiver_db() {
 }
 
 #[test]
-fn targeted_replay_mode_persists_empty_targets() {
+fn targeted_replay_mode_round_trips_with_targets() {
     let db = receiver::db::Db::open_in_memory().unwrap();
     db.save_profile("wss://persist.example", "tok", "check-and-download")
         .unwrap();
-    db.save_receiver_mode(&ReceiverMode::TargetedReplay {
+    let mode = ReceiverMode::TargetedReplay {
         targets: vec![ReplayTarget {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1".to_owned(),
             stream_epoch: 9,
             from_seq: 1,
         }],
-    })
-    .unwrap();
+    };
+    db.save_receiver_mode(&mode).unwrap();
 
-    assert_eq!(
-        db.load_receiver_mode().unwrap(),
-        Some(ReceiverMode::TargetedReplay { targets: vec![] })
-    );
+    assert_eq!(db.load_receiver_mode().unwrap(), Some(mode));
 }
 
 #[test]

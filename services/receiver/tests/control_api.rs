@@ -351,6 +351,26 @@ async fn put_earliest_epoch_persists_to_db() {
 }
 
 #[tokio::test]
+async fn put_earliest_epoch_rejects_negative_values() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/streams/earliest-epoch",
+            json!({"forwarder_id":"f1","reader_ip":"10.0.0.1:10000","earliest_epoch":-1})
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+
+    let rows = state.db.lock().await.load_earliest_epochs().unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
 async fn put_mode_emits_mode_changed_event() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);

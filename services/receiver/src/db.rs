@@ -1,4 +1,4 @@
-use rt_protocol::{ReceiverMode, ReplayTarget, ResumeCursor};
+use rt_protocol::{ReceiverMode, ResumeCursor};
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -111,13 +111,7 @@ impl Db {
     }
 
     pub fn save_receiver_mode(&self, mode: &ReceiverMode) -> DbResult<()> {
-        let persisted_mode = match mode {
-            ReceiverMode::TargetedReplay { .. } => ReceiverMode::TargetedReplay {
-                targets: Vec::<ReplayTarget>::new(),
-            },
-            other => other.clone(),
-        };
-        let json = serde_json::to_string(&persisted_mode)?;
+        let json = serde_json::to_string(mode)?;
         let updated = self.conn.execute(
             "UPDATE profile SET receiver_mode_json = ?1",
             rusqlite::params![json],
@@ -322,12 +316,12 @@ mod tests {
     }
 
     #[test]
-    fn targeted_replay_mode_is_persisted_without_targets() {
+    fn targeted_replay_mode_round_trips_with_targets() {
         let db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download")
             .unwrap();
         let targeted = ReceiverMode::TargetedReplay {
-            targets: vec![ReplayTarget {
+            targets: vec![rt_protocol::ReplayTarget {
                 forwarder_id: "f1".to_owned(),
                 reader_ip: "10.0.0.1".to_owned(),
                 stream_epoch: 3,
@@ -336,12 +330,7 @@ mod tests {
         };
 
         db.save_receiver_mode(&targeted).unwrap();
-        assert_eq!(
-            db.load_receiver_mode().unwrap().unwrap(),
-            ReceiverMode::TargetedReplay {
-                targets: Vec::new()
-            }
-        );
+        assert_eq!(db.load_receiver_mode().unwrap().unwrap(), targeted);
     }
 
     #[test]

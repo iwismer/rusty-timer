@@ -760,6 +760,10 @@ where
         }
         Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
     };
+    let clear_targeted_mode_after_handshake = matches!(
+        &mode,
+        ReceiverMode::TargetedReplay { targets } if !targets.is_empty()
+    );
 
     if let ReceiverMode::Live {
         ref mut streams,
@@ -865,6 +869,14 @@ where
 
         match serde_json::from_str::<WsMessage>(&text) {
             Ok(WsMessage::Heartbeat(hb)) => {
+                if clear_targeted_mode_after_handshake {
+                    let clear_mode = ReceiverMode::TargetedReplay {
+                        targets: Vec::new(),
+                    };
+                    if let Err(e) = db.save_receiver_mode(&clear_mode) {
+                        return (Err(receiver::session::SessionError::Db(e)), None);
+                    }
+                }
                 info!(session_id = %hb.session_id, "handshake complete");
                 return (Ok(hb.session_id), Some(ws));
             }
@@ -1035,7 +1047,7 @@ mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use receiver::ui_events::ReceiverUiEvent;
-    use rt_protocol::{Heartbeat, ReceiverModeApplied, WsMessage};
+    use rt_protocol::{Heartbeat, ReceiverMode, ReceiverModeApplied, ReplayTarget, WsMessage};
     use std::future::Future;
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -1127,6 +1139,72 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("replay capped at 1000 events")),
             "expected second warning log entry, got: {log_entries:?}"
+        );
+
+        task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn handshake_sends_targeted_replay_targets_then_clears_them() {
+        let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+            let hello = ws.next().await.expect("hello frame").expect("hello ws");
+            let Message::Text(hello_text) = hello else {
+                panic!("expected text hello frame");
+            };
+            let hello_msg: WsMessage = serde_json::from_str(&hello_text).expect("parse hello");
+            let WsMessage::ReceiverHelloV12(hello) = hello_msg else {
+                panic!("expected receiver_hello_v12");
+            };
+            let ReceiverMode::TargetedReplay { targets } = hello.mode else {
+                panic!("expected targeted replay mode");
+            };
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].forwarder_id, "f1");
+            assert_eq!(targets[0].reader_ip, "10.0.0.1");
+            assert_eq!(targets[0].stream_epoch, 4);
+
+            let heartbeat = WsMessage::Heartbeat(Heartbeat {
+                session_id: "session-targeted".to_owned(),
+                device_id: "receiver-main".to_owned(),
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&heartbeat)
+                    .expect("serialize heartbeat")
+                    .into(),
+            ))
+            .await
+            .expect("send heartbeat");
+        })
+        .await;
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .expect("connect");
+        let db = Db::open_in_memory().expect("db");
+        db.save_profile("ws://server.example", "token", "check-and-download")
+            .expect("save profile");
+        let initial_mode = ReceiverMode::TargetedReplay {
+            targets: vec![ReplayTarget {
+                forwarder_id: "f1".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                stream_epoch: 4,
+                from_seq: 1,
+            }],
+        };
+        db.save_receiver_mode(&initial_mode).expect("save mode");
+        assert_eq!(
+            db.load_receiver_mode().expect("load mode before handshake"),
+            Some(initial_mode)
+        );
+
+        let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx).await;
+        assert!(result.is_ok(), "handshake should succeed");
+        assert_eq!(
+            db.load_receiver_mode().expect("load mode after handshake"),
+            Some(ReceiverMode::TargetedReplay {
+                targets: Vec::new()
+            })
         );
 
         task.await.expect("server task");
