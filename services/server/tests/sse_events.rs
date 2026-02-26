@@ -786,6 +786,65 @@ async fn test_sse_emits_stream_updated_after_epoch_name_change() {
 }
 
 #[tokio::test]
+async fn test_sse_emits_resync_after_race_create() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state, None))
+            .await
+            .unwrap();
+    });
+
+    let sse_url = format!("http://{}/api/v1/events", addr);
+    let mut sse_response = reqwest::Client::new().get(&sse_url).send().await.unwrap();
+    assert_eq!(sse_response.status(), 200);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let create_resp = reqwest::Client::new()
+        .post(format!("http://{}/api/v1/races", addr))
+        .json(&serde_json::json!({ "name": "SSE Race Create" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 201);
+
+    let mut collected = String::new();
+    let mut saw_resync = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                let text = String::from_utf8_lossy(&chunk);
+                collected.push_str(&text);
+                if collected.contains("event: resync") {
+                    saw_resync = true;
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => panic!("error reading SSE chunk: {:?}", e),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        saw_resync,
+        "expected 'event: resync' in SSE stream after race create, got:\n{}",
+        collected
+    );
+
+    std::mem::forget(container);
+}
+
+#[tokio::test]
 async fn test_sse_emits_resync_after_admin_stream_delete() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

@@ -471,7 +471,7 @@
           api.getStreams(),
           api.getLogs(),
           api.getMode().catch(() => null),
-          api.getRaces().catch(() => ({ races: [] })),
+          api.getRaces().catch(() => null),
         ]);
       status = nextStatus;
       if (streamRefreshVersion === streamRefreshVersionAtLoadStart) {
@@ -479,7 +479,17 @@
         void prefetchEarliestEpochOptions(nextStreams.streams);
       }
       logs = nextLogs;
-      races = nextRaces.races;
+      if (nextRaces) {
+        const previousRaceIdDraft = raceIdDraft;
+        races = nextRaces.races;
+        if (
+          modeDraft === "race" &&
+          previousRaceIdDraft.length > 0 &&
+          races.some((race) => race.race_id === previousRaceIdDraft)
+        ) {
+          raceIdDraft = previousRaceIdDraft;
+        }
+      }
 
       if (
         nextMode &&
@@ -1052,12 +1062,15 @@
               <select
                 data-testid="race-id-select"
                 class="{inputClass} mt-1"
-                bind:value={raceIdDraft}
-                onchange={markModeEdited}
+                value={raceIdDraft}
+                onchange={(e) => {
+                  raceIdDraft = e.currentTarget.value;
+                  markModeEdited();
+                }}
                 disabled={modeBusy}
               >
                 <option value="">Select race...</option>
-                {#each races as race}
+                {#each races as race (race.race_id)}
                   <option value={race.race_id}>{race.name}</option>
                 {/each}
               </select>

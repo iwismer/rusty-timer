@@ -12,6 +12,7 @@ pub struct StreamCountUpdate {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReceiverUiEvent {
+    Resync,
     StatusChanged {
         connection_state: ConnectionState,
         streams_count: usize,
@@ -49,6 +50,13 @@ mod tests {
         assert_eq!(json["type"], "status_changed");
         assert_eq!(json["connection_state"], "connected");
         assert_eq!(json["streams_count"], 3);
+    }
+
+    #[test]
+    fn resync_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::Resync;
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "resync");
     }
 
     #[test]

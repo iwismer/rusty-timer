@@ -120,6 +120,77 @@ describe("receiver page mode controls", () => {
     expect((raceSelect as HTMLSelectElement).value).toBe("race-1");
   });
 
+  it("keeps selected race when race list refresh adds a new race", async () => {
+    apiMocks.getMode
+      .mockResolvedValueOnce({ mode: "race", race_id: "race-1" })
+      .mockResolvedValueOnce({ mode: "race", race_id: "race-1" });
+    apiMocks.getRaces
+      .mockResolvedValueOnce({
+        races: [
+          { race_id: "race-1", name: "Race 1", created_at: "2026-01-01" },
+        ],
+      })
+      .mockResolvedValueOnce({
+        races: [
+          { race_id: "race-1", name: "Race 1", created_at: "2026-01-01" },
+          { race_id: "race-2", name: "Race 2", created_at: "2026-01-02" },
+        ],
+      });
+
+    render(Page);
+
+    const raceSelect = (await screen.findByTestId(
+      "race-id-select",
+    )) as HTMLSelectElement;
+    expect(raceSelect.value).toBe("race-1");
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+    callbacks.onResync();
+
+    await waitFor(() => {
+      expect(raceSelect.value).toBe("race-1");
+      expect(
+        Array.from(raceSelect.options).some(
+          (option) => option.value === "race-2",
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("keeps selected race when race list refresh fails during resync", async () => {
+    apiMocks.getMode
+      .mockResolvedValueOnce({ mode: "race", race_id: "race-1" })
+      .mockResolvedValueOnce({ mode: "race", race_id: "race-1" });
+    apiMocks.getRaces
+      .mockResolvedValueOnce({
+        races: [
+          { race_id: "race-1", name: "Race 1", created_at: "2026-01-01" },
+        ],
+      })
+      .mockRejectedValueOnce(new Error("races unavailable"));
+
+    render(Page);
+
+    const raceSelect = (await screen.findByTestId(
+      "race-id-select",
+    )) as HTMLSelectElement;
+    expect(raceSelect.value).toBe("race-1");
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+    callbacks.onResync();
+
+    await waitFor(() => {
+      expect(raceSelect.value).toBe("race-1");
+      expect(
+        Array.from(raceSelect.options).some(
+          (option) => option.value === "race-1",
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("hydrates live mode when earliest epochs are omitted", async () => {
     apiMocks.getMode.mockResolvedValueOnce({
       mode: "live",

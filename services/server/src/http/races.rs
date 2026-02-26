@@ -1,4 +1,5 @@
 use super::response::{bad_request, conflict, internal_error, not_found};
+use crate::dashboard_events::DashboardEvent;
 use crate::repo::races as repo;
 use crate::state::AppState;
 use axum::{
@@ -50,6 +51,7 @@ pub async fn create_race(
             state
                 .logger
                 .log(format!("race \"{}\" created ({})", row.name, row.race_id));
+            let _ = state.dashboard_tx.send(DashboardEvent::Resync);
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!({
@@ -77,6 +79,7 @@ pub async fn delete_race(
     match repo::delete_race(&state.pool, race_id).await {
         Ok(true) => {
             state.logger.log(format!("race {race_id} deleted"));
+            let _ = state.dashboard_tx.send(DashboardEvent::Resync);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => not_found("race not found"),

@@ -527,6 +527,10 @@ fn should_refresh_stream_snapshot_for_dashboard_event(event_name: &str) -> bool 
     matches!(event_name, "stream_created" | "stream_updated" | "resync")
 }
 
+fn should_emit_receiver_resync_for_dashboard_event(event_name: &str) -> bool {
+    matches!(event_name, "resync")
+}
+
 fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) -> Option<String> {
     if line.is_empty() {
         return pending_event.take();
@@ -663,10 +667,13 @@ async fn consume_upstream_dashboard_events(
             }
 
             let line = String::from_utf8_lossy(&line_bytes).into_owned();
-            if let Some(event_name) = consume_sse_line_for_event(&line, &mut pending_event)
-                && should_refresh_stream_snapshot_for_dashboard_event(&event_name)
-            {
-                state.emit_streams_snapshot().await;
+            if let Some(event_name) = consume_sse_line_for_event(&line, &mut pending_event) {
+                if should_refresh_stream_snapshot_for_dashboard_event(&event_name) {
+                    state.emit_streams_snapshot().await;
+                }
+                if should_emit_receiver_resync_for_dashboard_event(&event_name) {
+                    state.emit_resync();
+                }
             }
         }
     }
@@ -1327,6 +1334,30 @@ mod tests {
             "log_entry"
         ));
         assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "unknown_event"
+        ));
+    }
+
+    #[test]
+    fn dashboard_event_filter_emits_receiver_resync_only_for_resync_events() {
+        assert!(should_emit_receiver_resync_for_dashboard_event("resync"));
+
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "stream_created"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "stream_updated"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "metrics_updated"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "forwarder_race_assigned"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "log_entry"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
             "unknown_event"
         ));
     }

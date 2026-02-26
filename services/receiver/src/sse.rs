@@ -16,6 +16,7 @@ pub async fn receiver_sse(
     let updates = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(event) => {
             let event_type = match &event {
+                ReceiverUiEvent::Resync => "resync",
                 ReceiverUiEvent::StatusChanged { .. } => "status_changed",
                 ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
                 ReceiverUiEvent::LogEntry { .. } => "log_entry",

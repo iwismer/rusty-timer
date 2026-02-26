@@ -278,6 +278,11 @@ impl AppState {
         });
     }
 
+    /// Ask UI clients to reload full state from the control API.
+    pub fn emit_resync(&self) {
+        let _ = self.ui_tx.send(ReceiverUiEvent::Resync);
+    }
+
     pub async fn is_stream_paused(&self, forwarder_id: &str, reader_ip: &str) -> bool {
         if *self.all_paused.read().await {
             return true;
