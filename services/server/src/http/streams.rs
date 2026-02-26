@@ -1,4 +1,5 @@
 use super::response::{bad_request, conflict, internal_error, not_found};
+use crate::repo::announcer_config;
 use crate::state::{AppState, ForwarderCommand};
 use axum::{
     Json,
@@ -129,6 +130,11 @@ pub async fn reset_epoch(
                     new_stream_epoch: (s.stream_epoch + 1) as u64,
                 };
                 if tx.send(ForwarderCommand::EpochReset(cmd)).await.is_ok() {
+                    if let Ok(config) = announcer_config::get_config(&state.pool).await
+                        && config.selected_stream_ids.contains(&stream_id)
+                    {
+                        state.announcer_runtime.write().await.reset();
+                    }
                     state
                         .logger
                         .log(format!("epoch reset for stream {stream_id}"));

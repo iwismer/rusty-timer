@@ -721,6 +721,13 @@ async fn handle_event_batch(
         socket.send(Message::Text(json.into())).await?;
     }
 
+    if epoch_transitions
+        .keys()
+        .any(|stream_id| announcer_selected_streams.contains(stream_id))
+    {
+        state.announcer_runtime.write().await.reset();
+    }
+
     for (stream_id, new_epoch) in epoch_transitions {
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id,

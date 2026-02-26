@@ -1,6 +1,7 @@
 //! Integration tests for dashboard HTTP API: streams, rename, metrics, reset-epoch.
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
+use server::announcer::AnnouncerInputEvent;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use testcontainers::runners::AsyncRunner;
@@ -88,6 +89,100 @@ fn write_dashboard_fixture() -> PathBuf {
     .expect("write dashboard index");
     std::fs::write(dir.join("app.js"), "console.log('dashboard')").expect("write dashboard asset");
     dir
+}
+
+#[tokio::test]
+async fn selected_stream_epoch_change_triggers_reset() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_state = app_state.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(server_state, None))
+            .await
+            .unwrap();
+    });
+
+    insert_token(
+        &pool,
+        "fwd-reset-epoch-announcer",
+        "forwarder",
+        b"fwd-reset-epoch-announcer-token",
+    )
+    .await;
+    let ws_url = format!("ws://{addr}/ws/v1/forwarders");
+    let mut fwd = MockWsClient::connect_with_token(&ws_url, "fwd-reset-epoch-announcer-token")
+        .await
+        .unwrap();
+    fwd.send_message(&WsMessage::ForwarderHello(ForwarderHello {
+        forwarder_id: "fwd-reset-epoch-announcer".to_owned(),
+        reader_ips: vec!["10.88.0.1:10000".to_owned()],
+        display_name: None,
+    }))
+    .await
+    .unwrap();
+    let _session_id = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {:?}", other),
+    };
+
+    let stream_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+    )
+    .bind("fwd-reset-epoch-announcer")
+    .bind("10.88.0.1:10000")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE announcer_config SET enabled = true, selected_stream_ids = $1")
+        .bind(vec![stream_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    {
+        let mut runtime = app_state.announcer_runtime.write().await;
+        let _ = runtime.ingest(
+            AnnouncerInputEvent {
+                stream_id,
+                seq: 1,
+                chip_id: "000000444444".to_owned(),
+                bib: Some(44),
+                display_name: "Runner 44".to_owned(),
+                reader_timestamp: Some("10:00:00".to_owned()),
+                received_at: chrono::Utc::now(),
+            },
+            25,
+        );
+        assert_eq!(runtime.finisher_count(), 1);
+    }
+
+    let reset_resp = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/api/v1/streams/{stream_id}/reset-epoch"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reset_resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    match fwd.recv_message().await.unwrap() {
+        WsMessage::EpochResetCommand(cmd) => {
+            assert_eq!(cmd.forwarder_id, "fwd-reset-epoch-announcer");
+            assert_eq!(cmd.reader_ip, "10.88.0.1:10000");
+        }
+        other => panic!("expected epoch reset command, got {:?}", other),
+    }
+
+    let runtime = app_state.announcer_runtime.read().await;
+    assert_eq!(runtime.finisher_count(), 0);
+    assert!(runtime.rows().is_empty());
 }
 
 #[tokio::test]
