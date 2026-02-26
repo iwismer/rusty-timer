@@ -302,26 +302,28 @@ impl AppState {
 
     pub async fn resume_stream(&self, forwarder_id: &str, reader_ip: &str) {
         let target_key = format!("{forwarder_id}/{reader_ip}");
-        let all_paused = *self.all_paused.read().await;
+        let subscriptions = if *self.all_paused.read().await {
+            let db = self.db.lock().await;
+            db.load_subscriptions().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
-        if all_paused {
-            let subscriptions = {
-                let db = self.db.lock().await;
-                db.load_subscriptions().unwrap_or_default()
-            };
-
+        let mut all_paused = self.all_paused.write().await;
+        if *all_paused {
             let mut paused_streams = self.paused_streams.write().await;
             for subscription in subscriptions {
-                let key = format!("{}/{}", subscription.forwarder_id, subscription.reader_ip);
-                paused_streams.insert(key);
+                paused_streams.insert(format!(
+                    "{}/{}",
+                    subscription.forwarder_id, subscription.reader_ip
+                ));
             }
             paused_streams.remove(&target_key);
-
-            *self.all_paused.write().await = false;
-            return;
+            *all_paused = false;
+        } else {
+            drop(all_paused);
+            self.paused_streams.write().await.remove(&target_key);
         }
-
-        self.paused_streams.write().await.remove(&target_key);
     }
 
     pub async fn pause_all(&self) {

@@ -201,9 +201,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     }
 
     let session_id = Uuid::new_v4().to_string();
-    let selection = ReceiverSelectionSnapshot::Mode {
-        mode_summary: mode_summary(&hello.mode),
-    };
+    let selection = mode_snapshot(&hello.mode);
 
     state
         .register_receiver_session(
@@ -434,6 +432,20 @@ fn mode_summary(mode: &ReceiverMode) -> String {
     }
 }
 
+fn mode_race_id(mode: &ReceiverMode) -> Option<Uuid> {
+    match mode {
+        ReceiverMode::Race { race_id } => Uuid::parse_str(race_id).ok(),
+        ReceiverMode::Live { .. } | ReceiverMode::TargetedReplay { .. } => None,
+    }
+}
+
+fn mode_snapshot(mode: &ReceiverMode) -> ReceiverSelectionSnapshot {
+    ReceiverSelectionSnapshot::Mode {
+        mode_summary: mode_summary(mode),
+        race_id: mode_race_id(mode),
+    }
+}
+
 async fn apply_mode(
     socket: &mut WebSocket,
     state: &AppState,
@@ -480,12 +492,7 @@ async fn apply_mode(
 
             *subscriptions = next_subscriptions;
             let _ = state
-                .update_receiver_session_selection(
-                    session_id,
-                    ReceiverSelectionSnapshot::Mode {
-                        mode_summary: mode_summary(&hello.mode),
-                    },
-                )
+                .update_receiver_session_selection(session_id, mode_snapshot(&hello.mode))
                 .await;
             Ok(ActiveMode::Live)
         }
@@ -507,12 +514,7 @@ async fn apply_mode(
 
             *subscriptions = next_subscriptions;
             let _ = state
-                .update_receiver_session_selection(
-                    session_id,
-                    ReceiverSelectionSnapshot::Mode {
-                        mode_summary: mode_summary(&hello.mode),
-                    },
-                )
+                .update_receiver_session_selection(session_id, mode_snapshot(&hello.mode))
                 .await;
             Ok(ActiveMode::Race {
                 race_id: race_id.clone(),
@@ -547,12 +549,7 @@ async fn apply_mode(
             // heartbeat/acks only, but do not keep any live stream subscriptions.
             subscriptions.clear();
             let _ = state
-                .update_receiver_session_selection(
-                    session_id,
-                    ReceiverSelectionSnapshot::Mode {
-                        mode_summary: mode_summary(&hello.mode),
-                    },
-                )
+                .update_receiver_session_selection(session_id, mode_snapshot(&hello.mode))
                 .await;
             Ok(ActiveMode::TargetedReplay)
         }
@@ -617,6 +614,7 @@ async fn apply_race_refresh_forward_only(
             session_id,
             ReceiverSelectionSnapshot::Mode {
                 mode_summary: format!("race ({race_id})"),
+                race_id: Uuid::parse_str(race_id).ok(),
             },
         )
         .await;
@@ -998,6 +996,40 @@ async fn replay_targeted_backlog(
     Ok(())
 }
 
+async fn handle_receiver_ack(
+    state: &AppState,
+    device_id: &str,
+    ack: ReceiverAck,
+    persist_cursors: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !persist_cursors {
+        return Ok(());
+    }
+
+    for entry in &ack.entries {
+        let row = sqlx::query!(
+            "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+            entry.forwarder_id,
+            entry.reader_ip
+        )
+        .fetch_optional(&state.pool)
+        .await?;
+
+        if let Some(r) = row {
+            upsert_cursor(
+                &state.pool,
+                device_id,
+                r.stream_id,
+                entry.stream_epoch as i64,
+                entry.last_seq as i64,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1118,38 +1150,4 @@ mod tests {
             "baseline should keep bounded state per stream across many epoch updates"
         );
     }
-}
-
-async fn handle_receiver_ack(
-    state: &AppState,
-    device_id: &str,
-    ack: ReceiverAck,
-    persist_cursors: bool,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if !persist_cursors {
-        return Ok(());
-    }
-
-    for entry in &ack.entries {
-        let row = sqlx::query!(
-            "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
-            entry.forwarder_id,
-            entry.reader_ip
-        )
-        .fetch_optional(&state.pool)
-        .await?;
-
-        if let Some(r) = row {
-            upsert_cursor(
-                &state.pool,
-                device_id,
-                r.stream_id,
-                entry.stream_epoch as i64,
-                entry.last_seq as i64,
-            )
-            .await?;
-        }
-    }
-
-    Ok(())
 }

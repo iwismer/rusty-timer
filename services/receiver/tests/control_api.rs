@@ -4,6 +4,7 @@ use receiver::Db;
 use receiver::control_api::{AppState, ConnectionState, build_router};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt;
 
 const TEST_RACE_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -403,6 +404,50 @@ async fn pause_all_and_resume_all_endpoints_update_stream_state() {
     );
     let (_, resumed) = get_json(app, "/api/v1/streams").await;
     assert_eq!(resumed["streams"][0]["paused"], false);
+}
+
+#[tokio::test]
+async fn concurrent_resume_stream_and_resume_all_does_not_deadlock() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1:10000", None).unwrap();
+    }
+    state.pause_all().await;
+
+    // Hold paused_streams so both operations queue behind it in a known order.
+    let paused_guard = state.paused_streams.write().await;
+
+    let state_for_resume_stream = Arc::clone(&state);
+    let resume_stream_task = tokio::spawn(async move {
+        state_for_resume_stream
+            .resume_stream("f1", "10.0.0.1:10000")
+            .await;
+    });
+
+    // Let resume_stream reach its first lock wait.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let state_for_resume_all = Arc::clone(&state);
+    let resume_all_task = tokio::spawn(async move {
+        state_for_resume_all.resume_all().await;
+    });
+
+    // Let resume_all acquire all_paused and block on paused_streams.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(paused_guard);
+
+    let joined = tokio::time::timeout(Duration::from_millis(500), async {
+        resume_stream_task.await.unwrap();
+        resume_all_task.await.unwrap();
+    })
+    .await;
+
+    assert!(
+        joined.is_ok(),
+        "resume_stream and resume_all should not deadlock when run concurrently"
+    );
 }
 
 #[tokio::test]

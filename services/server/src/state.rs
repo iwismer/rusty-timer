@@ -44,7 +44,10 @@ pub enum ReceiverSessionProtocol {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiverSelectionSnapshot {
     /// v1.2 mode-based snapshot.
-    Mode { mode_summary: String },
+    Mode {
+        mode_summary: String,
+        race_id: Option<Uuid>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,19 +171,14 @@ impl AppState {
             .read()
             .await
             .values()
-            .any(|record| {
-                let ReceiverSelectionSnapshot::Mode { mode_summary } = &record.selection;
-                parse_race_id_from_mode_summary(mode_summary)
-                    .is_some_and(|selected_race_id| selected_race_id == race_id)
+            .any(|record| match &record.selection {
+                ReceiverSelectionSnapshot::Mode {
+                    race_id: Some(selected_race_id),
+                    ..
+                } => *selected_race_id == race_id,
+                ReceiverSelectionSnapshot::Mode { race_id: None, .. } => false,
             })
     }
-}
-
-fn parse_race_id_from_mode_summary(mode_summary: &str) -> Option<Uuid> {
-    mode_summary
-        .strip_prefix("race (")
-        .and_then(|value| value.strip_suffix(')'))
-        .and_then(|value| value.parse::<Uuid>().ok())
 }
 
 #[cfg(test)]
@@ -207,6 +205,7 @@ mod tests {
                 ReceiverSessionProtocol::V12,
                 ReceiverSelectionSnapshot::Mode {
                     mode_summary: "race (race-1)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -221,6 +220,7 @@ mod tests {
             record.selection,
             ReceiverSelectionSnapshot::Mode {
                 mode_summary: "race (race-1)".to_owned(),
+                race_id: None,
             }
         );
 
@@ -229,6 +229,7 @@ mod tests {
                 &session_id,
                 ReceiverSelectionSnapshot::Mode {
                     mode_summary: "live (1 streams)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -242,6 +243,7 @@ mod tests {
             record.selection,
             ReceiverSelectionSnapshot::Mode {
                 mode_summary: "live (1 streams)".to_owned(),
+                race_id: None,
             }
         );
 
@@ -262,6 +264,7 @@ mod tests {
                 ReceiverSessionProtocol::V12,
                 ReceiverSelectionSnapshot::Mode {
                     mode_summary: format!("race ({selected_race_id})"),
+                    race_id: Some(selected_race_id),
                 },
             )
             .await;
@@ -273,6 +276,7 @@ mod tests {
                 ReceiverSessionProtocol::V12,
                 ReceiverSelectionSnapshot::Mode {
                     mode_summary: "live (1 streams)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -308,6 +312,7 @@ mod tests {
                 ReceiverSessionProtocol::V12,
                 ReceiverSelectionSnapshot::Mode {
                     mode_summary: format!("race ({})", selected_race_id.to_string().to_uppercase()),
+                    race_id: Some(selected_race_id),
                 },
             )
             .await;
@@ -319,6 +324,7 @@ mod tests {
                 ReceiverSessionProtocol::V12,
                 ReceiverSelectionSnapshot::Mode {
                     mode_summary: "race (not-a-uuid)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -328,5 +334,25 @@ mod tests {
                 .has_active_receiver_session_for_race(selected_race_id)
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn active_race_query_uses_structured_race_id_not_summary_text() {
+        let state = AppState::new(make_lazy_pool());
+        let race_id = Uuid::new_v4();
+
+        state
+            .register_receiver_session(
+                "session-race-structured",
+                "receiver-race",
+                ReceiverSessionProtocol::V12,
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: "non-standard race summary".to_owned(),
+                    race_id: Some(race_id),
+                },
+            )
+            .await;
+
+        assert!(state.has_active_receiver_session_for_race(race_id).await);
     }
 }

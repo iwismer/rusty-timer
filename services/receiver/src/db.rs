@@ -80,10 +80,7 @@ impl Db {
         Ok(rows.next().transpose()?)
     }
     pub fn save_profile(&self, url: &str, tok: &str, update_mode: &str) -> DbResult<()> {
-        let receiver_mode_json = self
-            .load_receiver_mode()?
-            .map(|mode| serde_json::to_string(&mode))
-            .transpose()?;
+        let receiver_mode_json = self.load_receiver_mode_json_raw()?;
         self.conn.execute_batch("DELETE FROM profile")?;
         self.conn.execute(
             "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json) VALUES (?1, ?2, ?3, ?4)",
@@ -93,20 +90,9 @@ impl Db {
     }
 
     pub fn load_receiver_mode(&self) -> DbResult<Option<ReceiverMode>> {
-        let raw: Option<Option<String>> = self
-            .conn
-            .query_row(
-                "SELECT receiver_mode_json FROM profile LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(Some(raw_json)) = raw else {
+        let Some(raw_json) = self.load_receiver_mode_json_raw()? else {
             return Ok(None);
         };
-        if raw_json.trim().is_empty() {
-            return Ok(None);
-        }
         Ok(Some(serde_json::from_str::<ReceiverMode>(&raw_json)?))
     }
 
@@ -248,6 +234,24 @@ impl Db {
         )?;
         Ok(())
     }
+
+    fn load_receiver_mode_json_raw(&self) -> DbResult<Option<String>> {
+        let raw: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT receiver_mode_json FROM profile LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(raw.flatten().and_then(|json| {
+            if json.trim().is_empty() {
+                None
+            } else {
+                Some(json)
+            }
+        }))
+    }
 }
 
 fn apply_profile_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
@@ -331,6 +335,25 @@ mod tests {
 
         db.save_receiver_mode(&targeted).unwrap();
         assert_eq!(db.load_receiver_mode().unwrap().unwrap(), targeted);
+    }
+
+    #[test]
+    fn save_profile_tolerates_invalid_stored_receiver_mode_json() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "check-and-download")
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE profile SET receiver_mode_json = ?1",
+                rusqlite::params!["{invalid-json"],
+            )
+            .unwrap();
+
+        let result = db.save_profile("wss://example.org", "tok-2", "check-only");
+        assert!(
+            result.is_ok(),
+            "profile updates should not fail due to malformed stored receiver_mode_json: {result:?}"
+        );
     }
 
     #[test]
