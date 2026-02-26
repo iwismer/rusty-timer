@@ -104,7 +104,15 @@
 </script>
 
 <main class="max-w-[900px] mx-auto px-6 py-6">
-  <h1 class="text-xl font-bold text-text-primary m-0 mb-6">Announcer</h1>
+  <div class="flex items-center justify-between gap-3 mb-6">
+    <h1 class="text-xl font-bold text-text-primary m-0">Announcer</h1>
+    <a
+      href="/announcer"
+      class="text-sm font-medium text-action-600 hover:text-action-700 underline"
+    >
+      Open announcer page
+    </a>
+  </div>
 
   {#if loading}
     <p class="text-sm text-text-muted">Loading announcer settings...</p>

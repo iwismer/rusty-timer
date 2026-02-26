@@ -61,4 +61,13 @@ describe("announcer config page", () => {
     await fireEvent.click(enableCheckbox);
     expect(saveButton).toBeDisabled();
   });
+
+  it("shows a link to open the public announcer page", async () => {
+    render(AnnouncerConfigPage);
+
+    const link = await screen.findByRole("link", {
+      name: "Open announcer page",
+    });
+    expect(link).toHaveAttribute("href", "/announcer");
+  });
 });
