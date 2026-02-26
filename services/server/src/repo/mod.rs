@@ -1,3 +1,4 @@
+pub mod announcer_config;
 pub mod events;
 pub mod forwarder_races;
 pub mod races;

@@ -208,6 +208,11 @@ timing.example.com {
     reverse_proxy server:8080
   }
 
+  @public_announcer path /announcer /announcer/* /_app/* /api/v1/public/announcer/state /api/v1/public/announcer/events
+  handle @public_announcer {
+    reverse_proxy server:8080
+  }
+
   handle {
     forward_auth authelia:9091 {
       uri /api/authz/forward-auth
@@ -217,6 +222,12 @@ timing.example.com {
   }
 }
 ```
+
+Notes:
+- Keep `/api/v1/announcer/config` and `/api/v1/announcer/reset` behind Authelia.
+- Public announcer traffic should use the sanitized public endpoints only:
+  - `GET /api/v1/public/announcer/state`
+  - `GET /api/v1/public/announcer/events`
 
 Run with both files:
 

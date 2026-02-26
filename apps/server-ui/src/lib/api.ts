@@ -55,6 +55,60 @@ export interface ApiError {
   details?: Record<string, unknown>;
 }
 
+export interface AnnouncerConfig {
+  enabled: boolean;
+  enabled_until: string | null;
+  selected_stream_ids: string[];
+  max_list_size: number;
+  updated_at: string;
+  public_enabled: boolean;
+}
+
+export interface AnnouncerConfigUpdate {
+  enabled: boolean;
+  selected_stream_ids: string[];
+  max_list_size: number;
+}
+
+export interface AnnouncerRow {
+  stream_id: string;
+  seq: number;
+  chip_id: string;
+  bib: number | null;
+  display_name: string;
+  reader_timestamp: string | null;
+  received_at: string;
+}
+
+export interface AnnouncerState extends AnnouncerConfig {
+  finisher_count: number;
+  rows: AnnouncerRow[];
+}
+
+export interface AnnouncerDelta {
+  row: AnnouncerRow;
+  finisher_count: number;
+}
+
+export interface PublicAnnouncerRow {
+  announcement_id: number;
+  bib: number | null;
+  display_name: string;
+  reader_timestamp: string | null;
+}
+
+export interface PublicAnnouncerState {
+  public_enabled: boolean;
+  finisher_count: number;
+  max_list_size: number;
+  rows: PublicAnnouncerRow[];
+}
+
+export interface PublicAnnouncerDelta {
+  row: PublicAnnouncerRow;
+  finisher_count: number;
+}
+
 // ----- Internal helpers -----
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -154,6 +208,38 @@ export async function resetEpoch(streamId: string): Promise<void> {
 /** GET /api/v1/streams/{stream_id}/epochs — list epochs with metadata */
 export async function getStreamEpochs(streamId: string): Promise<EpochInfo[]> {
   return apiFetch<EpochInfo[]>(`/api/v1/streams/${streamId}/epochs`);
+}
+
+/** GET /api/v1/announcer/config */
+export async function getAnnouncerConfig(): Promise<AnnouncerConfig> {
+  return apiFetch<AnnouncerConfig>("/api/v1/announcer/config");
+}
+
+/** PUT /api/v1/announcer/config */
+export async function updateAnnouncerConfig(
+  payload: AnnouncerConfigUpdate,
+): Promise<AnnouncerConfig> {
+  return apiFetch<AnnouncerConfig>("/api/v1/announcer/config", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** POST /api/v1/announcer/reset */
+export async function resetAnnouncer(): Promise<void> {
+  return apiFetch<void>("/api/v1/announcer/reset", {
+    method: "POST",
+  });
+}
+
+/** GET /api/v1/announcer/state */
+export async function getAnnouncerState(): Promise<AnnouncerState> {
+  return apiFetch<AnnouncerState>("/api/v1/announcer/state");
+}
+
+/** GET /api/v1/public/announcer/state */
+export async function getPublicAnnouncerState(): Promise<PublicAnnouncerState> {
+  return apiFetch<PublicAnnouncerState>("/api/v1/public/announcer/state");
 }
 
 // ----- Forwarder config types -----

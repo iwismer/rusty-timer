@@ -18,6 +18,10 @@ const EPOCH_METADATA_MIGRATION_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/migrations/0008_stream_epoch_metadata.sql"
 );
+const ANNOUNCER_CONFIG_MIGRATION_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/migrations/0009_announcer_config.sql"
+);
 
 fn read_migration() -> String {
     std::fs::read_to_string(MIGRATION_PATH)
@@ -39,6 +43,12 @@ fn read_epoch_race_migration() -> String {
 fn read_epoch_metadata_migration() -> String {
     std::fs::read_to_string(EPOCH_METADATA_MIGRATION_PATH).expect(
         "Migration file should exist at services/server/migrations/0008_stream_epoch_metadata.sql",
+    )
+}
+
+fn read_announcer_config_migration() -> String {
+    std::fs::read_to_string(ANNOUNCER_CONFIG_MIGRATION_PATH).expect(
+        "Migration file should exist at services/server/migrations/0009_announcer_config.sql",
     )
 }
 
@@ -94,6 +104,54 @@ fn contains_receiver_cursors_table() {
     assert!(
         sql.contains("CREATE TABLE receiver_cursors"),
         "Migration must define receiver_cursors table"
+    );
+}
+
+#[test]
+fn announcer_config_migration_exists_and_nonempty() {
+    let sql = read_announcer_config_migration();
+    assert!(
+        !sql.trim().is_empty(),
+        "announcer config migration file must not be empty"
+    );
+}
+
+#[test]
+fn contains_announcer_config_table() {
+    let sql = read_announcer_config_migration();
+    assert!(
+        sql.contains("CREATE TABLE announcer_config"),
+        "migration must define announcer_config table"
+    );
+}
+
+#[test]
+fn announcer_config_has_expected_columns_and_defaults() {
+    let sql = read_announcer_config_migration();
+    assert!(
+        sql.contains("id SMALLINT PRIMARY KEY"),
+        "announcer_config.id should be SMALLINT PRIMARY KEY"
+    );
+    assert!(
+        sql.contains("enabled BOOLEAN NOT NULL DEFAULT FALSE"),
+        "announcer_config.enabled should default FALSE"
+    );
+    assert!(
+        sql.contains("selected_stream_ids UUID[] NOT NULL DEFAULT '{}'"),
+        "announcer_config.selected_stream_ids should default to empty UUID array"
+    );
+    assert!(
+        sql.contains("max_list_size INTEGER NOT NULL DEFAULT 25"),
+        "announcer_config.max_list_size should default to 25"
+    );
+}
+
+#[test]
+fn announcer_config_seeds_singleton_row() {
+    let sql = read_announcer_config_migration();
+    assert!(
+        sql.contains("INSERT INTO announcer_config (id) VALUES (1)"),
+        "migration should seed singleton announcer_config row"
     );
 }
 

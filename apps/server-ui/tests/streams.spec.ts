@@ -126,6 +126,11 @@ test.describe("stream list page", () => {
     await expect(page.locator('[data-testid="streams-heading"]')).toBeVisible();
   });
 
+  test("renders announcer navigation link", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("link", { name: "Announcer" })).toBeVisible();
+  });
+
   test("renders list of streams", async ({ page }) => {
     await page.goto("/");
     await expect(
@@ -447,6 +452,99 @@ test.describe("stream list page", () => {
     await page.locator('[data-testid="stream-detail-link"]').first().click();
     await expect(page).toHaveURL("/streams/stream-uuid-1");
     await expect(page.getByRole("combobox").first()).toHaveValue(RACE_ID);
+  });
+});
+
+test.describe("announcer public page", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
+    await page.route("**/api/v1/streams", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ streams: [] }),
+      });
+    });
+    await page.route("**/api/v1/races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ races: [] }),
+      });
+    });
+    await page.route("**/api/v1/forwarder-races", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ assignments: [] }),
+      });
+    });
+    await page.route("**/api/v1/logs", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ entries: [] }),
+      });
+    });
+    await page.route("**/api/v1/public/announcer/events", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "event: keepalive\ndata: ok\n\n",
+      });
+    });
+  });
+
+  test("announcer-public disabled message renders", async ({ page }) => {
+    await page.route("**/api/v1/public/announcer/state", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          public_enabled: false,
+          finisher_count: 0,
+          max_list_size: 25,
+          rows: [],
+        }),
+      });
+    });
+
+    await page.goto("/announcer");
+    await expect(page.getByText("Announcer screen is disabled")).toBeVisible();
+  });
+
+  test("announcer-public enabled page shows disclaimer and rows", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/public/announcer/state", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          public_enabled: true,
+          finisher_count: 1,
+          max_list_size: 25,
+          rows: [
+            {
+              announcement_id: 1,
+              bib: 333,
+              display_name: "Runner Three",
+              reader_timestamp: "10:00:00",
+            },
+          ],
+        }),
+      });
+    });
+
+    await page.goto("/announcer");
+    await expect(page.getByText("Runner Three")).toBeVisible();
+    await expect(page.getByText(/not official results/i)).toBeVisible();
   });
 });
 

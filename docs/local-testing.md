@@ -79,6 +79,13 @@ The server exposes:
 - `GET  /api/v1/streams/:stream_id/export.txt` — raw read export
 - `GET  /api/v1/streams/:stream_id/export.csv` — CSV read export
 - `POST /api/v1/streams/:stream_id/reset-epoch` — increment the stream epoch
+- `GET  /api/v1/announcer/config` — read announcer config
+- `PUT  /api/v1/announcer/config` — update announcer config
+- `POST /api/v1/announcer/reset` — reset announcer runtime state
+- `GET  /api/v1/announcer/state` — full announcer snapshot (internal/operator)
+- `GET  /api/v1/announcer/events` — full announcer SSE updates (internal/operator)
+- `GET  /api/v1/public/announcer/state` — sanitized public announcer snapshot
+- `GET  /api/v1/public/announcer/events` — sanitized public announcer SSE updates
 
 ---
 
@@ -207,6 +214,21 @@ Other useful npm scripts:
 | `npm run preview` | Serve the production build locally |
 | `npm test` | Run Vitest unit tests (no browser required) |
 | `npm run check` | TypeScript and Svelte type-checking |
+
+### Announcer local smoke
+
+With server + dashboard running:
+
+1. Open `http://localhost:5173/announcer-config`
+2. Enable announcer and select at least one stream
+3. Open `http://localhost:5173/announcer` in another tab/window
+4. Generate reads from emulator/forwarder; verify newest-first list updates live
+5. Use reset button and verify list/count clear immediately
+
+Notes:
+- `enabled_until` is fixed when you explicitly enable announcer.
+- Config edits do not extend expiry.
+- No historical backfill appears after enable/reset; only new reads.
 
 ---
 
