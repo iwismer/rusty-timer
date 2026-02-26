@@ -108,6 +108,8 @@ pub async fn put_config(
 
     if should_reset_runtime(&previous, &updated, &selected_stream_ids) {
         state.reset_announcer_runtime().await;
+    } else if previous.max_list_size != updated.max_list_size {
+        state.notify_announcer_resync();
     }
 
     Json(config_response(updated)).into_response()

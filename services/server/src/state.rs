@@ -172,6 +172,10 @@ impl AppState {
             let mut runtime = self.announcer_runtime.write().await;
             runtime.reset();
         }
+        self.notify_announcer_resync();
+    }
+
+    pub fn notify_announcer_resync(&self) {
         let _ = self.announcer_tx.send(AnnouncerEvent::Resync);
     }
 

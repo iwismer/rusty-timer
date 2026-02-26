@@ -3,12 +3,20 @@ import type { PublicAnnouncerDelta } from "./api";
 interface AnnouncerEventHandlers {
   onUpdate: (delta: PublicAnnouncerDelta) => void;
   onResync?: () => void;
+  onReconnect?: () => void;
 }
 
 export function connectAnnouncerEvents(
   handlers: AnnouncerEventHandlers,
 ): EventSource {
   const es = new EventSource("/api/v1/public/announcer/events");
+  let hasOpened = false;
+  es.addEventListener("open", () => {
+    if (hasOpened) {
+      handlers.onReconnect?.();
+    }
+    hasOpened = true;
+  });
   es.addEventListener("announcer_update", (event: MessageEvent) => {
     try {
       handlers.onUpdate(JSON.parse(event.data) as PublicAnnouncerDelta);

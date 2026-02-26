@@ -24,6 +24,9 @@
       onResync: () => {
         void loadSnapshot();
       },
+      onReconnect: () => {
+        void loadSnapshot();
+      },
     });
   });
 

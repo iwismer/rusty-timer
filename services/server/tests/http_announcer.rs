@@ -347,6 +347,98 @@ async fn config_update_with_different_stream_selection_resets_runtime() {
 }
 
 #[tokio::test]
+async fn config_update_with_max_list_size_change_emits_resync_without_resetting_runtime() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, online) VALUES
+         ($1, 'fwd-a', '10.100.0.1:10000', false)",
+    )
+    .bind(stream_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE announcer_config
+         SET enabled = true, selected_stream_ids = $1, max_list_size = 25",
+    )
+    .bind(vec![stream_id])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (app_state, addr, _server_task) = start_server(pool).await;
+    {
+        let mut runtime = app_state.announcer_runtime.write().await;
+        let _ = runtime.ingest(
+            AnnouncerInputEvent {
+                stream_id,
+                seq: 1,
+                chip_id: "000000777777".to_owned(),
+                bib: Some(7),
+                display_name: "Runner A".to_owned(),
+                reader_timestamp: Some("10:00:00".to_owned()),
+                received_at: chrono::Utc::now(),
+            },
+            25,
+        );
+        assert_eq!(runtime.finisher_count(), 1);
+        assert_eq!(runtime.rows().len(), 1);
+    }
+
+    let sse_url = format!("http://{addr}/api/v1/announcer/events");
+    let mut sse_response = reqwest::Client::new().get(&sse_url).send().await.unwrap();
+    assert_eq!(sse_response.status(), reqwest::StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let resp = reqwest::Client::new()
+        .put(format!("http://{addr}/api/v1/announcer/config"))
+        .json(&serde_json::json!({
+            "enabled": true,
+            "selected_stream_ids": [stream_id],
+            "max_list_size": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let runtime = app_state.announcer_runtime.read().await;
+    assert_eq!(runtime.finisher_count(), 1);
+    assert_eq!(runtime.rows().len(), 1);
+
+    let mut collected = String::new();
+    let mut saw_resync = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), sse_response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                collected.push_str(&String::from_utf8_lossy(&chunk));
+                if collected.contains("event: resync") {
+                    saw_resync = true;
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => panic!("error reading SSE chunk: {:?}", e),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        saw_resync,
+        "expected 'event: resync' in announcer SSE after max_list_size update, got:\n{}",
+        collected
+    );
+}
+
+#[tokio::test]
 async fn disabling_announcer_allows_stale_selected_stream_ids() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

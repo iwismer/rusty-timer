@@ -267,4 +267,55 @@ describe("public announcer page", () => {
       expect(screen.queryByTestId("announcer-row-1")).not.toBeInTheDocument();
     });
   });
+
+  it("reloads snapshot after SSE reconnect to recover missed updates", async () => {
+    const AnnouncerPage = (await import("../routes/announcer/+page.svelte"))
+      .default;
+    mockFetch
+      .mockResolvedValueOnce(
+        makeResponse(
+          200,
+          makeState({
+            finisher_count: 1,
+            rows: [
+              {
+                announcement_id: 1,
+                bib: 111,
+                display_name: "Runner One",
+                reader_timestamp: "10:00:01",
+              },
+            ],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        makeResponse(
+          200,
+          makeState({
+            finisher_count: 2,
+            rows: [
+              {
+                announcement_id: 2,
+                bib: 222,
+                display_name: "Runner Recovered",
+                reader_timestamp: "10:00:02",
+              },
+            ],
+          }),
+        ),
+      );
+
+    render(AnnouncerPage);
+    expect(await screen.findByText("Runner One")).toBeInTheDocument();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    const es = MockEventSource.instances[0];
+    es.emit("open", {});
+    es.emit("open", {});
+
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByText("Runner Recovered")).toBeInTheDocument();
+  });
 });
