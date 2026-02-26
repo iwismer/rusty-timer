@@ -62,7 +62,7 @@ async fn test_export_csv_header_and_rows() {
             stream_epoch: 1,
             seq: 1,
             reader_timestamp: "2026-02-17T10:00:01.000Z".to_owned(),
-            raw_frame: "CSV_LINE_1".as_bytes().to_vec(),
+            raw_frame: "aa400000000123450a2a01123018455927a7".as_bytes().to_vec(),
             read_type: "RAW".to_owned(),
         }],
     }))
@@ -116,13 +116,18 @@ async fn test_export_csv_header_and_rows() {
     );
     // Check header
     assert_eq!(
-        lines[0], "stream_epoch,seq,reader_timestamp,raw_frame,read_type",
+        lines[0], "stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id",
         "unexpected CSV header"
     );
     // Check first data row
     assert!(
-        lines[1].contains("CSV_LINE_1"),
-        "first row should contain CSV_LINE_1"
+        lines[1].contains("aa400000000123450a2a01123018455927a7"),
+        "first row should contain the first raw frame"
+    );
+    assert!(
+        lines[1].contains(",000000012345"),
+        "first row should contain parsed chip_id, got: {}",
+        lines[1]
     );
     // Check that commas in data are properly quoted (RFC 4180)
     assert!(

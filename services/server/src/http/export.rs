@@ -67,7 +67,7 @@ pub async fn export_raw(
 /// `GET /api/v1/streams/{stream_id}/export.csv`
 ///
 /// Streams canonical deduplicated events as CSV:
-/// - Header: `stream_epoch,seq,reader_timestamp,raw_frame,read_type`
+/// - Header: `stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id`
 /// - RFC 4180 quoting: fields containing comma, double-quote, or newline are
 ///   wrapped in double-quotes; embedded double-quotes are doubled.
 /// - Ordered by `(stream_epoch, seq)`.
@@ -80,7 +80,7 @@ pub async fn export_csv(
     }
 
     let rows = sqlx::query(
-        r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type
+        r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id
            FROM events
            WHERE stream_id = $1
            ORDER BY stream_epoch ASC, seq ASC"#,
@@ -92,18 +92,21 @@ pub async fn export_csv(
     match rows {
         Err(e) => internal_error(e),
         Ok(rows) => {
-            let mut buf = String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type\n");
+            let mut buf =
+                String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n");
             for row in rows {
                 let epoch: i64 = row.get("stream_epoch");
                 let seq: i64 = row.get("seq");
                 let reader_timestamp: Option<String> = row.get("reader_timestamp");
                 let raw_frame: Vec<u8> = row.get("raw_frame");
                 let read_type: String = row.get("read_type");
+                let chip_id: Option<String> = row.get("tag_id");
 
                 let epoch = epoch.to_string();
                 let seq = seq.to_string();
                 let ts = reader_timestamp.as_deref().unwrap_or("");
                 let line = render_export_line(&raw_frame);
+                let chip_id = chip_id.as_deref().unwrap_or("");
                 buf.push_str(&csv_field(&epoch));
                 buf.push(',');
                 buf.push_str(&csv_field(&seq));
@@ -113,6 +116,8 @@ pub async fn export_csv(
                 buf.push_str(&csv_field(&line));
                 buf.push(',');
                 buf.push_str(&csv_field(&read_type));
+                buf.push(',');
+                buf.push_str(&csv_field(chip_id));
                 buf.push('\n');
             }
             Response::builder()
@@ -128,7 +133,7 @@ pub async fn export_csv(
 /// `GET /api/v1/streams/{stream_id}/epochs/{epoch}/export.csv`
 ///
 /// Streams canonical deduplicated events for a single epoch as CSV:
-/// - Header: `stream_epoch,seq,reader_timestamp,raw_frame,read_type`
+/// - Header: `stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id`
 /// - RFC 4180 quoting (same as whole-stream export).
 /// - Ordered by `seq`.
 /// - Returns valid CSV with headers even when the epoch has zero reads.
@@ -141,7 +146,7 @@ pub async fn export_epoch_csv(
     }
 
     let rows = sqlx::query(
-        r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type
+        r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id
            FROM events
            WHERE stream_id = $1 AND stream_epoch = $2
            ORDER BY seq ASC"#,
@@ -154,18 +159,21 @@ pub async fn export_epoch_csv(
     match rows {
         Err(e) => internal_error(e),
         Ok(rows) => {
-            let mut buf = String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type\n");
+            let mut buf =
+                String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n");
             for row in rows {
                 let stream_epoch: i64 = row.get("stream_epoch");
                 let seq: i64 = row.get("seq");
                 let reader_timestamp: Option<String> = row.get("reader_timestamp");
                 let raw_frame: Vec<u8> = row.get("raw_frame");
                 let read_type: String = row.get("read_type");
+                let chip_id: Option<String> = row.get("tag_id");
 
                 let ep = stream_epoch.to_string();
                 let seq = seq.to_string();
                 let ts = reader_timestamp.as_deref().unwrap_or("");
                 let line = render_export_line(&raw_frame);
+                let chip_id = chip_id.as_deref().unwrap_or("");
                 buf.push_str(&csv_field(&ep));
                 buf.push(',');
                 buf.push_str(&csv_field(&seq));
@@ -175,6 +183,8 @@ pub async fn export_epoch_csv(
                 buf.push_str(&csv_field(&line));
                 buf.push(',');
                 buf.push_str(&csv_field(&read_type));
+                buf.push(',');
+                buf.push_str(&csv_field(chip_id));
                 buf.push('\n');
             }
             Response::builder()
