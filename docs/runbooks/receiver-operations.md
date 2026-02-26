@@ -177,18 +177,16 @@ After restarting the receiver, it will replay from `last_seq + 1`.
 
 ## Stream Subscription Management
 
-### Receiver selection controls (`Mode` and `Epoch Scope`)
+### Receiver mode controls (`Mode`)
 
-`Mode: Manual` is the default receiver selection mode.
-- Operator chooses exactly which streams are subscribed.
-- Stream changes occur only when the operator updates selections.
+`Mode: Live` subscribes to explicit streams configured by the operator.
+- Use earliest-epoch overrides to control replay start bounds per stream.
 
-`Mode: Race` is an operator opt-in mode (not default).
-- Enable it only when you want receiver selection to follow race context.
-- In `Mode: Race`, set `Epoch Scope` to:
-  - `Current` to replay only the current epoch.
-  - `All` to replay all epochs available for the selected race.
-- If behavior is unexpected, switch back to `Mode: Manual` and select streams explicitly.
+`Mode: Race` subscribes to streams associated with a selected race.
+- Use this mode when operator workflow is race-centric.
+
+`Mode: Targeted Replay` replays explicit stream/epoch ranges.
+- Use this for focused backfills without enabling ongoing live fanout.
 
 ### Stream list epoch visibility
 
@@ -196,8 +194,8 @@ Receiver UI stream rows now show the current `stream epoch` and current epoch na
 
 ### Subscribe to a new stream
 
-The receiver subscribes during the hello handshake or mid-session
-via the `receiver_subscribe` message.
+The receiver applies stream subscriptions during the v1.2 hello handshake.
+Updating subscriptions triggers reconnect-based re-resolution/replay.
 
 Using the control API:
 

@@ -27,10 +27,8 @@ Defines the frozen v1 and v1.2 protocol types shared between the forwarder, serv
 
 ### Receiver messages
 
-- `ReceiverHello` -- Initial handshake from receiver to server (v1).
 - `ReceiverHelloV12` -- Receiver hello for v1.2 mode-based protocol (see Receiver v1.2 modes).
 - `ReceiverModeApplied` -- Server acknowledgement with a summary of the applied mode (v1.2).
-- `ReceiverSubscribe` -- Mid-session stream subscription request (v1).
 - `ReceiverEventBatch` -- Batch of read events from server to receiver.
 - `ReceiverAck` -- Receiver acknowledgement of a delivered batch.
 

@@ -133,8 +133,8 @@ The forwarder is designed to run on a single-board computer (SBC) co-located
 with the IPICO readers. See [`deploy/sbc/`](../../deploy/sbc/) for provisioning
 scripts and network configuration.
 
-## Current epoch name control (v1.1)
+## Current epoch name control
 
 - Forwarder UI operations can set the current epoch name through the server-backed path.
 - Forwarder UI operations can clear the current epoch name through the same server-backed path.
-- These controls align with receiver `race/current` opt-in selection behavior for race operations.
+- These controls align with server-backed race epoch workflows.

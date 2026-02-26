@@ -1,9 +1,9 @@
 use crate::db::Db;
 use futures_util::{SinkExt, StreamExt};
-use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, ReceiverSubscribe, StreamRef, WsMessage};
+use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, WsMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, error, info, warn};
 #[derive(Debug, thiserror::Error)]
@@ -24,11 +24,6 @@ pub struct Session {
     pub device_id: String,
 }
 
-#[derive(Debug, Clone)]
-pub enum SessionCommand {
-    ReplayStreams { streams: Vec<StreamRef> },
-}
-
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
@@ -37,7 +32,6 @@ pub struct SessionLoopDeps {
     pub shutdown: watch::Receiver<bool>,
     pub paused_streams: Arc<RwLock<HashSet<String>>>,
     pub all_paused: Arc<RwLock<bool>>,
-    pub control_rx: Option<mpsc::UnboundedReceiver<SessionCommand>>,
 }
 
 fn apply_batch_counts(
@@ -104,23 +98,6 @@ where
         tokio::select! {
             biased;
             _ = deps.shutdown.changed() => { if *deps.shutdown.borrow() { break; } }
-            cmd = next_session_command(&mut deps.control_rx) => {
-                match cmd {
-                    Some(SessionCommand::ReplayStreams { streams }) => {
-                        if streams.is_empty() {
-                            continue;
-                        }
-                        let subscribe = WsMessage::ReceiverSubscribe(ReceiverSubscribe {
-                            session_id: session_id.clone(),
-                            streams,
-                        });
-                        ws.send(Message::Text(serde_json::to_string(&subscribe)?.into())).await?;
-                    }
-                    None => {
-                        deps.control_rx = None;
-                    }
-                }
-            }
             msg = ws.next() => {
                 match msg {
                     None => break,
@@ -190,15 +167,6 @@ where
         }
     }
     Ok(())
-}
-
-async fn next_session_command(
-    control_rx: &mut Option<mpsc::UnboundedReceiver<SessionCommand>>,
-) -> Option<SessionCommand> {
-    match control_rx {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending::<Option<SessionCommand>>().await,
-    }
 }
 
 #[cfg(test)]

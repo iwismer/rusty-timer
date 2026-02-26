@@ -301,7 +301,6 @@ async fn main() {
                         }
 
                         // Cancel any existing session first.
-                        *state.session_command_tx.write().await = None;
                         cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
 
                         let url_opt = state.upstream_url.read().await.clone();
@@ -373,10 +372,6 @@ async fn main() {
 
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
-                                                let (session_cmd_tx, session_cmd_rx) =
-                                                    tokio::sync::mpsc::unbounded_channel();
-                                                *state.session_command_tx.write().await =
-                                                    Some(session_cmd_tx);
                                                 let db_arc = Arc::clone(&state.db);
                                                 let bus = event_bus.clone();
                                                 let counts = state.stream_counts.clone();
@@ -394,7 +389,6 @@ async fn main() {
                                                         shutdown: cancel_rx,
                                                         paused_streams,
                                                         all_paused,
-                                                        control_rx: Some(session_cmd_rx),
                                                     };
                                                     let result = receiver::session::run_session_loop(
                                                         ws, session_id, deps,
@@ -411,7 +405,6 @@ async fn main() {
                                                             );
                                                         }
                                                     }
-                                                    *st.session_command_tx.write().await = None;
                                                     if request_reconnect_if_connected(&st).await {
                                                         // Unexpected drop — auto-reconnect.
                                                         st.logger.log("Connection lost, will reconnect");
@@ -447,7 +440,6 @@ async fn main() {
 
                     ConnectionState::Disconnecting => {
                         info!("disconnecting: cancelling WS session");
-                        *state.session_command_tx.write().await = None;
                         cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
                         state.set_connection_state(ConnectionState::Disconnected).await;
                         state.emit_streams_snapshot().await;
@@ -466,7 +458,6 @@ async fn main() {
     // 8. Graceful shutdown — close WS session and release TCP ports
     // -------------------------------------------------------------------------
     state.logger.log("shutdown signal received");
-    *state.session_command_tx.write().await = None;
     cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");

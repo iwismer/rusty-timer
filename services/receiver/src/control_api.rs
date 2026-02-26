@@ -63,8 +63,6 @@ pub struct AppState {
     pub stream_counts: crate::cache::StreamCounts,
     pub paused_streams: Arc<RwLock<HashSet<String>>>,
     pub all_paused: Arc<RwLock<bool>>,
-    pub session_command_tx:
-        Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>>>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -90,7 +88,6 @@ impl AppState {
             stream_counts: crate::cache::StreamCounts::new(),
             paused_streams: Arc::new(RwLock::new(HashSet::new())),
             all_paused: Arc::new(RwLock::new(true)),
-            session_command_tx: Arc::new(RwLock::new(None)),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -329,18 +326,6 @@ impl AppState {
     pub async fn resume_all(&self) {
         *self.all_paused.write().await = false;
         self.paused_streams.write().await.clear();
-    }
-
-    pub async fn request_replay_streams(&self, streams: Vec<rt_protocol::StreamRef>) -> bool {
-        if streams.is_empty() {
-            return false;
-        }
-        let tx_opt = self.session_command_tx.read().await.clone();
-        let Some(tx) = tx_opt else {
-            return false;
-        };
-        tx.send(crate::session::SessionCommand::ReplayStreams { streams })
-            .is_ok()
     }
 }
 
@@ -687,21 +672,7 @@ async fn post_resume_stream(
     state
         .resume_stream(&body.forwarder_id, &body.reader_ip)
         .await;
-    let is_subscribed = {
-        let db = state.db.lock().await;
-        db.load_subscriptions().map_or(false, |subs| {
-            subs.iter()
-                .any(|sub| sub.forwarder_id == body.forwarder_id && sub.reader_ip == body.reader_ip)
-        })
-    };
-    if is_subscribed {
-        let _ = state
-            .request_replay_streams(vec![rt_protocol::StreamRef {
-                forwarder_id: body.forwarder_id.clone(),
-                reader_ip: body.reader_ip.clone(),
-            }])
-            .await;
-    }
+    let _ = state.request_reconnect_if_connected().await;
     state.emit_streams_snapshot().await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -714,18 +685,7 @@ async fn post_pause_all(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 async fn post_resume_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     state.resume_all().await;
-    let streams = {
-        let db = state.db.lock().await;
-        db.load_subscriptions()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|sub| rt_protocol::StreamRef {
-                forwarder_id: sub.forwarder_id,
-                reader_ip: sub.reader_ip,
-            })
-            .collect::<Vec<_>>()
-    };
-    let _ = state.request_replay_streams(streams).await;
+    let _ = state.request_reconnect_if_connected().await;
     state.emit_streams_snapshot().await;
     StatusCode::NO_CONTENT.into_response()
 }

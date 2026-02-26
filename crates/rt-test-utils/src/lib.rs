@@ -65,8 +65,12 @@ mod tests {
 
         let mut client = MockWsClient::connect(&url).await.unwrap();
 
-        let hello = WsMessage::ReceiverHello(ReceiverHello {
+        let hello = WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
             receiver_id: "rcv-test-001".to_owned(),
+            mode: ReceiverMode::Live {
+                streams: vec![],
+                earliest_epochs: vec![],
+            },
             resume: vec![],
         });
         client.send_message(&hello).await.unwrap();
@@ -203,8 +207,12 @@ mod tests {
             reader_ips: vec![],
             display_name: None,
         });
-        let hello2 = WsMessage::ReceiverHello(ReceiverHello {
+        let hello2 = WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
             receiver_id: "rcv-001".to_owned(),
+            mode: ReceiverMode::Live {
+                streams: vec![],
+                earliest_epochs: vec![],
+            },
             resume: vec![],
         });
 

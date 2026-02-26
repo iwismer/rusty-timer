@@ -221,7 +221,7 @@ async fn pause_and_resume_stream_endpoints_update_stream_state() {
 }
 
 #[tokio::test]
-async fn resume_stream_does_not_force_connecting_state() {
+async fn resume_stream_requests_reconnect_when_connected() {
     let db = Db::open_in_memory().unwrap();
     let (state, _rx) = AppState::new(db);
     {
@@ -242,7 +242,7 @@ async fn resume_stream_does_not_force_connecting_state() {
     );
 
     let (_, status) = get_json(app, "/api/v1/status").await;
-    assert_eq!(status["connection_state"], "connected");
+    assert_eq!(status["connection_state"], "connecting");
 }
 
 #[tokio::test]

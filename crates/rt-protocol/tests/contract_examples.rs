@@ -110,33 +110,6 @@ fn forwarder_ack_round_trip() {
 }
 
 #[test]
-fn receiver_hello_round_trip() {
-    let msg = round_trip("contracts/ws/v1/examples/receiver_hello.json");
-    match msg {
-        WsMessage::ReceiverHello(inner) => {
-            assert!(
-                !inner.receiver_id.is_empty(),
-                "receiver_id must be non-empty"
-            );
-            // No session_id on hello.
-        }
-        other => panic!("Expected ReceiverHello, got {:?}", other),
-    }
-}
-
-#[test]
-fn receiver_subscribe_round_trip() {
-    let msg = round_trip("contracts/ws/v1/examples/receiver_subscribe.json");
-    match msg {
-        WsMessage::ReceiverSubscribe(inner) => {
-            assert!(!inner.session_id.is_empty());
-            assert!(!inner.streams.is_empty());
-        }
-        other => panic!("Expected ReceiverSubscribe, got {:?}", other),
-    }
-}
-
-#[test]
 fn receiver_event_batch_round_trip() {
     let msg = round_trip("contracts/ws/v1/examples/receiver_event_batch.json");
     match msg {
@@ -160,7 +133,7 @@ fn receiver_ack_round_trip() {
     }
 }
 
-// v1.1 receiver selection protocol tests removed in favor of v1.2 mode-based tests.
+// Receiver mode coverage is validated in receiver_v12.rs.
 
 #[test]
 fn heartbeat_round_trip() {
@@ -348,26 +321,6 @@ fn forwarder_hello_has_no_session_id() {
     assert!(
         raw.get("session_id").is_none(),
         "forwarder_hello must NOT contain session_id"
-    );
-}
-
-/// Verify that session_id is NOT present in receiver_hello.
-#[test]
-fn receiver_hello_has_no_session_id() {
-    let json_text = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("contracts/ws/v1/examples/receiver_hello.json"),
-    )
-    .expect("read receiver_hello.json");
-
-    let raw: serde_json::Value = serde_json::from_str(&json_text).unwrap();
-    assert!(
-        raw.get("session_id").is_none(),
-        "receiver_hello must NOT contain session_id"
     );
 }
 

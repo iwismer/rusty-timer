@@ -19,8 +19,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 ///
 /// # Protocol behavior
 ///
-/// - First message from a client must be `forwarder_hello`, `receiver_hello`,
-///   or `receiver_hello_v12`.
+/// - First message from a client must be `forwarder_hello` or `receiver_hello_v12`.
 ///   Any other message produces an `error` response with code `PROTOCOL_ERROR`.
 /// - After a valid hello, the server responds with a `heartbeat` carrying a
 ///   generated `session_id` (UUID v4) and `device_id` (from the hello).
@@ -107,15 +106,6 @@ impl MockWsServer {
                         let json = serde_json::to_string(&heartbeat)?;
                         write.send(Message::Text(json.into())).await?;
                     }
-                    WsMessage::ReceiverHello(hello) => {
-                        hello_received = true;
-                        let heartbeat = WsMessage::Heartbeat(Heartbeat {
-                            session_id: session_id.clone(),
-                            device_id: hello.receiver_id.clone(),
-                        });
-                        let json = serde_json::to_string(&heartbeat)?;
-                        write.send(Message::Text(json.into())).await?;
-                    }
                     WsMessage::ReceiverHelloV12(hello) => {
                         hello_received = true;
                         let heartbeat = WsMessage::Heartbeat(Heartbeat {
@@ -129,9 +119,8 @@ impl MockWsServer {
                         // Protocol error: first message was not a hello
                         let error = WsMessage::Error(ErrorMessage {
                             code: error_codes::PROTOCOL_ERROR.to_owned(),
-                            message:
-                                "first message must be forwarder_hello, receiver_hello, or receiver_hello_v12"
-                                    .to_owned(),
+                            message: "first message must be forwarder_hello or receiver_hello_v12"
+                                .to_owned(),
                             retryable: false,
                         });
                         let json = serde_json::to_string(&error)?;

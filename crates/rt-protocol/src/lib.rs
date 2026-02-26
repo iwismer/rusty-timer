@@ -98,34 +98,6 @@ pub struct ForwarderAck {
     pub entries: Vec<AckEntry>,
 }
 
-// ---------------------------------------------------------------------------
-// Receiver -> Server messages
-// ---------------------------------------------------------------------------
-
-/// Receiver hello / re-hello message.
-///
-/// Does NOT carry `session_id` -- the session_id is assigned by the server
-/// and returned in the first `heartbeat`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverHello {
-    /// Advisory identity; must match token claims if present.
-    pub receiver_id: String,
-    /// Resume cursors for streams the receiver already has data for.
-    #[serde(default)]
-    pub resume: Vec<ResumeCursor>,
-}
-
-/// Subscribe to additional streams mid-session.
-///
-/// `receiver_hello` implicitly subscribes to streams in `resume`.
-/// `receiver_subscribe` adds new streams after the session is established.
-/// There is no unsubscribe in v1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverSubscribe {
-    pub session_id: String,
-    pub streams: Vec<StreamRef>,
-}
-
 /// A reference to a stream by its immutable identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamRef {
@@ -331,7 +303,7 @@ pub struct RestartResponse {
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
-/// All WebSocket message kinds in the v1 and v1.2 receiver protocols.
+/// All WebSocket message kinds in the v1 forwarder and v1.2 receiver protocols.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -345,10 +317,8 @@ pub enum WsMessage {
     ForwarderHello(ForwarderHello),
     ForwarderEventBatch(ForwarderEventBatch),
     ForwarderAck(ForwarderAck),
-    ReceiverHello(ReceiverHello),
     ReceiverHelloV12(ReceiverHelloV12),
     ReceiverModeApplied(ReceiverModeApplied),
-    ReceiverSubscribe(ReceiverSubscribe),
     ReceiverEventBatch(ReceiverEventBatch),
     ReceiverAck(ReceiverAck),
     Heartbeat(Heartbeat),

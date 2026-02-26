@@ -28,6 +28,26 @@ fn profile_stored_and_loaded() {
 }
 
 #[test]
+fn profile_schema_drops_legacy_selection_columns() {
+    let d = tempfile::tempdir().unwrap();
+    let c = open_db(&d.path().join("r.db"));
+
+    let mut stmt = c
+        .prepare("SELECT name FROM pragma_table_info('profile') ORDER BY cid")
+        .unwrap();
+    let column_names = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(!column_names.iter().any(|col| col == "selection_json"));
+    assert!(!column_names.iter().any(|col| col == "replay_policy"));
+    assert!(!column_names.iter().any(|col| col == "replay_targets_json"));
+    assert!(column_names.iter().any(|col| col == "receiver_mode_json"));
+}
+
+#[test]
 fn receiver_mode_persists_via_receiver_db() {
     let d = tempfile::tempdir().unwrap();
     let db_path = d.path().join("receiver.db");

@@ -41,7 +41,7 @@ async function mockReceiverApi(
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          server_url: "wss://example.com/ws/v1/receivers",
+          server_url: "wss://example.com",
           token: "token",
           update_mode: "check-and-download",
         }),
