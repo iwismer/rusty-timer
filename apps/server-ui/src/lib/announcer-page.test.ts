@@ -106,6 +106,8 @@ describe("public announcer page", () => {
       await screen.findByText(/not official results/i),
     ).toBeInTheDocument();
     expect(screen.getByText("Runner One")).toBeInTheDocument();
+    expect(screen.queryByText(/chip\s+000000111111/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/reader\s+10:00:00/i)).not.toBeInTheDocument();
   });
 
   it("applies flash class when an announcer_update SSE event arrives", async () => {
@@ -129,7 +131,7 @@ describe("public announcer page", () => {
       },
     });
 
-    const row = await screen.findByTestId("announcer-row-000000222222");
+    const row = await screen.findByTestId("announcer-row-stream-1:2");
     await waitFor(() => {
       expect(row.className).toContain("flash-new");
     });

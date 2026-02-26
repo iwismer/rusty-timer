@@ -10,7 +10,7 @@
   let finisherCount = $state(0);
   let rows: AnnouncerRow[] = $state([]);
   let maxListSize = $state(25);
-  let flashChipIds = $state(new Set<string>());
+  let flashRowKeys = $state(new Set<string>());
 
   let eventSource: EventSource | null = null;
 
@@ -46,21 +46,26 @@
   }
 
   function applyDelta(delta: AnnouncerDelta) {
-    const deduped = rows.filter((row) => row.chip_id !== delta.row.chip_id);
+    const key = rowKey(delta.row);
+    const deduped = rows.filter((row) => rowKey(row) !== key);
     rows = [delta.row, ...deduped].slice(0, maxListSize);
     finisherCount = delta.finisher_count;
-    markRowFlash(delta.row.chip_id);
+    markRowFlash(key);
   }
 
-  function markRowFlash(chipId: string) {
-    const next = new Set(flashChipIds);
-    next.add(chipId);
-    flashChipIds = next;
+  function markRowFlash(key: string) {
+    const next = new Set(flashRowKeys);
+    next.add(key);
+    flashRowKeys = next;
     setTimeout(() => {
-      const updated = new Set(flashChipIds);
-      updated.delete(chipId);
-      flashChipIds = updated;
+      const updated = new Set(flashRowKeys);
+      updated.delete(key);
+      flashRowKeys = updated;
     }, 1200);
+  }
+
+  function rowKey(row: AnnouncerRow): string {
+    return `${row.stream_id}:${row.seq}`;
   }
 </script>
 
@@ -95,12 +100,12 @@
         <p class="text-sm text-text-muted">Waiting for first finisher...</p>
       {:else}
         <ul class="list-none p-0 m-0 grid gap-3">
-          {#each rows as row (row.chip_id)}
+          {#each rows as row (rowKey(row))}
             <li
-              data-testid={"announcer-row-" + row.chip_id}
+              data-testid={"announcer-row-" + rowKey(row)}
               class={[
                 "rounded-md border border-border bg-surface-1 p-4",
-                flashChipIds.has(row.chip_id) ? "flash-new" : "",
+                flashRowKeys.has(rowKey(row)) ? "flash-new" : "",
               ]
                 .join(" ")
                 .trim()}
@@ -111,12 +116,11 @@
                   <p class="text-sm text-text-muted m-0">Bib {row.bib}</p>
                 {/if}
               </div>
-              <p class="text-sm text-text-muted mt-2 mb-0">
-                Chip {row.chip_id}
-                {#if row.reader_timestamp}
-                  · Reader {row.reader_timestamp}
-                {/if}
-              </p>
+              {#if row.reader_timestamp}
+                <p class="text-sm text-text-muted mt-2 mb-0">
+                  Time {row.reader_timestamp}
+                </p>
+              {/if}
             </li>
           {/each}
         </ul>
