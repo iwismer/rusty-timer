@@ -6,10 +6,12 @@
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import { NavBar } from "@rusty-timer/shared-ui";
   import { getRaces, getForwarderRaces } from "$lib/api";
+  import { getLayoutNavLinks } from "$lib/layout-nav";
   import { setRaces, forwarderRacesStore } from "$lib/stores";
   import { page } from "$app/state";
 
   let { children }: { children: Snippet } = $props();
+  let navLinks = $derived(getLayoutNavLinks(page.url.pathname));
 
   onMount(() => {
     initSSE();
@@ -40,38 +42,7 @@
 </svelte:head>
 
 <div class="flex flex-col min-h-screen min-h-[100dvh]">
-  <NavBar
-    links={[
-      {
-        href: "/",
-        label: "Streams",
-        active:
-          page.url.pathname === "/" ||
-          page.url.pathname.startsWith("/streams") ||
-          page.url.pathname.startsWith("/forwarders"),
-      },
-      {
-        href: "/races",
-        label: "Races",
-        active: page.url.pathname.startsWith("/races"),
-      },
-      {
-        href: "/announcer-config",
-        label: "Announcer",
-        active: page.url.pathname.startsWith("/announcer-config"),
-      },
-      {
-        href: "/logs",
-        label: "Logs",
-        active: page.url.pathname.startsWith("/logs"),
-      },
-      {
-        href: "/admin",
-        label: "Admin",
-        active: page.url.pathname.startsWith("/admin"),
-      },
-    ]}
-  />
+  <NavBar links={navLinks} />
 
   <div class="grow">
     {@render children()}
