@@ -11,6 +11,7 @@
   let rows: AnnouncerRow[] = $state([]);
   let maxListSize = $state(25);
   let flashRowKeys = $state(new Set<string>());
+  let liveRevision = 0;
 
   let eventSource: EventSource | null = null;
 
@@ -30,14 +31,30 @@
   });
 
   async function loadSnapshot() {
+    const revisionAtStart = liveRevision;
     loading = true;
     loadError = null;
     try {
       const state = await getAnnouncerState();
       publicEnabled = state.public_enabled;
-      finisherCount = state.finisher_count;
-      rows = [...state.rows];
       maxListSize = state.max_list_size;
+
+      if (liveRevision === revisionAtStart) {
+        finisherCount = state.finisher_count;
+        rows = [...state.rows];
+      } else {
+        const mergedByKey = new Map<string, AnnouncerRow>(
+          rows.map((row) => [rowKey(row), row]),
+        );
+        for (const row of state.rows) {
+          const key = rowKey(row);
+          if (!mergedByKey.has(key)) {
+            mergedByKey.set(key, row);
+          }
+        }
+        rows = [...mergedByKey.values()].slice(0, state.max_list_size);
+        finisherCount = Math.max(finisherCount, state.finisher_count);
+      }
     } catch (err) {
       loadError = String(err);
     } finally {
@@ -46,6 +63,7 @@
   }
 
   function applyDelta(delta: AnnouncerDelta) {
+    liveRevision += 1;
     const key = rowKey(delta.row);
     const deduped = rows.filter((row) => rowKey(row) !== key);
     rows = [delta.row, ...deduped].slice(0, maxListSize);

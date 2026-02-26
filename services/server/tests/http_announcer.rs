@@ -123,6 +123,43 @@ async fn disabled_state_reports_public_disabled() {
 }
 
 #[tokio::test]
+async fn disabled_public_state_redacts_seeded_runtime_rows() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let (app_state, addr, _server_task) = start_server(pool).await;
+
+    {
+        let mut runtime = app_state.announcer_runtime.write().await;
+        let _ = runtime.ingest(
+            AnnouncerInputEvent {
+                stream_id: Uuid::new_v4(),
+                seq: 1,
+                chip_id: "000000999999".to_owned(),
+                bib: Some(99),
+                display_name: "Seed Runner".to_owned(),
+                reader_timestamp: Some("10:00:00".to_owned()),
+                received_at: chrono::Utc::now(),
+            },
+            25,
+        );
+        assert_eq!(runtime.finisher_count(), 1);
+        assert_eq!(runtime.rows().len(), 1);
+    }
+
+    let resp = reqwest::get(format!("http://{addr}/api/v1/announcer/state"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["public_enabled"], serde_json::json!(false));
+    assert_eq!(body["finisher_count"], serde_json::json!(0));
+    assert_eq!(body["rows"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn config_update_with_different_stream_selection_resets_runtime() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();

@@ -112,6 +112,14 @@ pub async fn get_state(State(state): State<AppState>) -> impl IntoResponse {
     let now = Utc::now();
     let public_enabled = is_public_enabled(&config, now);
     let runtime = state.announcer_runtime.read().await;
+    let (finisher_count, rows) = if public_enabled {
+        (
+            runtime.finisher_count(),
+            runtime.rows().iter().cloned().collect::<Vec<_>>(),
+        )
+    } else {
+        (0, Vec::new())
+    };
 
     Json(serde_json::json!({
         "enabled": config.enabled,
@@ -120,8 +128,8 @@ pub async fn get_state(State(state): State<AppState>) -> impl IntoResponse {
         "max_list_size": config.max_list_size,
         "updated_at": config.updated_at.to_rfc3339(),
         "public_enabled": public_enabled,
-        "finisher_count": runtime.finisher_count(),
-        "rows": runtime.rows().iter().cloned().collect::<Vec<_>>(),
+        "finisher_count": finisher_count,
+        "rows": rows,
     }))
     .into_response()
 }

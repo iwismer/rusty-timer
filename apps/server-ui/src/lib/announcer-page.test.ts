@@ -136,4 +136,39 @@ describe("public announcer page", () => {
       expect(row.className).toContain("flash-new");
     });
   });
+
+  it("does not let stale snapshot overwrite a newer SSE update", async () => {
+    const AnnouncerPage = (await import("../routes/announcer/+page.svelte"))
+      .default;
+    let resolveFetch: (value: unknown) => void = () => undefined;
+    mockFetch.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+
+    render(AnnouncerPage);
+    await waitFor(() => {
+      expect(MockEventSource.instances).toHaveLength(1);
+    });
+
+    const es = MockEventSource.instances[0];
+    es.emit("announcer_update", {
+      finisher_count: 1,
+      row: {
+        stream_id: "stream-1",
+        seq: 2,
+        chip_id: "000000222222",
+        bib: 222,
+        display_name: "Runner Two",
+        reader_timestamp: "10:00:01",
+        received_at: "2026-02-26T10:00:01Z",
+      },
+    });
+
+    resolveFetch(makeResponse(200, makeState({ finisher_count: 0, rows: [] })));
+
+    expect(await screen.findByText("Runner Two")).toBeInTheDocument();
+    expect(screen.getByText(/Finishers announced:\s*1/)).toBeInTheDocument();
+  });
 });
