@@ -11,7 +11,9 @@
   let rows: PublicAnnouncerRow[] = $state([]);
   let maxListSize = $state(25);
   let flashRowKeys = $state(new Set<string>());
-  let liveRevision = 0;
+  let snapshotRequestId = 0;
+  let snapshotInFlight = false;
+  let bufferedDeltas: PublicAnnouncerDelta[] = [];
 
   let eventSource: EventSource | null = null;
 
@@ -31,39 +33,44 @@
   });
 
   async function loadSnapshot() {
-    const revisionAtStart = liveRevision;
+    const requestId = ++snapshotRequestId;
+    snapshotInFlight = true;
+    bufferedDeltas = [];
     loading = true;
     loadError = null;
     try {
       const state = await getPublicAnnouncerState();
-      publicEnabled = state.public_enabled;
-      maxListSize = Math.max(maxListSize, state.rows.length);
+      if (requestId !== snapshotRequestId) {
+        return;
+      }
 
-      if (liveRevision === revisionAtStart) {
-        finisherCount = state.finisher_count;
-        rows = [...state.rows];
-      } else {
-        const mergedByKey = new Map<string, PublicAnnouncerRow>(
-          rows.map((row) => [rowKey(row), row]),
-        );
-        for (const row of state.rows) {
-          const key = rowKey(row);
-          if (!mergedByKey.has(key)) {
-            mergedByKey.set(key, row);
-          }
-        }
-        rows = [...mergedByKey.values()].slice(0, maxListSize);
-        finisherCount = Math.max(finisherCount, state.finisher_count);
+      publicEnabled = state.public_enabled;
+      maxListSize = Math.max(1, state.max_list_size);
+      finisherCount = state.finisher_count;
+      rows = [...state.rows].slice(0, maxListSize);
+
+      for (const delta of bufferedDeltas) {
+        applyDeltaLocally(delta);
       }
     } catch (err) {
       loadError = String(err);
     } finally {
-      loading = false;
+      if (requestId === snapshotRequestId) {
+        snapshotInFlight = false;
+        bufferedDeltas = [];
+        loading = false;
+      }
     }
   }
 
   function applyDelta(delta: PublicAnnouncerDelta) {
-    liveRevision += 1;
+    if (snapshotInFlight) {
+      bufferedDeltas = [...bufferedDeltas, delta];
+    }
+    applyDeltaLocally(delta);
+  }
+
+  function applyDeltaLocally(delta: PublicAnnouncerDelta) {
     const key = rowKey(delta.row);
     const deduped = rows.filter((row) => rowKey(row) !== key);
     rows = [delta.row, ...deduped].slice(0, maxListSize);

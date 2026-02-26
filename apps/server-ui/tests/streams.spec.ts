@@ -509,6 +509,7 @@ test.describe("announcer public page", () => {
         body: JSON.stringify({
           public_enabled: false,
           finisher_count: 0,
+          max_list_size: 25,
           rows: [],
         }),
       });
@@ -528,6 +529,7 @@ test.describe("announcer public page", () => {
         body: JSON.stringify({
           public_enabled: true,
           finisher_count: 1,
+          max_list_size: 25,
           rows: [
             {
               announcement_id: 1,

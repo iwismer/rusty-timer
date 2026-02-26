@@ -276,6 +276,7 @@ describe("server_api client", () => {
       makeResponse(200, {
         public_enabled: true,
         finisher_count: 1,
+        max_list_size: 25,
         rows: [
           {
             announcement_id: 1,
@@ -293,6 +294,7 @@ describe("server_api client", () => {
       expect.any(Object),
     );
     expect(result.public_enabled).toBe(true);
+    expect(result.max_list_size).toBe(25);
     expect(result.rows[0]?.announcement_id).toBe(1);
   });
 

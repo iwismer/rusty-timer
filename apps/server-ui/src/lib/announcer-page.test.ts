@@ -38,6 +38,7 @@ function makeState(overrides?: Record<string, unknown>) {
   return {
     public_enabled: true,
     finisher_count: 0,
+    max_list_size: 25,
     rows: [],
     ...overrides,
   };
@@ -156,5 +157,114 @@ describe("public announcer page", () => {
 
     expect(await screen.findByText("Runner Two")).toBeInTheDocument();
     expect(screen.getByText(/Finishers announced:\s*1/)).toBeInTheDocument();
+  });
+
+  it("caps live rows to server-provided max_list_size", async () => {
+    const AnnouncerPage = (await import("../routes/announcer/+page.svelte"))
+      .default;
+    mockFetch.mockResolvedValue(
+      makeResponse(200, makeState({ max_list_size: 2 })),
+    );
+
+    render(AnnouncerPage);
+    await screen.findByText("Waiting for first finisher...");
+    const es = MockEventSource.instances[0];
+
+    es.emit("announcer_update", {
+      finisher_count: 1,
+      row: {
+        announcement_id: 1,
+        bib: 101,
+        display_name: "Runner One",
+        reader_timestamp: "10:00:01",
+      },
+    });
+    es.emit("announcer_update", {
+      finisher_count: 2,
+      row: {
+        announcement_id: 2,
+        bib: 102,
+        display_name: "Runner Two",
+        reader_timestamp: "10:00:02",
+      },
+    });
+    es.emit("announcer_update", {
+      finisher_count: 3,
+      row: {
+        announcement_id: 3,
+        bib: 103,
+        display_name: "Runner Three",
+        reader_timestamp: "10:00:03",
+      },
+    });
+
+    expect(await screen.findByTestId("announcer-row-3")).toBeInTheDocument();
+    expect(screen.getByTestId("announcer-row-2")).toBeInTheDocument();
+    expect(screen.queryByTestId("announcer-row-1")).not.toBeInTheDocument();
+  });
+
+  it("resync snapshot is authoritative and drops stale pre-resync rows", async () => {
+    const AnnouncerPage = (await import("../routes/announcer/+page.svelte"))
+      .default;
+    let resolveResyncFetch: (value: unknown) => void = () => undefined;
+    mockFetch
+      .mockResolvedValueOnce(
+        makeResponse(
+          200,
+          makeState({
+            finisher_count: 1,
+            rows: [
+              {
+                announcement_id: 1,
+                bib: 111,
+                display_name: "Runner One",
+                reader_timestamp: "10:00:01",
+              },
+            ],
+          }),
+        ),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveResyncFetch = resolve;
+        }),
+      );
+
+    render(AnnouncerPage);
+    expect(await screen.findByText("Runner One")).toBeInTheDocument();
+    const es = MockEventSource.instances[0];
+
+    es.emit("resync", {});
+    es.emit("announcer_update", {
+      finisher_count: 2,
+      row: {
+        announcement_id: 2,
+        bib: 222,
+        display_name: "Runner Two",
+        reader_timestamp: "10:00:02",
+      },
+    });
+
+    resolveResyncFetch(
+      makeResponse(
+        200,
+        makeState({
+          finisher_count: 2,
+          rows: [
+            {
+              announcement_id: 2,
+              bib: 222,
+              display_name: "Runner Two",
+              reader_timestamp: "10:00:02",
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(await screen.findByTestId("announcer-row-2")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByTestId("announcer-row-1")).not.toBeInTheDocument();
+    });
   });
 });

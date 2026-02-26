@@ -180,13 +180,13 @@ async fn public_state_endpoint_redacts_internal_fields_when_disabled() {
     assert_eq!(obj.get("public_enabled"), Some(&serde_json::json!(false)));
     assert_eq!(obj.get("finisher_count"), Some(&serde_json::json!(0)));
     assert_eq!(obj.get("rows"), Some(&serde_json::json!([])));
-    assert_eq!(obj.len(), 3, "public state must only contain public fields");
+    assert_eq!(obj.get("max_list_size"), Some(&serde_json::json!(25)));
+    assert_eq!(obj.len(), 4, "public state must only contain public fields");
 
     for forbidden in [
         "enabled",
         "enabled_until",
         "selected_stream_ids",
-        "max_list_size",
         "updated_at",
     ] {
         assert!(
@@ -215,11 +215,13 @@ async fn public_state_endpoint_returns_sanitized_rows_when_enabled() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE announcer_config SET enabled = true, selected_stream_ids = $1")
-        .bind(vec![stream_id])
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE announcer_config SET enabled = true, selected_stream_ids = $1, max_list_size = 10",
+    )
+    .bind(vec![stream_id])
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let (app_state, addr, _server_task) = start_server(pool).await;
     {
@@ -246,6 +248,7 @@ async fn public_state_endpoint_returns_sanitized_rows_when_enabled() {
 
     assert_eq!(body["public_enabled"], serde_json::json!(true));
     assert_eq!(body["finisher_count"], serde_json::json!(1));
+    assert_eq!(body["max_list_size"], serde_json::json!(10));
     let rows = body["rows"]
         .as_array()
         .expect("public state rows should be array");
@@ -341,6 +344,55 @@ async fn config_update_with_different_stream_selection_resets_runtime() {
     let runtime = app_state.announcer_runtime.read().await;
     assert_eq!(runtime.finisher_count(), 0);
     assert!(runtime.rows().is_empty());
+}
+
+#[tokio::test]
+async fn disabling_announcer_allows_stale_selected_stream_ids() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, online) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(stream_id)
+    .bind("fwd-stale")
+    .bind("10.102.0.1:10000")
+    .bind(false)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("UPDATE announcer_config SET enabled = true, selected_stream_ids = $1")
+        .bind(vec![stream_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query("DELETE FROM streams WHERE stream_id = $1")
+        .bind(stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (_app_state, addr, _server_task) = start_server(pool).await;
+    let resp = reqwest::Client::new()
+        .put(format!("http://{addr}/api/v1/announcer/config"))
+        .json(&serde_json::json!({
+            "enabled": false,
+            "selected_stream_ids": [stream_id],
+            "max_list_size": 25
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["enabled"], serde_json::json!(false));
 }
 
 #[tokio::test]

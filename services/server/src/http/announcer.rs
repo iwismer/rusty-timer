@@ -62,7 +62,7 @@ pub async fn put_config(
     }
 
     let selected_stream_ids = dedupe_stream_ids(body.selected_stream_ids);
-    if !selected_stream_ids.is_empty() {
+    if body.enabled && !selected_stream_ids.is_empty() {
         let known_count = match sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM streams WHERE stream_id = ANY($1)",
         )
@@ -177,6 +177,7 @@ pub async fn get_public_state(State(state): State<AppState>) -> impl IntoRespons
     Json(serde_json::json!({
         "public_enabled": public_enabled,
         "finisher_count": finisher_count,
+        "max_list_size": config.max_list_size,
         "rows": rows,
     }))
     .into_response()

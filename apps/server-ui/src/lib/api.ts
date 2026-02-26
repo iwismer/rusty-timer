@@ -100,6 +100,7 @@ export interface PublicAnnouncerRow {
 export interface PublicAnnouncerState {
   public_enabled: boolean;
   finisher_count: number;
+  max_list_size: number;
   rows: PublicAnnouncerRow[];
 }
 
