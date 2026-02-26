@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
@@ -14,7 +15,7 @@ pub struct AnnouncerInputEvent {
     pub received_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnnouncerRow {
     pub stream_id: Uuid,
     pub seq: i64,
@@ -25,7 +26,7 @@ pub struct AnnouncerRow {
     pub received_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnnouncerDelta {
     pub row: AnnouncerRow,
     pub finisher_count: u64,

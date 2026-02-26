@@ -74,6 +74,16 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             axum::routing::put(http::stream_epoch_races::put_stream_epoch_race),
         )
         .route("/api/v1/events", get(http::sse::dashboard_sse))
+        .route(
+            "/api/v1/announcer/config",
+            get(http::announcer::get_config).put(http::announcer::put_config),
+        )
+        .route("/api/v1/announcer/reset", post(http::announcer::post_reset))
+        .route("/api/v1/announcer/state", get(http::announcer::get_state))
+        .route(
+            "/api/v1/announcer/events",
+            get(http::announcer::announcer_sse),
+        )
         .route("/api/v1/logs", get(http::logs::get_logs))
         .route(
             "/api/v1/forwarders/{forwarder_id}/config",

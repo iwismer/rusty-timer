@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod admin;
+pub mod announcer;
 pub mod export;
 pub mod forwarder_config;
 pub mod forwarder_races;
