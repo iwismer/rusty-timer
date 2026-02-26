@@ -252,14 +252,19 @@ async fn e2e_export_txt_and_csv() {
         "2001-12-30T18:45:40.990",
     ];
 
-    let mut expected_csv = String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type\n");
+    let mut expected_csv =
+        String::from("stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n");
     for (i, read) in fixture_reads.iter().enumerate() {
+        let chip_id = ChipRead::try_from(read.as_str())
+            .unwrap_or_else(|e| panic!("failed to parse fixture read '{}': {}", read, e))
+            .tag_id;
         expected_csv.push_str(&format!(
-            "1,{},{},{},{}\n",
+            "1,{},{},{},{},{}\n",
             i + 1,
             expected_timestamps[i],
             read,
             READ_TYPE,
+            chip_id,
         ));
     }
     assert_eq!(csv_body, expected_csv, "export.csv content mismatch");
