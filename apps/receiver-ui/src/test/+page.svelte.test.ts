@@ -132,9 +132,7 @@ describe("receiver page mode controls", () => {
     expect((modeSelect as HTMLSelectElement).value).toBe("live");
 
     await waitFor(() => {
-      expect(
-        screen.queryByText(/earliest_epochs is undefined/i),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByText(/TypeError/i)).not.toBeInTheDocument();
     });
   });
 

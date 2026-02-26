@@ -236,8 +236,11 @@
   function hydrateMode(mode: ReceiverMode): void {
     modeDraft = mode.mode;
     if (mode.mode === "live") {
+      const earliestEpochRows = Array.isArray(mode.earliest_epochs)
+        ? mode.earliest_epochs
+        : [];
       earliestEpochInputs = Object.fromEntries(
-        mode.earliest_epochs.map((row) => [
+        earliestEpochRows.map((row) => [
           streamKey(row.forwarder_id, row.reader_ip),
           String(row.earliest_epoch),
         ]),
