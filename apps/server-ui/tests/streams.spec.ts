@@ -126,6 +126,11 @@ test.describe("stream list page", () => {
     await expect(page.locator('[data-testid="streams-heading"]')).toBeVisible();
   });
 
+  test("renders announcer navigation link", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("link", { name: "Announcer" })).toBeVisible();
+  });
+
   test("renders list of streams", async ({ page }) => {
     await page.goto("/");
     await expect(

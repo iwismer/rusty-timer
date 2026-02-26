@@ -56,6 +56,11 @@
         active: page.url.pathname.startsWith("/races"),
       },
       {
+        href: "/announcer-config",
+        label: "Announcer",
+        active: page.url.pathname.startsWith("/announcer-config"),
+      },
+      {
         href: "/logs",
         label: "Logs",
         active: page.url.pathname.startsWith("/logs"),
