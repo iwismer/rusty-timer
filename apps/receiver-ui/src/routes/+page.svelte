@@ -266,7 +266,7 @@
 
   function applyHydratedMode(mode: ReceiverMode): void {
     hydrateMode(mode);
-    savedModePayload = JSON.stringify(mode);
+    savedModePayload = modeSignature(mode);
     modeEditedSinceHydration = false;
     modeHydrationVersion += 1;
   }
@@ -341,10 +341,75 @@
     };
   }
 
+  function compareStreamRefs(
+    left: { forwarder_id: string; reader_ip: string },
+    right: { forwarder_id: string; reader_ip: string },
+  ): number {
+    const forwarderCompare = left.forwarder_id.localeCompare(
+      right.forwarder_id,
+    );
+    if (forwarderCompare !== 0) {
+      return forwarderCompare;
+    }
+    return left.reader_ip.localeCompare(right.reader_ip);
+  }
+
+  function modeSignature(mode: ReceiverMode): string {
+    if (mode.mode === "race") {
+      return JSON.stringify({
+        mode: "race",
+        race_id: mode.race_id.trim(),
+      });
+    }
+
+    if (mode.mode === "targeted_replay") {
+      const targets = [...mode.targets]
+        .map((target) => ({
+          forwarder_id: target.forwarder_id,
+          reader_ip: target.reader_ip,
+          stream_epoch: target.stream_epoch,
+        }))
+        .sort((a, b) => {
+          const streamCompare = compareStreamRefs(a, b);
+          if (streamCompare !== 0) {
+            return streamCompare;
+          }
+          return a.stream_epoch - b.stream_epoch;
+        });
+
+      return JSON.stringify({
+        mode: "targeted_replay",
+        targets,
+      });
+    }
+
+    const earliestEpochRows = Array.isArray(mode.earliest_epochs)
+      ? mode.earliest_epochs
+      : [];
+    const earliest_epochs = [...earliestEpochRows]
+      .map((row) => ({
+        forwarder_id: row.forwarder_id,
+        reader_ip: row.reader_ip,
+        earliest_epoch: row.earliest_epoch,
+      }))
+      .sort((a, b) => {
+        const streamCompare = compareStreamRefs(a, b);
+        if (streamCompare !== 0) {
+          return streamCompare;
+        }
+        return a.earliest_epoch - b.earliest_epoch;
+      });
+
+    return JSON.stringify({
+      mode: "live",
+      earliest_epochs,
+    });
+  }
+
   let modeDirty = $derived(
     savedModePayload === null
       ? modeEditedSinceHydration
-      : JSON.stringify(modePayload()) !== savedModePayload,
+      : modeSignature(modePayload()) !== savedModePayload,
   );
 
   function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
@@ -472,7 +537,7 @@
       try {
         await api.putMode(payload);
         modeMutationVersion += 1;
-        savedModePayload = JSON.stringify(payload);
+        savedModePayload = modeSignature(payload);
         modeEditedSinceHydration = false;
         error = null;
       } catch (e) {
@@ -601,7 +666,7 @@
       };
       await api.putMode(payload);
       modeMutationVersion += 1;
-      savedModePayload = JSON.stringify(payload);
+      savedModePayload = modeSignature(payload);
     } catch (e) {
       error = String(e);
     }
@@ -635,7 +700,7 @@
       };
       await api.putMode(payload);
       modeMutationVersion += 1;
-      savedModePayload = JSON.stringify(payload);
+      savedModePayload = modeSignature(payload);
     } catch (e) {
       error = String(e);
     }

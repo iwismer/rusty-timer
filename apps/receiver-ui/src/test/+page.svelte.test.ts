@@ -162,6 +162,19 @@ describe("receiver page mode controls", () => {
 
     render(Page);
 
+    const earliest = await screen.findByTestId(
+      "earliest-epoch-fwd-1/10.0.0.1:10000",
+    );
+    await fireEvent.change(earliest, { target: { value: "3" } });
+
+    await waitFor(() => {
+      expect(apiMocks.putEarliestEpoch).toHaveBeenCalledWith({
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        earliest_epoch: 3,
+      });
+    });
+
     const apply = await screen.findByTestId("save-mode-btn");
     await waitFor(() => {
       expect(apply).not.toBeDisabled();
@@ -175,8 +188,43 @@ describe("receiver page mode controls", () => {
           { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000" },
           { forwarder_id: "fwd-2", reader_ip: "10.0.0.2:10000" },
         ],
-        earliest_epochs: [],
+        earliest_epochs: [
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            earliest_epoch: 3,
+          },
+        ],
       });
+    });
+  });
+
+  it("keeps Apply Mode disabled on initial live hydration without local edits", async () => {
+    apiMocks.getMode.mockResolvedValueOnce({
+      mode: "live",
+      streams: [],
+      earliest_epochs: [],
+    });
+    apiMocks.getStreams.mockResolvedValueOnce({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: false,
+          local_port: null,
+          stream_epoch: 5,
+          paused: false,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    render(Page);
+
+    const apply = await screen.findByTestId("save-mode-btn");
+    await waitFor(() => {
+      expect(apply).toBeDisabled();
     });
   });
 
