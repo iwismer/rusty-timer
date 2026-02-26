@@ -1,5 +1,10 @@
 import { writable } from "svelte/store";
-import type { StreamEntry, StreamMetrics, RaceEntry } from "./api";
+import type {
+  AnnouncerConfig,
+  RaceEntry,
+  StreamEntry,
+  StreamMetrics,
+} from "./api";
 
 export const streamsStore = writable<StreamEntry[]>([]);
 export const metricsStore = writable<Record<string, StreamMetrics>>({});
@@ -10,6 +15,9 @@ export const forwarderRacesStore = writable<Record<string, string | null>>({});
 /** All races for dropdown selection */
 export const racesStore = writable<RaceEntry[]>([]);
 export const racesLoadedStore = writable(false);
+export const announcerConfigStore = writable<AnnouncerConfig | null>(null);
+export const announcerConfigSavingStore = writable(false);
+export const announcerConfigErrorStore = writable<string | null>(null);
 
 export const logsStore = writable<string[]>([]);
 
@@ -61,6 +69,18 @@ export function setRaces(races: RaceEntry[]): void {
   racesLoadedStore.set(true);
 }
 
+export function setAnnouncerConfig(config: AnnouncerConfig | null): void {
+  announcerConfigStore.set(config);
+}
+
+export function setAnnouncerConfigSaving(saving: boolean): void {
+  announcerConfigSavingStore.set(saving);
+}
+
+export function setAnnouncerConfigError(error: string | null): void {
+  announcerConfigErrorStore.set(error);
+}
+
 export function resetStores(): void {
   streamsStore.set([]);
   metricsStore.set({});
@@ -68,4 +88,7 @@ export function resetStores(): void {
   racesStore.set([]);
   racesLoadedStore.set(false);
   logsStore.set([]);
+  announcerConfigStore.set(null);
+  announcerConfigSavingStore.set(false);
+  announcerConfigErrorStore.set(null);
 }

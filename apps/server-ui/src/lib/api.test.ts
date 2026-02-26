@@ -202,6 +202,74 @@ describe("server_api client", () => {
     await expect(resetEpoch("abc-123")).rejects.toThrow();
   });
 
+  // ----- Announcer API -----
+  it("getAnnouncerConfig calls GET /api/v1/announcer/config", async () => {
+    const { getAnnouncerConfig } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        enabled: false,
+        enabled_until: null,
+        selected_stream_ids: [],
+        max_list_size: 25,
+        updated_at: "2026-02-26T10:00:00Z",
+        public_enabled: false,
+      }),
+    );
+
+    const result = await getAnnouncerConfig();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/announcer/config"),
+      expect.any(Object),
+    );
+    expect(result.enabled).toBe(false);
+    expect(result.max_list_size).toBe(25);
+  });
+
+  it("updateAnnouncerConfig sends PUT /api/v1/announcer/config", async () => {
+    const { updateAnnouncerConfig } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        enabled: true,
+        enabled_until: "2026-02-27T10:00:00Z",
+        selected_stream_ids: ["stream-1"],
+        max_list_size: 30,
+        updated_at: "2026-02-26T10:05:00Z",
+        public_enabled: true,
+      }),
+    );
+
+    const result = await updateAnnouncerConfig({
+      enabled: true,
+      selected_stream_ids: ["stream-1"],
+      max_list_size: 30,
+    });
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/announcer/config"),
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const callInit = mockFetch.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(callInit.body as string);
+    expect(body.enabled).toBe(true);
+    expect(body.selected_stream_ids).toEqual(["stream-1"]);
+    expect(result.public_enabled).toBe(true);
+  });
+
+  it("resetAnnouncer sends POST /api/v1/announcer/reset and resolves on 204", async () => {
+    const { resetAnnouncer } = await import("./api");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      json: async () => undefined,
+      text: async () => "",
+    });
+
+    await expect(resetAnnouncer()).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/announcer/reset"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   // ----- Admin: getTokens -----
   it("getTokens calls GET /api/v1/admin/tokens", async () => {
     const { getTokens } = await import("./api");

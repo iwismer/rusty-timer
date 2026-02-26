@@ -5,11 +5,17 @@ import {
   metricsStore,
   logsStore,
   racesLoadedStore,
+  announcerConfigStore,
+  announcerConfigSavingStore,
+  announcerConfigErrorStore,
   addOrUpdateStream,
   patchStream,
   pushLog,
   setMetrics,
   setRaces,
+  setAnnouncerConfig,
+  setAnnouncerConfigSaving,
+  setAnnouncerConfigError,
   resetStores,
   replaceStreams,
 } from "./stores";
@@ -148,5 +154,31 @@ describe("stores", () => {
 
     setRaces([RACE_A]);
     expect(get(racesLoadedStore)).toBe(true);
+  });
+
+  it("tracks announcer config, loading state, and errors", () => {
+    expect(get(announcerConfigStore)).toBeNull();
+    expect(get(announcerConfigSavingStore)).toBe(false);
+    expect(get(announcerConfigErrorStore)).toBeNull();
+
+    setAnnouncerConfig({
+      enabled: true,
+      enabled_until: "2026-02-27T10:00:00Z",
+      selected_stream_ids: ["aaa"],
+      max_list_size: 25,
+      updated_at: "2026-02-26T10:00:00Z",
+      public_enabled: true,
+    });
+    setAnnouncerConfigSaving(true);
+    setAnnouncerConfigError("save failed");
+
+    expect(get(announcerConfigStore)?.enabled).toBe(true);
+    expect(get(announcerConfigSavingStore)).toBe(true);
+    expect(get(announcerConfigErrorStore)).toBe("save failed");
+
+    resetStores();
+    expect(get(announcerConfigStore)).toBeNull();
+    expect(get(announcerConfigSavingStore)).toBe(false);
+    expect(get(announcerConfigErrorStore)).toBeNull();
   });
 });
