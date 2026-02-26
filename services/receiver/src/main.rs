@@ -208,6 +208,12 @@ async fn main() {
             }
         });
     }
+    {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_upstream_dashboard_sse_refresher(state).await;
+        });
+    }
 
     // -------------------------------------------------------------------------
     // Event loop: watch connection_state + reconcile subscriptions
@@ -219,7 +225,6 @@ async fn main() {
     // Interval for subscription reconciliation polling.
     let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_millis(500));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     // Track last-known subscriptions to detect changes.
     let mut last_subs: Vec<Subscription> = initial_subs;
 
@@ -308,7 +313,7 @@ async fn main() {
                             Some(base_url) => {
                                 // Build the full WS URL from the base URL.
                                 let ws_url = format!(
-                                    "{}/ws/v1.1/receivers",
+                                    "{}/ws/v1.2/receivers",
                                     base_url.trim_end_matches('/')
                                 );
                                 // Read the token from the saved profile so we can
@@ -343,7 +348,7 @@ async fn main() {
                                         // Perform the receiver hello / heartbeat handshake.
                                         let (session_result, ws) = {
                                             let db = state.db.lock().await;
-                                            do_handshake(ws, &db).await
+                                            do_handshake(ws, &db, &state.ui_tx).await
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -371,17 +376,25 @@ async fn main() {
                                                 let bus = event_bus.clone();
                                                 let counts = state.stream_counts.clone();
                                                 let ui_tx = state.ui_tx.clone();
+                                                let paused_streams = Arc::clone(&state.paused_streams);
+                                                let all_paused = Arc::clone(&state.all_paused);
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
-                                                    let result = receiver::session::run_session_loop(
-                                                        ws,
-                                                        session_id,
-                                                        db_arc,
+                                                    let deps = receiver::session::SessionLoopDeps {
+                                                        db: db_arc,
                                                         event_tx,
-                                                        counts,
+                                                        stream_counts: counts,
                                                         ui_tx,
-                                                        cancel_rx,
+                                                        shutdown: cancel_rx,
+                                                        paused_streams,
+                                                        all_paused,
+                                                        connection_state: Arc::clone(
+                                                            &st.connection_state,
+                                                        ),
+                                                    };
+                                                    let result = receiver::session::run_session_loop(
+                                                        ws, session_id, deps,
                                                     )
                                                     .await;
                                                     match result {
@@ -510,6 +523,162 @@ async fn wait_for_reconnect_delay_or_abort(
     }
 }
 
+fn should_refresh_stream_snapshot_for_dashboard_event(event_name: &str) -> bool {
+    matches!(event_name, "stream_created" | "stream_updated" | "resync")
+}
+
+fn should_emit_receiver_resync_for_dashboard_event(event_name: &str) -> bool {
+    matches!(event_name, "resync")
+}
+
+fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) -> Option<String> {
+    if line.is_empty() {
+        return pending_event.take();
+    }
+    if line.starts_with(':') {
+        return None;
+    }
+    if let Some(rest) = line.strip_prefix("event:") {
+        let event_name = rest.trim();
+        if event_name.is_empty() {
+            pending_event.take();
+        } else {
+            *pending_event = Some(event_name.to_owned());
+        }
+    }
+    None
+}
+
+fn http_base_url(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        _ => return None,
+    };
+    let host = url.host_str()?;
+    match url.port() {
+        Some(port) => Some(format!("{scheme}://{host}:{port}")),
+        None => Some(format!("{scheme}://{host}")),
+    }
+}
+
+async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            state.logger.log_at(
+                UiLogLevel::Warn,
+                format!("failed to create upstream SSE client: {e}"),
+            );
+            return;
+        }
+    };
+
+    loop {
+        if *state.connection_state.read().await != ConnectionState::Connected {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
+        let profile = {
+            let db = state.db.lock().await;
+            db.load_profile().ok().flatten()
+        };
+        let Some(profile) = profile else {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        };
+
+        let Some(base_url) = http_base_url(&profile.server_url) else {
+            state.logger.log_at(
+                UiLogLevel::Warn,
+                format!(
+                    "cannot derive upstream HTTP URL from profile server_url: {}",
+                    profile.server_url
+                ),
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        };
+        let events_url = format!("{base_url}/api/v1/events");
+
+        match consume_upstream_dashboard_events(&state, &client, &events_url, &profile.token).await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                if *state.connection_state.read().await == ConnectionState::Connected {
+                    state.logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("upstream dashboard SSE refresh disconnected: {e}"),
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn consume_upstream_dashboard_events(
+    state: &Arc<AppState>,
+    client: &reqwest::Client,
+    events_url: &str,
+    token: &str,
+) -> Result<(), String> {
+    let response = client
+        .get(events_url)
+        .bearer_auth(token)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("upstream returned {}", response.status()));
+    }
+
+    let mut response = response;
+    let mut pending_line_bytes: Vec<u8> = Vec::new();
+    let mut pending_event: Option<String> = None;
+
+    loop {
+        if *state.connection_state.read().await != ConnectionState::Connected {
+            return Ok(());
+        }
+
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|e| format!("read failed: {e}"))?;
+        let Some(chunk) = chunk else {
+            return Err("connection closed".to_owned());
+        };
+        pending_line_bytes.extend_from_slice(&chunk);
+
+        while let Some(line_end_idx) = pending_line_bytes.iter().position(|byte| *byte == b'\n') {
+            let mut line_bytes: Vec<u8> = pending_line_bytes.drain(..=line_end_idx).collect();
+            if line_bytes.last().copied() == Some(b'\n') {
+                line_bytes.pop();
+            }
+            if line_bytes.last().copied() == Some(b'\r') {
+                line_bytes.pop();
+            }
+
+            let line = String::from_utf8_lossy(&line_bytes).into_owned();
+            if let Some(event_name) = consume_sse_line_for_event(&line, &mut pending_event) {
+                if should_refresh_stream_snapshot_for_dashboard_event(&event_name) {
+                    state.emit_streams_snapshot().await;
+                }
+                if should_emit_receiver_resync_for_dashboard_event(&event_name) {
+                    state.emit_resync();
+                }
+            }
+        }
+    }
+}
+
 fn profile_has_connect_credentials(profile: Option<&receiver::db::Profile>) -> bool {
     profile.is_some_and(|profile| {
         !profile.server_url.trim().is_empty() && !profile.token.trim().is_empty()
@@ -548,6 +717,7 @@ async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64
 async fn do_handshake<S>(
     mut ws: S,
     db: &Db,
+    ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
 ) -> (Result<String, receiver::session::SessionError>, Option<S>)
 where
     S: futures_util::Stream<
@@ -561,38 +731,114 @@ where
         > + Unpin,
 {
     use futures_util::{SinkExt, StreamExt};
-    use rt_protocol::{ReceiverHelloV11, ReceiverSelection, StreamRef, WsMessage};
+    use rt_protocol::{
+        EarliestEpochOverride, ReceiverHelloV12, ReceiverMode, StreamRef, WsMessage,
+    };
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    let mut selection_config = match db.load_receiver_selection() {
-        Ok(s) => s,
+    let resume = match db.load_resume_cursors() {
+        Ok(cursors) => cursors,
         Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
     };
-
-    // Legacy compatibility: if manual mode has no explicit streams persisted,
-    // bootstrap from existing local subscriptions.
-    if let ReceiverSelection::Manual { streams } = &mut selection_config.selection
-        && streams.is_empty()
-    {
-        match db.load_subscriptions() {
-            Ok(subs) => {
-                *streams = subs
+    let mut mode = match db.load_receiver_mode() {
+        Ok(Some(mode)) => mode,
+        Ok(None) => {
+            let streams = match db.load_subscriptions() {
+                Ok(subs) => subs
                     .into_iter()
                     .map(|s| StreamRef {
                         forwarder_id: s.forwarder_id,
                         reader_ip: s.reader_ip,
                     })
-                    .collect();
+                    .collect(),
+                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            };
+            ReceiverMode::Live {
+                streams,
+                earliest_epochs: vec![],
             }
-            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
         }
+        Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+    };
+    let clear_targeted_mode_after_handshake = matches!(
+        &mode,
+        ReceiverMode::TargetedReplay { targets } if !targets.is_empty()
+    );
+
+    if let ReceiverMode::Live {
+        ref mut streams,
+        ref mut earliest_epochs,
+    } = mode
+    {
+        if streams.is_empty() {
+            match db.load_subscriptions() {
+                Ok(subs) => {
+                    *streams = subs
+                        .into_iter()
+                        .map(|s| StreamRef {
+                            forwarder_id: s.forwarder_id,
+                            reader_ip: s.reader_ip,
+                        })
+                        .collect();
+                }
+                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            }
+        }
+
+        let mut map: HashMap<(String, String), i64> = match db.load_earliest_epochs() {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(fwd, ip, epoch)| ((fwd, ip), epoch))
+                .collect(),
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+
+        let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
+        if let Some(url) = profile_url
+            && let Ok(server_streams) = receiver::control_api::fetch_server_streams(&url).await
+        {
+            let server_epoch_by_stream: HashMap<(String, String), i64> = server_streams
+                .into_iter()
+                .map(|stream| {
+                    (
+                        (stream.forwarder_id, stream.reader_ip),
+                        i64::try_from(stream.stream_epoch).unwrap_or(i64::MAX),
+                    )
+                })
+                .collect();
+
+            for stream in streams.iter() {
+                map.entry((stream.forwarder_id.clone(), stream.reader_ip.clone()))
+                    .or_insert_with(|| {
+                        server_epoch_by_stream
+                            .get(&(stream.forwarder_id.clone(), stream.reader_ip.clone()))
+                            .copied()
+                            .unwrap_or(0)
+                    });
+            }
+        }
+
+        *earliest_epochs = map
+            .into_iter()
+            .map(
+                |((forwarder_id, reader_ip), earliest_epoch)| EarliestEpochOverride {
+                    forwarder_id,
+                    reader_ip,
+                    earliest_epoch,
+                },
+            )
+            .collect();
+        earliest_epochs.sort_by(|a, b| {
+            a.forwarder_id
+                .cmp(&b.forwarder_id)
+                .then(a.reader_ip.cmp(&b.reader_ip))
+        });
     }
 
-    let hello = WsMessage::ReceiverHelloV11(ReceiverHelloV11 {
+    let hello = WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
         receiver_id: "receiver-main".to_owned(),
-        selection: selection_config.selection,
-        replay_policy: selection_config.replay_policy,
-        replay_targets: selection_config.replay_targets,
+        mode,
+        resume,
     });
 
     let hello_text = match serde_json::to_string(&hello) {
@@ -604,32 +850,59 @@ where
         return (Err(receiver::session::SessionError::Ws(e)), None);
     }
 
-    let msg = match ws.next().await {
-        None => return (Err(receiver::session::SessionError::ConnectionClosed), None),
-        Some(Err(e)) => return (Err(receiver::session::SessionError::Ws(e)), None),
-        Some(Ok(m)) => m,
-    };
+    loop {
+        let msg = match ws.next().await {
+            None => return (Err(receiver::session::SessionError::ConnectionClosed), None),
+            Some(Err(e)) => return (Err(receiver::session::SessionError::Ws(e)), None),
+            Some(Ok(m)) => m,
+        };
 
-    let text = match msg {
-        Message::Text(t) => t,
-        _ => {
-            return (
-                Err(receiver::session::SessionError::UnexpectedFirstMessage),
-                None,
-            );
-        }
-    };
+        let text = match msg {
+            Message::Text(t) => t,
+            _ => {
+                return (
+                    Err(receiver::session::SessionError::UnexpectedFirstMessage),
+                    None,
+                );
+            }
+        };
 
-    match serde_json::from_str::<WsMessage>(&text) {
-        Ok(WsMessage::Heartbeat(hb)) => {
-            info!(session_id = %hb.session_id, "handshake complete");
-            (Ok(hb.session_id), Some(ws))
+        match serde_json::from_str::<WsMessage>(&text) {
+            Ok(WsMessage::Heartbeat(hb)) => {
+                if clear_targeted_mode_after_handshake {
+                    let clear_mode = ReceiverMode::TargetedReplay {
+                        targets: Vec::new(),
+                    };
+                    if let Err(e) = db.save_receiver_mode(&clear_mode) {
+                        return (Err(receiver::session::SessionError::Db(e)), None);
+                    }
+                }
+                info!(session_id = %hb.session_id, "handshake complete");
+                return (Ok(hb.session_id), Some(ws));
+            }
+            Ok(WsMessage::ReceiverModeApplied(applied)) => {
+                info!(mode = %applied.mode_summary, streams = applied.resolved_stream_count, "mode applied before heartbeat");
+                let _ = ui_tx.send(receiver::ui_events::ReceiverUiEvent::LogEntry {
+                    entry: format!(
+                        "server applied mode: {} (resolved streams: {})",
+                        applied.mode_summary, applied.resolved_stream_count
+                    ),
+                });
+                for warning in applied.warnings {
+                    warn!(warning = %warning, "server mode warning");
+                    let _ = ui_tx.send(receiver::ui_events::ReceiverUiEvent::LogEntry {
+                        entry: format!("server mode warning: {warning}"),
+                    });
+                }
+            }
+            Ok(_) => {
+                return (
+                    Err(receiver::session::SessionError::UnexpectedFirstMessage),
+                    None,
+                );
+            }
+            Err(e) => return (Err(receiver::session::SessionError::Json(e)), None),
         }
-        Ok(_) => (
-            Err(receiver::session::SessionError::UnexpectedFirstMessage),
-            None,
-        ),
-        Err(e) => (Err(receiver::session::SessionError::Json(e)), None),
     }
 }
 
@@ -772,6 +1045,170 @@ async fn reconcile_proxies(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use receiver::ui_events::ReceiverUiEvent;
+    use rt_protocol::{Heartbeat, ReceiverMode, ReceiverModeApplied, ReplayTarget, WsMessage};
+    use std::future::Future;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    async fn run_raw_ws_server_once<H, Fut>(handler: H) -> (std::net::SocketAddr, JoinHandle<()>)
+    where
+        H: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut
+            + Send
+            + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let ws = accept_async(stream).await.expect("ws accept");
+            handler(ws).await;
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn handshake_emits_mode_applied_warnings_to_ui_before_heartbeat() {
+        let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+            let _hello = ws.next().await.expect("hello frame").expect("hello ws");
+
+            let mode_applied = WsMessage::ReceiverModeApplied(ReceiverModeApplied {
+                mode_summary: "race=race-42".to_owned(),
+                resolved_stream_count: 3,
+                warnings: vec![
+                    "stream fwd-1/10.0.0.1 unavailable".to_owned(),
+                    "replay capped at 1000 events".to_owned(),
+                ],
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&mode_applied)
+                    .expect("serialize mode")
+                    .into(),
+            ))
+            .await
+            .expect("send mode");
+
+            let heartbeat = WsMessage::Heartbeat(Heartbeat {
+                session_id: "session-handshake".to_owned(),
+                device_id: "receiver-main".to_owned(),
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&heartbeat)
+                    .expect("serialize heartbeat")
+                    .into(),
+            ))
+            .await
+            .expect("send heartbeat");
+        })
+        .await;
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .expect("connect");
+        let db = Db::open_in_memory().expect("db");
+        let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx).await;
+        assert!(result.is_ok(), "handshake should succeed");
+
+        let mut log_entries = Vec::new();
+        while let Ok(event) = ui_rx.try_recv() {
+            if let ReceiverUiEvent::LogEntry { entry } = event {
+                log_entries.push(entry);
+            }
+        }
+
+        assert!(
+            log_entries
+                .iter()
+                .any(|entry| entry.contains("race=race-42") && entry.contains("3")),
+            "expected mode summary log entry, got: {log_entries:?}"
+        );
+        assert!(
+            log_entries
+                .iter()
+                .any(|entry| entry.contains("stream fwd-1/10.0.0.1 unavailable")),
+            "expected first warning log entry, got: {log_entries:?}"
+        );
+        assert!(
+            log_entries
+                .iter()
+                .any(|entry| entry.contains("replay capped at 1000 events")),
+            "expected second warning log entry, got: {log_entries:?}"
+        );
+
+        task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn handshake_sends_targeted_replay_targets_then_clears_them() {
+        let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+            let hello = ws.next().await.expect("hello frame").expect("hello ws");
+            let Message::Text(hello_text) = hello else {
+                panic!("expected text hello frame");
+            };
+            let hello_msg: WsMessage = serde_json::from_str(&hello_text).expect("parse hello");
+            let WsMessage::ReceiverHelloV12(hello) = hello_msg else {
+                panic!("expected receiver_hello_v12");
+            };
+            let ReceiverMode::TargetedReplay { targets } = hello.mode else {
+                panic!("expected targeted replay mode");
+            };
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].forwarder_id, "f1");
+            assert_eq!(targets[0].reader_ip, "10.0.0.1");
+            assert_eq!(targets[0].stream_epoch, 4);
+
+            let heartbeat = WsMessage::Heartbeat(Heartbeat {
+                session_id: "session-targeted".to_owned(),
+                device_id: "receiver-main".to_owned(),
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&heartbeat)
+                    .expect("serialize heartbeat")
+                    .into(),
+            ))
+            .await
+            .expect("send heartbeat");
+        })
+        .await;
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .expect("connect");
+        let db = Db::open_in_memory().expect("db");
+        db.save_profile("ws://server.example", "token", "check-and-download")
+            .expect("save profile");
+        let initial_mode = ReceiverMode::TargetedReplay {
+            targets: vec![ReplayTarget {
+                forwarder_id: "f1".to_owned(),
+                reader_ip: "10.0.0.1".to_owned(),
+                stream_epoch: 4,
+                from_seq: 1,
+            }],
+        };
+        db.save_receiver_mode(&initial_mode).expect("save mode");
+        assert_eq!(
+            db.load_receiver_mode().expect("load mode before handshake"),
+            Some(initial_mode)
+        );
+
+        let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx).await;
+        assert!(result.is_ok(), "handshake should succeed");
+        assert_eq!(
+            db.load_receiver_mode().expect("load mode after handshake"),
+            Some(ReceiverMode::TargetedReplay {
+                targets: Vec::new()
+            })
+        );
+
+        task.await.expect("server task");
+    }
 
     #[tokio::test]
     async fn dropped_session_does_not_reconnect_when_disconnect_in_progress() {
@@ -953,6 +1390,86 @@ mod tests {
                 update_mode: "check-only".to_owned(),
             }
         )));
+    }
+
+    #[test]
+    fn dashboard_event_filter_only_refreshes_on_stream_metadata_changes() {
+        assert!(should_refresh_stream_snapshot_for_dashboard_event(
+            "stream_created"
+        ));
+        assert!(should_refresh_stream_snapshot_for_dashboard_event(
+            "stream_updated"
+        ));
+        assert!(should_refresh_stream_snapshot_for_dashboard_event("resync"));
+
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "metrics_updated"
+        ));
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "forwarder_race_assigned"
+        ));
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "log_entry"
+        ));
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "unknown_event"
+        ));
+    }
+
+    #[test]
+    fn dashboard_event_filter_emits_receiver_resync_only_for_resync_events() {
+        assert!(should_emit_receiver_resync_for_dashboard_event("resync"));
+
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "stream_created"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "stream_updated"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "metrics_updated"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "forwarder_race_assigned"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "log_entry"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "unknown_event"
+        ));
+    }
+
+    #[test]
+    fn sse_event_parsing_emits_completed_event_name_on_frame_boundary() {
+        let mut pending_event = None;
+        assert_eq!(
+            consume_sse_line_for_event("event: stream_updated", &mut pending_event),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event("data: {\"type\":\"stream_updated\"}", &mut pending_event),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event("", &mut pending_event),
+            Some("stream_updated".to_owned())
+        );
+        assert_eq!(pending_event, None);
+    }
+
+    #[test]
+    fn sse_event_parsing_ignores_comments_and_data_only_frames() {
+        let mut pending_event = None;
+        assert_eq!(
+            consume_sse_line_for_event(": keepalive", &mut pending_event),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event("data: keepalive", &mut pending_event),
+            None
+        );
+        assert_eq!(consume_sse_line_for_event("", &mut pending_event), None);
     }
 
     #[tokio::test]

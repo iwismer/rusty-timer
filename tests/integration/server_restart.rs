@@ -129,12 +129,19 @@ async fn server_restart_events_survive_in_postgres() {
     assert_eq!(count_after, 4, "events must persist across server restart");
 
     // --- Receiver connects to server instance 2 and gets all events ---
-    let rcv_url2 = format!("ws://{}/ws/v1/receivers", addr2);
+    let rcv_url2 = format!("ws://{}/ws/v1.2/receivers", addr2);
     let mut rcv = MockWsClient::connect_with_token(&rcv_url2, "rcv-srv-token-01")
         .await
         .unwrap();
-    rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
+    rcv.send_message(&WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
         receiver_id: "rcv-srv-01".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-srv-01".to_owned(),
+                reader_ip: "10.110.110.1".to_owned(),
+            }],
+            earliest_epochs: vec![],
+        },
         resume: vec![ResumeCursor {
             forwarder_id: "fwd-srv-01".to_owned(),
             reader_ip: "10.110.110.1".to_owned(),
@@ -144,9 +151,12 @@ async fn server_restart_events_survive_in_postgres() {
     }))
     .await
     .unwrap();
-    match rcv.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(_) => {}
-        other => panic!("{:?}", other),
+    loop {
+        match rcv.recv_message().await.unwrap() {
+            WsMessage::Heartbeat(_) => break,
+            WsMessage::ReceiverModeApplied(_) => {}
+            other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
+        }
     }
 
     // Receiver should get all 4 events from the new server instance.
@@ -159,7 +169,7 @@ async fn server_restart_events_survive_in_postgres() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
             _ => break,
         }
     }

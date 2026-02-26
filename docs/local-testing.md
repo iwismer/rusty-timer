@@ -72,7 +72,7 @@ The server exposes:
 
 - `GET  /healthz` and `GET /readyz` — liveness/readiness probes
 - `WS   /ws/v1/forwarders` — forwarder WebSocket ingest
-- `WS   /ws/v1/receivers` — receiver WebSocket fanout
+- `WS   /ws/v1.2/receivers` — receiver WebSocket fanout
 - `GET  /api/v1/streams` — list all known streams
 - `PATCH /api/v1/streams/:stream_id` — rename a stream (`display_alias`)
 - `GET  /api/v1/streams/:stream_id/metrics` — per-stream counters
@@ -250,8 +250,8 @@ curl -s -X PUT http://127.0.0.1:9090/api/v1/profile \
 Returns `204 No Content` on success.
 
 The `server_url` is the base URL of the server (just the scheme, host, and port). The
-receiver automatically appends `/ws/v1/receivers` when connecting, so the full WebSocket
-URL becomes `ws://127.0.0.1:8080/ws/v1/receivers`.
+receiver automatically appends `/ws/v1.2/receivers` when connecting, so the full WebSocket
+URL becomes `ws://127.0.0.1:8080/ws/v1.2/receivers`.
 
 The default dev token for the receiver is `rusty-dev-receiver`.
 

@@ -1,7 +1,7 @@
 // rt-protocol: Remote forwarding protocol types and serialization.
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
-// deserialization. The enum variants map 1:1 to the frozen v1/v1.1 message
+// deserialization. The enum variants map 1:1 to the frozen v1/v1.2 message
 // kinds.
 
 use serde::{Deserialize, Serialize};
@@ -98,34 +98,6 @@ pub struct ForwarderAck {
     pub entries: Vec<AckEntry>,
 }
 
-// ---------------------------------------------------------------------------
-// Receiver -> Server messages
-// ---------------------------------------------------------------------------
-
-/// Receiver hello / re-hello message.
-///
-/// Does NOT carry `session_id` -- the session_id is assigned by the server
-/// and returned in the first `heartbeat`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverHello {
-    /// Advisory identity; must match token claims if present.
-    pub receiver_id: String,
-    /// Resume cursors for streams the receiver already has data for.
-    #[serde(default)]
-    pub resume: Vec<ResumeCursor>,
-}
-
-/// Subscribe to additional streams mid-session.
-///
-/// `receiver_hello` implicitly subscribes to streams in `resume`.
-/// `receiver_subscribe` adds new streams after the session is established.
-/// There is no unsubscribe in v1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverSubscribe {
-    pub session_id: String,
-    pub streams: Vec<StreamRef>,
-}
-
 /// A reference to a stream by its immutable identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamRef {
@@ -133,37 +105,7 @@ pub struct StreamRef {
     pub reader_ip: String,
 }
 
-/// Receiver selection strategy for v1.1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum ReceiverSelection {
-    /// Explicit stream list.
-    Manual { streams: Vec<StreamRef> },
-    /// Race-scoped stream selection resolved by the server.
-    Race {
-        race_id: String,
-        epoch_scope: EpochScope,
-    },
-}
-
-/// Epoch scope used by race selection in v1.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EpochScope {
-    All,
-    Current,
-}
-
-/// Replay behavior used by receiver v1.1 selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplayPolicy {
-    Resume,
-    LiveOnly,
-    Targeted,
-}
-
-/// Explicit replay target for v1.1 targeted replay policy.
+/// Explicit replay target for targeted replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayTarget {
     pub forwarder_id: String,
@@ -177,31 +119,49 @@ fn default_replay_from_seq() -> i64 {
     1
 }
 
-/// Receiver hello / re-hello message for v1.1 selection protocol.
+// ---------------------------------------------------------------------------
+// Receiver v1.2 mode-based protocol types
+// ---------------------------------------------------------------------------
+
+/// Optional bound to start at the earliest epoch when replaying.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverHelloV11 {
+pub struct EarliestEpochOverride {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub earliest_epoch: i64,
+}
+
+/// Receiver operating mode for v1.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ReceiverMode {
+    /// Subscribe to live traffic with explicit streams and optional earliest epoch overrides.
+    Live {
+        streams: Vec<StreamRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earliest_epochs: Vec<EarliestEpochOverride>,
+    },
+    /// Race-scoped mode.
+    Race { race_id: String },
+    /// Explicit targeted replay set.
+    TargetedReplay { targets: Vec<ReplayTarget> },
+}
+
+/// Receiver hello / re-hello message for v1.2 mode-based protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverHelloV12 {
     pub receiver_id: String,
-    pub selection: ReceiverSelection,
-    pub replay_policy: ReplayPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_targets: Option<Vec<ReplayTarget>>,
+    pub mode: ReceiverMode,
+    /// Resume cursors for streams the receiver already has data for.
+    #[serde(default)]
+    pub resume: Vec<ResumeCursor>,
 }
 
-/// Mid-session selection update for receiver v1.1.
+/// Server acknowledgement of applied receiver mode in v1.2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverSetSelection {
-    pub selection: ReceiverSelection,
-    pub replay_policy: ReplayPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay_targets: Option<Vec<ReplayTarget>>,
-}
-
-/// Server acknowledgement of applied receiver selection in v1.1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiverSelectionApplied {
-    pub selection: ReceiverSelection,
-    pub replay_policy: ReplayPolicy,
-    pub resolved_target_count: usize,
+pub struct ReceiverModeApplied {
+    pub mode_summary: String,
+    pub resolved_stream_count: usize,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -343,7 +303,7 @@ pub struct RestartResponse {
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
-/// All WebSocket message kinds in the v1 and v1.1 receiver protocols.
+/// All WebSocket message kinds in the v1 forwarder and v1.2 receiver protocols.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -357,11 +317,8 @@ pub enum WsMessage {
     ForwarderHello(ForwarderHello),
     ForwarderEventBatch(ForwarderEventBatch),
     ForwarderAck(ForwarderAck),
-    ReceiverHello(ReceiverHello),
-    ReceiverHelloV11(ReceiverHelloV11),
-    ReceiverSetSelection(ReceiverSetSelection),
-    ReceiverSelectionApplied(ReceiverSelectionApplied),
-    ReceiverSubscribe(ReceiverSubscribe),
+    ReceiverHelloV12(ReceiverHelloV12),
+    ReceiverModeApplied(ReceiverModeApplied),
     ReceiverEventBatch(ReceiverEventBatch),
     ReceiverAck(ReceiverAck),
     Heartbeat(Heartbeat),

@@ -22,6 +22,7 @@ export interface StreamEntry {
   current_epoch_name?: string | null;
   reads_total?: number;
   reads_epoch?: number;
+  paused: boolean;
 }
 
 export interface StreamCountUpdate {
@@ -64,20 +65,11 @@ export interface StreamRef {
   reader_ip: string;
 }
 
-export type EpochScope = "all" | "current";
-
-export type ReplayPolicy = "resume" | "live_only" | "targeted";
-
-export type ReceiverSelection =
-  | {
-      mode: "manual";
-      streams: StreamRef[];
-    }
-  | {
-      mode: "race";
-      race_id: string;
-      epoch_scope: EpochScope;
-    };
+export interface EarliestEpochOverride {
+  forwarder_id: string;
+  reader_ip: string;
+  earliest_epoch: number;
+}
 
 export interface ReplayTarget {
   forwarder_id: string;
@@ -86,11 +78,20 @@ export interface ReplayTarget {
   from_seq?: number;
 }
 
-export interface ReceiverSetSelection {
-  selection: ReceiverSelection;
-  replay_policy: ReplayPolicy;
-  replay_targets?: ReplayTarget[];
-}
+export type ReceiverMode =
+  | {
+      mode: "live";
+      streams: StreamRef[];
+      earliest_epochs: EarliestEpochOverride[];
+    }
+  | {
+      mode: "race";
+      race_id: string;
+    }
+  | {
+      mode: "targeted_replay";
+      targets: ReplayTarget[];
+    };
 
 export interface RaceEntry {
   race_id: string;
@@ -145,16 +146,49 @@ export async function getLogs(): Promise<LogsResponse> {
   return apiFetch<LogsResponse>("/api/v1/logs");
 }
 
-export async function getSelection(): Promise<ReceiverSetSelection> {
-  return apiFetch<ReceiverSetSelection>("/api/v1/selection");
+export async function getMode(): Promise<ReceiverMode> {
+  return apiFetch<ReceiverMode>("/api/v1/mode");
 }
 
-export async function putSelection(
-  selection: ReceiverSetSelection,
-): Promise<void> {
-  await apiFetch("/api/v1/selection", {
+export async function putMode(mode: ReceiverMode): Promise<void> {
+  await apiFetch("/api/v1/mode", {
     method: "PUT",
-    body: JSON.stringify(selection),
+    body: JSON.stringify(mode),
+  });
+}
+
+export async function pauseStream(stream: StreamRef): Promise<void> {
+  await apiFetch("/api/v1/streams/pause", {
+    method: "POST",
+    body: JSON.stringify(stream),
+  });
+}
+
+export async function resumeStream(stream: StreamRef): Promise<void> {
+  await apiFetch("/api/v1/streams/resume", {
+    method: "POST",
+    body: JSON.stringify(stream),
+  });
+}
+
+export async function pauseAll(): Promise<void> {
+  await apiFetch("/api/v1/streams/pause-all", {
+    method: "POST",
+  });
+}
+
+export async function resumeAll(): Promise<void> {
+  await apiFetch("/api/v1/streams/resume-all", {
+    method: "POST",
+  });
+}
+
+export async function putEarliestEpoch(
+  override: EarliestEpochOverride,
+): Promise<void> {
+  await apiFetch("/api/v1/streams/earliest-epoch", {
+    method: "PUT",
+    body: JSON.stringify(override),
   });
 }
 

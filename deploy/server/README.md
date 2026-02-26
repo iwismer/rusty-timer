@@ -12,7 +12,7 @@ Compose.
 - `postgres` (`postgres:18-trixie`) for durable storage.
 - `server` (`rt-server`) for:
   - WebSocket ingest (`/ws/v1/forwarders`)
-  - WebSocket receiver delivery (`/ws/v1/receivers`)
+  - WebSocket receiver delivery (`/ws/v1.2/receivers`)
   - REST API (`/api/v1/...`)
   - Dashboard static UI (`/`)
 
@@ -152,7 +152,7 @@ Recommended pattern:
 - Put Caddy in front of `rt-server`.
 - Use Authelia forward-auth for dashboard + admin/API access.
 - Bypass Authelia for device WebSocket paths (`/ws/v1/forwarders`,
-  `/ws/v1/receivers`) so forwarders/receivers can still use bearer tokens.
+  `/ws/v1.2/receivers`) so forwarders/receivers can still use bearer tokens.
 
 Create an overlay compose file (example path: `deploy/server/docker-compose.edge.yml`):
 
@@ -203,7 +203,7 @@ auth.example.com {
 }
 
 timing.example.com {
-  @device_ws path /ws/v1/forwarders /ws/v1/receivers
+  @device_ws path /ws/v1/forwarders /ws/v1.2/receivers
   handle @device_ws {
     reverse_proxy server:8080
   }

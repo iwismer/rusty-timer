@@ -1,6 +1,4 @@
-use rt_protocol::{
-    ConfigGetResponse, ConfigSetResponse, EpochResetCommand, EpochScope, RestartResponse, StreamRef,
-};
+use rt_protocol::{ConfigGetResponse, ConfigSetResponse, EpochResetCommand, RestartResponse};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,21 +38,15 @@ pub type ReceiverSessionRegistry = Arc<RwLock<HashMap<String, ReceiverSessionRec
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiverSessionProtocol {
-    V1,
-    V11,
+    V12,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiverSelectionSnapshot {
-    LegacyV1 {
-        streams: Vec<StreamRef>,
-    },
-    Manual {
-        streams: Vec<StreamRef>,
-    },
-    Race {
-        race_id: String,
-        epoch_scope: EpochScope,
+    /// v1.2 mode-based snapshot.
+    Mode {
+        mode_summary: String,
+        race_id: Option<Uuid>,
     },
 }
 
@@ -179,17 +171,12 @@ impl AppState {
             .read()
             .await
             .values()
-            .any(|record| {
-                matches!(
-                    &record.selection,
-                    ReceiverSelectionSnapshot::Race {
-                        race_id: selected_race_id,
-                        ..
-                    } if selected_race_id
-                        .parse::<Uuid>()
-                        .ok()
-                        .is_some_and(|selected_race_id| selected_race_id == race_id)
-                )
+            .any(|record| match &record.selection {
+                ReceiverSelectionSnapshot::Mode {
+                    race_id: Some(selected_race_id),
+                    ..
+                } => *selected_race_id == race_id,
+                ReceiverSelectionSnapshot::Mode { race_id: None, .. } => false,
             })
     }
 }
@@ -197,7 +184,6 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rt_protocol::{EpochScope, StreamRef};
     use sqlx::postgres::PgPoolOptions;
 
     fn make_lazy_pool() -> PgPool {
@@ -216,10 +202,10 @@ mod tests {
             .register_receiver_session(
                 &session_id,
                 "receiver-1",
-                ReceiverSessionProtocol::V11,
-                ReceiverSelectionSnapshot::Race {
-                    race_id: "race-1".to_owned(),
-                    epoch_scope: EpochScope::Current,
+                ReceiverSessionProtocol::V12,
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: "race (race-1)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -229,23 +215,21 @@ mod tests {
             .await
             .expect("session should exist");
         assert_eq!(record.receiver_id, "receiver-1");
-        assert_eq!(record.protocol, ReceiverSessionProtocol::V11);
+        assert_eq!(record.protocol, ReceiverSessionProtocol::V12);
         assert_eq!(
             record.selection,
-            ReceiverSelectionSnapshot::Race {
-                race_id: "race-1".to_owned(),
-                epoch_scope: EpochScope::Current,
+            ReceiverSelectionSnapshot::Mode {
+                mode_summary: "race (race-1)".to_owned(),
+                race_id: None,
             }
         );
 
         let updated = state
             .update_receiver_session_selection(
                 &session_id,
-                ReceiverSelectionSnapshot::Manual {
-                    streams: vec![StreamRef {
-                        forwarder_id: "fwd-1".to_owned(),
-                        reader_ip: "10.0.0.1:10000".to_owned(),
-                    }],
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: "live (1 streams)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -257,51 +241,14 @@ mod tests {
             .expect("session should still exist");
         assert_eq!(
             record.selection,
-            ReceiverSelectionSnapshot::Manual {
-                streams: vec![StreamRef {
-                    forwarder_id: "fwd-1".to_owned(),
-                    reader_ip: "10.0.0.1:10000".to_owned(),
-                }],
+            ReceiverSelectionSnapshot::Mode {
+                mode_summary: "live (1 streams)".to_owned(),
+                race_id: None,
             }
         );
 
         state.unregister_receiver_session(&session_id).await;
         assert!(state.get_receiver_session(&session_id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn receiver_session_registry_supports_legacy_v1_snapshots() {
-        let state = AppState::new(make_lazy_pool());
-        let session_id = Uuid::new_v4().to_string();
-
-        state
-            .register_receiver_session(
-                &session_id,
-                "receiver-v1",
-                ReceiverSessionProtocol::V1,
-                ReceiverSelectionSnapshot::LegacyV1 {
-                    streams: vec![StreamRef {
-                        forwarder_id: "fwd-legacy".to_owned(),
-                        reader_ip: "10.0.0.9:10000".to_owned(),
-                    }],
-                },
-            )
-            .await;
-
-        let record = state
-            .get_receiver_session(&session_id)
-            .await
-            .expect("session should exist");
-        assert_eq!(record.protocol, ReceiverSessionProtocol::V1);
-        assert_eq!(
-            record.selection,
-            ReceiverSelectionSnapshot::LegacyV1 {
-                streams: vec![StreamRef {
-                    forwarder_id: "fwd-legacy".to_owned(),
-                    reader_ip: "10.0.0.9:10000".to_owned(),
-                }],
-            }
-        );
     }
 
     #[tokio::test]
@@ -314,10 +261,10 @@ mod tests {
             .register_receiver_session(
                 "session-race",
                 "receiver-race",
-                ReceiverSessionProtocol::V11,
-                ReceiverSelectionSnapshot::Race {
-                    race_id: selected_race_id.to_string(),
-                    epoch_scope: EpochScope::Current,
+                ReceiverSessionProtocol::V12,
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: format!("race ({selected_race_id})"),
+                    race_id: Some(selected_race_id),
                 },
             )
             .await;
@@ -326,12 +273,10 @@ mod tests {
             .register_receiver_session(
                 "session-manual",
                 "receiver-manual",
-                ReceiverSessionProtocol::V11,
-                ReceiverSelectionSnapshot::Manual {
-                    streams: vec![StreamRef {
-                        forwarder_id: "fwd-1".to_owned(),
-                        reader_ip: "10.0.0.1:10000".to_owned(),
-                    }],
+                ReceiverSessionProtocol::V12,
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: "live (1 streams)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -364,10 +309,10 @@ mod tests {
             .register_receiver_session(
                 "session-race-uppercase",
                 "receiver-race",
-                ReceiverSessionProtocol::V11,
-                ReceiverSelectionSnapshot::Race {
-                    race_id: selected_race_id.to_string().to_uppercase(),
-                    epoch_scope: EpochScope::Current,
+                ReceiverSessionProtocol::V12,
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: format!("race ({})", selected_race_id.to_string().to_uppercase()),
+                    race_id: Some(selected_race_id),
                 },
             )
             .await;
@@ -376,10 +321,10 @@ mod tests {
             .register_receiver_session(
                 "session-race-invalid",
                 "receiver-race",
-                ReceiverSessionProtocol::V11,
-                ReceiverSelectionSnapshot::Race {
-                    race_id: "not-a-uuid".to_owned(),
-                    epoch_scope: EpochScope::Current,
+                ReceiverSessionProtocol::V12,
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: "race (not-a-uuid)".to_owned(),
+                    race_id: None,
                 },
             )
             .await;
@@ -389,5 +334,25 @@ mod tests {
                 .has_active_receiver_session_for_race(selected_race_id)
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn active_race_query_uses_structured_race_id_not_summary_text() {
+        let state = AppState::new(make_lazy_pool());
+        let race_id = Uuid::new_v4();
+
+        state
+            .register_receiver_session(
+                "session-race-structured",
+                "receiver-race",
+                ReceiverSessionProtocol::V12,
+                ReceiverSelectionSnapshot::Mode {
+                    mode_summary: "non-standard race summary".to_owned(),
+                    race_id: Some(race_id),
+                },
+            )
+            .await;
+
+        assert!(state.has_active_receiver_session_for_race(race_id).await);
     }
 }

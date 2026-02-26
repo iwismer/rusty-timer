@@ -45,8 +45,8 @@ endpoints are JSON unless otherwise noted.
 | `GET`  | `/api/v1/streams` | List all known streams, merging upstream server data with local subscriptions. |
 | `GET`  | `/api/v1/subscriptions` | Read the current subscription list. |
 | `PUT`  | `/api/v1/subscriptions` | Replace the full subscription list (atomic). |
-| `GET`  | `/api/v1/selection` | Read the current receiver selection (mode, replay policy, replay targets). |
-| `PUT`  | `/api/v1/selection` | Set the receiver selection. Body: `ReceiverSetSelection` with `selection`, `replay_policy`, and optional `replay_targets`. Returns `400` if `replay_policy` is `targeted` but `replay_targets` is absent or empty. |
+| `GET`  | `/api/v1/mode` | Read the current receiver mode configuration. Returns `404` if no mode is configured. |
+| `PUT`  | `/api/v1/mode` | Set receiver mode (`live`, `race`, or `targeted_replay`). |
 | `GET`  | `/api/v1/races` | List available races for race-mode selection. |
 | `GET`  | `/api/v1/replay-targets/epochs` | List available stream epochs for targeted replay. |
 | `GET`  | `/api/v1/status` | Runtime status: connection state, stream count, DB health. |
@@ -66,7 +66,7 @@ with `--features embed-ui`).
 {
   "server_url": "ws://timing.example.com:8080",
   "token": "your-auth-token",
-  "log_level": "info"
+  "update_mode": "check-and-download"
 }
 ```
 
@@ -139,12 +139,11 @@ for that stream (see Port assignment below).
 Duplicate `(forwarder_id, reader_ip)` pairs in the same request are rejected
 with `400 Bad Request`.
 
-## Selection mode and replay behavior (v1.1)
+## Receiver mode behavior (v1.2)
 
-- The receiver default selection mode is `manual`.
-- The receiver default replay behavior is `resume`.
-- `race/current` selection is explicit opt-in behavior and is not enabled by default.
-- Targeted replay can be operated from the receiver UI, where saves are explicit per-row actions.
+- `live`: subscribes to explicit streams and can apply earliest-epoch overrides.
+- `race`: subscribes to streams linked to the selected race ID.
+- `targeted_replay`: replays explicit `(forwarder_id, reader_ip, stream_epoch, from_seq)` targets.
 
 ## Port assignment
 
@@ -173,23 +172,9 @@ RUST_LOG=debug receiver
 
 ## Troubleshooting
 
-### `PUT /api/v1/selection` returns 400
+### `PUT /api/v1/mode` with race mode returns 400
 
-If you call `PUT /api/v1/selection` with `"replay_policy": "targeted"` and receive
-`400 Bad Request` with body `replay_targets must be provided when replay_policy is targeted`,
-the request is missing the required `replay_targets` array.
+If you call `PUT /api/v1/mode` with `{"mode":"race","race_id":""}` you will get
+`400 Bad Request` because `race_id` must be non-empty.
 
-**Fix:** Include a non-empty `replay_targets` array in the request body. Example:
-
-```json
-{
-  "selection": { "mode": "manual", "streams": [] },
-  "replay_policy": "targeted",
-  "replay_targets": [
-    { "forwarder_id": "fwd-001", "reader_ip": "192.168.1.100:10000", "stream_epoch": 3 }
-  ]
-}
-```
-
-The `replay_targets` field is required (and must be non-empty) when `replay_policy` is `"targeted"`.
-For any other replay policy, `replay_targets` is ignored and may be omitted.
+**Fix:** Supply a non-empty race ID in race mode payloads.

@@ -379,8 +379,6 @@
   function canAdvanceToNextEpoch(): boolean {
     const row = getCurrentEpochRow();
     if (!row) return false;
-    if (!row.saved_race_id) return false;
-    if (isEpochRowDirty(row)) return false;
     if (row.pending) return false;
     if (epochAdvancePending) return false;
     return true;
@@ -388,12 +386,16 @@
 
   async function handleAdvanceToNextEpoch(): Promise<void> {
     const row = getCurrentEpochRow();
-    const raceId = row?.saved_race_id ?? null;
-    if (!raceId || !canAdvanceToNextEpoch()) return;
+    if (!row || !canAdvanceToNextEpoch()) return;
+    const raceId = row.saved_race_id;
     epochAdvancePending = true;
     epochAdvanceStatus = "idle";
     try {
-      await api.activateNextStreamEpochForRace(raceId, streamId);
+      if (raceId) {
+        await api.activateNextStreamEpochForRace(raceId, streamId);
+      } else {
+        await api.resetEpoch(streamId);
+      }
       epochAdvanceAwaitingReload = true;
     } catch {
       epochAdvanceStatus = "error";
@@ -818,7 +820,7 @@
                     : "Advance to Next Epoch"}
             </button>
             <span class="text-xs text-text-muted">
-              Uses the current epoch's saved race mapping.
+              Advances epoch always; uses saved race mapping when available.
             </span>
           </div>
         {/if}

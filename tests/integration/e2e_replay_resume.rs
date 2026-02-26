@@ -10,7 +10,7 @@
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
@@ -82,6 +82,47 @@ async fn send_events(
     start_seq + count - 1
 }
 
+async fn receiver_handshake(
+    client: &mut MockWsClient,
+    receiver_id: &str,
+    resume: Vec<ResumeCursor>,
+) -> String {
+    let mut seen = HashSet::new();
+    let streams: Vec<StreamRef> = resume
+        .iter()
+        .filter_map(|cursor| {
+            let key = (cursor.forwarder_id.clone(), cursor.reader_ip.clone());
+            if seen.insert(key.clone()) {
+                Some(StreamRef {
+                    forwarder_id: key.0,
+                    reader_ip: key.1,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    client
+        .send_message(&WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
+            receiver_id: receiver_id.to_owned(),
+            mode: ReceiverMode::Live {
+                streams,
+                earliest_epochs: vec![],
+            },
+            resume,
+        }))
+        .await
+        .unwrap();
+
+    loop {
+        match client.recv_message().await.unwrap() {
+            WsMessage::Heartbeat(hb) => break hb.session_id,
+            WsMessage::ReceiverModeApplied(_) => {}
+            other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test: Replay on reconnect — receiver gets only events after its cursor.
 // ---------------------------------------------------------------------------
@@ -127,25 +168,21 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
     send_events(&mut fwd, &fwd_session, "fwd-rpl-01", "10.10.10.1", 1, 1, 5).await;
 
     // First receiver session: connects with cursor at seq=0 (replay all).
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut rcv1 = MockWsClient::connect_with_token(&rcv_url, "rcv-rpl-token-01")
         .await
         .unwrap();
-    rcv1.send_message(&WsMessage::ReceiverHello(ReceiverHello {
-        receiver_id: "rcv-rpl-01".to_owned(),
-        resume: vec![ResumeCursor {
+    let rcv1_session = receiver_handshake(
+        &mut rcv1,
+        "rcv-rpl-01",
+        vec![ResumeCursor {
             forwarder_id: "fwd-rpl-01".to_owned(),
             reader_ip: "10.10.10.1".to_owned(),
             stream_epoch: 1,
             last_seq: 0,
         }],
-    }))
-    .await
-    .unwrap();
-    let rcv1_session = match rcv1.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(h) => h.session_id,
-        other => panic!("{:?}", other),
-    };
+    )
+    .await;
 
     // Drain events until we have seq 1..5 and ack them.
     let mut max_seq_seen: u64 = 0;
@@ -178,7 +215,7 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -195,21 +232,17 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
     let mut rcv2 = MockWsClient::connect_with_token(&rcv_url, "rcv-rpl-token-01")
         .await
         .unwrap();
-    rcv2.send_message(&WsMessage::ReceiverHello(ReceiverHello {
-        receiver_id: "rcv-rpl-01".to_owned(),
-        resume: vec![ResumeCursor {
+    let _rcv2_session = receiver_handshake(
+        &mut rcv2,
+        "rcv-rpl-01",
+        vec![ResumeCursor {
             forwarder_id: "fwd-rpl-01".to_owned(),
             reader_ip: "10.10.10.1".to_owned(),
             stream_epoch: 1,
-            last_seq: 5, // already have up to seq 5
+            last_seq: 5,
         }],
-    }))
-    .await
-    .unwrap();
-    match rcv2.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(_) => {}
-        other => panic!("expected Heartbeat, got {:?}", other),
-    }
+    )
+    .await;
 
     // Collect events — none of them should have seq <= 5.
     let mut replay_seqs = Vec::new();
@@ -228,7 +261,7 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -285,25 +318,21 @@ async fn e2e_replay_fresh_receiver_gets_all_events() {
     send_events(&mut fwd, &fwd_session, "fwd-rpl-02", "10.20.20.1", 1, 1, 4).await;
 
     // Receiver with cursor at seq=0 (fresh receiver — replays all).
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-rpl-token-02")
         .await
         .unwrap();
-    rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
-        receiver_id: "rcv-rpl-02".to_owned(),
-        resume: vec![ResumeCursor {
+    let _rcv_session = receiver_handshake(
+        &mut rcv,
+        "rcv-rpl-02",
+        vec![ResumeCursor {
             forwarder_id: "fwd-rpl-02".to_owned(),
             reader_ip: "10.20.20.1".to_owned(),
             stream_epoch: 1,
             last_seq: 0,
         }],
-    }))
-    .await
-    .unwrap();
-    match rcv.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(_) => {}
-        other => panic!("{:?}", other),
-    }
+    )
+    .await;
 
     let mut total_events = 0usize;
     let mut min_seq = u64::MAX;
@@ -320,7 +349,7 @@ async fn e2e_replay_fresh_receiver_gets_all_events() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -418,26 +447,34 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
         .unwrap();
     assert_eq!(count, 3, "should have events from both epochs");
 
+    let stream_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+    )
+    .bind("fwd-epoch-01")
+    .bind("10.30.30.1")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    server::repo::receiver_cursors::upsert_cursor(&pool, "rcv-epoch-01", stream_id, 1, 0)
+        .await
+        .unwrap();
+
     // Receiver subscribes from epoch 1, seq=0 — should replay all 3 events.
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-epoch-token-01")
         .await
         .unwrap();
-    rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
-        receiver_id: "rcv-epoch-01".to_owned(),
-        resume: vec![ResumeCursor {
+    let _rcv_session = receiver_handshake(
+        &mut rcv,
+        "rcv-epoch-01",
+        vec![ResumeCursor {
             forwarder_id: "fwd-epoch-01".to_owned(),
             reader_ip: "10.30.30.1".to_owned(),
             stream_epoch: 1,
             last_seq: 0,
         }],
-    }))
-    .await
-    .unwrap();
-    match rcv.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(_) => {}
-        other => panic!("{:?}", other),
-    }
+    )
+    .await;
 
     // Collect all replayed events.
     let mut total = 0usize;
@@ -449,7 +486,7 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -466,8 +503,8 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
 // Test: Receiver ack advances the cursor (no re-delivery after ack).
 // ---------------------------------------------------------------------------
 
-/// E2E test: after receiver acks events up to seq N, re-connecting with
-/// cursor at N does not re-deliver those events.
+/// E2E test: after receiver acks events up to seq N, reconnecting does not
+/// re-deliver those events.
 #[tokio::test]
 async fn e2e_receiver_ack_advances_cursor() {
     let container = Postgres::default().start().await.unwrap();
@@ -499,30 +536,97 @@ async fn e2e_receiver_ack_advances_cursor() {
     // Send events 1..3.
     send_events(&mut fwd, &fwd_session, "fwd-rpl-03", "10.40.40.1", 1, 1, 3).await;
 
-    // Receiver connects, gets all 3, acks seq=3.
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
-    let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-rpl-token-03")
+    // Receiver connects and acks all replayed events.
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
+    let mut rcv1 = MockWsClient::connect_with_token(&rcv_url, "rcv-rpl-token-03")
         .await
         .unwrap();
-    rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
-        receiver_id: "rcv-rpl-03".to_owned(),
-        resume: vec![ResumeCursor {
+    let rcv1_session = receiver_handshake(
+        &mut rcv1,
+        "rcv-rpl-03",
+        vec![ResumeCursor {
             forwarder_id: "fwd-rpl-03".to_owned(),
             reader_ip: "10.40.40.1".to_owned(),
             stream_epoch: 1,
-            last_seq: 3, // simulate cursor already at 3
+            last_seq: 0,
         }],
-    }))
+    )
+    .await;
+
+    let mut max_acked = 0_u64;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline && max_acked < 3 {
+        match tokio::time::timeout(Duration::from_millis(500), rcv1.recv_message()).await {
+            Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
+                let entries: Vec<AckEntry> = batch
+                    .events
+                    .iter()
+                    .map(|ev| {
+                        max_acked = max_acked.max(ev.seq);
+                        AckEntry {
+                            forwarder_id: ev.forwarder_id.clone(),
+                            reader_ip: ev.reader_ip.clone(),
+                            stream_epoch: ev.stream_epoch,
+                            last_seq: ev.seq,
+                        }
+                    })
+                    .collect();
+                rcv1.send_message(&WsMessage::ReceiverAck(ReceiverAck {
+                    session_id: rcv1_session.clone(),
+                    entries,
+                }))
+                .await
+                .unwrap();
+            }
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {}
+            Ok(Ok(other)) => panic!("unexpected: {:?}", other),
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
+    assert_eq!(max_acked, 3, "expected to ack through seq 3");
+
+    let stream_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+    )
+    .bind("fwd-rpl-03")
+    .bind("10.40.40.1")
+    .fetch_one(&pool)
     .await
     .unwrap();
-    match rcv.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(_) => {}
-        other => panic!("{:?}", other),
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut persisted = None;
+    while tokio::time::Instant::now() < deadline {
+        persisted = server::repo::receiver_cursors::fetch_cursor(&pool, "rcv-rpl-03", stream_id)
+            .await
+            .unwrap();
+        if persisted == Some((1, 3)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    assert_eq!(
+        persisted,
+        Some((1, 3)),
+        "expected persisted cursor at (1,3)"
+    );
 
-    // With cursor at 3, server should send no events (all already seen).
-    // Any batch received must have seq > 3.
-    match tokio::time::timeout(Duration::from_secs(2), rcv.recv_message()).await {
+    // Reconnect and verify there is no replay <= 3.
+    let mut rcv2 = MockWsClient::connect_with_token(&rcv_url, "rcv-rpl-token-03")
+        .await
+        .unwrap();
+    let _rcv2_session = receiver_handshake(
+        &mut rcv2,
+        "rcv-rpl-03",
+        vec![ResumeCursor {
+            forwarder_id: "fwd-rpl-03".to_owned(),
+            reader_ip: "10.40.40.1".to_owned(),
+            stream_epoch: 1,
+            last_seq: 0,
+        }],
+    )
+    .await;
+
+    match tokio::time::timeout(Duration::from_secs(2), rcv2.recv_message()).await {
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             for ev in &batch.events {
                 assert!(
@@ -532,7 +636,7 @@ async fn e2e_receiver_ack_advances_cursor() {
                 );
             }
         }
-        Ok(Ok(WsMessage::Heartbeat(_))) => {}
+        Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {}
         Ok(Ok(other)) => panic!("unexpected: {:?}", other),
         // Timeout or connection close are acceptable — no events to deliver.
         Ok(Err(_)) | Err(_) => {}

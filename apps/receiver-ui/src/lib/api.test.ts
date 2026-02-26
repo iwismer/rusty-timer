@@ -179,78 +179,112 @@ describe("api client", () => {
     });
   });
 
-  it("getSelection calls selection endpoint", async () => {
-    const { getSelection } = await import("./api");
+  it("getMode calls mode endpoint", async () => {
+    const { getMode } = await import("./api");
     mockFetch.mockResolvedValue(
       makeResponse(200, {
-        selection: { mode: "manual", streams: [] },
-        replay_policy: "resume",
-      }),
-    );
-    const result = await getSelection();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/selection",
-      expect.any(Object),
-    );
-    expect(result.replay_policy).toBe("resume");
-  });
-
-  it("putSelection preserves default manual/resume payload shape", async () => {
-    const { putSelection } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(204, null));
-    const payload: Parameters<typeof putSelection>[0] = {
-      selection: {
-        mode: "manual",
+        mode: "live",
         streams: [],
-      },
-      replay_policy: "resume",
-    };
-
-    await putSelection(payload);
-
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/selection",
-      expect.objectContaining({
-        method: "PUT",
-        body: JSON.stringify(payload),
+        earliest_epochs: [],
       }),
     );
-
-    const [, options] = mockFetch.mock.calls.at(-1)!;
-    const body = JSON.parse((options as RequestInit).body as string);
-    expect(body).toEqual(payload);
-    expect(body.selection).not.toHaveProperty("race_id");
-    expect(body.selection).not.toHaveProperty("epoch_scope");
+    const result = await getMode();
+    expect(mockFetch).toHaveBeenCalledWith("/api/v1/mode", expect.any(Object));
+    expect(result.mode).toBe("live");
   });
 
-  it("putSelection supports explicit race/current opt-in payload shape", async () => {
-    const { putSelection } = await import("./api");
+  it("putMode sends raw receiver mode body", async () => {
+    const { putMode } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(204, null));
-    const payload: Parameters<typeof putSelection>[0] = {
-      selection: {
-        mode: "race",
-        race_id: "race-1",
-        epoch_scope: "current",
-      },
-      replay_policy: "live_only",
-    };
-    await putSelection(payload);
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/selection",
-      expect.objectContaining({
-        method: "PUT",
-        body: JSON.stringify(payload),
-      }),
-    );
-
-    const [, options] = mockFetch.mock.calls.at(-1)!;
-    const body = JSON.parse((options as RequestInit).body as string);
-    expect(body).toEqual(payload);
-    expect(body.selection).toMatchObject({
+    const payload: Parameters<typeof putMode>[0] = {
       mode: "race",
       race_id: "race-1",
-      epoch_scope: "current",
-    });
+    };
+    await putMode(payload);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/mode",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    );
+  });
+
+  it("pauseStream posts stream reference", async () => {
+    const { pauseStream } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    const payload = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+    };
+    await pauseStream(payload);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/pause",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    );
+  });
+
+  it("resumeStream posts stream reference", async () => {
+    const { resumeStream } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    const payload = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+    };
+    await resumeStream(payload);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/resume",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    );
+  });
+
+  it("pauseAll posts pause-all endpoint", async () => {
+    const { pauseAll } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    await pauseAll();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/pause-all",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+  });
+
+  it("resumeAll posts resume-all endpoint", async () => {
+    const { resumeAll } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    await resumeAll();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/resume-all",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+  });
+
+  it("putEarliestEpoch sends earliest epoch override payload", async () => {
+    const { putEarliestEpoch } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    const payload = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      earliest_epoch: 7,
+    };
+    await putEarliestEpoch(payload);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/streams/earliest-epoch",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify(payload),
+      }),
+    );
   });
 
   it("getRaces calls races endpoint", async () => {
@@ -377,6 +411,7 @@ describe("sse client", () => {
       onConnectionChange: vi.fn(),
       onUpdateStatusChanged: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
+      onModeChanged: vi.fn(),
     };
 
     initSSE(callbacks);
@@ -404,6 +439,7 @@ describe("sse client", () => {
       onConnectionChange: vi.fn(),
       onUpdateStatusChanged: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
+      onModeChanged: vi.fn(),
     };
 
     initSSE(callbacks);
@@ -429,6 +465,34 @@ describe("sse client", () => {
       },
     ]);
 
+    destroySSE();
+    vi.unstubAllGlobals();
+  });
+
+  it("forwards mode_changed event payload", async () => {
+    const { initSSE, destroySSE } = await import("./sse");
+    const callbacks = {
+      onStatusChanged: vi.fn(),
+      onStreamsSnapshot: vi.fn(),
+      onLogEntry: vi.fn(),
+      onResync: vi.fn(),
+      onConnectionChange: vi.fn(),
+      onUpdateStatusChanged: vi.fn(),
+      onStreamCountsUpdated: vi.fn(),
+      onModeChanged: vi.fn(),
+    };
+
+    initSSE(callbacks);
+    expect(MockEventSource.lastInstance).not.toBeNull();
+
+    MockEventSource.lastInstance!.emit("mode_changed", {
+      mode: { mode: "race", race_id: "race-1" },
+    });
+
+    expect(callbacks.onModeChanged).toHaveBeenCalledWith({
+      mode: "race",
+      race_id: "race-1",
+    });
     destroySSE();
     vi.unstubAllGlobals();
   });

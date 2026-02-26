@@ -31,6 +31,7 @@ vi.mock("$lib/api", async () => {
     getMetrics: vi.fn(),
     getStreamReads: vi.fn(),
     getStreamEpochs: vi.fn(),
+    resetEpoch: vi.fn(),
     getRaceStreamEpochMappings: vi.fn(),
     setStreamEpochRace: vi.fn(),
     setStreamEpochName: vi.fn(),
@@ -163,6 +164,7 @@ describe("stream detail page epoch race mapping", () => {
       stream_epoch: 1,
       name: "Warmup",
     });
+    vi.mocked(api.resetEpoch).mockResolvedValue();
     vi.mocked(api.activateNextStreamEpochForRace).mockResolvedValue();
 
     replaceStreams([stream]);
@@ -466,6 +468,25 @@ describe("stream detail page epoch race mapping", () => {
       "race-1",
       "abc-123",
     );
+  });
+
+  it("advances to next epoch without race mapping by calling resetEpoch", async () => {
+    vi.mocked(api.getRaceStreamEpochMappings).mockResolvedValue({
+      mappings: [],
+    });
+
+    render(Page);
+
+    const advanceButton = await screen.findByTestId(
+      "epoch-race-advance-next-btn",
+    );
+    await waitFor(() => {
+      expect(advanceButton).not.toBeDisabled();
+    });
+    await fireEvent.click(advanceButton);
+
+    expect(api.resetEpoch).toHaveBeenCalledWith("abc-123");
+    expect(api.activateNextStreamEpochForRace).not.toHaveBeenCalled();
   });
 
   it("reloads epoch race mappings on matching stream epoch updates", async () => {

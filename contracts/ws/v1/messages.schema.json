@@ -104,34 +104,6 @@
       }
     },
 
-    "ReceiverHello": {
-      "type": "object",
-      "description": "Sent by receiver immediately after WS connection. session_id is NOT present; it will be assigned by the server and returned in the first heartbeat.",
-      "required": ["kind", "receiver_id"],
-      "additionalProperties": false,
-      "properties": {
-        "kind":        { "const": "receiver_hello" },
-        "receiver_id": { "type": "string", "description": "Advisory; must match token claims if present." },
-        "resume": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/ResumeCursor" },
-          "default": []
-        }
-      }
-    },
-
-    "ReceiverSubscribe": {
-      "type": "object",
-      "description": "Receiver -> Server: subscribe to additional streams mid-session. There is no unsubscribe in v1.",
-      "required": ["kind", "session_id", "streams"],
-      "additionalProperties": false,
-      "properties": {
-        "kind":       { "const": "receiver_subscribe" },
-        "session_id": { "type": "string" },
-        "streams":    { "type": "array", "items": { "$ref": "#/$defs/StreamRef" }, "minItems": 1 }
-      }
-    },
-
     "ReceiverEventBatch": {
       "type": "object",
       "description": "Server -> Receiver: a batch of read events for delivery.",
@@ -211,8 +183,6 @@
     { "$ref": "#/$defs/ForwarderHello" },
     { "$ref": "#/$defs/ForwarderEventBatch" },
     { "$ref": "#/$defs/ForwarderAck" },
-    { "$ref": "#/$defs/ReceiverHello" },
-    { "$ref": "#/$defs/ReceiverSubscribe" },
     { "$ref": "#/$defs/ReceiverEventBatch" },
     { "$ref": "#/$defs/ReceiverAck" },
     { "$ref": "#/$defs/Heartbeat" },

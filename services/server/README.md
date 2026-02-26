@@ -84,7 +84,7 @@ management. See `src/http/admin.rs` for the full list.
 ### WebSocket
 
 - `GET /ws/v1/forwarders` -- forwarder uplink (timing data ingest)
-- `GET /ws/v1/receivers` -- receiver downlink (live data fan-out)
+- `GET /ws/v1.2/receivers` -- receiver downlink (mode-based fan-out)
 
 ### Server-Sent Events
 

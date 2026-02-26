@@ -323,14 +323,21 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
     }
 
     // Receiver session 1: subscribes and gets events 1..3, then "drops".
-    let rcv_url = format!("ws://{}/ws/v1/receivers", addr);
+    let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut max_seq_session1: u64 = 0;
     {
         let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-chaos-token-03")
             .await
             .unwrap();
-        rcv.send_message(&WsMessage::ReceiverHello(ReceiverHello {
+        rcv.send_message(&WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
             receiver_id: "rcv-chaos-03".to_owned(),
+            mode: ReceiverMode::Live {
+                streams: vec![StreamRef {
+                    forwarder_id: "fwd-chaos-03".to_owned(),
+                    reader_ip: "10.70.70.1".to_owned(),
+                }],
+                earliest_epochs: vec![],
+            },
             resume: vec![ResumeCursor {
                 forwarder_id: "fwd-chaos-03".to_owned(),
                 reader_ip: "10.70.70.1".to_owned(),
@@ -340,9 +347,12 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
         }))
         .await
         .unwrap();
-        let rcv_session = match rcv.recv_message().await.unwrap() {
-            WsMessage::Heartbeat(h) => h.session_id,
-            other => panic!("{:?}", other),
+        let rcv_session = loop {
+            match rcv.recv_message().await.unwrap() {
+                WsMessage::Heartbeat(h) => break h.session_id,
+                WsMessage::ReceiverModeApplied(_) => {}
+                other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
+            }
         };
 
         // Collect some events.
@@ -375,7 +385,7 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
                         break;
                     }
                 }
-                Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+                Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
                 _ => break,
             }
         }
@@ -387,13 +397,38 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
         "first receiver session should have gotten some events"
     );
 
+    let stream_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT stream_id FROM streams WHERE forwarder_id = $1 AND reader_ip = $2",
+    )
+    .bind("fwd-chaos-03")
+    .bind("10.70.70.1")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    server::repo::receiver_cursors::upsert_cursor(
+        &pool,
+        "rcv-chaos-03",
+        stream_id,
+        1,
+        i64::try_from(max_seq_session1).unwrap(),
+    )
+    .await
+    .unwrap();
+
     // Receiver session 2: reconnects with cursor at max_seq_session1.
     // Should only get events after that cursor.
     let mut rcv2 = MockWsClient::connect_with_token(&rcv_url, "rcv-chaos-token-03")
         .await
         .unwrap();
-    rcv2.send_message(&WsMessage::ReceiverHello(ReceiverHello {
+    rcv2.send_message(&WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
         receiver_id: "rcv-chaos-03".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-chaos-03".to_owned(),
+                reader_ip: "10.70.70.1".to_owned(),
+            }],
+            earliest_epochs: vec![],
+        },
         resume: vec![ResumeCursor {
             forwarder_id: "fwd-chaos-03".to_owned(),
             reader_ip: "10.70.70.1".to_owned(),
@@ -403,9 +438,12 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
     }))
     .await
     .unwrap();
-    match rcv2.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(_) => {}
-        other => panic!("{:?}", other),
+    loop {
+        match rcv2.recv_message().await.unwrap() {
+            WsMessage::Heartbeat(_) => break,
+            WsMessage::ReceiverModeApplied(_) => {}
+            other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
+        }
     }
 
     // Collect events — none should have seq <= max_seq_session1.
@@ -426,7 +464,7 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
             _ => break,
         }
     }

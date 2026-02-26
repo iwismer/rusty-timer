@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import * as api from "$lib/api";
-  import { buildUpdatedSubscriptions } from "$lib/subscriptions";
   import { initSSE, destroySSE } from "$lib/sse";
   import { waitForApplyResult } from "@rusty-timer/shared-ui/lib/update-flow";
   import {
@@ -12,32 +11,18 @@
     AlertBanner,
   } from "@rusty-timer/shared-ui";
   import type {
-    EpochScope,
     RaceEntry,
-    ReceiverSelection,
-    ReplayPolicy,
-    Profile,
     StreamCountUpdate,
     StatusResponse,
     StreamsResponse,
     LogsResponse,
-    ReplayTargetEpochOption,
+    ReceiverMode,
   } from "$lib/api";
-  type TargetedRowDraft = {
-    streamKey: string;
-    streamEpoch: string;
-  };
-  type TargetedRowErrors = {
-    streamKey?: string;
-    streamEpoch?: string;
-  };
 
-  let profile = $state<Profile | null>(null);
   let status = $state<StatusResponse | null>(null);
   let streams = $state<StreamsResponse | null>(null);
   let logs = $state<LogsResponse | null>(null);
   let error = $state<string | null>(null);
-  let epochLoadError = $state<string | null>(null);
 
   // Edit state
   let editServerUrl = $state("");
@@ -47,53 +32,36 @@
   let checkMessage = $state<string | null>(null);
   let saving = $state(false);
   let connectBusy = $state(false);
-  let sseConnected = $state(false);
   let updateVersion = $state<string | null>(null);
   let updateStatus = $state<"available" | "downloaded" | null>(null);
   let updateBusy = $state(false);
-  let portOverrides = $state<Record<string, string | number | null>>({});
-  let subscriptionsBusy = $state(false);
-  let activeSubscriptionKey = $state<string | null>(null);
+
   let races = $state<RaceEntry[]>([]);
-  let selectionMode = $state<ReceiverSelection["mode"]>("manual");
-  let selectedStreams = $state<{ forwarder_id: string; reader_ip: string }[]>(
-    [],
-  );
+  let modeDraft = $state<ReceiverMode["mode"]>("live");
   let raceIdDraft = $state("");
-  let epochScopeDraft = $state<EpochScope>("current");
-  let replayPolicyDraft = $state<ReplayPolicy>("resume");
-  let targetedRows = $state<TargetedRowDraft[]>([
-    { streamKey: "", streamEpoch: "" },
-  ]);
-  let targetedEpochOptionsByStream = $state<
-    Record<string, ReplayTargetEpochOption[]>
+  let earliestEpochInputs = $state<Record<string, string>>({});
+  let earliestEpochOptions = $state<
+    Record<string, api.ReplayTargetEpochOption[]>
   >({});
-  let targetedRowErrors = $state<Record<number, TargetedRowErrors>>({});
-  let selectionBusy = $state(false);
-  let selectionApplyQueued = $state(false);
-  let savedPayload = $state<string | null>(null);
-  let isDirty = $derived(
-    savedPayload !== null &&
-      JSON.stringify(selectionPayload()) !== savedPayload,
-  );
+  let earliestEpochLoading = $state<Record<string, boolean>>({});
+  let earliestEpochLoadErrors = $state<Record<string, string>>({});
+  let earliestEpochSaving = $state<Record<string, boolean>>({});
+  let targetedEpochInputs = $state<Record<string, string>>({});
+  let modeBusy = $state(false);
+  let modeApplyQueued = $state(false);
+  let savedModePayload = $state<string | null>(null);
+  let modeEditedSinceHydration = $state(false);
+  let modeHydrationVersion = 0;
+  let modeEditVersion = 0;
+  let modeMutationVersion = 0;
+  let streamActionBusy = $state(false);
+  let streamRefreshVersion = 0;
+
   let loadAllInFlight = false;
   let loadAllQueued = false;
 
-  function normalizeReplayPolicy(replayPolicy: ReplayPolicy): ReplayPolicy {
-    if (replayPolicy === "live_only") {
-      return "live_only";
-    }
-    if (replayPolicy === "targeted") {
-      return "targeted";
-    }
-    return "resume";
-  }
-
-  function rowFromReplayTarget(target: api.ReplayTarget): TargetedRowDraft {
-    return {
-      streamKey: streamKey(target.forwarder_id, target.reader_ip),
-      streamEpoch: String(target.stream_epoch),
-    };
+  function streamKey(forwarder_id: string, reader_ip: string): string {
+    return `${forwarder_id}/${reader_ip}`;
   }
 
   function parseStreamKey(value: string): api.StreamRef | null {
@@ -109,7 +77,16 @@
     return { forwarder_id, reader_ip };
   }
 
-  function parseNonNegativeInt(raw: string): number | null {
+  function parseNonNegativeInt(raw: unknown): number | null {
+    if (typeof raw === "number") {
+      if (!Number.isSafeInteger(raw) || raw < 0) {
+        return null;
+      }
+      return raw;
+    }
+    if (typeof raw !== "string") {
+      return null;
+    }
     const trimmed = raw.trim();
     if (!/^\d+$/.test(trimmed)) {
       return null;
@@ -121,98 +98,319 @@
     return parsed;
   }
 
-  function validateTargetedRows(): {
-    replayTargets: api.ReplayTarget[];
-    errors: Record<number, TargetedRowErrors>;
-  } {
-    const replayTargets: api.ReplayTarget[] = [];
-    const errors: Record<number, TargetedRowErrors> = {};
+  function isApiReturnedEpoch(key: string, epoch: number): boolean {
+    const options = earliestEpochOptions[key] ?? [];
+    return options.some((option) => option.stream_epoch === epoch);
+  }
 
-    targetedRows.forEach((row, index) => {
-      const rowErrors: TargetedRowErrors = {};
-      const parsedStream = parseStreamKey(row.streamKey);
-      if (!parsedStream) {
-        rowErrors.streamKey = "Select a stream.";
-      }
+  function parseApiReturnedEpoch(key: string, raw: unknown): number | null {
+    const parsed = parseNonNegativeInt(raw);
+    if (parsed === null) {
+      return null;
+    }
+    return isApiReturnedEpoch(key, parsed) ? parsed : null;
+  }
 
-      const epoch = parseNonNegativeInt(row.streamEpoch);
-      if (epoch === null) {
-        rowErrors.streamEpoch = row.streamEpoch.trim()
-          ? "Stream epoch must be a non-negative integer."
-          : "Stream epoch is required.";
-      }
+  function formatEarliestEpochOption(
+    option: api.ReplayTargetEpochOption,
+  ): string {
+    const name = option.name?.trim();
+    return name && name.length > 0
+      ? `${option.stream_epoch} (${name})`
+      : String(option.stream_epoch);
+  }
 
-      if (rowErrors.streamKey || rowErrors.streamEpoch) {
-        errors[index] = rowErrors;
+  function selectedEarliestEpochValue(stream: api.StreamEntry): string {
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    const configured = earliestEpochInputs[key];
+    const options = earliestEpochOptions[key] ?? [];
+
+    if (
+      configured &&
+      options.some((option) => String(option.stream_epoch) === configured)
+    ) {
+      return configured;
+    }
+    if (options.length === 0) {
+      return "";
+    }
+    if (
+      stream.stream_epoch !== undefined &&
+      options.some((option) => option.stream_epoch === stream.stream_epoch)
+    ) {
+      return String(stream.stream_epoch);
+    }
+
+    const newest = options.reduce(
+      (max, option) => Math.max(max, option.stream_epoch),
+      options[0]?.stream_epoch ?? 0,
+    );
+    return String(newest);
+  }
+
+  function selectedTargetedEpochValue(stream: api.StreamEntry): string {
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    const configured = parseApiReturnedEpoch(key, targetedEpochInputs[key]);
+    const options = earliestEpochOptions[key] ?? [];
+
+    if (configured !== null) {
+      return String(configured);
+    }
+    if (options.length === 0) {
+      return "";
+    }
+    if (
+      stream.stream_epoch !== undefined &&
+      isApiReturnedEpoch(key, stream.stream_epoch)
+    ) {
+      return String(stream.stream_epoch);
+    }
+
+    const newest = options.reduce(
+      (max, option) => Math.max(max, option.stream_epoch),
+      options[0]?.stream_epoch ?? 0,
+    );
+    return String(newest);
+  }
+
+  function resolveReplayTargetEpoch(stream: api.StreamEntry): number | null {
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+
+    const configured = parseApiReturnedEpoch(key, targetedEpochInputs[key]);
+    if (configured !== null) {
+      return configured;
+    }
+
+    const selected = parseApiReturnedEpoch(
+      key,
+      selectedTargetedEpochValue(stream),
+    );
+    if (selected !== null) {
+      return selected;
+    }
+
+    return parseNonNegativeInt(stream.stream_epoch);
+  }
+
+  async function prefetchEarliestEpochOptions(
+    streamList: api.StreamEntry[],
+    forceRefreshKeys: Set<string> = new Set<string>(),
+  ): Promise<void> {
+    const tasks = streamList.map(async (stream) => {
+      const key = streamKey(stream.forwarder_id, stream.reader_ip);
+      const forceRefresh = forceRefreshKeys.has(key);
+      if (
+        (!forceRefresh && earliestEpochOptions[key]) ||
+        earliestEpochLoading[key]
+      ) {
         return;
       }
 
-      replayTargets.push({
-        forwarder_id: parsedStream!.forwarder_id,
-        reader_ip: parsedStream!.reader_ip,
-        stream_epoch: epoch!,
-      });
+      earliestEpochLoading = { ...earliestEpochLoading, [key]: true };
+      earliestEpochLoadErrors = { ...earliestEpochLoadErrors, [key]: "" };
+
+      try {
+        const response = await api.getReplayTargetEpochs({
+          forwarder_id: stream.forwarder_id,
+          reader_ip: stream.reader_ip,
+        });
+        earliestEpochOptions = {
+          ...earliestEpochOptions,
+          [key]: [...response.epochs].sort(
+            (a, b) => b.stream_epoch - a.stream_epoch,
+          ),
+        };
+      } catch (e) {
+        earliestEpochLoadErrors = {
+          ...earliestEpochLoadErrors,
+          [key]: String(e),
+        };
+      } finally {
+        earliestEpochLoading = { ...earliestEpochLoading, [key]: false };
+      }
     });
 
-    return { replayTargets, errors };
+    await Promise.allSettled(tasks);
   }
 
-  function streamKey(forwarder_id: string, reader_ip: string): string {
-    return `${forwarder_id}/${reader_ip}`;
+  function hydrateMode(mode: ReceiverMode): void {
+    modeDraft = mode.mode;
+    if (mode.mode === "live") {
+      const earliestEpochRows = Array.isArray(mode.earliest_epochs)
+        ? mode.earliest_epochs
+        : [];
+      earliestEpochInputs = Object.fromEntries(
+        earliestEpochRows.map((row) => [
+          streamKey(row.forwarder_id, row.reader_ip),
+          String(row.earliest_epoch),
+        ]),
+      );
+      raceIdDraft = "";
+      targetedEpochInputs = {};
+      return;
+    }
+
+    if (mode.mode === "race") {
+      raceIdDraft = mode.race_id;
+      targetedEpochInputs = {};
+      return;
+    }
+
+    targetedEpochInputs = Object.fromEntries(
+      mode.targets.map((target) => [
+        streamKey(target.forwarder_id, target.reader_ip),
+        String(target.stream_epoch),
+      ]),
+    );
   }
 
-  async function ensureTargetedEpochOptionsForStream(
-    key: string,
-  ): Promise<void> {
-    if (!key || targetedEpochOptionsByStream[key] !== undefined) {
-      return;
-    }
-    const parsed = parseStreamKey(key);
-    if (!parsed) {
-      return;
-    }
-    try {
-      epochLoadError = null;
-      const response = await api.getReplayTargetEpochs(parsed);
-      targetedEpochOptionsByStream = {
-        ...targetedEpochOptionsByStream,
-        [key]: response.epochs,
+  function applyHydratedMode(mode: ReceiverMode): void {
+    hydrateMode(mode);
+    savedModePayload = modeSignature(mode);
+    modeEditedSinceHydration = false;
+    modeHydrationVersion += 1;
+  }
+
+  function markModeEdited(): void {
+    modeEditedSinceHydration = true;
+    modeEditVersion += 1;
+  }
+
+  function modePayload(): ReceiverMode {
+    if (modeDraft === "race") {
+      return {
+        mode: "race",
+        race_id: raceIdDraft.trim(),
       };
-    } catch (e) {
-      // Do not cache transient failures as empty options; allow in-session retry.
-      epochLoadError = `Failed to load epoch options: ${String(e)}`;
     }
+
+    if (modeDraft === "targeted_replay") {
+      const targets = Object.entries(targetedEpochInputs)
+        .map(([key, value]) => {
+          const stream = parseStreamKey(key);
+          const stream_epoch = parseApiReturnedEpoch(key, value);
+          if (!stream || stream_epoch === null) {
+            return null;
+          }
+          return {
+            forwarder_id: stream.forwarder_id,
+            reader_ip: stream.reader_ip,
+            stream_epoch,
+          };
+        })
+        .filter((target): target is api.ReplayTarget => target !== null);
+
+      return {
+        mode: "targeted_replay",
+        targets,
+      };
+    }
+
+    const liveStreams = (streams?.streams ?? []).map((stream) => ({
+      forwarder_id: stream.forwarder_id,
+      reader_ip: stream.reader_ip,
+    }));
+
+    const earliest_epochs = Object.entries(earliestEpochInputs)
+      .map(([key, value]) => {
+        const stream = parseStreamKey(key);
+        const earliest_epoch = parseNonNegativeInt(value);
+        if (!stream || earliest_epoch === null) {
+          return null;
+        }
+        return {
+          forwarder_id: stream.forwarder_id,
+          reader_ip: stream.reader_ip,
+          earliest_epoch,
+        };
+      })
+      .filter(
+        (
+          row,
+        ): row is {
+          forwarder_id: string;
+          reader_ip: string;
+          earliest_epoch: number;
+        } => row !== null,
+      );
+
+    return {
+      mode: "live",
+      streams: liveStreams,
+      earliest_epochs,
+    };
   }
 
-  function epochFallbackLabel(option: ReplayTargetEpochOption): string {
-    if (option.name && option.name.trim().length > 0) {
-      return option.name.trim();
+  function compareStreamRefs(
+    left: { forwarder_id: string; reader_ip: string },
+    right: { forwarder_id: string; reader_ip: string },
+  ): number {
+    const forwarderCompare = left.forwarder_id.localeCompare(
+      right.forwarder_id,
+    );
+    if (forwarderCompare !== 0) {
+      return forwarderCompare;
     }
-    if (option.first_seen_at) {
-      const firstSeen = new Date(option.first_seen_at);
-      if (!Number.isNaN(firstSeen.getTime())) {
-        return `Epoch ${option.stream_epoch} (${firstSeen.toLocaleString()})`;
-      }
-    }
-    return `Epoch ${option.stream_epoch}`;
+    return left.reader_ip.localeCompare(right.reader_ip);
   }
 
-  function targetedEpochOptionLabel(option: ReplayTargetEpochOption): string {
-    const base = epochFallbackLabel(option);
-    if (option.race_names.length === 0) {
-      return base;
+  function modeSignature(mode: ReceiverMode): string {
+    if (mode.mode === "race") {
+      return JSON.stringify({
+        mode: "race",
+        race_id: mode.race_id.trim(),
+      });
     }
-    return `${base} - Race: ${option.race_names.join(", ")}`;
+
+    if (mode.mode === "targeted_replay") {
+      const targets = [...mode.targets]
+        .map((target) => ({
+          forwarder_id: target.forwarder_id,
+          reader_ip: target.reader_ip,
+          stream_epoch: target.stream_epoch,
+        }))
+        .sort((a, b) => {
+          const streamCompare = compareStreamRefs(a, b);
+          if (streamCompare !== 0) {
+            return streamCompare;
+          }
+          return a.stream_epoch - b.stream_epoch;
+        });
+
+      return JSON.stringify({
+        mode: "targeted_replay",
+        targets,
+      });
+    }
+
+    const earliestEpochRows = Array.isArray(mode.earliest_epochs)
+      ? mode.earliest_epochs
+      : [];
+    const earliest_epochs = [...earliestEpochRows]
+      .map((row) => ({
+        forwarder_id: row.forwarder_id,
+        reader_ip: row.reader_ip,
+        earliest_epoch: row.earliest_epoch,
+      }))
+      .sort((a, b) => {
+        const streamCompare = compareStreamRefs(a, b);
+        if (streamCompare !== 0) {
+          return streamCompare;
+        }
+        return a.earliest_epoch - b.earliest_epoch;
+      });
+
+    return JSON.stringify({
+      mode: "live",
+      earliest_epochs,
+    });
   }
 
-  function targetedRowEpochOptions(
-    row: TargetedRowDraft,
-  ): ReplayTargetEpochOption[] {
-    if (!row.streamKey) {
-      return [];
-    }
-    return targetedEpochOptionsByStream[row.streamKey] ?? [];
-  }
+  let modeDirty = $derived(
+    savedModePayload === null
+      ? modeEditedSinceHydration
+      : modeSignature(modePayload()) !== savedModePayload,
+  );
 
   function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
     if (updates.length === 0) {
@@ -255,48 +453,6 @@
     return hasUnknownStream;
   }
 
-  async function toggleSubscription(
-    forwarder_id: string,
-    reader_ip: string,
-    currentlySubscribed: boolean,
-  ) {
-    if (subscriptionsBusy) {
-      return;
-    }
-
-    error = null;
-    const key = streamKey(forwarder_id, reader_ip);
-    subscriptionsBusy = true;
-    activeSubscriptionKey = key;
-    try {
-      const updated = buildUpdatedSubscriptions({
-        allStreams: streams?.streams ?? [],
-        target: {
-          forwarder_id,
-          reader_ip,
-          currentlySubscribed,
-        },
-        rawPortOverride: portOverrides[key],
-      });
-      if (updated.error) {
-        error = updated.error;
-        return;
-      }
-
-      await api.putSubscriptions(updated.subscriptions ?? []);
-      streams = await api.getStreams();
-      if (!currentlySubscribed) {
-        const { [key]: _, ...rest } = portOverrides;
-        portOverrides = rest;
-      }
-    } catch (e) {
-      error = String(e);
-    } finally {
-      subscriptionsBusy = false;
-      activeSubscriptionKey = null;
-    }
-  }
-
   async function loadAll() {
     if (loadAllInFlight) {
       loadAllQueued = true;
@@ -305,47 +461,48 @@
 
     loadAllInFlight = true;
     try {
-      const [nextStatus, nextStreams, nextLogs, nextSelection, nextRaces] =
+      const modeVersionAtLoadStart = modeHydrationVersion;
+      const modeEditVersionAtLoadStart = modeEditVersion;
+      const modeMutationVersionAtLoadStart = modeMutationVersion;
+      const streamRefreshVersionAtLoadStart = streamRefreshVersion;
+      const [nextStatus, nextStreams, nextLogs, nextMode, nextRaces] =
         await Promise.all([
           api.getStatus(),
           api.getStreams(),
           api.getLogs(),
-          api.getSelection().catch(() => null),
-          api.getRaces().catch(() => ({ races: [] })),
+          api.getMode().catch(() => null),
+          api.getRaces().catch(() => null),
         ]);
       status = nextStatus;
-      streams = nextStreams;
-      logs = nextLogs;
-      races = nextRaces.races;
-      if (nextSelection) {
-        selectionMode = nextSelection.selection.mode;
-        replayPolicyDraft = normalizeReplayPolicy(nextSelection.replay_policy);
-        targetedRows =
-          nextSelection.replay_policy === "targeted" &&
-          nextSelection.replay_targets &&
-          nextSelection.replay_targets.length > 0
-            ? nextSelection.replay_targets.map(rowFromReplayTarget)
-            : [{ streamKey: "", streamEpoch: "" }];
-        for (const row of targetedRows) {
-          if (row.streamKey) {
-            void ensureTargetedEpochOptionsForStream(row.streamKey);
-          }
-        }
-        targetedRowErrors = {};
-        if (nextSelection.selection.mode === "manual") {
-          selectedStreams = nextSelection.selection.streams;
-          raceIdDraft = "";
-          epochScopeDraft = "current";
-        } else {
-          raceIdDraft = nextSelection.selection.race_id;
-          epochScopeDraft = nextSelection.selection.epoch_scope;
-          selectedStreams = [];
-        }
-        savedPayload = JSON.stringify(selectionPayload());
+      if (streamRefreshVersion === streamRefreshVersionAtLoadStart) {
+        streams = nextStreams;
+        void prefetchEarliestEpochOptions(nextStreams.streams);
       }
+      logs = nextLogs;
+      if (nextRaces) {
+        const previousRaceIdDraft = raceIdDraft;
+        races = nextRaces.races;
+        if (
+          modeDraft === "race" &&
+          previousRaceIdDraft.length > 0 &&
+          races.some((race) => race.race_id === previousRaceIdDraft)
+        ) {
+          raceIdDraft = previousRaceIdDraft;
+        }
+      }
+
+      if (
+        nextMode &&
+        !modeDirty &&
+        modeEditVersion === modeEditVersionAtLoadStart &&
+        modeHydrationVersion === modeVersionAtLoadStart &&
+        modeMutationVersion === modeMutationVersionAtLoadStart
+      ) {
+        applyHydratedMode(nextMode);
+      }
+
       const p = await api.getProfile().catch(() => null);
       if (p) {
-        profile = p;
         editServerUrl = p.server_url;
         editToken = p.token;
         editUpdateMode = p.update_mode || "check-and-download";
@@ -372,132 +529,191 @@
     }
   }
 
-  function selectionPayload(): api.ReceiverSetSelection {
-    const replay_targets =
-      replayPolicyDraft === "targeted"
-        ? validateTargetedRows().replayTargets
-        : undefined;
+  async function applyMode(): Promise<void> {
+    modeApplyQueued = true;
+    if (modeBusy) return;
 
-    if (selectionMode === "manual") {
-      return {
-        selection: {
-          mode: "manual",
-          streams: selectedStreams,
-        },
-        replay_policy: replayPolicyDraft,
-        ...(replayPolicyDraft === "targeted" ? { replay_targets } : {}),
-      };
-    }
-
-    return {
-      selection: {
-        mode: "race",
-        race_id: raceIdDraft.trim(),
-        epoch_scope: epochScopeDraft,
-      },
-      replay_policy: replayPolicyDraft,
-      ...(replayPolicyDraft === "targeted" ? { replay_targets } : {}),
-    };
-  }
-
-  async function applySelection(): Promise<void> {
-    selectionApplyQueued = true;
-    if (selectionBusy) return;
-
-    selectionBusy = true;
+    modeBusy = true;
     error = null;
-    while (selectionApplyQueued) {
-      selectionApplyQueued = false;
-      if (replayPolicyDraft === "targeted") {
-        const validation = validateTargetedRows();
-        targetedRowErrors = validation.errors;
-        if (
-          Object.keys(validation.errors).length > 0 ||
-          validation.replayTargets.length === 0
-        ) {
-          if (validation.replayTargets.length === 0) {
-            targetedRowErrors = {
-              ...(Object.keys(validation.errors).length > 0
-                ? validation.errors
-                : { 0: {} }),
-              0: {
-                ...(validation.errors[0] ?? {}),
-                streamKey:
-                  validation.errors[0]?.streamKey ??
-                  "Add at least one valid replay target.",
-              },
-            };
-          }
-          continue;
-        }
-      } else {
-        targetedRowErrors = {};
+
+    while (modeApplyQueued) {
+      modeApplyQueued = false;
+      const payload = modePayload();
+      if (payload.mode === "race" && payload.race_id.length === 0) {
+        error = "Select a race before applying Race mode.";
+        continue;
       }
+
       try {
-        const payload = selectionPayload();
-        await api.putSelection(payload);
-        savedPayload = JSON.stringify(payload);
+        await api.putMode(payload);
+        modeMutationVersion += 1;
+        savedModePayload = modeSignature(payload);
+        modeEditedSinceHydration = false;
         error = null;
       } catch (e) {
         error = String(e);
-        if (!selectionApplyQueued) {
+        if (!modeApplyQueued) {
           break;
         }
       }
     }
 
-    selectionBusy = false;
+    modeBusy = false;
   }
 
-  function handleSelectionModeChange(event: Event): void {
-    const nextMode = (event.currentTarget as HTMLSelectElement).value as
-      | "manual"
-      | "race";
-    selectionMode = nextMode;
-  }
+  async function changeEarliestEpoch(
+    stream: api.StreamEntry,
+    rawValue: string,
+  ): Promise<void> {
+    if (modeDraft === "race") {
+      return;
+    }
 
-  function handleRaceIdChange(event: Event): void {
-    raceIdDraft = (event.currentTarget as HTMLSelectElement).value;
-  }
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    if (earliestEpochSaving[key]) {
+      return;
+    }
 
-  function handleEpochScopeChange(event: Event): void {
-    epochScopeDraft = (event.currentTarget as HTMLSelectElement)
-      .value as EpochScope;
-  }
+    const parsed = parseNonNegativeInt(rawValue);
+    if (parsed === null) {
+      error = "Earliest epoch must be a non-negative integer.";
+      return;
+    }
 
-  function handleReplayPolicyChange(event: Event): void {
-    replayPolicyDraft = (event.currentTarget as HTMLSelectElement)
-      .value as ReplayPolicy;
-  }
-
-  function handleTargetedStreamChange(index: number, event: Event): void {
-    const value = (event.currentTarget as HTMLSelectElement).value;
-    targetedRows = targetedRows.map((row, rowIndex) =>
-      rowIndex === index ? { ...row, streamKey: value, streamEpoch: "" } : row,
-    );
-    if (value) {
-      void ensureTargetedEpochOptionsForStream(value);
+    earliestEpochSaving = { ...earliestEpochSaving, [key]: true };
+    try {
+      error = null;
+      await api.putEarliestEpoch({
+        forwarder_id: stream.forwarder_id,
+        reader_ip: stream.reader_ip,
+        earliest_epoch: parsed,
+      });
+      earliestEpochInputs = { ...earliestEpochInputs, [key]: String(parsed) };
+      markModeEdited();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      earliestEpochSaving = { ...earliestEpochSaving, [key]: false };
     }
   }
 
-  function handleTargetedEpochChange(index: number, event: Event): void {
-    const value = (event.currentTarget as HTMLSelectElement).value.trim();
-    targetedRows = targetedRows.map((row, rowIndex) =>
-      rowIndex === index ? { ...row, streamEpoch: value } : row,
-    );
-  }
-
-  function addTargetedRow(): void {
-    targetedRows = [...targetedRows, { streamKey: "", streamEpoch: "" }];
-    targetedRowErrors = {};
-  }
-
-  function removeTargetedRow(index: number): void {
-    targetedRows = targetedRows.filter((_, rowIndex) => rowIndex !== index);
-    if (targetedRows.length === 0) {
-      targetedRows = [{ streamKey: "", streamEpoch: "" }];
+  async function pauseOrResumeStream(stream: api.StreamEntry): Promise<void> {
+    if (streamActionBusy) {
+      return;
     }
-    targetedRowErrors = {};
+
+    streamActionBusy = true;
+    const refreshVersion = ++streamRefreshVersion;
+    try {
+      error = null;
+      if (stream.paused) {
+        await api.resumeStream({
+          forwarder_id: stream.forwarder_id,
+          reader_ip: stream.reader_ip,
+        });
+      } else {
+        await api.pauseStream({
+          forwarder_id: stream.forwarder_id,
+          reader_ip: stream.reader_ip,
+        });
+      }
+      const latestStreams = await api.getStreams();
+      if (refreshVersion === streamRefreshVersion) {
+        streams = latestStreams;
+        void prefetchEarliestEpochOptions(latestStreams.streams);
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      streamActionBusy = false;
+    }
+  }
+
+  async function pauseOrResumeAll(action: "pause" | "resume"): Promise<void> {
+    if (streamActionBusy) {
+      return;
+    }
+
+    streamActionBusy = true;
+    const refreshVersion = ++streamRefreshVersion;
+    try {
+      error = null;
+      if (action === "pause") {
+        await api.pauseAll();
+      } else {
+        await api.resumeAll();
+      }
+      const latestStreams = await api.getStreams();
+      if (refreshVersion === streamRefreshVersion) {
+        streams = latestStreams;
+        void prefetchEarliestEpochOptions(latestStreams.streams);
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      streamActionBusy = false;
+    }
+  }
+
+  async function replayStream(stream: api.StreamEntry): Promise<void> {
+    const parsed = resolveReplayTargetEpoch(stream);
+    if (parsed === null) {
+      error = "Select a valid target epoch before replaying.";
+      return;
+    }
+
+    try {
+      error = null;
+      const payload: ReceiverMode = {
+        mode: "targeted_replay",
+        targets: [
+          {
+            forwarder_id: stream.forwarder_id,
+            reader_ip: stream.reader_ip,
+            stream_epoch: parsed,
+          },
+        ],
+      };
+      await api.putMode(payload);
+      modeMutationVersion += 1;
+      savedModePayload = modeSignature(payload);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function replayAll(): Promise<void> {
+    const targets = (streams?.streams ?? [])
+      .map((stream) => {
+        const stream_epoch = resolveReplayTargetEpoch(stream);
+        if (stream_epoch === null) {
+          return null;
+        }
+        return {
+          forwarder_id: stream.forwarder_id,
+          reader_ip: stream.reader_ip,
+          stream_epoch,
+        };
+      })
+      .filter((row): row is api.ReplayTarget => row !== null);
+
+    if (targets.length === 0) {
+      error = "Select at least one valid target epoch before replaying all.";
+      return;
+    }
+
+    try {
+      error = null;
+      const payload: ReceiverMode = {
+        mode: "targeted_replay",
+        targets,
+      };
+      await api.putMode(payload);
+      modeMutationVersion += 1;
+      savedModePayload = modeSignature(payload);
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   async function saveProfile() {
@@ -526,7 +742,7 @@
         result.status === "available" ||
         result.status === "downloaded"
       ) {
-        checkMessage = null; // UpdateBanner will show via SSE
+        checkMessage = null;
         updateVersion = result.version ?? null;
         updateStatus = result.status;
       } else if (result.status === "failed") {
@@ -609,7 +825,14 @@
         status = s;
       },
       onStreamsSnapshot: (s) => {
+        const refreshAllKeys = new Set(
+          s.streams.map((stream) =>
+            streamKey(stream.forwarder_id, stream.reader_ip),
+          ),
+        );
+        streamRefreshVersion += 1;
         streams = s;
+        void prefetchEarliestEpochOptions(s.streams, refreshAllKeys);
       },
       onLogEntry: (entry) => {
         if (logs) {
@@ -622,7 +845,9 @@
         loadAll();
       },
       onConnectionChange: (connected) => {
-        sseConnected = connected;
+        if (!connected) {
+          return;
+        }
       },
       onUpdateStatusChanged: (us) => {
         if (
@@ -641,6 +866,9 @@
         if (needsResync) {
           void loadAll();
         }
+      },
+      onModeChanged: (mode) => {
+        applyHydratedMode(mode);
       },
     });
   });
@@ -661,6 +889,11 @@
     streams?.streams.filter((s) => s.subscribed).length ?? 0,
   );
   let totalCount = $derived(streams?.streams.length ?? 0);
+  let pausedCount = $derived(
+    streams?.streams.filter((stream) => stream.paused).length ?? 0,
+  );
+  let allStreamsPaused = $derived(totalCount > 0 && pausedCount === totalCount);
+  let allStreamsResumed = $derived(totalCount > 0 && pausedCount === 0);
 
   const inputClass =
     "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
@@ -668,6 +901,10 @@
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
   const btnSecondary =
     "px-3 py-1.5 text-sm font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
+  const btnWarn =
+    "px-3 py-1.5 text-sm font-medium rounded-md bg-status-warn-bg text-status-warn border border-status-warn-border cursor-pointer hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
+  const btnOk =
+    "px-3 py-1.5 text-sm font-medium rounded-md bg-status-ok-bg text-status-ok border border-status-ok-border cursor-pointer hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
 </script>
 
 <main class="max-w-[900px] mx-auto px-8 py-6">
@@ -691,9 +928,7 @@
 
   <h1 class="text-xl font-bold text-text-primary mb-6">Receiver</h1>
 
-  <!-- Status + Profile two-column grid -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-    <!-- Status Card -->
     <Card title="Status">
       <section data-testid="status-section">
         {#if status}
@@ -738,7 +973,6 @@
       </section>
     </Card>
 
-    <!-- Config Card -->
     <Card title="Config">
       <section data-testid="config-section">
         <div class="grid gap-3">
@@ -804,192 +1038,80 @@
   </div>
 
   <div class="mb-6">
-    <Card title="Race & Mode Selection">
-      <section data-testid="selection-section">
+    <Card title="Receiver Mode">
+      <section data-testid="mode-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
             Mode
             <select
-              data-testid="selection-mode-select"
+              data-testid="mode-select"
               class="{inputClass} mt-1"
-              bind:value={selectionMode}
-              onchange={handleSelectionModeChange}
-              disabled={selectionBusy}
+              bind:value={modeDraft}
+              onchange={markModeEdited}
+              disabled={modeBusy}
             >
-              <option value="manual">Manual</option>
+              <option value="live">Live</option>
               <option value="race">Race</option>
+              <option value="targeted_replay">Targeted Replay</option>
             </select>
           </label>
 
-          {#if selectionMode === "race"}
+          {#if modeDraft === "race"}
             <label class="block text-xs font-medium text-text-muted">
-              Race ID
+              Race
               <select
                 data-testid="race-id-select"
                 class="{inputClass} mt-1"
-                bind:value={raceIdDraft}
-                onchange={handleRaceIdChange}
-                disabled={selectionBusy}
+                value={raceIdDraft}
+                onchange={(e) => {
+                  raceIdDraft = e.currentTarget.value;
+                  markModeEdited();
+                }}
+                disabled={modeBusy}
               >
                 <option value="">Select race...</option>
-                {#each races as race}
+                {#each races as race (race.race_id)}
                   <option value={race.race_id}>{race.name}</option>
                 {/each}
               </select>
             </label>
-
-            <label class="block text-xs font-medium text-text-muted">
-              Epoch Scope
-              <select
-                data-testid="epoch-scope-select"
-                class="{inputClass} mt-1"
-                bind:value={epochScopeDraft}
-                onchange={handleEpochScopeChange}
-                disabled={selectionBusy}
-              >
-                <option value="current">Current and future</option>
-                <option value="all">All</option>
-              </select>
-              <p class="text-xs text-text-muted mt-1 m-0">
-                Current and future: replay the current epoch and continue
-                receiving as the epoch advances. All: replay all epochs
-                available for the race.
-              </p>
-            </label>
           {/if}
 
-          <label class="block text-xs font-medium text-text-muted">
-            Replay Policy
-            <select
-              data-testid="replay-policy-select"
-              class="{inputClass} mt-1"
-              bind:value={replayPolicyDraft}
-              onchange={handleReplayPolicyChange}
-              disabled={selectionBusy}
-            >
-              <option value="resume">Resume</option>
-              <option value="live_only">Live only</option>
-              <option value="targeted">Targeted replay</option>
-            </select>
-            <p class="text-xs text-text-muted mt-1 m-0">
-              Resume: continue from the last acknowledged position. Live only:
-              skip replay and receive new reads only. Targeted replay: replay
-              full selected epochs per stream.
+          {#if modeDraft === "live"}
+            <p class="text-xs text-text-muted m-0">
+              Live mode includes all available streams automatically and
+              supports earliest-epoch overrides.
             </p>
-          </label>
-
-          {#if replayPolicyDraft === "targeted"}
-            <div class="border border-border rounded-md p-3 bg-surface-0">
-              {#if epochLoadError}
-                <div class="mb-2">
-                  <AlertBanner variant="err" message={epochLoadError} />
-                </div>
-              {/if}
-              <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-semibold text-text-primary m-0">
-                  Replay Targets
-                </p>
-                <button
-                  data-testid="add-targeted-row-btn"
-                  class={btnSecondary}
-                  onclick={addTargetedRow}
-                  disabled={selectionBusy}
-                >
-                  Add Row
-                </button>
-              </div>
-
-              <div class="grid gap-2">
-                {#each targetedRows as row, index}
-                  <div
-                    class="grid gap-2 md:grid-cols-[2fr_2fr_auto] items-start"
-                  >
-                    <select
-                      data-testid={"targeted-row-stream-" + index}
-                      class={inputClass}
-                      value={row.streamKey}
-                      onchange={(event) =>
-                        handleTargetedStreamChange(index, event)}
-                      disabled={selectionBusy}
-                    >
-                      <option value="">Select stream...</option>
-                      {#each streams?.streams ?? [] as stream}
-                        <option
-                          value={streamKey(
-                            stream.forwarder_id,
-                            stream.reader_ip,
-                          )}
-                        >
-                          {stream.display_alias ??
-                            `${stream.forwarder_id} / ${stream.reader_ip}`}
-                        </option>
-                      {/each}
-                    </select>
-
-                    <select
-                      data-testid={"targeted-row-epoch-" + index}
-                      class={inputClass}
-                      value={row.streamEpoch}
-                      onchange={(event) =>
-                        handleTargetedEpochChange(index, event)}
-                      disabled={selectionBusy || !row.streamKey}
-                    >
-                      <option value="">Select epoch...</option>
-                      {#each targetedRowEpochOptions(row) as option}
-                        <option value={String(option.stream_epoch)}>
-                          {targetedEpochOptionLabel(option)}
-                        </option>
-                      {/each}
-                    </select>
-
-                    <button
-                      data-testid={"remove-targeted-row-" + index}
-                      class={btnSecondary}
-                      onclick={() => removeTargetedRow(index)}
-                      disabled={selectionBusy}
-                    >
-                      Remove
-                    </button>
-
-                    {#if targetedRowErrors[index]}
-                      <p
-                        data-testid={"targeted-row-error-" + index}
-                        class="md:col-span-4 text-xs text-status-err m-0"
-                      >
-                        {#if targetedRowErrors[index].streamKey}
-                          {targetedRowErrors[index].streamKey}
-                        {/if}
-                        {#if targetedRowErrors[index].streamEpoch}
-                          {targetedRowErrors[index].streamKey ? " " : ""}
-                          {targetedRowErrors[index].streamEpoch}
-                        {/if}
-                      </p>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            </div>
+          {:else if modeDraft === "race"}
+            <p class="text-xs text-text-muted m-0">
+              Race mode follows race stream resolution from the server; earliest
+              epoch controls are shown but disabled.
+            </p>
+          {:else}
+            <p class="text-xs text-text-muted m-0">
+              Targeted Replay uses per-stream epoch controls in the table.
+            </p>
           {/if}
         </div>
+
         <div class="mt-3 pt-3 border-t border-border">
           <button
-            data-testid="save-selection-btn"
+            data-testid="save-mode-btn"
             class={btnPrimary}
-            onclick={() => void applySelection()}
-            disabled={!isDirty || selectionBusy}
+            onclick={() => void applyMode()}
+            disabled={!modeDirty || modeBusy}
           >
-            {selectionBusy ? "Saving..." : "Save"}
+            {modeBusy ? "Applying..." : "Apply Mode"}
           </button>
         </div>
       </section>
     </Card>
   </div>
 
-  <!-- Streams Section -->
   <div class="mb-6">
     <Card>
       {#snippet header()}
-        <div class="flex items-center justify-between w-full">
+        <div class="flex items-center justify-between w-full gap-2">
           <h2 class="text-sm font-semibold text-text-primary">
             Available Streams
             {#if streams?.degraded}
@@ -998,9 +1120,37 @@
               >
             {/if}
           </h2>
-          <span class="text-xs text-text-muted"
-            >{subscribedCount} subscribed / {totalCount} available</span
-          >
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-text-muted"
+              >{subscribedCount} subscribed / {totalCount} available</span
+            >
+            {#if modeDraft === "live" || modeDraft === "race"}
+              <button
+                data-testid="pause-all-btn"
+                class={btnWarn}
+                onclick={() => void pauseOrResumeAll("pause")}
+                disabled={streamActionBusy || allStreamsPaused}
+              >
+                Pause All
+              </button>
+              <button
+                data-testid="resume-all-btn"
+                class={btnOk}
+                onclick={() => void pauseOrResumeAll("resume")}
+                disabled={streamActionBusy || allStreamsResumed}
+              >
+                Resume All
+              </button>
+            {:else}
+              <button
+                data-testid="replay-all-btn"
+                class={btnSecondary}
+                onclick={() => void replayAll()}
+              >
+                Replay All
+              </button>
+            {/if}
+          </div>
         </div>
       {/snippet}
 
@@ -1033,10 +1183,19 @@
                         state={stream.online ? "ok" : "err"}
                       />
                     {/if}
+                    <StatusBadge
+                      label={stream.paused ? "paused" : "active"}
+                      state={stream.paused ? "warn" : "ok"}
+                    />
                   </div>
                   <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                     {stream.forwarder_id} / {stream.reader_ip}
                   </p>
+                  {#if stream.local_port !== null}
+                    <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
+                      local port: {stream.local_port}
+                    </p>
+                  {/if}
                   {#if stream.stream_epoch !== undefined}
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                       epoch: {stream.stream_epoch}{#if stream.current_epoch_name && stream.current_epoch_name.trim().length > 0}
@@ -1050,52 +1209,81 @@
                     </p>
                   {/if}
                 </div>
+
                 <div class="flex items-center gap-2 shrink-0">
-                  {#if stream.subscribed}
-                    <span class="text-xs font-mono text-text-secondary"
-                      >port {stream.local_port ?? "auto"}</span
+                  {#if modeDraft === "targeted_replay"}
+                    {@const options = earliestEpochOptions[key] ?? []}
+                    {@const selectedTargeted =
+                      selectedTargetedEpochValue(stream)}
+                    <select
+                      data-testid="targeted-epoch-{key}"
+                      class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                      value={selectedTargeted}
+                      onchange={(event) => {
+                        targetedEpochInputs = {
+                          ...targetedEpochInputs,
+                          [key]: event.currentTarget.value,
+                        };
+                        markModeEdited();
+                      }}
                     >
+                      {#if earliestEpochLoading[key]}
+                        <option value="">Loading epochs...</option>
+                      {:else if earliestEpochLoadErrors[key]}
+                        <option value="">Epochs unavailable</option>
+                      {:else if options.length === 0}
+                        <option value="">No epochs available</option>
+                      {:else}
+                        {#each options as option}
+                          <option value={String(option.stream_epoch)}>
+                            {formatEarliestEpochOption(option)}
+                          </option>
+                        {/each}
+                      {/if}
+                    </select>
                     <button
-                      data-testid="unsub-{key}"
-                      class="px-2.5 py-1 text-xs font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-                      onclick={() =>
-                        toggleSubscription(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                          true,
-                        )}
-                      disabled={subscriptionsBusy}
+                      data-testid="replay-stream-{key}"
+                      class="{btnPrimary} !px-2.5 !py-1 !text-xs"
+                      onclick={() => replayStream(stream)}
                     >
-                      {subscriptionsBusy && activeSubscriptionKey === key
-                        ? "..."
-                        : "Unsubscribe"}
+                      Replay
                     </button>
                   {:else}
-                    <input
-                      data-testid="port-{key}"
-                      type="number"
-                      min="1"
-                      max="65535"
-                      placeholder="port"
-                      aria-label="Port for {stream.display_alias ?? key}"
-                      class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-20 focus:outline-none focus:ring-1 focus:ring-accent"
-                      bind:value={portOverrides[key]}
-                      disabled={subscriptionsBusy}
-                    />
-                    <button
-                      data-testid="sub-{key}"
-                      class="{btnPrimary} !px-2.5 !py-1 !text-xs"
-                      onclick={() =>
-                        toggleSubscription(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                          false,
+                    {@const options = earliestEpochOptions[key] ?? []}
+                    {@const selectedEarliest =
+                      selectedEarliestEpochValue(stream)}
+                    <select
+                      data-testid="earliest-epoch-{key}"
+                      class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 disabled:cursor-not-allowed"
+                      value={selectedEarliest}
+                      onchange={(event) =>
+                        void changeEarliestEpoch(
+                          stream,
+                          event.currentTarget.value,
                         )}
-                      disabled={subscriptionsBusy}
+                      disabled={modeDraft === "race"}
                     >
-                      {subscriptionsBusy && activeSubscriptionKey === key
-                        ? "..."
-                        : "Subscribe"}
+                      {#if earliestEpochLoading[key]}
+                        <option value="">Loading epochs...</option>
+                      {:else if earliestEpochLoadErrors[key]}
+                        <option value="">Epochs unavailable</option>
+                      {:else if options.length === 0}
+                        <option value="">No epochs available</option>
+                      {:else}
+                        {#each options as option}
+                          <option value={String(option.stream_epoch)}>
+                            {formatEarliestEpochOption(option)}
+                          </option>
+                        {/each}
+                      {/if}
+                    </select>
+                    <button
+                      data-testid="pause-resume-{key}"
+                      class={stream.paused ? btnOk : btnWarn}
+                      onclick={() => pauseOrResumeStream(stream)}
+                      disabled={streamActionBusy}
+                    >
+                      {stream.paused ? "Resume" : "Pause"}
                     </button>
                   {/if}
                 </div>
@@ -1107,7 +1295,6 @@
     </Card>
   </div>
 
-  <!-- Logs -->
   <Card>
     <div class="-m-4">
       <LogViewer entries={logs?.entries ?? []} />

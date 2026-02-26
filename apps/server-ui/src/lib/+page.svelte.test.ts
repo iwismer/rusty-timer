@@ -16,6 +16,7 @@ vi.mock("$lib/api", async () => {
     getMetrics: vi.fn(),
     getStreamReads: vi.fn(),
     getStreamEpochs: vi.fn(),
+    resetEpoch: vi.fn(),
     getRaceStreamEpochMappings: vi.fn(),
     setStreamEpochRace: vi.fn(),
     activateNextStreamEpochForRace: vi.fn(),
@@ -118,6 +119,7 @@ describe("stream detail page activate-next", () => {
       stream_epoch: 1,
       race_id: "race-1",
     });
+    vi.mocked(api.resetEpoch).mockResolvedValue();
     vi.mocked(api.activateNextStreamEpochForRace).mockResolvedValue();
 
     replaceStreams([stream]);
@@ -139,7 +141,7 @@ describe("stream detail page activate-next", () => {
     ]);
   });
 
-  it("keeps shared advance action disabled for dirty rows until Save succeeds", async () => {
+  it("keeps shared advance action enabled for dirty rows and uses saved mapping", async () => {
     render(StreamDetailPage);
 
     const select = await screen.findByTestId("epoch-race-select-1");
@@ -151,15 +153,32 @@ describe("stream detail page activate-next", () => {
 
     await fireEvent.change(select, { target: { value: "race-2" } });
     expect(saveButton).not.toBeDisabled();
-    expect(activateNext).toBeDisabled();
-
-    await fireEvent.click(saveButton);
-    await waitFor(() => {
-      expect(screen.getByTestId("epoch-race-state-1")).toHaveTextContent(
-        "Saved",
-      );
-    });
     expect(activateNext).not.toBeDisabled();
+
+    await fireEvent.click(activateNext);
+    expect(api.activateNextStreamEpochForRace).toHaveBeenCalledWith(
+      "race-1",
+      "abc-123",
+    );
+  });
+
+  it("calls resetEpoch when advancing an unmapped current epoch", async () => {
+    vi.mocked(api.getRaceStreamEpochMappings).mockResolvedValue({
+      mappings: [],
+    });
+
+    render(StreamDetailPage);
+
+    const activateNext = await screen.findByTestId(
+      "epoch-race-advance-next-btn",
+    );
+    await waitFor(() => {
+      expect(activateNext).not.toBeDisabled();
+    });
+
+    await fireEvent.click(activateNext);
+    expect(api.resetEpoch).toHaveBeenCalledWith("abc-123");
+    expect(api.activateNextStreamEpochForRace).not.toHaveBeenCalled();
   });
 
   it("enables shared advance action when stream epoch matches and is_current is false", async () => {
