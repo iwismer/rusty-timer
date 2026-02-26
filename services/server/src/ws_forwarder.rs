@@ -1,10 +1,15 @@
 use crate::{
+    announcer::AnnouncerInputEvent,
     auth::validate_token,
     dashboard_events::{DashboardEvent, OptionalStringPatch},
-    repo::events::{
-        IngestResult, count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
-        fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
-        upsert_stream,
+    repo::{
+        announcer_config,
+        events::{
+            IngestResult, count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
+            fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
+            upsert_stream,
+        },
+        races::lookup_stream_chip_participant,
     },
     state::{AppState, ForwarderCommand, ForwarderProxyReply},
     ws_common::{
@@ -20,7 +25,8 @@ use axum::{
     response::IntoResponse,
 };
 use rt_protocol::{AckEntry, ForwarderAck, WsMessage, error_codes};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::convert::TryFrom;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -69,6 +75,16 @@ fn created_reader_ips_for_logging<'a>(
         .filter(|reader_ip| stream_map.contains_key(reader_ip.as_str()))
         .map(String::as_str)
         .collect()
+}
+
+fn parse_chip_id_from_raw_frame(raw_frame: &[u8]) -> Option<String> {
+    let trimmed = raw_frame
+        .strip_suffix(b"\r\n")
+        .or_else(|| raw_frame.strip_suffix(b"\n"))
+        .unwrap_or(raw_frame);
+    let raw = std::str::from_utf8(trimmed).ok()?;
+    let chip = ipico_core::read::ChipRead::try_from(raw).ok()?;
+    Some(chip.tag_id)
 }
 
 fn display_name_change_log_entry(
@@ -550,6 +566,22 @@ async fn handle_event_batch(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut high_water: HashMap<(String, u64), u64> = HashMap::new();
     let mut epoch_transitions: HashMap<Uuid, i64> = HashMap::new();
+    let config = announcer_config::get_config(&state.pool).await.ok();
+    let now = chrono::Utc::now();
+    let (announcer_enabled, announcer_selected_streams, announcer_max_list_size) =
+        if let Some(config) = config {
+            let not_expired = config.enabled_until.map(|ts| ts > now).unwrap_or(true);
+            (
+                config.enabled && not_expired,
+                config
+                    .selected_stream_ids
+                    .into_iter()
+                    .collect::<HashSet<Uuid>>(),
+                usize::try_from(config.max_list_size.max(1)).unwrap_or(25),
+            )
+        } else {
+            (false, HashSet::new(), 25)
+        };
 
     for event in &batch.events {
         let stream_id = if let Some(&sid) = stream_map.get(&event.reader_ip) {
@@ -592,6 +624,58 @@ async fn handle_event_batch(
                     .or_insert(0);
                 if event.seq > *entry {
                     *entry = event.seq;
+                }
+
+                if announcer_enabled
+                    && announcer_selected_streams.contains(&stream_id)
+                    && let Some(chip_id) = parse_chip_id_from_raw_frame(&event.raw_frame)
+                {
+                    let participant = match lookup_stream_chip_participant(
+                        &state.pool,
+                        stream_id,
+                        &chip_id,
+                    )
+                    .await
+                    {
+                        Ok(found) => found,
+                        Err(err) => {
+                            warn!(
+                                stream_id = %stream_id,
+                                error = %err,
+                                "failed to resolve announcer participant; using unknown"
+                            );
+                            None
+                        }
+                    };
+
+                    let (display_name, bib) = match participant {
+                        Some(participant) => match (
+                            participant.first_name.as_deref(),
+                            participant.last_name.as_deref(),
+                        ) {
+                            (Some(first), Some(last)) => {
+                                (format!("{first} {last}").trim().to_owned(), participant.bib)
+                            }
+                            _ => ("Unknown".to_owned(), participant.bib),
+                        },
+                        None => ("Unknown".to_owned(), None),
+                    };
+
+                    let mut runtime = state.announcer_runtime.write().await;
+                    if let Some(delta) = runtime.ingest(
+                        AnnouncerInputEvent {
+                            stream_id,
+                            seq: event.seq as i64,
+                            chip_id,
+                            bib,
+                            display_name,
+                            reader_timestamp: Some(event.reader_timestamp.clone()),
+                            received_at: chrono::Utc::now(),
+                        },
+                        announcer_max_list_size,
+                    ) {
+                        let _ = state.announcer_tx.send(delta);
+                    }
                 }
             }
             IngestResult::Retransmit => {

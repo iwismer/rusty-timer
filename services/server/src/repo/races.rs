@@ -24,6 +24,12 @@ pub struct UnmatchedChipRow {
     pub bib: i32,
 }
 
+pub struct StreamChipParticipantRow {
+    pub bib: Option<i32>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+}
+
 pub async fn list_races(pool: &PgPool) -> Result<Vec<RaceRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"SELECT r.race_id, r.name, r.created_at,
@@ -185,4 +191,34 @@ pub async fn list_unmatched_chips(
             bib: r.get("bib"),
         })
         .collect())
+}
+
+pub async fn lookup_stream_chip_participant(
+    pool: &PgPool,
+    stream_id: Uuid,
+    chip_id: &str,
+) -> Result<Option<StreamChipParticipantRow>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"SELECT c.bib, p.first_name, p.last_name
+           FROM streams s
+           LEFT JOIN forwarder_races fr
+                  ON fr.forwarder_id = s.forwarder_id
+           LEFT JOIN chips c
+                  ON c.race_id = fr.race_id
+                 AND c.chip_id = $2
+           LEFT JOIN participants p
+                  ON p.race_id = fr.race_id
+                 AND p.bib = c.bib
+           WHERE s.stream_id = $1"#,
+    )
+    .bind(stream_id)
+    .bind(chip_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| StreamChipParticipantRow {
+        bib: r.get("bib"),
+        first_name: r.get("first_name"),
+        last_name: r.get("last_name"),
+    }))
 }

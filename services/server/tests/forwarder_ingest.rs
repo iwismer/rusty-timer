@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
+use uuid::Uuid;
 
 async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, raw_token: &[u8]) {
     let hash = Sha256::digest(raw_token);
@@ -372,4 +373,89 @@ async fn test_path_unsafe_forwarder_id_rejected() {
         Err(_) => {}
         Ok(other) => panic!("expected INVALID_TOKEN error, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn test_announcer_runtime_updates_for_selected_stream() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, online) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(stream_id)
+    .bind("fwd-announcer")
+    .bind("192.168.2.10:10000")
+    .bind(false)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO stream_metrics (stream_id) VALUES ($1)")
+        .bind(stream_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE announcer_config SET enabled = true, selected_stream_ids = $1, max_list_size = 25",
+    )
+    .bind(vec![stream_id])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app_state = server::AppState::new(pool.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_state = app_state.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(server_state, None))
+            .await
+            .unwrap();
+    });
+
+    insert_token(&pool, "fwd-announcer", "forwarder", b"test-token-announcer").await;
+    let url = format!("ws://{}/ws/v1/forwarders", addr);
+    let mut client = MockWsClient::connect_with_token(&url, "test-token-announcer")
+        .await
+        .unwrap();
+    client
+        .send_message(&WsMessage::ForwarderHello(ForwarderHello {
+            forwarder_id: "fwd-announcer".to_owned(),
+            reader_ips: vec!["192.168.2.10:10000".to_owned()],
+            display_name: None,
+        }))
+        .await
+        .unwrap();
+    let session_id = match client.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected Heartbeat, got {:?}", other),
+    };
+
+    client
+        .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
+            session_id,
+            batch_id: "b001".to_owned(),
+            events: vec![ReadEvent {
+                forwarder_id: "fwd-announcer".to_owned(),
+                reader_ip: "192.168.2.10:10000".to_owned(),
+                stream_epoch: 1,
+                seq: 1,
+                reader_timestamp: "2026-02-17T10:00:00.000Z".to_owned(),
+                raw_frame: "aa400000000123450a2a01123018455927a7".as_bytes().to_vec(),
+                read_type: "RAW".to_owned(),
+            }],
+        }))
+        .await
+        .unwrap();
+    let _ = client.recv_message().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let runtime = app_state.announcer_runtime.read().await;
+    assert_eq!(runtime.finisher_count(), 1);
+    assert_eq!(runtime.rows().len(), 1);
+    assert_eq!(runtime.rows()[0].chip_id, "000000012345");
 }

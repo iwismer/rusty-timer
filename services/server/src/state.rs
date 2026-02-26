@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, oneshot};
 use uuid::Uuid;
 
-use crate::dashboard_events::DashboardEvent;
+use crate::{announcer::AnnouncerRuntime, dashboard_events::DashboardEvent};
 
 pub enum ForwarderProxyReply<T> {
     Response(T),
@@ -35,6 +35,7 @@ pub type BroadcastRegistry = Arc<RwLock<HashMap<Uuid, StreamBroadcast>>>;
 pub type ForwarderCommandSenders =
     Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<ForwarderCommand>>>>;
 pub type ReceiverSessionRegistry = Arc<RwLock<HashMap<String, ReceiverSessionRecord>>>;
+pub type AnnouncerRuntimeState = Arc<RwLock<AnnouncerRuntime>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiverSessionProtocol {
@@ -64,13 +65,16 @@ pub struct AppState {
     pub broadcast_registry: BroadcastRegistry,
     pub forwarder_command_senders: ForwarderCommandSenders,
     pub active_receiver_sessions: ReceiverSessionRegistry,
+    pub announcer_runtime: AnnouncerRuntimeState,
     pub dashboard_tx: broadcast::Sender<DashboardEvent>,
+    pub announcer_tx: broadcast::Sender<crate::announcer::AnnouncerDelta>,
     pub logger: Arc<rt_ui_log::UiLogger<DashboardEvent>>,
 }
 
 impl AppState {
     pub fn new(pool: PgPool) -> Self {
         let (dashboard_tx, _) = broadcast::channel(4096);
+        let (announcer_tx, _) = broadcast::channel(4096);
         let logger = Arc::new(rt_ui_log::UiLogger::with_buffer(
             dashboard_tx.clone(),
             |entry| DashboardEvent::LogEntry { entry },
@@ -82,7 +86,9 @@ impl AppState {
             broadcast_registry: Arc::new(RwLock::new(HashMap::new())),
             forwarder_command_senders: Arc::new(RwLock::new(HashMap::new())),
             active_receiver_sessions: Arc::new(RwLock::new(HashMap::new())),
+            announcer_runtime: Arc::new(RwLock::new(AnnouncerRuntime::new())),
             dashboard_tx,
+            announcer_tx,
             logger,
         }
     }
