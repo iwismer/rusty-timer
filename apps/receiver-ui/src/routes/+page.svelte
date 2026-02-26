@@ -50,6 +50,7 @@
   let modeBusy = $state(false);
   let modeApplyQueued = $state(false);
   let savedModePayload = $state<string | null>(null);
+  let modeEditedSinceHydration = $state(false);
   let modeHydrationVersion = 0;
   let modeEditVersion = 0;
   let modeMutationVersion = 0;
@@ -172,6 +173,25 @@
     return String(newest);
   }
 
+  function resolveReplayTargetEpoch(stream: api.StreamEntry): number | null {
+    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+
+    const configured = parseApiReturnedEpoch(key, targetedEpochInputs[key]);
+    if (configured !== null) {
+      return configured;
+    }
+
+    const selected = parseApiReturnedEpoch(
+      key,
+      selectedTargetedEpochValue(stream),
+    );
+    if (selected !== null) {
+      return selected;
+    }
+
+    return parseNonNegativeInt(stream.stream_epoch);
+  }
+
   async function prefetchEarliestEpochOptions(
     streamList: api.StreamEntry[],
     forceRefreshKeys: Set<string> = new Set<string>(),
@@ -244,10 +264,12 @@
   function applyHydratedMode(mode: ReceiverMode): void {
     hydrateMode(mode);
     savedModePayload = JSON.stringify(mode);
+    modeEditedSinceHydration = false;
     modeHydrationVersion += 1;
   }
 
   function markModeEdited(): void {
+    modeEditedSinceHydration = true;
     modeEditVersion += 1;
   }
 
@@ -317,8 +339,9 @@
   }
 
   let modeDirty = $derived(
-    savedModePayload !== null &&
-      JSON.stringify(modePayload()) !== savedModePayload,
+    savedModePayload === null
+      ? modeEditedSinceHydration
+      : JSON.stringify(modePayload()) !== savedModePayload,
   );
 
   function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
@@ -447,6 +470,7 @@
         await api.putMode(payload);
         modeMutationVersion += 1;
         savedModePayload = JSON.stringify(payload);
+        modeEditedSinceHydration = false;
         error = null;
       } catch (e) {
         error = String(e);
@@ -554,11 +578,7 @@
   }
 
   async function replayStream(stream: api.StreamEntry): Promise<void> {
-    const key = streamKey(stream.forwarder_id, stream.reader_ip);
-    const parsed = parseApiReturnedEpoch(
-      key,
-      selectedTargetedEpochValue(stream),
-    );
+    const parsed = resolveReplayTargetEpoch(stream);
     if (parsed === null) {
       error = "Select a valid target epoch before replaying.";
       return;
@@ -587,11 +607,7 @@
   async function replayAll(): Promise<void> {
     const targets = (streams?.streams ?? [])
       .map((stream) => {
-        const key = streamKey(stream.forwarder_id, stream.reader_ip);
-        const stream_epoch = parseApiReturnedEpoch(
-          key,
-          selectedTargetedEpochValue(stream),
-        );
+        const stream_epoch = resolveReplayTargetEpoch(stream);
         if (stream_epoch === null) {
           return null;
         }

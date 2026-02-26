@@ -120,6 +120,24 @@ describe("receiver page mode controls", () => {
     expect((raceSelect as HTMLSelectElement).value).toBe("race-1");
   });
 
+  it("hydrates live mode when earliest epochs are omitted", async () => {
+    apiMocks.getMode.mockResolvedValueOnce({
+      mode: "live",
+      streams: [],
+    });
+
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("mode-select");
+    expect((modeSelect as HTMLSelectElement).value).toBe("live");
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/earliest_epochs is undefined/i),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("applies live mode with all available streams on Apply Mode", async () => {
     apiMocks.getStreams.mockResolvedValueOnce({
       streams: [
@@ -161,6 +179,24 @@ describe("receiver page mode controls", () => {
         ],
         earliest_epochs: [],
       });
+    });
+  });
+
+  it("enables Apply Mode after local mode edits when initial mode load fails", async () => {
+    apiMocks.getMode.mockRejectedValueOnce(new Error("mode unavailable"));
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("mode-select");
+    const apply = await screen.findByTestId("save-mode-btn");
+
+    expect(apply).toBeDisabled();
+
+    await fireEvent.change(modeSelect, {
+      target: { value: "targeted_replay" },
+    });
+
+    await waitFor(() => {
+      expect(apply).not.toBeDisabled();
     });
   });
 
@@ -681,6 +717,36 @@ describe("receiver page mode controls", () => {
             forwarder_id: "fwd-1",
             reader_ip: "10.0.0.1:10000",
             stream_epoch: 9,
+          },
+        ],
+      });
+    });
+  });
+
+  it("replays a single stream with current epoch when epoch options are unavailable", async () => {
+    apiMocks.getReplayTargetEpochs.mockRejectedValueOnce(
+      new Error("epochs unavailable"),
+    );
+    render(Page);
+
+    const modeSelect = await screen.findByTestId("mode-select");
+    await fireEvent.change(modeSelect, {
+      target: { value: "targeted_replay" },
+    });
+
+    const replayButton = await screen.findByTestId(
+      "replay-stream-fwd-1/10.0.0.1:10000",
+    );
+    await fireEvent.click(replayButton);
+
+    await waitFor(() => {
+      expect(apiMocks.putMode).toHaveBeenCalledWith({
+        mode: "targeted_replay",
+        targets: [
+          {
+            forwarder_id: "fwd-1",
+            reader_ip: "10.0.0.1:10000",
+            stream_epoch: 5,
           },
         ],
       });
