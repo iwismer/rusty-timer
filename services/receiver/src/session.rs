@@ -1,3 +1,4 @@
+use crate::control_api::ConnectionState;
 use crate::db::Db;
 use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, WsMessage};
@@ -32,6 +33,7 @@ pub struct SessionLoopDeps {
     pub shutdown: watch::Receiver<bool>,
     pub paused_streams: Arc<RwLock<HashSet<String>>>,
     pub all_paused: Arc<RwLock<bool>>,
+    pub connection_state: Arc<RwLock<ConnectionState>>,
 }
 
 fn apply_batch_counts(
@@ -107,12 +109,15 @@ where
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
                                 let all_paused_now = *deps.all_paused.read().await;
+                                let reconnect_pending =
+                                    deps.connection_state.read().await.clone()
+                                        != ConnectionState::Connected;
                                 let paused_set = deps.paused_streams.read().await;
                                 let forwarded_events: Vec<ReadEvent> = b
                                     .events
                                     .iter()
                                     .filter(|e| {
-                                        if all_paused_now {
+                                        if all_paused_now || reconnect_pending {
                                             return false;
                                         }
                                         !paused_set.contains(&format!("{}/{}", e.forwarder_id, e.reader_ip))

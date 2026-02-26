@@ -389,6 +389,9 @@ async fn main() {
                                                         shutdown: cancel_rx,
                                                         paused_streams,
                                                         all_paused,
+                                                        connection_state: Arc::clone(
+                                                            &st.connection_state,
+                                                        ),
                                                     };
                                                     let result = receiver::session::run_session_loop(
                                                         ws, session_id, deps,

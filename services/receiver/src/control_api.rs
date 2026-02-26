@@ -669,10 +669,10 @@ async fn post_resume_stream(
     State(state): State<Arc<AppState>>,
     Json(body): Json<StreamPauseRequest>,
 ) -> impl IntoResponse {
+    let _ = state.request_reconnect_if_connected().await;
     state
         .resume_stream(&body.forwarder_id, &body.reader_ip)
         .await;
-    let _ = state.request_reconnect_if_connected().await;
     state.emit_streams_snapshot().await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -684,8 +684,8 @@ async fn post_pause_all(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 async fn post_resume_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.resume_all().await;
     let _ = state.request_reconnect_if_connected().await;
+    state.resume_all().await;
     state.emit_streams_snapshot().await;
     StatusCode::NO_CONTENT.into_response()
 }
