@@ -59,6 +59,20 @@ All REST endpoints live under `/api/v1/`. WebSocket endpoints are under `/ws/v1/
 - `GET /api/v1/streams/:stream_id/reads` -- reads for a stream
 - `GET /api/v1/forwarders/:forwarder_id/reads` -- reads for a forwarder
 
+### Announcer
+
+- `GET /api/v1/announcer/config` -- read announcer config
+- `PUT /api/v1/announcer/config` -- update announcer config
+- `POST /api/v1/announcer/reset` -- clear announcer runtime state
+- `GET /api/v1/announcer/state` -- public snapshot (config + current rows/count)
+- `GET /api/v1/announcer/events` -- announcer SSE updates (`announcer_update`)
+
+Announcer semantics:
+- Enabling requires at least one selected stream.
+- `enabled_until` is set on explicit enable and is not extended by later edits.
+- Runtime state (dedup/list/count) is in-memory and resets on process restart.
+- No historical backfill is emitted on enable/reset; only new canonical reads.
+
 ### Races
 
 - `GET /api/v1/races` -- list races
@@ -89,6 +103,7 @@ management. See `src/http/admin.rs` for the full list.
 ### Server-Sent Events
 
 - `GET /api/v1/events` -- SSE stream for the dashboard
+- `GET /api/v1/announcer/events` -- SSE stream for announcer rows
 
 ## Docker
 

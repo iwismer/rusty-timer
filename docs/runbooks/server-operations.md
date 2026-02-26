@@ -9,11 +9,12 @@ and its PostgreSQL database.
 2. [Startup and Deployment](#startup-and-deployment)
 3. [Configuration](#configuration)
 4. [Monitoring and Health](#monitoring-and-health)
-5. [Recovery Procedures](#recovery-procedures)
-6. [Epoch Reset (Admin)](#epoch-reset-admin)
-7. [Exports](#exports)
-8. [Manual Retention Delete (DB-Admin Only)](#manual-retention-delete-db-admin-only)
-9. [Troubleshooting](#troubleshooting)
+5. [Announcer Operations](#announcer-operations)
+6. [Recovery Procedures](#recovery-procedures)
+7. [Epoch Reset (Admin)](#epoch-reset-admin)
+8. [Exports](#exports)
+9. [Manual Retention Delete (DB-Admin Only)](#manual-retention-delete-db-admin-only)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -25,8 +26,10 @@ The rt-server is a stateless Rust service backed by PostgreSQL. It:
 - Exposes a REST API for stream management, metrics, and exports.
 - Serves the dashboard UI as static files.
 
-**Server is stateless** — all event data lives in Postgres. Restarting
-the server process does not lose any data.
+**Server is mostly stateless** — canonical event data lives in Postgres.
+Restarting the server process does not lose canonical event history.
+Exception: announcer runtime state (dedup/list/count) is in-memory and is
+cleared on restart by design.
 
 ---
 
@@ -136,6 +139,43 @@ Operational note:
 
 ---
 
+## Announcer Operations
+
+The announcer feature exposes a public `/announcer` screen and dashboard
+controls at `/announcer-config`.
+
+### Endpoint summary
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/announcer/config` | Current persisted announcer configuration |
+| `PUT /api/v1/announcer/config` | Update config (enable/select streams/max list) |
+| `POST /api/v1/announcer/reset` | Clear announcer runtime list/count/dedup |
+| `GET /api/v1/announcer/state` | Snapshot used by public announcer screen |
+| `GET /api/v1/announcer/events` | Live SSE updates (`announcer_update`) |
+
+### Enable + expiry semantics
+
+- Enabling requires at least one selected stream.
+- `enabled_until` is fixed at the explicit enable action (24h window).
+- Editing stream selection/max size while enabled does not extend expiry.
+- Once expired, announcer behaves as disabled for ingestion and public display.
+
+### Reset triggers
+
+Announcer runtime state is reset when any of the following occurs:
+- Manual `POST /api/v1/announcer/reset`
+- Stream selection set changes via `PUT /api/v1/announcer/config`
+- Selected stream epoch changes (manual reset-epoch command or epoch transition)
+
+### Operational caveats
+
+- No historical backfill is replayed on enable/reset.
+- Unknown chip mappings are shown as `Unknown` with chip ID.
+- Runtime state is process-memory only and is cleared on server restart.
+
+---
+
 ## Recovery Procedures
 
 ### Server restart (no data loss)
@@ -152,6 +192,7 @@ docker compose --env-file deploy/server/.env -f deploy/server/docker-compose.pro
 
 After restart, connected forwarders and receivers will reconnect automatically.
 Any in-flight events are re-sent by the forwarder (at-least-once delivery).
+Announcer runtime list/count are reset after restart and repopulate from new reads.
 
 ### Database recovery
 
