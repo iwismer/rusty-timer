@@ -639,12 +639,15 @@ async fn put_mode(
             .into_response();
     }
 
-    state.pause_all().await;
-
     let db = state.db.lock().await;
     match db.save_receiver_mode(&mode) {
         Ok(()) => {
             drop(db);
+            if matches!(mode, ReceiverMode::TargetedReplay { .. }) {
+                state.resume_all().await;
+            } else {
+                state.pause_all().await;
+            }
             let _ = state
                 .ui_tx
                 .send(crate::ui_events::ReceiverUiEvent::ModeChanged { mode: mode.clone() });

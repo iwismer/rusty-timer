@@ -175,6 +175,58 @@ async fn mode_switch_pauses_streams() {
 }
 
 #[tokio::test]
+async fn targeted_replay_mode_keeps_streams_resumed_for_delivery() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db);
+    let app = build_router(Arc::clone(&state));
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/subscriptions",
+            json!({
+                "subscriptions":[{"forwarder_id":"f1","reader_ip":"10.0.0.1:10000","local_port_override":null}]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    assert_eq!(
+        post_empty(app.clone(), "/api/v1/streams/resume-all").await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (_, before) = get_json(app.clone(), "/api/v1/streams").await;
+    assert_eq!(before["streams"][0]["paused"], false);
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/mode",
+            json!({
+                "mode":"targeted_replay",
+                "targets":[{"forwarder_id":"f1","reader_ip":"10.0.0.1:10000","stream_epoch":1}]
+            })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (_, after) = get_json(app, "/api/v1/streams").await;
+    assert_eq!(after["streams"][0]["paused"], false);
+}
+
+#[tokio::test]
 async fn pause_and_resume_stream_endpoints_update_stream_state() {
     let app = setup();
     assert_eq!(
