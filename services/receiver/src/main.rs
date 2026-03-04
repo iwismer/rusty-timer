@@ -109,6 +109,15 @@ async fn main() {
         });
     state.logger.log("Control API listening on 127.0.0.1:9090");
 
+    let url = "http://127.0.0.1:9090";
+    println!("Receiver listening on {url}");
+
+    if !cli.no_open_browser {
+        if let Err(e) = open::that(url) {
+            warn!("Failed to open browser: {e}");
+        }
+    }
+
     let api_state = Arc::clone(&state);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
