@@ -23,7 +23,7 @@
       "Bash(npx prettier:*)",
       "Bash(npx:*)",
       "Bash(node:*)",
-      "Skill(pr-manager)"
+      "Bash(git checkout:*)"
     ]
   }
 }
