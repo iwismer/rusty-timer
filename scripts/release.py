@@ -480,6 +480,22 @@ def main() -> None:
         if not args.dry_run:
             rollback_transaction(start_head, tags)
         sys.exit(1)
+    except KeyboardInterrupt:
+        print(
+            style("\nInterrupted. Rolling back local transaction.", role="error"),
+            file=sys.stderr,
+        )
+        if not args.dry_run:
+            rollback_transaction(start_head, tags)
+        sys.exit(130)
+    except Exception as e:
+        print(
+            style(f"Error: unexpected failure: {e}", role="error"),
+            file=sys.stderr,
+        )
+        if not args.dry_run:
+            rollback_transaction(start_head, tags)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
