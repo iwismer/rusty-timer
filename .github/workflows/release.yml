@@ -36,7 +36,7 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if ! git ls-remote --tags origin "$INPUT_TAG" | grep -q .; then
+          if ! git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" "$INPUT_TAG" | grep -q .; then
             echo "::error::Tag '$INPUT_TAG' does not exist on origin. Push the tag first."
             exit 1
           fi
