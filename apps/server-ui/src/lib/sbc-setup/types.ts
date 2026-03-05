@@ -14,4 +14,5 @@ export interface SbcSetupFormData {
   readerTargets: string;
   statusBind: string;
   displayName: string;
+  setupScriptUrl: string;
 }

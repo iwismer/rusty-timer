@@ -90,7 +90,7 @@ export function validateBaseUrl(value: string): string | Error {
       return new Error("Server base URL must start with http:// or https://");
     if (!url.hostname)
       return new Error("Server base URL must include a hostname");
-    return url.toString();
+    return v;
   } catch {
     return new Error("Server base URL must be a valid URL");
   }

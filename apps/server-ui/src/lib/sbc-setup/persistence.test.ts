@@ -36,6 +36,8 @@ describe("readSbcSetupPreference", () => {
       readerTargets: "192.168.1.10:10000",
       statusBind: "0.0.0.0:80",
       displayName: "rt-fwd-02",
+      setupScriptUrl:
+        "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
       ipBaseOctet: 50,
     };
     vi.stubGlobal("localStorage", {
@@ -81,6 +83,8 @@ describe("writeSbcSetupPreference", () => {
       readerTargets: "",
       statusBind: "0.0.0.0:80",
       displayName: "",
+      setupScriptUrl:
+        "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
       ipBaseOctet: 50,
     };
     const result = writeSbcSetupPreference(data);
@@ -110,6 +114,8 @@ describe("writeSbcSetupPreference", () => {
       readerTargets: "",
       statusBind: "0.0.0.0:80",
       displayName: "",
+      setupScriptUrl:
+        "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
       ipBaseOctet: 50,
     };
     const result = writeSbcSetupPreference(data);
@@ -187,5 +193,9 @@ describe("computeBaseOctet", () => {
 
   it("returns 0 for malformed CIDR", () => {
     expect(computeBaseOctet("rt-fwd-01", "badformat")).toBe(0);
+  });
+
+  it("clamps to 0 when hostname number exceeds IP octet", () => {
+    expect(computeBaseOctet("rt-fwd-05", "192.168.1.2/24")).toBe(0);
   });
 });

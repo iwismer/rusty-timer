@@ -122,11 +122,11 @@ describe("parseDnsServers", () => {
 });
 
 describe("validateBaseUrl", () => {
-  it("accepts http URL and canonicalizes", () => {
-    expect(validateBaseUrl("http://example.com")).toBe("http://example.com/");
+  it("accepts http URL without canonicalizing", () => {
+    expect(validateBaseUrl("http://example.com")).toBe("http://example.com");
   });
-  it("accepts https URL and canonicalizes", () => {
-    expect(validateBaseUrl("https://example.com")).toBe("https://example.com/");
+  it("accepts https URL without canonicalizing", () => {
+    expect(validateBaseUrl("https://example.com")).toBe("https://example.com");
   });
   it("rejects empty", () => {
     expect(validateBaseUrl("")).toBeInstanceOf(Error);

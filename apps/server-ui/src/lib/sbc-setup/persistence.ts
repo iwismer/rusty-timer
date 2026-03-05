@@ -77,5 +77,5 @@ export function computeBaseOctet(hostname: string, cidr: string): number {
   const lastOctetMatch = /(\d+)\/\d+$/.exec(cidr);
   if (!lastOctetMatch) return 0;
   const lastOctet = parseInt(lastOctetMatch[1], 10);
-  return lastOctet - parsed.num;
+  return Math.max(0, lastOctet - parsed.num);
 }

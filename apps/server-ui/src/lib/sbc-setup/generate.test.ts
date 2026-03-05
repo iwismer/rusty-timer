@@ -20,6 +20,8 @@ function baseConfig(): SbcSetupFormData {
     readerTargets: "192.168.1.10:10000",
     statusBind: "0.0.0.0:80",
     displayName: "rt-fwd-01",
+    setupScriptUrl:
+      "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
   };
 }
 
@@ -89,6 +91,16 @@ describe("generateUserData", () => {
     const config = { ...baseConfig(), displayName: "" };
     const result = generateUserData(config);
     expect(result).toContain("RT_SETUP_DISPLAY_NAME='rt-fwd-01'");
+  });
+
+  it("uses custom setupScriptUrl when provided", () => {
+    const config = {
+      ...baseConfig(),
+      setupScriptUrl: "https://my-server.com/setup.sh",
+    };
+    const result = generateUserData(config);
+    expect(result).toContain("https://my-server.com/setup.sh");
+    expect(result).not.toContain("raw.githubusercontent.com");
   });
 
   it("filters blank lines from multi-line reader targets", () => {

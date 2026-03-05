@@ -1,8 +1,5 @@
 import type { SbcSetupFormData } from "./types";
 
-const SETUP_SCRIPT_URL =
-  "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh";
-
 function yamlQuote(value: string): string {
   return "'" + value.replace(/'/g, "''") + "'";
 }
@@ -86,7 +83,7 @@ export function generateUserData(config: SbcSetupFormData): string {
     `  - mkdir -p /etc/rusty-timer\n` +
     `  - mkdir -p /var/lib/rusty-timer\n` +
     `  - chown rt-forwarder:rt-forwarder /var/lib/rusty-timer\n` +
-    `  - curl -fsSL ${yamlQuote(SETUP_SCRIPT_URL)} -o /var/tmp/rt-setup.sh\n` +
+    `  - curl -fsSL ${yamlQuote(config.setupScriptUrl)} -o /var/tmp/rt-setup.sh\n` +
     `  - chmod 0755 /var/tmp/rt-setup.sh\n` +
     `  - bash -lc 'set -a; . /etc/rusty-timer/rt-setup.env; set +a; /var/tmp/rt-setup.sh'\n`
   );
