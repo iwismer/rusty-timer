@@ -303,8 +303,22 @@ def git_head_sha() -> str:
 
 def rollback_transaction(start_head: str, created_tags: list[str]) -> None:
     for tag in reversed(created_tags):
-        run(["git", "tag", "-d", tag], check=False)
-    run(["git", "reset", "--hard", start_head], check=False)
+        result = run(["git", "tag", "-d", tag], check=False)
+        if result.returncode != 0:
+            print(
+                style(f"    Warning: failed to delete local tag {tag}", role="warning"),
+                file=sys.stderr,
+            )
+    result = run(["git", "reset", "--hard", start_head], check=False)
+    if result.returncode != 0:
+        print(
+            style(
+                f"    Warning: failed to reset HEAD to {start_head}. "
+                "Manual cleanup may be required.",
+                role="warning",
+            ),
+            file=sys.stderr,
+        )
 
 
 def main() -> None:
@@ -357,6 +371,8 @@ def main() -> None:
         print("Nothing to release — all services are already at the target version.")
         return
 
+    start_head = git_head_sha()
+
     if args.dry_run:
         print(
             style(
@@ -364,8 +380,6 @@ def main() -> None:
                 role="dry_run",
             )
         )
-    else:
-        start_head = git_head_sha()
 
     # --- Confirm ---
     if not args.yes:
@@ -431,28 +445,32 @@ def main() -> None:
                 tags.append(tag)
 
         # --- Push ---
-        # Push commits first, then each tag individually so GitHub Actions
-        # triggers a separate workflow run for each tag.
+        # Use --atomic so either all refs land or none do.  If GitHub Actions
+        # only fires one workflow run for a multi-tag push, use the
+        # workflow_dispatch trigger to manually re-run the missed releases.
         print(style("\n[Final Step] Push commits and tags", role="step"))
-        log_command(["git", "push", "origin", "master"], execute=not args.dry_run)
-
         push_tags = tags if not args.dry_run else [f"{svc}-v{new}" for svc, _, new in plan]
-        for tag in push_tags:
-            log_command(["git", "push", "origin", tag], execute=not args.dry_run)
+        push_cmd = ["git", "push", "--atomic", "origin", "master", *push_tags]
+        log_command(push_cmd, execute=not args.dry_run)
 
         if args.dry_run:
             print(style("Dry run complete.", role="dry_run"))
         else:
             print(style("Done!", role="success"))
     except subprocess.CalledProcessError as e:
+        failed_cmd = shlex.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
         if args.dry_run:
             print(
-                style("Error: dry-run checks failed.", role="error"),
+                style(f"Error: dry-run checks failed: {failed_cmd}", role="error"),
                 file=sys.stderr,
             )
         else:
             print(
-                style("Error: release failed, rolling back transaction.", role="error"),
+                style(
+                    f"Error: release failed (exit {e.returncode}): {failed_cmd}\n"
+                    "Rolling back local transaction.",
+                    role="error",
+                ),
                 file=sys.stderr,
             )
         if e.stderr:

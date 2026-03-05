@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. server-v0.4.0). Must already exist as a git tag."
+        description: "Tag to release. Format: <service>-v<X.Y.Z> (e.g. server-v0.4.0). Must already exist as a git tag."
         required: true
         type: string
   push:
@@ -31,6 +31,16 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
+      - name: Validate workflow_dispatch tag exists
+        if: inputs.tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if ! git ls-remote --tags origin "$INPUT_TAG" | grep -q .; then
+            echo "::error::Tag '$INPUT_TAG' does not exist on origin. Push the tag first."
+            exit 1
+          fi
+
       - name: Parse tag
         id: parse
         env:
