@@ -1,3 +1,4 @@
+use clap::Parser;
 use receiver::Subscription;
 use receiver::cache::EventBus;
 use receiver::control_api::{AppState, ConnectionState};
@@ -11,8 +12,17 @@ use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
 use tracing::{error, info, warn};
 
+#[derive(Parser)]
+#[command(name = "receiver", about = "Rusty Timer Receiver")]
+struct Cli {
+    /// Disable automatic browser open on startup
+    #[arg(long)]
+    no_open_browser: bool,
+}
+
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
     tracing_subscriber::fmt::init();
 
     // -------------------------------------------------------------------------
@@ -98,6 +108,15 @@ async fn main() {
             std::process::exit(1);
         });
     state.logger.log("Control API listening on 127.0.0.1:9090");
+
+    let url = "http://127.0.0.1:9090";
+    println!("Receiver listening on {url}");
+
+    if !cli.no_open_browser
+        && let Err(e) = open::that(url)
+    {
+        warn!("Failed to open browser: {e}");
+    }
 
     let api_state = Arc::clone(&state);
     tokio::spawn(async move {
