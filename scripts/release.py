@@ -305,16 +305,18 @@ def rollback_transaction(start_head: str, created_tags: list[str]) -> None:
     for tag in reversed(created_tags):
         result = run(["git", "tag", "-d", tag], check=False)
         if result.returncode != 0:
+            detail = result.stderr.strip() if result.stderr else "no details available"
             print(
-                style(f"    Warning: failed to delete local tag {tag}", role="warning"),
+                style(f"    Warning: failed to delete local tag {tag}: {detail}", role="warning"),
                 file=sys.stderr,
             )
     result = run(["git", "reset", "--hard", start_head], check=False)
     if result.returncode != 0:
+        detail = result.stderr.strip() if result.stderr else "no details available"
         print(
             style(
-                f"    Warning: failed to reset HEAD to {start_head}. "
-                "Manual cleanup may be required.",
+                f"    Warning: failed to reset HEAD to {start_head}: {detail}\n"
+                "    Manual cleanup may be required.",
                 role="warning",
             ),
             file=sys.stderr,
