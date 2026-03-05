@@ -431,12 +431,14 @@ def main() -> None:
                 tags.append(tag)
 
         # --- Push ---
+        # Push commits first, then each tag individually so GitHub Actions
+        # triggers a separate workflow run for each tag.
         print(style("\n[Final Step] Push commits and tags", role="step"))
-        push_cmd = ["git", "push", "--atomic", "origin", "master", *tags]
-        if args.dry_run and plan:
-            dry_tags = [f"{service}-v{new}" for service, _, new in plan]
-            push_cmd = ["git", "push", "--atomic", "origin", "master", *dry_tags]
-        log_command(push_cmd, execute=not args.dry_run)
+        log_command(["git", "push", "origin", "master"], execute=not args.dry_run)
+
+        push_tags = tags if not args.dry_run else [f"{svc}-v{new}" for svc, _, new in plan]
+        for tag in push_tags:
+            log_command(["git", "push", "origin", tag], execute=not args.dry_run)
 
         if args.dry_run:
             print(style("Dry run complete.", role="dry_run"))
