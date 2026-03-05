@@ -40,7 +40,7 @@
     wifiEnabled: false,
     wifiSsid: "",
     wifiPassword: "",
-    wifiCountry: "US",
+    wifiCountry: "CA",
     serverBaseUrl: "",
     authToken: "",
     readerTargets: "",
@@ -66,6 +66,9 @@
         DEFAULTS.hostname,
         DEFAULTS.staticIpv4Cidr,
       );
+    }
+    if (!form.serverBaseUrl) {
+      form.serverBaseUrl = window.location.origin;
     }
   });
 
