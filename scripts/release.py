@@ -25,6 +25,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
+import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -301,10 +302,40 @@ def git_head_sha() -> str:
     return result.stdout.strip()
 
 
-def rollback_transaction(start_head: str, created_tags: list[str]) -> None:
+def rollback_transaction(start_head: str, created_tags: list[str]) -> bool:
+    success = True
     for tag in reversed(created_tags):
-        run(["git", "tag", "-d", tag], check=False)
-    run(["git", "reset", "--hard", start_head], check=False)
+        result = run(["git", "tag", "-d", tag], check=False)
+        if result.returncode != 0:
+            success = False
+            detail = result.stderr.strip() if result.stderr else "no details available"
+            print(
+                style(f"    Warning: failed to delete local tag {tag}: {detail}", role="warning"),
+                file=sys.stderr,
+            )
+    result = run(["git", "reset", "--hard", start_head], check=False)
+    if result.returncode != 0:
+        success = False
+        detail = result.stderr.strip() if result.stderr else "no details available"
+        print(
+            style(
+                f"    Warning: failed to reset HEAD to {start_head}: {detail}\n"
+                "    Manual cleanup may be required.",
+                role="warning",
+            ),
+            file=sys.stderr,
+        )
+    if success:
+        print(
+            style("    Rollback complete. Working tree restored.", role="success"),
+            file=sys.stderr,
+        )
+    else:
+        print(
+            style("    Rollback INCOMPLETE. Manual cleanup required.", role="error"),
+            file=sys.stderr,
+        )
+    return success
 
 
 def main() -> None:
@@ -357,6 +388,11 @@ def main() -> None:
         print("Nothing to release — all services are already at the target version.")
         return
 
+    start_head = git_head_sha()
+    if not start_head:
+        print("Error: could not determine current HEAD SHA.", file=sys.stderr)
+        sys.exit(1)
+
     if args.dry_run:
         print(
             style(
@@ -364,8 +400,6 @@ def main() -> None:
                 role="dry_run",
             )
         )
-    else:
-        start_head = git_head_sha()
 
     # --- Confirm ---
     if not args.yes:
@@ -431,11 +465,12 @@ def main() -> None:
                 tags.append(tag)
 
         # --- Push ---
+        # Use --atomic so either all refs land or none do.  If GitHub Actions
+        # only fires one workflow run for a multi-tag push, use the
+        # workflow_dispatch trigger to manually re-run the missed releases.
         print(style("\n[Final Step] Push commits and tags", role="step"))
-        push_cmd = ["git", "push", "--atomic", "origin", "master", *tags]
-        if args.dry_run and plan:
-            dry_tags = [f"{service}-v{new}" for service, _, new in plan]
-            push_cmd = ["git", "push", "--atomic", "origin", "master", *dry_tags]
+        push_tags = tags if not args.dry_run else [f"{svc}-v{new}" for svc, _, new in plan]
+        push_cmd = ["git", "push", "--atomic", "origin", "master", *push_tags]
         log_command(push_cmd, execute=not args.dry_run)
 
         if args.dry_run:
@@ -443,18 +478,45 @@ def main() -> None:
         else:
             print(style("Done!", role="success"))
     except subprocess.CalledProcessError as e:
+        failed_cmd = shlex.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
         if args.dry_run:
             print(
-                style("Error: dry-run checks failed.", role="error"),
+                style(f"Error: dry-run checks failed: {failed_cmd}", role="error"),
                 file=sys.stderr,
             )
         else:
             print(
-                style("Error: release failed, rolling back transaction.", role="error"),
+                style(
+                    f"Error: release failed (exit {e.returncode}): {failed_cmd}\n"
+                    "Rolling back local transaction.",
+                    role="error",
+                ),
                 file=sys.stderr,
             )
         if e.stderr:
             print(e.stderr, file=sys.stderr)
+        if not args.dry_run:
+            rollback_transaction(start_head, tags)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        if not args.dry_run:
+            print(
+                style("\nInterrupted. Rolling back local transaction.", role="error"),
+                file=sys.stderr,
+            )
+            rollback_transaction(start_head, tags)
+        else:
+            print(
+                style("\nInterrupted.", role="error"),
+                file=sys.stderr,
+            )
+        sys.exit(130)
+    except Exception as e:
+        print(
+            style(f"Error: unexpected failure: {e}", role="error"),
+            file=sys.stderr,
+        )
+        traceback.print_exc(file=sys.stderr)
         if not args.dry_run:
             rollback_transaction(start_head, tags)
         sys.exit(1)

@@ -22,7 +22,8 @@
       "Bash(npx vitest:*)",
       "Bash(npx prettier:*)",
       "Bash(npx:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }
