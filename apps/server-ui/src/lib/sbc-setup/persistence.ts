@@ -9,18 +9,26 @@ export function readSbcSetupPreference(): SbcSetupStored | null {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as SbcSetupStored;
-  } catch {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.hostname !== "string") {
+      console.warn("sbcSetup: stored data failed shape check, ignoring");
+      return null;
+    }
+    return parsed as SbcSetupStored;
+  } catch (e) {
+    console.warn("sbcSetup: failed to read stored preference", e);
     return null;
   }
 }
 
-export function writeSbcSetupPreference(data: SbcSetupStored): void {
-  if (typeof localStorage === "undefined") return;
+export function writeSbcSetupPreference(data: SbcSetupStored): boolean {
+  if (typeof localStorage === "undefined") return false;
   try {
     localStorage.setItem(KEY, JSON.stringify(data));
-  } catch {
-    // silently ignore
+    return true;
+  } catch (e) {
+    console.warn("sbcSetup: failed to write preference", e);
+    return false;
   }
 }
 
@@ -49,9 +57,11 @@ export function autoIncrement(current: {
   if (!parsed) return { ...current };
 
   const nextNum = parsed.num + 1;
+  const newOctet = current.ipBaseOctet + nextNum;
+  if (newOctet > 255) return { ...current };
+
   const newHostname =
     parsed.prefix + String(nextNum).padStart(parsed.width, "0");
-  const newOctet = current.ipBaseOctet + nextNum;
   const newCidr = replaceLastOctet(current.staticIpv4Cidr, newOctet);
 
   return {

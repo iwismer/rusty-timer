@@ -12,6 +12,7 @@
     parseDnsServers,
     validateBaseUrl,
     parseReaderTargets,
+    validateStatusBind,
     validateWifiCountry,
   } from "$lib/sbc-setup/validation";
   import {
@@ -54,7 +55,7 @@
   onMount(() => {
     const saved = readSbcSetupPreference();
     if (saved) {
-      form = { ...saved };
+      form = { ...DEFAULTS, ...saved };
       ipBaseOctet = saved.ipBaseOctet;
     } else {
       ipBaseOctet = computeBaseOctet(
@@ -121,6 +122,16 @@
         if (r instanceof Error) newErrors.readerTargets = r.message;
         break;
       }
+      case "statusBind": {
+        const r = validateStatusBind(form.statusBind);
+        if (r instanceof Error) newErrors.statusBind = r.message;
+        break;
+      }
+      case "authToken": {
+        if (!form.authToken.trim())
+          newErrors.authToken = "Auth token is required";
+        break;
+      }
     }
 
     errors = newErrors;
@@ -160,6 +171,11 @@
     const targets = parseReaderTargets(form.readerTargets);
     if (targets instanceof Error) newErrors.readerTargets = targets.message;
 
+    if (!form.authToken.trim()) newErrors.authToken = "Auth token is required";
+
+    const sb = validateStatusBind(form.statusBind);
+    if (sb instanceof Error) newErrors.statusBind = sb.message;
+
     errors = newErrors;
     return Object.keys(newErrors).length === 0;
   }
@@ -182,10 +198,23 @@
     const userData = generateUserData(form);
     const networkConfig = generateNetworkConfig(form);
 
-    downloadFile("user-data", userData);
-    downloadFile("network-config", networkConfig);
+    try {
+      downloadFile("user-data", userData);
+      downloadFile("network-config", networkConfig);
+    } catch (e) {
+      console.error("Failed to download files:", e);
+      feedback = "Download failed — check browser permissions.";
+      return;
+    }
 
-    writeSbcSetupPreference({ ...form, ipBaseOctet });
+    const saved = writeSbcSetupPreference({
+      ...form,
+      authToken: "",
+      ipBaseOctet,
+    });
+    if (!saved) {
+      feedback = "Downloaded, but failed to save preferences for next time.";
+    }
 
     const incremented = autoIncrement({
       hostname: form.hostname,
@@ -198,7 +227,9 @@
     form.authToken = "";
     form.displayName = "";
 
-    feedback = "Downloaded! Form auto-incremented for next device.";
+    if (!feedback) {
+      feedback = "Downloaded! Form auto-incremented for next device.";
+    }
   }
 
   async function handleCreateToken() {
@@ -211,7 +242,14 @@
       });
       form.authToken = result.token;
     } catch (e) {
-      tokenError = String(e);
+      console.error("Failed to create token:", e);
+      if (e instanceof TypeError && e.message === "Failed to fetch") {
+        tokenError = "Network error — is the server reachable?";
+      } else if (e instanceof Error) {
+        tokenError = e.message;
+      } else {
+        tokenError = "An unexpected error occurred while creating the token";
+      }
     } finally {
       tokenCreating = false;
     }
@@ -498,7 +536,10 @@
                 id="authToken"
                 type="text"
                 bind:value={form.authToken}
-                class="block flex-1 rounded border px-3 py-2 text-sm bg-surface-0 text-text-primary border-border font-mono"
+                onblur={() => handleBlur("authToken")}
+                class="block flex-1 rounded border px-3 py-2 text-sm bg-surface-0 text-text-primary font-mono {errors.authToken
+                  ? 'border-status-err'
+                  : 'border-border'}"
               />
               <button
                 onclick={handleCreateToken}
@@ -508,6 +549,11 @@
                 {tokenCreating ? "Creating..." : "Create Token"}
               </button>
             </div>
+            {#if errors.authToken}
+              <p class="text-xs text-status-err mt-1 m-0">
+                {errors.authToken}
+              </p>
+            {/if}
             {#if tokenError}
               <p class="text-xs text-status-err mt-1 m-0">{tokenError}</p>
             {/if}
@@ -546,9 +592,17 @@
               id="statusBind"
               type="text"
               bind:value={form.statusBind}
+              onblur={() => handleBlur("statusBind")}
               placeholder="0.0.0.0:80"
-              class="mt-1 block w-full rounded border px-3 py-2 text-sm bg-surface-0 text-text-primary border-border"
+              class="mt-1 block w-full rounded border px-3 py-2 text-sm bg-surface-0 text-text-primary {errors.statusBind
+                ? 'border-status-err'
+                : 'border-border'}"
             />
+            {#if errors.statusBind}
+              <p class="text-xs text-status-err mt-1 m-0">
+                {errors.statusBind}
+              </p>
+            {/if}
           </div>
 
           <!-- Display Name -->

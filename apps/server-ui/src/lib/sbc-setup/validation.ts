@@ -79,9 +79,16 @@ export function parseDnsServers(value: string): string[] | Error {
 export function validateBaseUrl(value: string): string | Error {
   const v = value.trim();
   if (!v) return new Error("Server base URL is required");
-  if (!v.startsWith("http://") && !v.startsWith("https://"))
-    return new Error("Server base URL must start with http:// or https://");
-  return v;
+  try {
+    const url = new URL(v);
+    if (url.protocol !== "http:" && url.protocol !== "https:")
+      return new Error("Server base URL must start with http:// or https://");
+    if (!url.hostname)
+      return new Error("Server base URL must include a hostname");
+    return v;
+  } catch {
+    return new Error("Server base URL must be a valid URL");
+  }
 }
 
 export function validateReaderTarget(value: string): string | Error {
@@ -91,6 +98,34 @@ export function validateReaderTarget(value: string): string | Error {
     return new Error(
       "Reader target must be IP:PORT or IP_RANGE:PORT (e.g. 192.168.1.10:10000)",
     );
+
+  const colonIdx = v.lastIndexOf(":");
+  const ipPart = v.substring(0, colonIdx);
+  const portStr = v.substring(colonIdx + 1);
+  const port = parseInt(portStr, 10);
+  if (port < 1 || port > 65535)
+    return new Error("Port must be between 1 and 65535");
+
+  const dashIdx = ipPart.indexOf("-");
+  if (dashIdx !== -1) {
+    const baseIp = ipPart.substring(0, ipPart.lastIndexOf("."));
+    const startOctetStr = ipPart.substring(
+      ipPart.lastIndexOf(".", dashIdx - 1) + 1,
+      dashIdx,
+    );
+    const endOctetStr = ipPart.substring(dashIdx + 1);
+    const baseWithStart = baseIp + "." + startOctetStr;
+    if (!isValidIpv4(baseWithStart))
+      return new Error("Invalid IP address in reader target");
+    const endOctet = parseInt(endOctetStr, 10);
+    const startOctet = parseInt(startOctetStr, 10);
+    if (endOctet < 0 || endOctet > 255 || endOctet < startOctet)
+      return new Error("Invalid IP range in reader target");
+  } else {
+    if (!isValidIpv4(ipPart))
+      return new Error("Invalid IP address in reader target");
+  }
+
   return v;
 }
 
@@ -106,6 +141,21 @@ export function parseReaderTargets(value: string): string[] | Error {
     if (result instanceof Error) return result;
   }
   return entries;
+}
+
+export function validateStatusBind(value: string): string | Error {
+  const v = value.trim();
+  if (!v) return new Error("Status bind address is required");
+  const colonIdx = v.lastIndexOf(":");
+  if (colonIdx === -1)
+    return new Error("Status bind must be IP:PORT (e.g. 0.0.0.0:80)");
+  const ip = v.substring(0, colonIdx);
+  const portStr = v.substring(colonIdx + 1);
+  if (!isValidIpv4(ip)) return new Error("Invalid IP address in status bind");
+  const port = parseInt(portStr, 10);
+  if (isNaN(port) || port < 1 || port > 65535)
+    return new Error("Port must be between 1 and 65535");
+  return v;
 }
 
 export function validateWifiCountry(value: string): string | Error {

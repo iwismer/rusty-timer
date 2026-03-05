@@ -54,13 +54,13 @@ export function generateUserData(config: SbcSetupFormData): string {
 
   return (
     `#cloud-config\n` +
-    `hostname: ${config.hostname}\n` +
+    `hostname: ${yamlQuote(config.hostname)}\n` +
     `manage_etc_hosts: true\n` +
     `enable_ssh: true\n` +
     `ssh_pwauth: false\n` +
     `\n` +
     `users:\n` +
-    `  - name: ${config.adminUsername}\n` +
+    `  - name: ${yamlQuote(config.adminUsername)}\n` +
     `    groups: sudo\n` +
     `    shell: /bin/bash\n` +
     `    lock_passwd: true\n` +
@@ -98,7 +98,9 @@ export function generateNetworkConfig(config: SbcSetupFormData): string {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const dnsLines = dnsEntries.map((s) => `          - ${s}`).join("\n");
+  const dnsLines = dnsEntries
+    .map((s) => `          - ${yamlQuote(s)}`)
+    .join("\n");
 
   let text =
     `network:\n` +
@@ -109,10 +111,10 @@ export function generateNetworkConfig(config: SbcSetupFormData): string {
     `      dhcp6: false\n` +
     `      optional: true\n` +
     `      addresses:\n` +
-    `        - ${config.staticIpv4Cidr}\n` +
+    `        - ${yamlQuote(config.staticIpv4Cidr)}\n` +
     `      routes:\n` +
     `        - to: default\n` +
-    `          via: ${config.gateway}\n` +
+    `          via: ${yamlQuote(config.gateway)}\n` +
     `      nameservers:\n` +
     `        addresses:\n` +
     `${dnsLines}\n`;

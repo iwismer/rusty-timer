@@ -31,7 +31,7 @@ describe("generateUserData", () => {
 
   it("includes hostname", () => {
     const result = generateUserData(baseConfig());
-    expect(result).toContain("hostname: rt-fwd-01");
+    expect(result).toContain("hostname: 'rt-fwd-01'");
   });
 
   it("includes SSH key in single quotes", () => {
@@ -41,7 +41,7 @@ describe("generateUserData", () => {
 
   it("includes admin username", () => {
     const result = generateUserData(baseConfig());
-    expect(result).toContain("name: rt-admin");
+    expect(result).toContain("name: 'rt-admin'");
   });
 
   it("includes rt-forwarder system user", () => {
@@ -72,6 +72,35 @@ describe("generateUserData", () => {
     expect(result).toContain("curl -fsSL");
     expect(result).toContain("rt-setup.sh");
   });
+
+  it("shell-escapes auth token with single quote", () => {
+    const config = { ...baseConfig(), authToken: "tok_it's" };
+    const result = generateUserData(config);
+    expect(result).toContain("RT_SETUP_AUTH_TOKEN='tok_it'\\''s'");
+  });
+
+  it("shell-escapes display name with single quote", () => {
+    const config = { ...baseConfig(), displayName: "O'Brien" };
+    const result = generateUserData(config);
+    expect(result).toContain("RT_SETUP_DISPLAY_NAME='O'\\''Brien'");
+  });
+
+  it("falls back to hostname when displayName is empty", () => {
+    const config = { ...baseConfig(), displayName: "" };
+    const result = generateUserData(config);
+    expect(result).toContain("RT_SETUP_DISPLAY_NAME='rt-fwd-01'");
+  });
+
+  it("filters blank lines from multi-line reader targets", () => {
+    const config = {
+      ...baseConfig(),
+      readerTargets: "192.168.1.10:10000\n\n192.168.1.11:10000\n",
+    };
+    const result = generateUserData(config);
+    expect(result).toContain(
+      "RT_SETUP_READER_TARGETS='192.168.1.10:10000,192.168.1.11:10000'",
+    );
+  });
 });
 
 describe("generateNetworkConfig", () => {
@@ -82,18 +111,18 @@ describe("generateNetworkConfig", () => {
 
   it("includes static IP on eth0", () => {
     const result = generateNetworkConfig(baseConfig());
-    expect(result).toContain("192.168.1.50/24");
+    expect(result).toContain("'192.168.1.50/24'");
   });
 
   it("includes gateway", () => {
     const result = generateNetworkConfig(baseConfig());
-    expect(result).toContain("via: 192.168.1.1");
+    expect(result).toContain("via: '192.168.1.1'");
   });
 
   it("includes DNS servers", () => {
     const result = generateNetworkConfig(baseConfig());
-    expect(result).toContain("- 8.8.8.8");
-    expect(result).toContain("- 8.8.4.4");
+    expect(result).toContain("- '8.8.8.8'");
+    expect(result).toContain("- '8.8.4.4'");
   });
 
   it("does not include wifi when disabled", () => {
@@ -127,5 +156,29 @@ describe("generateNetworkConfig", () => {
     const result = generateNetworkConfig(config);
     expect(result).toContain("'OpenNet': {}");
     expect(result).not.toContain("password:");
+  });
+
+  it("YAML-escapes wifi SSID with single quote", () => {
+    const config = {
+      ...baseConfig(),
+      wifiEnabled: true,
+      wifiSsid: "Bob's Net",
+      wifiPassword: "pass",
+      wifiCountry: "US",
+    };
+    const result = generateNetworkConfig(config);
+    expect(result).toContain("'Bob''s Net':");
+  });
+
+  it("YAML-escapes wifi password with single quote", () => {
+    const config = {
+      ...baseConfig(),
+      wifiEnabled: true,
+      wifiSsid: "MyNet",
+      wifiPassword: "it's-secret",
+      wifiCountry: "US",
+    };
+    const result = generateNetworkConfig(config);
+    expect(result).toContain("password: 'it''s-secret'");
   });
 });

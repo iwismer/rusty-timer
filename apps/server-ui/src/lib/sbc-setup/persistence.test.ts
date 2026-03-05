@@ -3,6 +3,7 @@ import {
   readSbcSetupPreference,
   writeSbcSetupPreference,
   autoIncrement,
+  computeBaseOctet,
   type SbcSetupStored,
 } from "./persistence";
 
@@ -82,8 +83,37 @@ describe("writeSbcSetupPreference", () => {
       displayName: "",
       ipBaseOctet: 50,
     };
-    writeSbcSetupPreference(data);
+    const result = writeSbcSetupPreference(data);
     expect(setItem).toHaveBeenCalledWith("sbcSetup", JSON.stringify(data));
+    expect(result).toBe(true);
+  });
+
+  it("returns false when localStorage throws", () => {
+    vi.stubGlobal("localStorage", {
+      setItem: vi.fn().mockImplementation(() => {
+        throw new Error("quota exceeded");
+      }),
+    } as unknown as Storage);
+    const data: SbcSetupStored = {
+      hostname: "rt-fwd-01",
+      adminUsername: "rt-admin",
+      sshPublicKey: "",
+      staticIpv4Cidr: "192.168.1.51/24",
+      gateway: "192.168.1.1",
+      dnsServers: "8.8.8.8",
+      wifiEnabled: false,
+      wifiSsid: "",
+      wifiPassword: "",
+      wifiCountry: "US",
+      serverBaseUrl: "",
+      authToken: "",
+      readerTargets: "",
+      statusBind: "0.0.0.0:80",
+      displayName: "",
+      ipBaseOctet: 50,
+    };
+    const result = writeSbcSetupPreference(data);
+    expect(result).toBe(false);
   });
 });
 
@@ -127,5 +157,35 @@ describe("autoIncrement", () => {
     });
     expect(result.hostname).toBe("rt-fwd-04");
     expect(result.staticIpv4Cidr).toBe("192.168.1.54/24");
+  });
+
+  it("returns unchanged when next octet would exceed 255", () => {
+    const input = {
+      hostname: "rt-fwd-205",
+      staticIpv4Cidr: "192.168.1.255/24",
+      ipBaseOctet: 50,
+    };
+    const result = autoIncrement(input);
+    expect(result.hostname).toBe("rt-fwd-205");
+    expect(result.staticIpv4Cidr).toBe("192.168.1.255/24");
+    expect(result.ipBaseOctet).toBe(50);
+  });
+});
+
+describe("computeBaseOctet", () => {
+  it("computes base from hostname number and IP octet", () => {
+    expect(computeBaseOctet("rt-fwd-01", "192.168.1.51/24")).toBe(50);
+  });
+
+  it("works for higher hostname numbers", () => {
+    expect(computeBaseOctet("rt-fwd-03", "192.168.1.53/24")).toBe(50);
+  });
+
+  it("returns 0 for hostname without trailing number", () => {
+    expect(computeBaseOctet("my-sbc", "192.168.1.50/24")).toBe(0);
+  });
+
+  it("returns 0 for malformed CIDR", () => {
+    expect(computeBaseOctet("rt-fwd-01", "badformat")).toBe(0);
   });
 });

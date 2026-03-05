@@ -9,6 +9,7 @@ import {
   validateBaseUrl,
   validateReaderTarget,
   parseReaderTargets,
+  validateStatusBind,
   validateWifiCountry,
 } from "./validation";
 
@@ -67,6 +68,9 @@ describe("validateIpv4Cidr", () => {
   it("rejects invalid octets", () => {
     expect(validateIpv4Cidr("999.999.999.999/24")).toBeInstanceOf(Error);
   });
+  it("rejects prefix length > 32", () => {
+    expect(validateIpv4Cidr("192.168.1.50/33")).toBeInstanceOf(Error);
+  });
   it("rejects empty", () => {
     expect(validateIpv4Cidr("")).toBeInstanceOf(Error);
   });
@@ -115,6 +119,9 @@ describe("validateBaseUrl", () => {
   it("rejects non-http", () => {
     expect(validateBaseUrl("ftp://example.com")).toBeInstanceOf(Error);
   });
+  it("rejects protocol-only URL without host", () => {
+    expect(validateBaseUrl("https://")).toBeInstanceOf(Error);
+  });
 });
 
 describe("validateReaderTarget", () => {
@@ -131,6 +138,12 @@ describe("validateReaderTarget", () => {
   it("rejects missing port", () => {
     expect(validateReaderTarget("192.168.1.10")).toBeInstanceOf(Error);
   });
+  it("rejects invalid IP octets", () => {
+    expect(validateReaderTarget("999.999.999.999:99999")).toBeInstanceOf(Error);
+  });
+  it("rejects port 0", () => {
+    expect(validateReaderTarget("192.168.1.10:0")).toBeInstanceOf(Error);
+  });
 });
 
 describe("parseReaderTargets", () => {
@@ -141,6 +154,27 @@ describe("parseReaderTargets", () => {
   });
   it("rejects empty", () => {
     expect(parseReaderTargets("")).toBeInstanceOf(Error);
+  });
+});
+
+describe("validateStatusBind", () => {
+  it("accepts valid bind address", () => {
+    expect(validateStatusBind("0.0.0.0:80")).toBe("0.0.0.0:80");
+  });
+  it("accepts localhost with port", () => {
+    expect(validateStatusBind("127.0.0.1:8080")).toBe("127.0.0.1:8080");
+  });
+  it("rejects missing port", () => {
+    expect(validateStatusBind("badaddr")).toBeInstanceOf(Error);
+  });
+  it("rejects invalid IP", () => {
+    expect(validateStatusBind("999.0.0.1:80")).toBeInstanceOf(Error);
+  });
+  it("rejects port 0", () => {
+    expect(validateStatusBind("0.0.0.0:0")).toBeInstanceOf(Error);
+  });
+  it("rejects empty", () => {
+    expect(validateStatusBind("")).toBeInstanceOf(Error);
   });
 });
 
