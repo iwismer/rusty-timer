@@ -465,13 +465,20 @@ def main() -> None:
                 tags.append(tag)
 
         # --- Push ---
-        # Use --atomic so either all refs land or none do.  If GitHub Actions
-        # only fires one workflow run for a multi-tag push, use the
-        # workflow_dispatch trigger to manually re-run the missed releases.
+        # Push commits first, then each tag individually.  GitHub's push.tags
+        # trigger creates one workflow run per push event — pushing all tags in
+        # a single command causes only one workflow to fire while the rest are
+        # silently dropped.  Pushing tags one-by-one ensures every tag gets its
+        # own release workflow run.
         print(style("\n[Final Step] Push commits and tags", role="step"))
         push_tags = tags if not args.dry_run else [f"{svc}-v{new}" for svc, _, new in plan]
-        push_cmd = ["git", "push", "--atomic", "origin", "master", *push_tags]
-        log_command(push_cmd, execute=not args.dry_run)
+
+        # 1. Push commits (without tags)
+        log_command(["git", "push", "origin", "master"], execute=not args.dry_run)
+
+        # 2. Push each tag individually so each triggers its own workflow run
+        for tag in push_tags:
+            log_command(["git", "push", "origin", tag], execute=not args.dry_run)
 
         if args.dry_run:
             print(style("Dry run complete.", role="dry_run"))
