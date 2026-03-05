@@ -25,6 +25,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
+import traceback
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -511,8 +512,6 @@ def main() -> None:
             )
         sys.exit(130)
     except Exception as e:
-        import traceback
-
         print(
             style(f"Error: unexpected failure: {e}", role="error"),
             file=sys.stderr,
