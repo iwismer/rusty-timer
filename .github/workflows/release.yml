@@ -31,12 +31,21 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - name: Validate workflow_dispatch tag exists
+      - name: Validate workflow_dispatch tag
         if: inputs.tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if ! git ls-remote --tags "https://github.com/$GITHUB_REPOSITORY" "$INPUT_TAG" | grep -q .; then
+          if [ -z "$INPUT_TAG" ]; then
+            echo "::error::Tag input is empty."
+            exit 1
+          fi
+          if ! [[ "$INPUT_TAG" =~ ^(forwarder|receiver|streamer|emulator|server)-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid tag format: '$INPUT_TAG'. Expected: <service>-v<X.Y.Z>"
+            exit 1
+          fi
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$INPUT_TAG" >/dev/null 2>&1; then
             echo "::error::Tag '$INPUT_TAG' does not exist on origin. Push the tag first."
             exit 1
           fi
@@ -69,9 +78,10 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Verify Cargo.toml version matches tag
+        env:
+          SERVICE: ${{ steps.parse.outputs.service }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
-          SERVICE="${{ steps.parse.outputs.service }}"
-          VERSION="${{ steps.parse.outputs.version }}"
           CARGO_VERSION=$(python3 - "$SERVICE" <<'PY'
           import sys
           import tomllib
@@ -91,8 +101,9 @@ jobs:
 
       - name: Build matrix
         id: matrix
+        env:
+          SERVICE: ${{ steps.parse.outputs.service }}
         run: |
-          SERVICE="${{ steps.parse.outputs.service }}"
           case "$SERVICE" in
             forwarder|emulator)
               MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'

@@ -301,10 +301,12 @@ def git_head_sha() -> str:
     return result.stdout.strip()
 
 
-def rollback_transaction(start_head: str, created_tags: list[str]) -> None:
+def rollback_transaction(start_head: str, created_tags: list[str]) -> bool:
+    success = True
     for tag in reversed(created_tags):
         result = run(["git", "tag", "-d", tag], check=False)
         if result.returncode != 0:
+            success = False
             detail = result.stderr.strip() if result.stderr else "no details available"
             print(
                 style(f"    Warning: failed to delete local tag {tag}: {detail}", role="warning"),
@@ -312,6 +314,7 @@ def rollback_transaction(start_head: str, created_tags: list[str]) -> None:
             )
     result = run(["git", "reset", "--hard", start_head], check=False)
     if result.returncode != 0:
+        success = False
         detail = result.stderr.strip() if result.stderr else "no details available"
         print(
             style(
@@ -321,6 +324,17 @@ def rollback_transaction(start_head: str, created_tags: list[str]) -> None:
             ),
             file=sys.stderr,
         )
+    if success:
+        print(
+            style("    Rollback complete. Working tree restored.", role="success"),
+            file=sys.stderr,
+        )
+    else:
+        print(
+            style("    Rollback INCOMPLETE. Manual cleanup required.", role="error"),
+            file=sys.stderr,
+        )
+    return success
 
 
 def main() -> None:
@@ -374,6 +388,9 @@ def main() -> None:
         return
 
     start_head = git_head_sha()
+    if not start_head:
+        print("Error: could not determine current HEAD SHA.", file=sys.stderr)
+        sys.exit(1)
 
     if args.dry_run:
         print(
@@ -481,18 +498,26 @@ def main() -> None:
             rollback_transaction(start_head, tags)
         sys.exit(1)
     except KeyboardInterrupt:
-        print(
-            style("\nInterrupted. Rolling back local transaction.", role="error"),
-            file=sys.stderr,
-        )
         if not args.dry_run:
+            print(
+                style("\nInterrupted. Rolling back local transaction.", role="error"),
+                file=sys.stderr,
+            )
             rollback_transaction(start_head, tags)
+        else:
+            print(
+                style("\nInterrupted.", role="error"),
+                file=sys.stderr,
+            )
         sys.exit(130)
     except Exception as e:
+        import traceback
+
         print(
             style(f"Error: unexpected failure: {e}", role="error"),
             file=sys.stderr,
         )
+        traceback.print_exc(file=sys.stderr)
         if not args.dry_run:
             rollback_transaction(start_head, tags)
         sys.exit(1)
