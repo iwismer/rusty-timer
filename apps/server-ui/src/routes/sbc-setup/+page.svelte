@@ -65,75 +65,39 @@
     }
   });
 
+  const blurValidators: Record<
+    string,
+    () => string | Error | string[] | undefined
+  > = {
+    hostname: () => validateHostname(form.hostname),
+    adminUsername: () => validateUsername(form.adminUsername),
+    sshPublicKey: () => validateSshKey(form.sshPublicKey),
+    staticIpv4Cidr: () => validateIpv4Cidr(form.staticIpv4Cidr),
+    gateway: () => validateIpv4Address(form.gateway),
+    dnsServers: () => parseDnsServers(form.dnsServers),
+    wifiSsid: () => {
+      if (form.wifiEnabled && !form.wifiSsid.trim())
+        return new Error("Wi-Fi SSID is required when Wi-Fi is enabled");
+    },
+    wifiCountry: () => {
+      if (form.wifiEnabled) return validateWifiCountry(form.wifiCountry);
+    },
+    serverBaseUrl: () => validateBaseUrl(form.serverBaseUrl),
+    readerTargets: () => parseReaderTargets(form.readerTargets),
+    statusBind: () => validateStatusBind(form.statusBind),
+    authToken: () => {
+      if (!form.authToken.trim()) return new Error("Auth token is required");
+    },
+  };
+
   function handleBlur(field: string) {
     const newErrors = { ...errors };
     delete newErrors[field];
-
-    switch (field) {
-      case "hostname": {
-        const r = validateHostname(form.hostname);
-        if (r instanceof Error) newErrors.hostname = r.message;
-        break;
-      }
-      case "adminUsername": {
-        const r = validateUsername(form.adminUsername);
-        if (r instanceof Error) newErrors.adminUsername = r.message;
-        break;
-      }
-      case "sshPublicKey": {
-        const r = validateSshKey(form.sshPublicKey);
-        if (r instanceof Error) newErrors.sshPublicKey = r.message;
-        break;
-      }
-      case "staticIpv4Cidr": {
-        const r = validateIpv4Cidr(form.staticIpv4Cidr);
-        if (r instanceof Error) newErrors.staticIpv4Cidr = r.message;
-        break;
-      }
-      case "gateway": {
-        const r = validateIpv4Address(form.gateway);
-        if (r instanceof Error) newErrors.gateway = r.message;
-        break;
-      }
-      case "dnsServers": {
-        const r = parseDnsServers(form.dnsServers);
-        if (r instanceof Error) newErrors.dnsServers = r.message;
-        break;
-      }
-      case "wifiSsid": {
-        if (form.wifiEnabled && !form.wifiSsid.trim())
-          newErrors.wifiSsid = "Wi-Fi SSID is required when Wi-Fi is enabled";
-        break;
-      }
-      case "wifiCountry": {
-        if (form.wifiEnabled) {
-          const r = validateWifiCountry(form.wifiCountry);
-          if (r instanceof Error) newErrors.wifiCountry = r.message;
-        }
-        break;
-      }
-      case "serverBaseUrl": {
-        const r = validateBaseUrl(form.serverBaseUrl);
-        if (r instanceof Error) newErrors.serverBaseUrl = r.message;
-        break;
-      }
-      case "readerTargets": {
-        const r = parseReaderTargets(form.readerTargets);
-        if (r instanceof Error) newErrors.readerTargets = r.message;
-        break;
-      }
-      case "statusBind": {
-        const r = validateStatusBind(form.statusBind);
-        if (r instanceof Error) newErrors.statusBind = r.message;
-        break;
-      }
-      case "authToken": {
-        if (!form.authToken.trim())
-          newErrors.authToken = "Auth token is required";
-        break;
-      }
+    const validator = blurValidators[field];
+    if (validator) {
+      const r = validator();
+      if (r instanceof Error) newErrors[field] = r.message;
     }
-
     errors = newErrors;
   }
 
@@ -180,33 +144,7 @@
     return Object.keys(newErrors).length === 0;
   }
 
-  function handleDownloadUserData() {
-    if (!validateAll()) return;
-    const content = generateUserData(form);
-    downloadFile("user-data", content);
-  }
-
-  function handleDownloadNetworkConfig() {
-    if (!validateAll()) return;
-    const content = generateNetworkConfig(form);
-    downloadFile("network-config", content);
-  }
-
-  function handleDownloadBoth() {
-    if (!validateAll()) return;
-
-    const userData = generateUserData(form);
-    const networkConfig = generateNetworkConfig(form);
-
-    try {
-      downloadFile("user-data", userData);
-      downloadFile("network-config", networkConfig);
-    } catch (e) {
-      console.error("Failed to download files:", e);
-      feedback = "Download failed — check browser permissions.";
-      return;
-    }
-
+  function saveAndIncrement() {
     const saved = writeSbcSetupPreference({
       ...form,
       authToken: "",
@@ -230,6 +168,20 @@
     if (!feedback) {
       feedback = "Downloaded! Form auto-incremented for next device.";
     }
+  }
+
+  function handleDownloadUserData() {
+    if (!validateAll()) return;
+    const content = generateUserData(form);
+    downloadFile("user-data", content);
+    saveAndIncrement();
+  }
+
+  function handleDownloadNetworkConfig() {
+    if (!validateAll()) return;
+    const content = generateNetworkConfig(form);
+    downloadFile("network-config", content);
+    saveAndIncrement();
   }
 
   async function handleCreateToken() {
@@ -627,12 +579,6 @@
 
   <!-- Action Buttons -->
   <div class="flex flex-wrap gap-3">
-    <button
-      onclick={handleDownloadBoth}
-      class="px-4 py-2 text-sm font-medium rounded-md bg-accent text-white border-none cursor-pointer hover:opacity-80"
-    >
-      Download Both &amp; Next
-    </button>
     <button
       onclick={handleDownloadUserData}
       class="px-4 py-2 text-sm font-medium rounded-md bg-surface-1 text-text-primary border border-border cursor-pointer hover:opacity-80"

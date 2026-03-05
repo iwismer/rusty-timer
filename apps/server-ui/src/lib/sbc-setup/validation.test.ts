@@ -50,11 +50,26 @@ describe("validateSshKey", () => {
   it("accepts keys starting with ssh-", () => {
     expect(validateSshKey("ssh-ed25519 AAAA...")).toBe("ssh-ed25519 AAAA...");
   });
+  it("accepts ecdsa-sha2- keys", () => {
+    expect(validateSshKey("ecdsa-sha2-nistp256 AAAA...")).toBe(
+      "ecdsa-sha2-nistp256 AAAA...",
+    );
+  });
+  it("accepts sk-ssh- keys", () => {
+    expect(validateSshKey("sk-ssh-ed25519 AAAA...")).toBe(
+      "sk-ssh-ed25519 AAAA...",
+    );
+  });
+  it("accepts sk-ecdsa- keys", () => {
+    expect(validateSshKey("sk-ecdsa-sha2-nistp256 AAAA...")).toBe(
+      "sk-ecdsa-sha2-nistp256 AAAA...",
+    );
+  });
   it("rejects empty", () => {
     expect(validateSshKey("")).toBeInstanceOf(Error);
   });
-  it("rejects non-ssh prefix", () => {
-    expect(validateSshKey("ecdsa-sha2 ...")).toBeInstanceOf(Error);
+  it("rejects invalid prefix", () => {
+    expect(validateSshKey("rsa-bad AAAA...")).toBeInstanceOf(Error);
   });
 });
 
@@ -107,11 +122,11 @@ describe("parseDnsServers", () => {
 });
 
 describe("validateBaseUrl", () => {
-  it("accepts http URL", () => {
-    expect(validateBaseUrl("http://example.com")).toBe("http://example.com");
+  it("accepts http URL and canonicalizes", () => {
+    expect(validateBaseUrl("http://example.com")).toBe("http://example.com/");
   });
-  it("accepts https URL", () => {
-    expect(validateBaseUrl("https://example.com")).toBe("https://example.com");
+  it("accepts https URL and canonicalizes", () => {
+    expect(validateBaseUrl("https://example.com")).toBe("https://example.com/");
   });
   it("rejects empty", () => {
     expect(validateBaseUrl("")).toBeInstanceOf(Error);

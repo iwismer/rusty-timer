@@ -1,4 +1,3 @@
-// types.ts
 export interface SbcSetupFormData {
   hostname: string;
   adminUsername: string;

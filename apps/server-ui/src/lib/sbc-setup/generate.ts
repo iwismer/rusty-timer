@@ -1,4 +1,3 @@
-// generate.ts
 import type { SbcSetupFormData } from "./types";
 
 const SETUP_SCRIPT_URL =

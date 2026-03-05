@@ -34,10 +34,15 @@ export function validateUsername(value: string): string | Error {
   return v;
 }
 
+const SSH_KEY_PREFIXES = ["ssh-", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-"];
+
 export function validateSshKey(value: string): string | Error {
   const v = value.trim();
   if (!v) return new Error("SSH public key is required");
-  if (!v.startsWith("ssh-")) return new Error("SSH key must start with ssh-");
+  if (!SSH_KEY_PREFIXES.some((p) => v.startsWith(p)))
+    return new Error(
+      "SSH key must start with ssh-, ecdsa-sha2-, sk-ssh-, or sk-ecdsa-",
+    );
   return v;
 }
 
@@ -85,7 +90,7 @@ export function validateBaseUrl(value: string): string | Error {
       return new Error("Server base URL must start with http:// or https://");
     if (!url.hostname)
       return new Error("Server base URL must include a hostname");
-    return v;
+    return url.toString();
   } catch {
     return new Error("Server base URL must be a valid URL");
   }
@@ -106,20 +111,16 @@ export function validateReaderTarget(value: string): string | Error {
   if (port < 1 || port > 65535)
     return new Error("Port must be between 1 and 65535");
 
-  const dashIdx = ipPart.indexOf("-");
-  if (dashIdx !== -1) {
-    const baseIp = ipPart.substring(0, ipPart.lastIndexOf("."));
-    const startOctetStr = ipPart.substring(
-      ipPart.lastIndexOf(".", dashIdx - 1) + 1,
-      dashIdx,
-    );
-    const endOctetStr = ipPart.substring(dashIdx + 1);
-    const baseWithStart = baseIp + "." + startOctetStr;
-    if (!isValidIpv4(baseWithStart))
+  if (ipPart.includes("-")) {
+    const lastDot = ipPart.lastIndexOf(".");
+    const baseIp = ipPart.substring(0, lastDot);
+    const rangePart = ipPart.substring(lastDot + 1);
+    const [startStr, endStr] = rangePart.split("-");
+    const start = parseInt(startStr, 10);
+    const end = parseInt(endStr, 10);
+    if (!isValidIpv4(baseIp + "." + startStr))
       return new Error("Invalid IP address in reader target");
-    const endOctet = parseInt(endOctetStr, 10);
-    const startOctet = parseInt(startOctetStr, 10);
-    if (endOctet < 0 || endOctet > 255 || endOctet < startOctet)
+    if (end < 0 || end > 255 || end < start)
       return new Error("Invalid IP range in reader target");
   } else {
     if (!isValidIpv4(ipPart))
