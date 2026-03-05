@@ -18,7 +18,11 @@
       "mcp__jetbrains__list_directory_tree",
       "Bash(git worktree:*)",
       "Bash(tail:*)",
-      "Bash(gh run:*)"
+      "Bash(gh run:*)",
+      "Bash(npx vitest:*)",
+      "Bash(npx prettier:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)"
     ]
   }
 }
