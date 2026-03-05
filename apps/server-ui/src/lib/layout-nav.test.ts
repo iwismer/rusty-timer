@@ -15,8 +15,24 @@ describe("getLayoutNavLinks", () => {
       "Races",
       "Announcer",
       "Logs",
+      "SBC Setup",
       "Admin",
     ]);
     expect(links.find((link) => link.label === "Announcer")?.active).toBe(true);
+  });
+
+  it("marks SBC Setup as active on /sbc-setup", () => {
+    const links = getLayoutNavLinks("/sbc-setup");
+    const sbcLink = links.find((l) => l.label === "SBC Setup");
+    expect(sbcLink).toBeDefined();
+    expect(sbcLink!.active).toBe(true);
+    expect(sbcLink!.href).toBe("/sbc-setup");
+  });
+
+  it("marks SBC Setup as inactive on other pages", () => {
+    const links = getLayoutNavLinks("/admin");
+    const sbcLink = links.find((l) => l.label === "SBC Setup");
+    expect(sbcLink).toBeDefined();
+    expect(sbcLink!.active).toBe(false);
   });
 });

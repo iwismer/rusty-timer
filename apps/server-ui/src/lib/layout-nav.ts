@@ -38,6 +38,11 @@ export function getLayoutNavLinks(pathname: string): LayoutNavLink[] {
       active: pathname.startsWith("/logs"),
     },
     {
+      href: "/sbc-setup",
+      label: "SBC Setup",
+      active: pathname.startsWith("/sbc-setup"),
+    },
+    {
       href: "/admin",
       label: "Admin",
       active: pathname.startsWith("/admin"),
