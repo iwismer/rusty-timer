@@ -172,6 +172,9 @@ assert_eq "https://example.com/fwd-aarch64.tar.gz" "${url_aarch64}" "should sele
 url_missing="$(select_latest_forwarder_asset_from_pages "x86_64-unknown-linux-gnu" "${page_armv7}")"
 assert_eq "" "${url_missing}" "should return empty when no asset matches the requested target triple"
 
+url_nopages="$(select_latest_forwarder_asset_from_pages "armv7-unknown-linux-gnueabihf")"
+assert_eq "" "${url_nopages}" "should return empty when no pages are provided"
+
 # --- architecture detection ---
 export RT_SETUP_ARCH="aarch64"
 assert_eq "aarch64-unknown-linux-gnu" "$(detect_arch)" "aarch64 env should map to aarch64 target"
@@ -187,10 +190,11 @@ unset RT_SETUP_ARCH
 
 # --- architecture detection: error path ---
 export RT_SETUP_ARCH="x86_64"
-if detect_arch 2>/dev/null; then
-  echo "FAIL: detect_arch should fail for unsupported architecture x86_64" >&2
-  exit 1
+if arch_err="$(detect_arch 2>&1)"; then
+  fail "detect_arch should return non-zero for unsupported architecture x86_64"
 fi
+assert_contains "${arch_err}" "unsupported architecture" "detect_arch should report unsupported architecture"
+assert_contains "${arch_err}" "Supported values" "detect_arch should list accepted values"
 unset RT_SETUP_ARCH
 
 echo "PASS: rt-setup helper tests"

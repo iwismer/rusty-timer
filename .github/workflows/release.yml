@@ -106,14 +106,39 @@ jobs:
         run: |
           case "$SERVICE" in
             forwarder|emulator)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","use_cross":"false"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","use_cross":"false"},{"os":"linux","arch":"armv7","runner":"ubuntu-latest","target":"armv7-unknown-linux-gnueabihf","use_cross":"true"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","use_cross":"false"}]}'
+              MATRIX=$(jq -c . <<'JSON'
+          {
+            "include": [
+              { "os": "linux",   "arch": "x86_64", "runner": "ubuntu-latest",    "target": "x86_64-unknown-linux-gnu",      "use_cross": "false" },
+              { "os": "linux",   "arch": "arm64",  "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu",     "use_cross": "false" },
+              { "os": "linux",   "arch": "armv7",  "runner": "ubuntu-latest",    "target": "armv7-unknown-linux-gnueabihf", "use_cross": "true"  },
+              { "os": "windows", "arch": "x86_64", "runner": "windows-latest",   "target": "x86_64-pc-windows-msvc",       "use_cross": "false" }
+            ]
+          }
+          JSON
+              )
               ;;
             receiver|streamer)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","use_cross":"false"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","use_cross":"false"}]}'
+              MATRIX=$(jq -c . <<'JSON'
+          {
+            "include": [
+              { "os": "linux",   "arch": "x86_64", "runner": "ubuntu-latest",  "target": "x86_64-unknown-linux-gnu", "use_cross": "false" },
+              { "os": "windows", "arch": "x86_64", "runner": "windows-latest", "target": "x86_64-pc-windows-msvc",   "use_cross": "false" }
+            ]
+          }
+          JSON
+              )
               ;;
             server)
               # Keep a valid matrix output, but skip binary build/package jobs.
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","use_cross":"false"}]}'
+              MATRIX=$(jq -c . <<'JSON'
+          {
+            "include": [
+              { "os": "linux", "arch": "x86_64", "runner": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu", "use_cross": "false" }
+            ]
+          }
+          JSON
+              )
               ;;
             *)
               echo "::error::Unknown service: $SERVICE"
@@ -148,6 +173,17 @@ jobs:
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
 
+      - name: Resolve build tool and output directory
+        id: build-env
+        shell: bash
+        run: |
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            echo "build_cmd=cross" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_cmd=cargo" >> "$GITHUB_OUTPUT"
+          fi
+          echo "bin_dir=target/${{ matrix.target }}/release" >> "$GITHUB_OUTPUT"
+
       - name: Install cross (cross-compilation)
         if: matrix.use_cross == 'true'
         shell: bash
@@ -181,22 +217,13 @@ jobs:
               FEATURES="--features embed-ui"
               ;;
           esac
-          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }} --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
-          else
-            cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
-          fi
+          ${{ steps.build-env.outputs.build_cmd }} build --release --target ${{ matrix.target }} --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
-          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            BIN_DIR="target/${{ matrix.target }}/release"
-          else
-            BIN_DIR="target/release"
-          fi
-          tar -czf "$ARCHIVE" -C "$BIN_DIR" ${{ env.SERVICE }}
+          tar -czf "$ARCHIVE" -C "${{ steps.build-env.outputs.bin_dir }}" ${{ env.SERVICE }}
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
@@ -205,7 +232,7 @@ jobs:
         shell: bash
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.zip"
-          pushd target/release
+          pushd "${{ steps.build-env.outputs.bin_dir }}"
           7z a "../../$ARCHIVE" "${{ env.SERVICE }}.exe"
           popd
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"

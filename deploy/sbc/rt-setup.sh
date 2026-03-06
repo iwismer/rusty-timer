@@ -113,7 +113,7 @@ detect_arch() {
       ;;
     *)
       echo "Error: unsupported architecture: ${arch}" >&2
-      echo "Set RT_SETUP_ARCH to override (aarch64, armv7l, armhf)." >&2
+      echo "Supported values: aarch64, arm64, armv7, armv7l, armhf." >&2
       return 1
       ;;
   esac
@@ -138,7 +138,7 @@ select_latest_forwarder_asset_from_pages() {
     | reverse
     | .[]
     | .assets[]?
-    | select((.name // "") | test("forwarder-.*-" + $target + "\\.tar\\.gz$"))
+    | select((.name // "") | endswith("-" + $target + ".tar.gz"))
     | .browser_download_url
     | select(type == "string" and length > 0)
   ' | head -n 1
