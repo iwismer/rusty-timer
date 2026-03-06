@@ -160,4 +160,17 @@ EOF
 assert_eq "0" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should disable power actions when key is missing"
 rm -f "${tmp_cfg}"
 
+# --- architecture detection ---
+export RT_SETUP_ARCH="aarch64"
+assert_eq "aarch64-unknown-linux-gnu" "$(detect_arch)" "aarch64 env should map to aarch64 target"
+export RT_SETUP_ARCH="arm64"
+assert_eq "aarch64-unknown-linux-gnu" "$(detect_arch)" "arm64 env should map to aarch64 target"
+export RT_SETUP_ARCH="armv7l"
+assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armv7l env should map to armv7 target"
+export RT_SETUP_ARCH="armv7"
+assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armv7 env should map to armv7 target"
+export RT_SETUP_ARCH="armhf"
+assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armhf env should map to armv7 target"
+unset RT_SETUP_ARCH
+
 echo "PASS: rt-setup helper tests"

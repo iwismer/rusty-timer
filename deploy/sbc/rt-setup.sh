@@ -102,6 +102,23 @@ write_done_marker_if_requested() {
   echo "Wrote setup completion marker: ${marker}"
 }
 
+detect_arch() {
+  local arch="${RT_SETUP_ARCH:-$(uname -m)}"
+  case "${arch}" in
+    aarch64|arm64)
+      printf 'aarch64-unknown-linux-gnu\n'
+      ;;
+    armv7l|armv7|armhf)
+      printf 'armv7-unknown-linux-gnueabihf\n'
+      ;;
+    *)
+      echo "Error: unsupported architecture: ${arch}" >&2
+      echo "Set RT_SETUP_ARCH to override (aarch64, armv7l, armhf)." >&2
+      return 1
+      ;;
+  esac
+}
+
 select_latest_forwarder_asset_from_pages() {
   if [[ $# -eq 0 ]]; then
     return 0
