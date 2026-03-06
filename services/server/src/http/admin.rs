@@ -226,6 +226,15 @@ pub async fn create_token(
     // Hash the token
     let hash = Sha256::digest(raw_token.as_bytes());
 
+    // For forwarder tokens, auto-derive device_id to match the forwarder's
+    // own derivation: "fwd-" + first 16 hex chars of SHA-256(token).
+    let device_id = if body.device_type == "forwarder" {
+        let hex = format!("{:x}", hash);
+        format!("fwd-{}", &hex[..16])
+    } else {
+        device_id
+    };
+
     // Insert into DB
     match sqlx::query!(
         r#"INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3) RETURNING token_id"#,
