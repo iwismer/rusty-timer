@@ -267,6 +267,44 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_all_cursors(&self) -> DbResult<usize> {
+        let count = self.conn.execute("DELETE FROM cursors", [])?;
+        Ok(count)
+    }
+
+    pub fn delete_all_earliest_epochs(&self) -> DbResult<usize> {
+        let count = self.conn.execute("DELETE FROM earliest_epochs", [])?;
+        Ok(count)
+    }
+
+    pub fn delete_all_subscriptions(&self) -> DbResult<usize> {
+        let count = self.conn.execute("DELETE FROM subscriptions", [])?;
+        Ok(count)
+    }
+
+    pub fn reset_profile(&self) -> DbResult<()> {
+        self.conn.execute_batch("DELETE FROM profile")?;
+        self.conn.execute(
+            "INSERT INTO profile (server_url, token, update_mode) VALUES ('', '', ?1)",
+            rusqlite::params![DEFAULT_UPDATE_MODE],
+        )?;
+        Ok(())
+    }
+
+    pub fn factory_reset(&mut self) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM cursors")?;
+        tx.execute_batch("DELETE FROM earliest_epochs")?;
+        tx.execute_batch("DELETE FROM subscriptions")?;
+        tx.execute_batch("DELETE FROM profile")?;
+        tx.execute(
+            "INSERT INTO profile (server_url, token, update_mode) VALUES ('', '', ?1)",
+            rusqlite::params![DEFAULT_UPDATE_MODE],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn load_receiver_mode_json_raw(&self) -> DbResult<Option<String>> {
         let raw: Option<Option<String>> = self
             .conn
@@ -460,5 +498,94 @@ mod tests {
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, None);
+    }
+
+    #[test]
+    fn delete_all_cursors_removes_every_row() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
+        db.save_cursor("f2", "10.0.0.2:10000", 3, 9).unwrap();
+        let count = db.delete_all_cursors().unwrap();
+        assert_eq!(count, 2);
+        assert!(db.load_cursors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_all_cursors_on_empty_table_returns_zero() {
+        let db = Db::open_in_memory().unwrap();
+        let count = db.delete_all_cursors().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn delete_all_earliest_epochs_removes_every_row() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.save_earliest_epoch("f2", "10.0.0.2", 3).unwrap();
+        let count = db.delete_all_earliest_epochs().unwrap();
+        assert_eq!(count, 2);
+        assert!(db.load_earliest_epochs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_all_earliest_epochs_on_empty_table_returns_zero() {
+        let db = Db::open_in_memory().unwrap();
+        let count = db.delete_all_earliest_epochs().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn delete_all_subscriptions_removes_every_row() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f2", "10.0.0.2", Some(9000)).unwrap();
+        let count = db.delete_all_subscriptions().unwrap();
+        assert_eq!(count, 2);
+        assert!(db.load_subscriptions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_profile_clears_to_defaults() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(
+            "wss://example.com",
+            "secret-tok",
+            "check-only",
+            Some("recv-1"),
+        )
+        .unwrap();
+        db.reset_profile().unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.server_url, "");
+        assert_eq!(p.token, "");
+        assert_eq!(p.update_mode, "check-and-download");
+        assert_eq!(p.receiver_id, None);
+    }
+
+    #[test]
+    fn reset_profile_on_empty_db_is_ok() {
+        let db = Db::open_in_memory().unwrap();
+        db.reset_profile().unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.server_url, "");
+        assert_eq!(p.token, "");
+    }
+
+    #[test]
+    fn factory_reset_clears_all_tables() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
+        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.factory_reset().unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.server_url, "");
+        assert_eq!(p.token, "");
+        assert_eq!(p.receiver_id, None);
+        assert!(db.load_subscriptions().unwrap().is_empty());
+        assert!(db.load_cursors().unwrap().is_empty());
+        assert!(db.load_earliest_epochs().unwrap().is_empty());
     }
 }
