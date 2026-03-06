@@ -14,6 +14,7 @@
 
   let { children }: { children: Snippet } = $props();
   let navLinks = $derived(getLayoutNavLinks(page.url.pathname));
+  let version = $state("");
 
   function loadDashboardReferenceData() {
     // Load races and forwarder-race assignments in parallel
@@ -33,6 +34,12 @@
 
   onMount(() => {
     initDarkMode();
+    fetch("/api/v1/version")
+      .then((r) => r.json())
+      .then((d: { version: string }) => {
+        version = d.version;
+      })
+      .catch(() => {});
     let isBootstrapped = false;
 
     function syncDashboardBootstrap(pathname: string): void {
@@ -72,6 +79,9 @@
   </div>
 
   <footer class="border-t border-border py-3 px-6 text-center">
-    <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Server</p>
+    <p class="text-xs text-text-muted m-0">
+      Rusty Timer &middot; Server{version ? ` · v${version}` : ""} &middot; Built
+      {__BUILD_DATE__}
+    </p>
   </footer>
 </div>
