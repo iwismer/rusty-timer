@@ -125,7 +125,7 @@ impl<T: Clone + Send> UiLogger<T> {
         match &self.buffer {
             Some(buf) => buf
                 .read()
-                .map(|b| b.iter().cloned().collect())
+                .map(|b| b.iter().rev().cloned().collect())
                 .unwrap_or_default(),
             None => Vec::new(),
         }
@@ -185,8 +185,8 @@ mod tests {
         logger.log("d");
         let entries = logger.entries();
         assert_eq!(entries.len(), 3);
-        assert!(entries[0].ends_with(" b"));
-        assert!(entries[2].ends_with(" d"));
+        assert!(entries[0].ends_with(" d"));
+        assert!(entries[2].ends_with(" b"));
     }
 
     #[test]
@@ -198,8 +198,8 @@ mod tests {
         logger.log_at(UiLogLevel::Error, "e");
         let entries = logger.entries();
         assert_eq!(entries.len(), 2);
-        assert!(entries[0].contains("[DEBUG]"));
-        assert!(entries[1].contains("[ERROR]"));
+        assert!(entries[0].contains("[ERROR]"));
+        assert!(entries[1].contains("[DEBUG]"));
     }
 
     #[test]
