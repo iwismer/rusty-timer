@@ -169,6 +169,9 @@ assert_eq "https://example.com/fwd-armv7.tar.gz" "${url_armv7}" "should select a
 url_aarch64="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page_armv7}")"
 assert_eq "https://example.com/fwd-aarch64.tar.gz" "${url_aarch64}" "should select aarch64 asset when aarch64 target requested"
 
+url_missing="$(select_latest_forwarder_asset_from_pages "x86_64-unknown-linux-gnu" "${page_armv7}")"
+assert_eq "" "${url_missing}" "should return empty when no asset matches the requested target triple"
+
 # --- architecture detection ---
 export RT_SETUP_ARCH="aarch64"
 assert_eq "aarch64-unknown-linux-gnu" "$(detect_arch)" "aarch64 env should map to aarch64 target"
@@ -180,6 +183,14 @@ export RT_SETUP_ARCH="armv7"
 assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armv7 env should map to armv7 target"
 export RT_SETUP_ARCH="armhf"
 assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armhf env should map to armv7 target"
+unset RT_SETUP_ARCH
+
+# --- architecture detection: error path ---
+export RT_SETUP_ARCH="x86_64"
+if detect_arch 2>/dev/null; then
+  echo "FAIL: detect_arch should fail for unsupported architecture x86_64" >&2
+  exit 1
+fi
 unset RT_SETUP_ARCH
 
 echo "PASS: rt-setup helper tests"

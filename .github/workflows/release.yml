@@ -143,15 +143,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cross (cross-compilation)
-        if: matrix.use_cross == 'true'
-        shell: bash
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Install cross (cross-compilation)
+        if: matrix.use_cross == 'true'
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.cargo/bin"
+          cross --version
 
       - name: Setup Node.js (UI-embedded services)
         if: env.SERVICE == 'forwarder' || env.SERVICE == 'receiver'
