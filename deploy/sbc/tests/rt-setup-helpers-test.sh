@@ -42,7 +42,7 @@ assert_contains() {
 page1='[{"tag_name":"server-v1.0.0","published_at":"2026-02-01T00:00:00Z","draft":false,"prerelease":false,"assets":[]}]'
 page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
 
-url="$(select_latest_forwarder_asset_from_pages "${page1}" "${page2}")"
+url="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page1}" "${page2}")"
 assert_nonempty "${url}" "release URL should be found across multiple pages"
 assert_eq "https://example.com/fwd.tar.gz" "${url}" "release URL should match expected arm64 asset"
 
@@ -159,6 +159,15 @@ base_url = "https://example.com"
 EOF
 assert_eq "0" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should disable power actions when key is missing"
 rm -f "${tmp_cfg}"
+
+# --- parameterized asset selection ---
+page_armv7='[{"tag_name":"forwarder-v2.0.0","published_at":"2026-03-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v2.0.0-armv7-unknown-linux-gnueabihf.tar.gz","browser_download_url":"https://example.com/fwd-armv7.tar.gz"},{"name":"forwarder-v2.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-aarch64.tar.gz"}]}]'
+
+url_armv7="$(select_latest_forwarder_asset_from_pages "armv7-unknown-linux-gnueabihf" "${page_armv7}")"
+assert_eq "https://example.com/fwd-armv7.tar.gz" "${url_armv7}" "should select armv7 asset when armv7 target requested"
+
+url_aarch64="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page_armv7}")"
+assert_eq "https://example.com/fwd-aarch64.tar.gz" "${url_aarch64}" "should select aarch64 asset when aarch64 target requested"
 
 # --- architecture detection ---
 export RT_SETUP_ARCH="aarch64"

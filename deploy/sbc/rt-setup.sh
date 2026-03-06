@@ -120,11 +120,13 @@ detect_arch() {
 }
 
 select_latest_forwarder_asset_from_pages() {
+  local target_triple="${1:?target_triple required}"
+  shift
   if [[ $# -eq 0 ]]; then
     return 0
   fi
 
-  printf '%s\n' "$@" | jq -rs '
+  printf '%s\n' "$@" | jq -rs --arg target "${target_triple}" '
     [
       .[]
       | if type == "array" then .[] else empty end
@@ -136,7 +138,7 @@ select_latest_forwarder_asset_from_pages() {
     | reverse
     | .[]
     | .assets[]?
-    | select((.name // "") | test("forwarder-.*-aarch64-unknown-linux-gnu\\.tar\\.gz$"))
+    | select((.name // "") | test("forwarder-.*-" + $target + "\\.tar\\.gz$"))
     | .browser_download_url
     | select(type == "string" and length > 0)
   ' | head -n 1
@@ -451,6 +453,9 @@ download_binary() {
 
   echo "Fetching latest forwarder release from GitHub..."
 
+  local target_triple
+  target_triple="$(detect_arch)"
+
   local releases_pages=()
   local page_json
   local page
@@ -464,10 +469,10 @@ download_binary() {
 
   # Find the latest stable release whose tag matches forwarder-v*
   local download_url
-  download_url=$(select_latest_forwarder_asset_from_pages "${releases_pages[@]}")
+  download_url=$(select_latest_forwarder_asset_from_pages "${target_triple}" "${releases_pages[@]}")
 
   if [[ -z "${download_url}" || "${download_url}" == "null" ]]; then
-    echo "Error: could not find a forwarder arm64 release asset." >&2
+    echo "Error: could not find a forwarder release asset for ${target_triple}." >&2
     exit 1
   fi
 
