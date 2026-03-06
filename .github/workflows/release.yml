@@ -145,6 +145,10 @@ jobs:
               exit 1
               ;;
           esac
+          if [[ -z "${MATRIX}" ]]; then
+            echo "::error::Failed to generate build matrix (jq returned empty output)"
+            exit 1
+          fi
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
           echo "Matrix: ${MATRIX}"
 
@@ -167,6 +171,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -238,9 +244,10 @@ jobs:
         shell: bash
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.zip"
-          pushd "${{ steps.build-env.outputs.bin_dir }}"
-          7z a "../../../$ARCHIVE" "${{ env.SERVICE }}.exe"
-          popd
+          BIN_DIR="${{ steps.build-env.outputs.bin_dir }}"
+          cp "${BIN_DIR}/${{ env.SERVICE }}.exe" .
+          7z a "$ARCHIVE" "${{ env.SERVICE }}.exe"
+          rm "${{ env.SERVICE }}.exe"
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 

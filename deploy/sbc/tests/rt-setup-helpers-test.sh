@@ -197,4 +197,19 @@ assert_contains "${arch_err}" "unsupported architecture" "detect_arch should rep
 assert_contains "${arch_err}" "Supported values" "detect_arch should list accepted values"
 unset RT_SETUP_ARCH
 
+# --- architecture detection: uname -m fallback ---
+unset RT_SETUP_ARCH
+fallback_arch="$(detect_arch 2>/dev/null || true)"
+assert_nonempty "${fallback_arch}" "detect_arch should produce output from uname -m fallback"
+
+# --- multi-version asset selection with mixed architectures ---
+page_v1='[{"tag_name":"forwarder-v1.0.0","published_at":"2026-01-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.0.0-armv7-unknown-linux-gnueabihf.tar.gz","browser_download_url":"https://example.com/fwd-v1-armv7.tar.gz"},{"name":"forwarder-v1.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-v1-aarch64.tar.gz"}]}]'
+page_v2='[{"tag_name":"forwarder-v2.0.0","published_at":"2026-03-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v2.0.0-armv7-unknown-linux-gnueabihf.tar.gz","browser_download_url":"https://example.com/fwd-v2-armv7.tar.gz"},{"name":"forwarder-v2.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-v2-aarch64.tar.gz"}]}]'
+
+url_multi_armv7="$(select_latest_forwarder_asset_from_pages "armv7-unknown-linux-gnueabihf" "${page_v1}" "${page_v2}")"
+assert_eq "https://example.com/fwd-v2-armv7.tar.gz" "${url_multi_armv7}" "should select latest version armv7 asset across multiple release pages"
+
+url_multi_aarch64="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page_v1}" "${page_v2}")"
+assert_eq "https://example.com/fwd-v2-aarch64.tar.gz" "${url_multi_aarch64}" "should select latest version aarch64 asset across multiple release pages"
+
 echo "PASS: rt-setup helper tests"
