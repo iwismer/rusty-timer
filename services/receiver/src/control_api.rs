@@ -1335,6 +1335,10 @@ async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoRe
     }
 }
 
+async fn get_version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
+}
+
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
@@ -1362,6 +1366,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(get_subscriptions).put(put_subscriptions),
         )
         .route("/api/v1/status", get(get_status))
+        .route("/api/v1/version", get(get_version))
         .route("/api/v1/logs", get(get_logs))
         .route("/api/v1/connect", post(post_connect))
         .route("/api/v1/disconnect", post(post_disconnect))

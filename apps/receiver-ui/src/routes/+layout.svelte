@@ -6,8 +6,17 @@
   import "@rusty-timer/shared-ui/styles/tokens.css";
 
   let { children } = $props();
+  let version = $state("");
 
-  onMount(() => initDarkMode());
+  onMount(() => {
+    initDarkMode();
+    fetch("/api/v1/version")
+      .then((r) => r.json())
+      .then((d) => {
+        version = d.version;
+      })
+      .catch(() => {});
+  });
 </script>
 
 <svelte:head>
@@ -35,6 +44,9 @@
   </div>
 
   <footer class="border-t border-border py-3 px-8 text-center">
-    <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Receiver</p>
+    <p class="text-xs text-text-muted m-0">
+      Rusty Timer &middot; Receiver{version ? ` · v${version}` : ""} &middot; Built
+      {__BUILD_DATE__}
+    </p>
   </footer>
 </div>

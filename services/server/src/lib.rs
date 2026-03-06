@@ -32,6 +32,7 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
         )
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
+        .route("/api/v1/version", get(http::version::get_version))
         .route("/api/v1/streams", get(http::streams::list_streams))
         .route(
             "/api/v1/streams/{stream_id}",

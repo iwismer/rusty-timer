@@ -5,6 +5,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [tailwindcss(), sveltekit(), svelteTesting()],
+  define: {
+    __BUILD_DATE__: JSON.stringify(new Date().toISOString().split("T")[0]),
+  },
   server: {
     proxy: {
       "/api": "http://localhost:8080",

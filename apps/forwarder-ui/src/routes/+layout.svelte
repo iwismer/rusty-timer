@@ -7,7 +7,17 @@
 
   let { children } = $props();
 
-  onMount(() => initDarkMode());
+  let version = $state("");
+
+  onMount(() => {
+    initDarkMode();
+    fetch("/api/v1/status")
+      .then((r) => r.json())
+      .then((d) => {
+        version = d.version;
+      })
+      .catch(() => {});
+  });
 
   let currentPath = $derived($page.url.pathname);
 </script>
@@ -29,6 +39,9 @@
   </div>
 
   <footer class="border-t border-border py-3 px-6 text-center">
-    <p class="text-xs text-text-muted m-0">Rusty Timer &middot; Forwarder</p>
+    <p class="text-xs text-text-muted m-0">
+      Rusty Timer &middot; Forwarder{version ? ` · v${version}` : ""} &middot; Built
+      {__BUILD_DATE__}
+    </p>
   </footer>
 </div>
