@@ -12,7 +12,14 @@
 //!   POST /api/v1/connect        - initiate WS connection (async, 202)
 //!   POST /api/v1/disconnect     - close WS connection (async, 202)
 //!   GET  /api/v1/events         - SSE stream of receiver UI events
-//!   POST /api/v1/admin/cursors/reset - reset one stream cursor
+//!   POST /api/v1/admin/cursors/reset     - reset one stream cursor
+//!   POST /api/v1/admin/cursors/reset-all - reset all stream cursors
+//!   POST /api/v1/admin/earliest-epochs/reset     - reset one earliest epoch
+//!   POST /api/v1/admin/earliest-epochs/reset-all - reset all earliest epochs
+//!   POST /api/v1/admin/subscriptions/purge - delete all subscriptions
+//!   POST /api/v1/admin/subscriptions/port  - update subscription local port
+//!   POST /api/v1/admin/profile/reset   - reset profile to defaults
+//!   POST /api/v1/admin/factory-reset   - full factory reset
 
 use crate::db::{Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
@@ -36,6 +43,13 @@ use tracing::warn;
 
 const ADMIN_INTENT_HEADER: &str = "x-rt-receiver-admin-intent";
 const ADMIN_RESET_CURSOR_INTENT: &str = "reset-stream-cursor";
+const ADMIN_RESET_ALL_CURSORS_INTENT: &str = "reset-all-cursors";
+const ADMIN_RESET_ALL_EPOCHS_INTENT: &str = "reset-all-earliest-epochs";
+const ADMIN_RESET_EPOCH_INTENT: &str = "reset-earliest-epoch";
+const ADMIN_PURGE_SUBSCRIPTIONS_INTENT: &str = "purge-subscriptions";
+const ADMIN_RESET_PROFILE_INTENT: &str = "reset-profile";
+const ADMIN_FACTORY_RESET_INTENT: &str = "factory-reset";
+const ADMIN_UPDATE_PORT_INTENT: &str = "update-local-port";
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -401,6 +415,13 @@ pub struct SubscriptionsBody {
 pub struct CursorResetRequest {
     pub forwarder_id: String,
     pub reader_ip: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdatePortRequest {
+    forwarder_id: String,
+    reader_ip: String,
+    local_port_override: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1140,22 +1161,157 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
     StatusCode::ACCEPTED.into_response()
 }
 
+fn check_admin_intent(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(ADMIN_INTENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected)
+}
+
 async fn post_admin_reset_cursor(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<CursorResetRequest>,
 ) -> impl IntoResponse {
-    let has_valid_intent = headers
-        .get(ADMIN_INTENT_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == ADMIN_RESET_CURSOR_INTENT);
-    if !has_valid_intent {
+    if !check_admin_intent(&headers, ADMIN_RESET_CURSOR_INTENT) {
         return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
     }
 
     let db = state.db.lock().await;
     match db.delete_cursor(&body.forwarder_id, &body.reader_ip) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_admin_reset_all_cursors(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !check_admin_intent(&headers, ADMIN_RESET_ALL_CURSORS_INTENT) {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+    let db = state.db.lock().await;
+    match db.delete_all_cursors() {
+        Ok(count) => Json(serde_json::json!({ "deleted": count })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_admin_reset_all_earliest_epochs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !check_admin_intent(&headers, ADMIN_RESET_ALL_EPOCHS_INTENT) {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+    let db = state.db.lock().await;
+    match db.delete_all_earliest_epochs() {
+        Ok(count) => Json(serde_json::json!({ "deleted": count })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_admin_reset_earliest_epoch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CursorResetRequest>,
+) -> impl IntoResponse {
+    if !check_admin_intent(&headers, ADMIN_RESET_EPOCH_INTENT) {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+    let db = state.db.lock().await;
+    match db.delete_earliest_epoch(&body.forwarder_id, &body.reader_ip) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_admin_purge_subscriptions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !check_admin_intent(&headers, ADMIN_PURGE_SUBSCRIPTIONS_INTENT) {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+    let db = state.db.lock().await;
+    match db.delete_all_subscriptions() {
+        Ok(count) => {
+            drop(db);
+            state.emit_streams_snapshot().await;
+            Json(serde_json::json!({ "deleted": count })).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_admin_reset_profile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !check_admin_intent(&headers, ADMIN_RESET_PROFILE_INTENT) {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+    let db = state.db.lock().await;
+    match db.reset_profile() {
+        Ok(()) => {
+            drop(db);
+            *state.upstream_url.write().await = None;
+            *state.receiver_id.write().await = String::new();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_admin_factory_reset(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !check_admin_intent(&headers, ADMIN_FACTORY_RESET_INTENT) {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+    let current = state.connection_state.read().await.clone();
+    if current != ConnectionState::Disconnected {
+        state
+            .set_connection_state(ConnectionState::Disconnecting)
+            .await;
+        let _ = state.shutdown_tx.send(true);
+    }
+    let mut db = state.db.lock().await;
+    match db.factory_reset() {
+        Ok(()) => {
+            drop(db);
+            *state.upstream_url.write().await = None;
+            *state.receiver_id.write().await = String::new();
+            state.emit_streams_snapshot().await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn post_admin_update_port(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UpdatePortRequest>,
+) -> impl IntoResponse {
+    if !check_admin_intent(&headers, ADMIN_UPDATE_PORT_INTENT) {
+        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
+    }
+    if let Some(port) = body.local_port_override {
+        if port == 0 {
+            return (StatusCode::BAD_REQUEST, "port must be 1-65535").into_response();
+        }
+    }
+    let db = state.db.lock().await;
+    match db.update_subscription_port(
+        &body.forwarder_id,
+        &body.reader_ip,
+        body.local_port_override,
+    ) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "subscription not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -1367,6 +1523,34 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/disconnect", post(post_disconnect))
         .route("/api/v1/events", get(crate::sse::receiver_sse))
         .route("/api/v1/admin/cursors/reset", post(post_admin_reset_cursor))
+        .route(
+            "/api/v1/admin/cursors/reset-all",
+            post(post_admin_reset_all_cursors),
+        )
+        .route(
+            "/api/v1/admin/earliest-epochs/reset",
+            post(post_admin_reset_earliest_epoch),
+        )
+        .route(
+            "/api/v1/admin/earliest-epochs/reset-all",
+            post(post_admin_reset_all_earliest_epochs),
+        )
+        .route(
+            "/api/v1/admin/subscriptions/purge",
+            post(post_admin_purge_subscriptions),
+        )
+        .route(
+            "/api/v1/admin/profile/reset",
+            post(post_admin_reset_profile),
+        )
+        .route(
+            "/api/v1/admin/factory-reset",
+            post(post_admin_factory_reset),
+        )
+        .route(
+            "/api/v1/admin/subscriptions/port",
+            post(post_admin_update_port),
+        )
         .route("/api/v1/update/status", get(get_update_status))
         .route("/api/v1/update/apply", post(post_update_apply))
         .route("/api/v1/update/check", post(post_update_check))
