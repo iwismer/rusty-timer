@@ -127,6 +127,14 @@ async fn main() {
         let _ = api_state.shutdown_tx.send(true);
     });
 
+    // Dedicated ctrl-c handler — works even when the main select loop is
+    // blocked inside connect_async or do_handshake.
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("received ctrl-c, shutting down");
+        std::process::exit(0);
+    });
+
     // Spawn background update check
     {
         let state = Arc::clone(&state);
@@ -372,10 +380,15 @@ async fn main() {
                                         match (session_result, ws) {
                                             (Err(e), _) => {
                                                 state.logger.log_at(UiLogLevel::Error, format!("Handshake failed: {e}"));
-                                                let _ = retry_connect_if_attempt_current(
-                                                    &state, attempt,
-                                                )
-                                                .await;
+                                                if matches!(e, receiver::session::SessionError::ServerError(_)) {
+                                                    // Non-retryable server error (e.g. invalid token) — stop retrying.
+                                                    let _ = set_disconnected_if_attempt_current(&state, attempt).await;
+                                                } else {
+                                                    let _ = retry_connect_if_attempt_current(
+                                                        &state, attempt,
+                                                    )
+                                                    .await;
+                                                }
                                             }
                                             (Ok(session_id), Some(ws)) => {
                                                 let still_current =
@@ -878,7 +891,12 @@ where
 
         let text = match msg {
             Message::Text(t) => t,
-            _ => {
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => {
+                return (Err(receiver::session::SessionError::ConnectionClosed), None);
+            }
+            other => {
+                error!(msg = ?other, "handshake: unexpected message type");
                 return (
                     Err(receiver::session::SessionError::UnexpectedFirstMessage),
                     None,
@@ -914,7 +932,17 @@ where
                     });
                 }
             }
-            Ok(_) => {
+            Ok(WsMessage::Error(err)) => {
+                return (
+                    Err(receiver::session::SessionError::ServerError(format!(
+                        "{}: {}",
+                        err.code, err.message
+                    ))),
+                    None,
+                );
+            }
+            Ok(other) => {
+                error!("handshake: unexpected WsMessage variant: {other:?}");
                 return (
                     Err(receiver::session::SessionError::UnexpectedFirstMessage),
                     None,

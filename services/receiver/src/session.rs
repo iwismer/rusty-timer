@@ -17,6 +17,8 @@ pub enum SessionError {
     Db(#[from] crate::db::DbError),
     #[error("UnexpectedFirstMessage")]
     UnexpectedFirstMessage,
+    #[error("Server error: {0}")]
+    ServerError(String),
     #[error("ConnectionClosed")]
     ConnectionClosed,
 }
