@@ -106,14 +106,14 @@ jobs:
         run: |
           case "$SERVICE" in
             forwarder|emulator)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","use_cross":"false"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","use_cross":"false"},{"os":"linux","arch":"armv7","runner":"ubuntu-latest","target":"armv7-unknown-linux-gnueabihf","use_cross":"true"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","use_cross":"false"}]}'
               ;;
             receiver|streamer)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","use_cross":"false"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc","use_cross":"false"}]}'
               ;;
             server)
               # Keep a valid matrix output, but skip binary build/package jobs.
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]}'
+              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","use_cross":"false"}]}'
               ;;
             *)
               echo "::error::Unknown service: $SERVICE"
@@ -142,6 +142,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross (cross-compilation)
+        if: matrix.use_cross == 'true'
+        shell: bash
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -173,13 +178,22 @@ jobs:
               FEATURES="--features embed-ui"
               ;;
           esac
-          cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
+          else
+            cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
+          fi
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C target/release ${{ env.SERVICE }}
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            BIN_DIR="target/${{ matrix.target }}/release"
+          else
+            BIN_DIR="target/release"
+          fi
+          tar -czf "$ARCHIVE" -C "$BIN_DIR" ${{ env.SERVICE }}
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
