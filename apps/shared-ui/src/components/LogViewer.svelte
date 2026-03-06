@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import {
     LOG_LEVELS,
     type LogLevel,
@@ -15,8 +16,31 @@
   } = $props();
 
   let selectedLevel = $state<LogLevel>("info");
+  let listEl: HTMLUListElement | undefined = $state();
 
   let filteredEntries = $derived(filterEntries(entries, selectedLevel));
+
+  let prevCount = 0;
+
+  $effect(() => {
+    const count = filteredEntries.length;
+    const added = count - prevCount;
+    if (added > 0 && listEl) {
+      const wasAtTop = listEl.scrollTop < 8;
+      const oldScrollTop = listEl.scrollTop;
+      const oldScrollHeight = listEl.scrollHeight;
+      tick().then(() => {
+        if (!listEl) return;
+        if (wasAtTop) {
+          listEl.scrollTop = 0;
+        } else {
+          const heightDiff = listEl.scrollHeight - oldScrollHeight;
+          listEl.scrollTop = oldScrollTop + heightDiff;
+        }
+      });
+    }
+    prevCount = count;
+  });
 
   function levelColor(level: LogLevel): string {
     switch (level) {
@@ -62,6 +86,7 @@
     </p>
   {:else}
     <ul
+      bind:this={listEl}
       class="font-mono text-xs overflow-y-auto list-none p-0 m-0"
       style="max-height: {maxHeight}"
     >
