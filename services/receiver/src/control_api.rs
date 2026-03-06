@@ -358,6 +358,14 @@ fn default_update_mode() -> String {
     crate::db::DEFAULT_UPDATE_MODE.to_owned()
 }
 
+fn is_valid_receiver_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn is_uuid_format(value: &str) -> bool {
     if value.len() != 36 {
         return false;
@@ -615,6 +623,16 @@ async fn put_profile(
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_owned);
+
+    if let Some(ref id) = new_receiver_id {
+        if !is_valid_receiver_id(id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only",
+            )
+                .into_response();
+        }
+    }
 
     let db = state.db.lock().await;
     let mut effective_update_mode = body.update_mode.clone().unwrap_or_else(|| {

@@ -611,3 +611,46 @@ async fn put_profile_without_receiver_id_preserves_db_value() {
     let profile = db.load_profile().unwrap().unwrap();
     assert_eq!(profile.receiver_id, Some("recv-original".to_owned()));
 }
+
+#[tokio::test]
+async fn put_profile_rejects_too_long_receiver_id() {
+    let app = setup();
+    let long_id = "a".repeat(65);
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok", "receiver_id": long_id})
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn put_profile_rejects_receiver_id_with_special_chars() {
+    let app = setup();
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok", "receiver_id": "recv/bad@id"})
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn put_profile_accepts_valid_receiver_id() {
+    let app = setup();
+    assert_eq!(
+        put_json(
+            app,
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok", "receiver_id": "my-recv-01"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+}

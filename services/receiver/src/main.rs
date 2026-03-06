@@ -63,6 +63,16 @@ async fn main() {
     // -------------------------------------------------------------------------
     let receiver_id = match cli.receiver_id.map(|id| id.trim().to_owned()) {
         Some(id) if !id.is_empty() => {
+            if id.len() > 64
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                eprintln!(
+                    "FATAL: receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only"
+                );
+                std::process::exit(1);
+            }
             if let Err(e) = db.save_receiver_id(&id) {
                 warn!(error = %e, "failed to persist CLI receiver_id to DB");
             }
