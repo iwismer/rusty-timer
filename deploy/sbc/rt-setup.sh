@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy/sbc/rt-setup.sh
 #
-# Interactive setup wizard for rt-forwarder on a Raspberry Pi.
+# Interactive setup wizard for rt-forwarder on ARM-based Linux SBCs (aarch64 and armv7).
 #
 # Downloads the forwarder binary from GitHub Releases, prompts for
 # configuration values, generates forwarder.toml and the auth token
@@ -138,7 +138,7 @@ select_latest_forwarder_asset_from_pages() {
     | reverse
     | .[]
     | .assets[]?
-    | select((.name // "") | endswith("-" + $target + ".tar.gz"))
+    | select((.name // "") | (startswith("forwarder-") and endswith("-" + $target + ".tar.gz")))
     | .browser_download_url
     | select(type == "string" and length > 0)
   ' | head -n 1
@@ -454,7 +454,9 @@ download_binary() {
   echo "Fetching latest forwarder release from GitHub..."
 
   local target_triple
-  target_triple="$(detect_arch)"
+  if ! target_triple="$(detect_arch)"; then
+    exit 1
+  fi
 
   local releases_pages=()
   local page_json
@@ -464,10 +466,14 @@ download_binary() {
     if [[ "${page_json}" == "[]" ]]; then
       break
     fi
+    if ! echo "${page_json}" | jq empty 2>/dev/null; then
+      echo "Error: GitHub API returned invalid JSON on page ${page}" >&2
+      exit 1
+    fi
     releases_pages+=("${page_json}")
   done
 
-  # Find the latest stable release whose tag matches forwarder-v*
+  # Find the latest stable release asset matching forwarder-v* for the detected architecture
   local download_url
   download_url=$(select_latest_forwarder_asset_from_pages "${target_triple}" "${releases_pages[@]}")
 

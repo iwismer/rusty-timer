@@ -44,7 +44,7 @@ page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","dr
 
 url="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page1}" "${page2}")"
 assert_nonempty "${url}" "release URL should be found across multiple pages"
-assert_eq "https://example.com/fwd.tar.gz" "${url}" "release URL should match expected arm64 asset"
+assert_eq "https://example.com/fwd.tar.gz" "${url}" "release URL should match expected aarch64 asset"
 
 # --- probe URL derivation from bind ---
 assert_eq "http://localhost:8080/healthz" "$(status_probe_url_from_bind '0.0.0.0:8080')" "wildcard ipv4 bind should map to localhost"

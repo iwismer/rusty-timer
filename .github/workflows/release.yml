@@ -199,8 +199,14 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # Pinned to v0.2.5 -- last release with prebuilt binaries
           curl -fsSL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C "$HOME/.cargo/bin"
+          if ! command -v cross >/dev/null 2>&1; then
+            echo "::error::cross binary not found in PATH after extraction"
+            ls -la "$HOME/.cargo/bin/"
+            exit 1
+          fi
           cross --version
 
       - name: Setup Node.js (UI-embedded services)
