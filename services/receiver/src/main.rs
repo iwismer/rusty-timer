@@ -30,6 +30,52 @@ fn generate_receiver_id() -> String {
     format!("recv-{:08x}", u32::from_be_bytes(bytes))
 }
 
+fn resolve_receiver_id(cli_id: Option<String>, db: &receiver::db::Db) -> String {
+    // CLI flag takes priority
+    if let Some(id) = cli_id
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+    {
+        if id.len() > 64
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            eprintln!(
+                "FATAL: receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only"
+            );
+            std::process::exit(1);
+        }
+        if let Err(e) = db.save_receiver_id(&id) {
+            warn!(error = %e, "failed to persist CLI receiver_id to DB");
+        }
+        return id;
+    }
+
+    // DB lookup
+    match db.load_profile() {
+        Ok(Some(p)) => {
+            if let Some(id) = p.receiver_id.filter(|id| !id.is_empty()) {
+                return id;
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let id = generate_receiver_id();
+            warn!(error = %e, receiver_id = %id, "failed to load profile; using ephemeral receiver ID");
+            return id;
+        }
+    }
+
+    // Auto-generate
+    let id = generate_receiver_id();
+    if let Err(e) = db.save_receiver_id(&id) {
+        warn!(error = %e, "failed to persist auto-generated receiver ID; ID will not survive restart");
+    }
+    info!(receiver_id = %id, "auto-generated receiver ID");
+    id
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -61,42 +107,7 @@ async fn main() {
     // -------------------------------------------------------------------------
     // 1b. Resolve receiver ID: CLI flag > DB > auto-generate
     // -------------------------------------------------------------------------
-    let receiver_id = match cli.receiver_id.map(|id| id.trim().to_owned()) {
-        Some(id) if !id.is_empty() => {
-            if id.len() > 64
-                || !id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                eprintln!(
-                    "FATAL: receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only"
-                );
-                std::process::exit(1);
-            }
-            if let Err(e) = db.save_receiver_id(&id) {
-                warn!(error = %e, "failed to persist CLI receiver_id to DB");
-            }
-            id
-        }
-        _ => match db.load_profile() {
-            Ok(Some(p)) if p.receiver_id.as_deref().is_some_and(|id| !id.is_empty()) => {
-                p.receiver_id.unwrap()
-            }
-            Ok(_) => {
-                let id = generate_receiver_id();
-                if let Err(e) = db.save_receiver_id(&id) {
-                    warn!(error = %e, "failed to persist auto-generated receiver ID; ID will not survive restart");
-                }
-                info!(receiver_id = %id, "auto-generated receiver ID");
-                id
-            }
-            Err(e) => {
-                let id = generate_receiver_id();
-                warn!(error = %e, receiver_id = %id, "failed to load profile; using ephemeral receiver ID");
-                id
-            }
-        },
-    };
+    let receiver_id = resolve_receiver_id(cli.receiver_id, &db);
     info!(receiver_id = %receiver_id, "resolved receiver ID");
 
     // -------------------------------------------------------------------------
@@ -1465,6 +1476,52 @@ mod tests {
             compute_reconnect_delay_secs(state.current_retry_streak()),
             0
         );
+    }
+
+    #[test]
+    fn resolve_receiver_id_prefers_cli() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_receiver_id("recv-db").unwrap();
+        let id = resolve_receiver_id(Some("recv-cli".to_owned()), &db);
+        assert_eq!(id, "recv-cli");
+        // Should also persist to DB
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.receiver_id, Some("recv-cli".to_owned()));
+    }
+
+    #[test]
+    fn resolve_receiver_id_falls_back_to_db() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_receiver_id("recv-db").unwrap();
+        let id = resolve_receiver_id(None, &db);
+        assert_eq!(id, "recv-db");
+    }
+
+    #[test]
+    fn resolve_receiver_id_auto_generates_when_db_empty() {
+        let db = Db::open_in_memory().unwrap();
+        let id = resolve_receiver_id(None, &db);
+        assert!(id.starts_with("recv-"), "expected recv- prefix, got: {id}");
+        assert_eq!(id.len(), 13);
+        // Should persist the generated ID
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.receiver_id, Some(id.clone()));
+    }
+
+    #[test]
+    fn resolve_receiver_id_skips_whitespace_cli() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_receiver_id("recv-db").unwrap();
+        let id = resolve_receiver_id(Some("  ".to_owned()), &db);
+        assert_eq!(id, "recv-db");
+    }
+
+    #[test]
+    fn generate_receiver_id_format() {
+        let id = generate_receiver_id();
+        assert!(id.starts_with("recv-"));
+        assert_eq!(id.len(), 13);
+        assert!(id[5..].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
