@@ -33,6 +33,14 @@ fn main() {
     println!("cargo:rerun-if-changed={UI_APP_DIR}/vite.config.ts");
     println!("cargo:rerun-if-changed=../../apps/shared-ui/src");
 
+    // When cross-compiling, npm is not available inside the container.
+    // Skip the build if the output directory already exists (pre-built on the host).
+    let build_output = ui_dir.join("build");
+    if build_output.join("index.html").exists() {
+        println!("cargo:warning=UI already built at {}, skipping npm build", build_output.display());
+        return;
+    }
+
     let workspace_root = Path::new("../../");
     assert!(
         workspace_root.join("node_modules").exists(),

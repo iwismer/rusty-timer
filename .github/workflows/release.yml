@@ -210,6 +210,12 @@ jobs:
           npm run check --workspace "apps/${{ env.SERVICE }}-ui"
           npm test --workspace "apps/${{ env.SERVICE }}-ui"
 
+      - name: Pre-build UI for cross-compilation
+        if: matrix.use_cross == 'true' && (env.SERVICE == 'forwarder' || env.SERVICE == 'receiver')
+        shell: bash
+        run: |
+          npm run build --workspace "apps/${{ env.SERVICE }}-ui"
+
       - name: Build release binary
         shell: bash
         run: |
