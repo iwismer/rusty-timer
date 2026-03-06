@@ -624,14 +624,14 @@ async fn put_profile(
         .filter(|id| !id.is_empty())
         .map(str::to_owned);
 
-    if let Some(ref id) = new_receiver_id {
-        if !is_valid_receiver_id(id) {
-            return (
-                StatusCode::BAD_REQUEST,
-                "receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only",
-            )
-                .into_response();
-        }
+    if let Some(ref id) = new_receiver_id
+        && !is_valid_receiver_id(id)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only",
+        )
+            .into_response();
     }
 
     let db = state.db.lock().await;
