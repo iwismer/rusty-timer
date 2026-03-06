@@ -149,6 +149,10 @@ jobs:
             echo "::error::Failed to generate build matrix (jq returned empty output)"
             exit 1
           fi
+          if ! echo "${MATRIX}" | jq empty 2>/dev/null; then
+            echo "::error::Build matrix is not valid JSON: ${MATRIX}"
+            exit 1
+          fi
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
           echo "Matrix: ${MATRIX}"
 
@@ -219,8 +223,13 @@ jobs:
         shell: bash
         run: |
           BUILD_CMD="${{ steps.build-env.outputs.build_cmd }}"
+          BIN_DIR="${{ steps.build-env.outputs.bin_dir }}"
           if [[ -z "$BUILD_CMD" ]]; then
             echo "::error::build_cmd is empty - build-env step may have failed"
+            exit 1
+          fi
+          if [[ -z "$BIN_DIR" ]]; then
+            echo "::error::bin_dir is empty - build-env step may have failed"
             exit 1
           fi
           FEATURES=""

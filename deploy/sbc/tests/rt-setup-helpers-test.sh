@@ -199,8 +199,18 @@ unset RT_SETUP_ARCH
 
 # --- architecture detection: uname -m fallback ---
 unset RT_SETUP_ARCH
-fallback_arch="$(detect_arch 2>/dev/null || true)"
-assert_nonempty "${fallback_arch}" "detect_arch should produce output from uname -m fallback"
+host_arch="$(uname -m)"
+case "${host_arch}" in
+  aarch64|arm64|armv7l|armv7|armhf)
+    fallback_arch="$(detect_arch)"
+    assert_nonempty "${fallback_arch}" "detect_arch should produce output from uname -m fallback"
+    ;;
+  *)
+    if detect_arch >/dev/null 2>&1; then
+      fail "detect_arch should fail on unsupported host architecture: ${host_arch}"
+    fi
+    ;;
+esac
 
 # --- multi-version asset selection with mixed architectures ---
 page_v1='[{"tag_name":"forwarder-v1.0.0","published_at":"2026-01-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.0.0-armv7-unknown-linux-gnueabihf.tar.gz","browser_download_url":"https://example.com/fwd-v1-armv7.tar.gz"},{"name":"forwarder-v1.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-v1-aarch64.tar.gz"}]}]'
