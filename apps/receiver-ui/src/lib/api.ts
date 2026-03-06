@@ -261,3 +261,67 @@ export async function downloadUpdate(): Promise<UpdateStatusResponse> {
   }
   return (await resp.json()) as UpdateStatusResponse;
 }
+
+export async function resetAllCursors(): Promise<{ deleted: number }> {
+  return apiFetch("/api/v1/admin/cursors/reset-all", {
+    method: "POST",
+    headers: { "x-rt-receiver-admin-intent": "reset-all-cursors" },
+  });
+}
+
+export async function resetEarliestEpoch(stream: StreamRef): Promise<void> {
+  await apiFetch("/api/v1/admin/earliest-epochs/reset", {
+    method: "POST",
+    headers: { "x-rt-receiver-admin-intent": "reset-earliest-epoch" },
+    body: JSON.stringify(stream),
+  });
+}
+
+export async function resetAllEarliestEpochs(): Promise<{ deleted: number }> {
+  return apiFetch("/api/v1/admin/earliest-epochs/reset-all", {
+    method: "POST",
+    headers: { "x-rt-receiver-admin-intent": "reset-all-earliest-epochs" },
+  });
+}
+
+export async function purgeSubscriptions(): Promise<{ deleted: number }> {
+  return apiFetch("/api/v1/admin/subscriptions/purge", {
+    method: "POST",
+    headers: { "x-rt-receiver-admin-intent": "purge-subscriptions" },
+  });
+}
+
+export async function resetProfile(): Promise<void> {
+  await apiFetch("/api/v1/admin/profile/reset", {
+    method: "POST",
+    headers: { "x-rt-receiver-admin-intent": "reset-profile" },
+  });
+}
+
+export async function factoryReset(): Promise<void> {
+  await apiFetch("/api/v1/admin/factory-reset", {
+    method: "POST",
+    headers: { "x-rt-receiver-admin-intent": "factory-reset" },
+  });
+}
+
+export async function updateLocalPort(
+  stream: StreamRef,
+  localPortOverride: number | null,
+): Promise<void> {
+  await apiFetch("/api/v1/admin/subscriptions/port", {
+    method: "POST",
+    headers: { "x-rt-receiver-admin-intent": "update-local-port" },
+    body: JSON.stringify({
+      forwarder_id: stream.forwarder_id,
+      reader_ip: stream.reader_ip,
+      local_port_override: localPortOverride,
+    }),
+  });
+}
+
+export async function getSubscriptions(): Promise<{
+  subscriptions: SubscriptionItem[];
+}> {
+  return apiFetch("/api/v1/subscriptions");
+}
