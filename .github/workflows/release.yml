@@ -106,20 +106,49 @@ jobs:
         run: |
           case "$SERVICE" in
             forwarder|emulator)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+              MATRIX=$(jq -c . <<'JSON'
+          {
+            "include": [
+              { "os": "linux",   "arch": "x86_64", "runner": "ubuntu-latest",    "target": "x86_64-unknown-linux-gnu",      "use_cross": "false" },
+              { "os": "linux",   "arch": "arm64",  "runner": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu",     "use_cross": "false" },
+              { "os": "linux",   "arch": "armv7",  "runner": "ubuntu-latest",    "target": "armv7-unknown-linux-gnueabihf", "use_cross": "true"  },
+              { "os": "windows", "arch": "x86_64", "runner": "windows-latest",   "target": "x86_64-pc-windows-msvc",       "use_cross": "false" }
+            ]
+          }
+          JSON
+              ) || { echo "::error::jq failed to parse forwarder/emulator build matrix"; exit 1; }
               ;;
             receiver|streamer)
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"windows","arch":"x86_64","runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+              MATRIX=$(jq -c . <<'JSON'
+          {
+            "include": [
+              { "os": "linux",   "arch": "x86_64", "runner": "ubuntu-latest",  "target": "x86_64-unknown-linux-gnu", "use_cross": "false" },
+              { "os": "windows", "arch": "x86_64", "runner": "windows-latest", "target": "x86_64-pc-windows-msvc",   "use_cross": "false" }
+            ]
+          }
+          JSON
+              ) || { echo "::error::jq failed to parse receiver/streamer build matrix"; exit 1; }
               ;;
             server)
               # Keep a valid matrix output, but skip binary build/package jobs.
-              MATRIX='{"include":[{"os":"linux","arch":"x86_64","runner":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]}'
+              MATRIX=$(jq -c . <<'JSON'
+          {
+            "include": [
+              { "os": "linux", "arch": "x86_64", "runner": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu", "use_cross": "false" }
+            ]
+          }
+          JSON
+              ) || { echo "::error::jq failed to parse server build matrix"; exit 1; }
               ;;
             *)
               echo "::error::Unknown service: $SERVICE"
               exit 1
               ;;
           esac
+          if [[ -z "${MATRIX}" ]]; then
+            echo "::error::Failed to generate build matrix (jq returned empty output)"
+            exit 1
+          fi
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
           echo "Matrix: ${MATRIX}"
 
@@ -142,11 +171,28 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Install cross (cross-compilation)
+        if: matrix.use_cross == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          # Pinned to v0.2.5 -- last release with prebuilt binaries
+          curl -fsSL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.cargo/bin"
+          if ! command -v cross >/dev/null 2>&1; then
+            echo "::error::cross binary not found in PATH after extraction"
+            ls -la "$HOME/.cargo/bin/"
+            exit 1
+          fi
+          cross --version
 
       - name: Setup Node.js (UI-embedded services)
         if: env.SERVICE == 'forwarder' || env.SERVICE == 'receiver'
@@ -167,19 +213,21 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
+          BUILD_CMD=${{ matrix.use_cross == 'true' && '"cross"' || '"cargo"' }}
           FEATURES=""
           case "${{ env.SERVICE }}" in
             forwarder|receiver)
               FEATURES="--features embed-ui"
               ;;
           esac
-          cargo build --release --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
+          $BUILD_CMD build --release --target ${{ matrix.target }} --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C target/release ${{ env.SERVICE }}
+          BIN_DIR="target/${{ matrix.target }}/release"
+          tar -czf "$ARCHIVE" -C "${BIN_DIR}" ${{ env.SERVICE }}
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
@@ -188,9 +236,10 @@ jobs:
         shell: bash
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.zip"
-          pushd target/release
-          7z a "../../$ARCHIVE" "${{ env.SERVICE }}.exe"
-          popd
+          BIN_DIR="target/${{ matrix.target }}/release"
+          cp "${BIN_DIR}/${{ env.SERVICE }}.exe" .
+          7z a "$ARCHIVE" "${{ env.SERVICE }}.exe"
+          rm "${{ env.SERVICE }}.exe"
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 

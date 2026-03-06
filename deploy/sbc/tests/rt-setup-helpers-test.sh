@@ -42,9 +42,9 @@ assert_contains() {
 page1='[{"tag_name":"server-v1.0.0","published_at":"2026-02-01T00:00:00Z","draft":false,"prerelease":false,"assets":[]}]'
 page2='[{"tag_name":"forwarder-v1.2.3","published_at":"2026-02-10T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.2.3-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd.tar.gz"}]}]'
 
-url="$(select_latest_forwarder_asset_from_pages "${page1}" "${page2}")"
+url="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page1}" "${page2}")"
 assert_nonempty "${url}" "release URL should be found across multiple pages"
-assert_eq "https://example.com/fwd.tar.gz" "${url}" "release URL should match expected arm64 asset"
+assert_eq "https://example.com/fwd.tar.gz" "${url}" "release URL should match expected aarch64 asset"
 
 # --- probe URL derivation from bind ---
 assert_eq "http://localhost:8080/healthz" "$(status_probe_url_from_bind '0.0.0.0:8080')" "wildcard ipv4 bind should map to localhost"
@@ -159,5 +159,67 @@ base_url = "https://example.com"
 EOF
 assert_eq "0" "$(expected_allow_power_actions_for_install "${tmp_cfg}")" "install expectation should disable power actions when key is missing"
 rm -f "${tmp_cfg}"
+
+# --- parameterized asset selection ---
+page_armv7='[{"tag_name":"forwarder-v2.0.0","published_at":"2026-03-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v2.0.0-armv7-unknown-linux-gnueabihf.tar.gz","browser_download_url":"https://example.com/fwd-armv7.tar.gz"},{"name":"forwarder-v2.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-aarch64.tar.gz"}]}]'
+
+url_armv7="$(select_latest_forwarder_asset_from_pages "armv7-unknown-linux-gnueabihf" "${page_armv7}")"
+assert_eq "https://example.com/fwd-armv7.tar.gz" "${url_armv7}" "should select armv7 asset when armv7 target requested"
+
+url_aarch64="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page_armv7}")"
+assert_eq "https://example.com/fwd-aarch64.tar.gz" "${url_aarch64}" "should select aarch64 asset when aarch64 target requested"
+
+url_missing="$(select_latest_forwarder_asset_from_pages "x86_64-unknown-linux-gnu" "${page_armv7}")"
+assert_eq "" "${url_missing}" "should return empty when no asset matches the requested target triple"
+
+url_nopages="$(select_latest_forwarder_asset_from_pages "armv7-unknown-linux-gnueabihf")"
+assert_eq "" "${url_nopages}" "should return empty when no pages are provided"
+
+# --- architecture detection ---
+export RT_SETUP_ARCH="aarch64"
+assert_eq "aarch64-unknown-linux-gnu" "$(detect_arch)" "aarch64 env should map to aarch64 target"
+export RT_SETUP_ARCH="arm64"
+assert_eq "aarch64-unknown-linux-gnu" "$(detect_arch)" "arm64 env should map to aarch64 target"
+export RT_SETUP_ARCH="armv7l"
+assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armv7l env should map to armv7 target"
+export RT_SETUP_ARCH="armv7"
+assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armv7 env should map to armv7 target"
+export RT_SETUP_ARCH="armhf"
+assert_eq "armv7-unknown-linux-gnueabihf" "$(detect_arch)" "armhf env should map to armv7 target"
+unset RT_SETUP_ARCH
+
+# --- architecture detection: error path ---
+export RT_SETUP_ARCH="x86_64"
+if arch_err="$(detect_arch 2>&1)"; then
+  fail "detect_arch should return non-zero for unsupported architecture x86_64"
+fi
+assert_contains "${arch_err}" "unsupported architecture" "detect_arch should report unsupported architecture"
+assert_contains "${arch_err}" "Supported values" "detect_arch should list accepted values"
+unset RT_SETUP_ARCH
+
+# --- architecture detection: uname -m fallback ---
+unset RT_SETUP_ARCH
+host_arch="$(uname -m)"
+case "${host_arch}" in
+  aarch64|arm64|armv7l|armv7|armhf)
+    fallback_arch="$(detect_arch)"
+    assert_nonempty "${fallback_arch}" "detect_arch should produce output from uname -m fallback"
+    ;;
+  *)
+    if detect_arch >/dev/null 2>&1; then
+      fail "detect_arch should fail on unsupported host architecture: ${host_arch}"
+    fi
+    ;;
+esac
+
+# --- multi-version asset selection with mixed architectures ---
+page_v1='[{"tag_name":"forwarder-v1.0.0","published_at":"2026-01-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v1.0.0-armv7-unknown-linux-gnueabihf.tar.gz","browser_download_url":"https://example.com/fwd-v1-armv7.tar.gz"},{"name":"forwarder-v1.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-v1-aarch64.tar.gz"}]}]'
+page_v2='[{"tag_name":"forwarder-v2.0.0","published_at":"2026-03-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"forwarder-v2.0.0-armv7-unknown-linux-gnueabihf.tar.gz","browser_download_url":"https://example.com/fwd-v2-armv7.tar.gz"},{"name":"forwarder-v2.0.0-aarch64-unknown-linux-gnu.tar.gz","browser_download_url":"https://example.com/fwd-v2-aarch64.tar.gz"}]}]'
+
+url_multi_armv7="$(select_latest_forwarder_asset_from_pages "armv7-unknown-linux-gnueabihf" "${page_v1}" "${page_v2}")"
+assert_eq "https://example.com/fwd-v2-armv7.tar.gz" "${url_multi_armv7}" "should select latest version armv7 asset across multiple release pages"
+
+url_multi_aarch64="$(select_latest_forwarder_asset_from_pages "aarch64-unknown-linux-gnu" "${page_v1}" "${page_v2}")"
+assert_eq "https://example.com/fwd-v2-aarch64.tar.gz" "${url_multi_aarch64}" "should select latest version aarch64 asset across multiple release pages"
 
 echo "PASS: rt-setup helper tests"

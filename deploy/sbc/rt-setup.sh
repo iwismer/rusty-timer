@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy/sbc/rt-setup.sh
 #
-# Interactive setup wizard for rt-forwarder on a Raspberry Pi.
+# Interactive setup wizard for rt-forwarder on ARM-based Linux SBCs (aarch64 and armv7).
 #
 # Downloads the forwarder binary from GitHub Releases, prompts for
 # configuration values, generates forwarder.toml and the auth token
@@ -102,12 +102,32 @@ write_done_marker_if_requested() {
   echo "Wrote setup completion marker: ${marker}"
 }
 
+detect_arch() {
+  local arch="${RT_SETUP_ARCH:-$(uname -m)}"
+  case "${arch}" in
+    aarch64|arm64)
+      printf 'aarch64-unknown-linux-gnu\n'
+      ;;
+    armv7l|armv7|armhf)
+      printf 'armv7-unknown-linux-gnueabihf\n'
+      ;;
+    *)
+      echo "Error: unsupported architecture: ${arch}" >&2
+      echo "Supported values: aarch64, arm64, armv7, armv7l, armhf." >&2
+      return 1
+      ;;
+  esac
+}
+
 select_latest_forwarder_asset_from_pages() {
+  local target_triple="${1:?target_triple required}"
+  shift
   if [[ $# -eq 0 ]]; then
     return 0
   fi
 
-  printf '%s\n' "$@" | jq -rs '
+  local jq_output
+  if ! jq_output=$(printf '%s\n' "$@" | jq -rs --arg target "${target_triple}" '
     [
       .[]
       | if type == "array" then .[] else empty end
@@ -119,10 +139,14 @@ select_latest_forwarder_asset_from_pages() {
     | reverse
     | .[]
     | .assets[]?
-    | select((.name // "") | test("forwarder-.*-aarch64-unknown-linux-gnu\\.tar\\.gz$"))
+    | select((.name // "") | (startswith("forwarder-") and endswith("-" + $target + ".tar.gz")))
     | .browser_download_url
     | select(type == "string" and length > 0)
-  ' | head -n 1
+  '); then
+    echo "Error: jq failed to process release pages" >&2
+    return 1
+  fi
+  printf '%s' "${jq_output}" | head -n 1
 }
 
 status_probe_url_from_bind() {
@@ -434,6 +458,11 @@ download_binary() {
 
   echo "Fetching latest forwarder release from GitHub..."
 
+  local target_triple
+  if ! target_triple="$(detect_arch)"; then
+    exit 1
+  fi
+
   local releases_pages=()
   local page_json
   local page
@@ -442,15 +471,19 @@ download_binary() {
     if [[ "${page_json}" == "[]" ]]; then
       break
     fi
+    if ! echo "${page_json}" | jq empty 2>/dev/null; then
+      echo "Error: GitHub API returned invalid JSON on page ${page}" >&2
+      exit 1
+    fi
     releases_pages+=("${page_json}")
   done
 
-  # Find the latest stable release whose tag matches forwarder-v*
+  # Find the latest stable release asset matching forwarder-v* for the detected architecture
   local download_url
-  download_url=$(select_latest_forwarder_asset_from_pages "${releases_pages[@]}")
+  download_url=$(select_latest_forwarder_asset_from_pages "${target_triple}" "${releases_pages[@]}")
 
   if [[ -z "${download_url}" || "${download_url}" == "null" ]]; then
-    echo "Error: could not find a forwarder arm64 release asset." >&2
+    echo "Error: could not find a forwarder release asset for ${target_triple}." >&2
     exit 1
   fi
 
