@@ -229,7 +229,6 @@ async fn test_create_token_auto_generate() {
         .unwrap();
     assert_eq!(resp.status(), 201);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["device_id"], "my-forwarder");
     assert_eq!(body["device_type"], "forwarder");
     assert!(body["token_id"].is_string());
     let raw_token = body["token"].as_str().unwrap();
@@ -239,8 +238,12 @@ async fn test_create_token_auto_generate() {
         "URL-safe base64 of 32 bytes = 43 chars"
     );
 
-    // Verify token hash is stored in DB
+    // Forwarder device_id is auto-derived from token hash
     let hash = Sha256::digest(raw_token.as_bytes());
+    let expected_device_id = format!("fwd-{}", &format!("{:x}", hash)[..16]);
+    assert_eq!(body["device_id"], expected_device_id);
+
+    // Verify token hash is stored in DB
     let row_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM device_tokens WHERE token_hash = $1")
             .bind(hash.as_slice())
@@ -405,6 +408,8 @@ async fn test_create_token_appears_in_list() {
         .await
         .unwrap();
     assert_eq!(create_resp.status(), 201);
+    let create_body: serde_json::Value = create_resp.json().await.unwrap();
+    let expected_device_id = create_body["device_id"].as_str().unwrap().to_owned();
 
     // Verify it shows in list
     let list_resp = reqwest::get(format!("http://{}/api/v1/admin/tokens", addr))
@@ -413,7 +418,7 @@ async fn test_create_token_appears_in_list() {
     let list_body: serde_json::Value = list_resp.json().await.unwrap();
     let tokens = list_body["tokens"].as_array().unwrap();
     assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0]["device_id"], "list-check");
+    assert_eq!(tokens[0]["device_id"], expected_device_id);
     assert_eq!(tokens[0]["revoked"], false);
 }
 
