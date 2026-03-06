@@ -126,7 +126,8 @@ select_latest_forwarder_asset_from_pages() {
     return 0
   fi
 
-  printf '%s\n' "$@" | jq -rs --arg target "${target_triple}" '
+  local jq_output
+  if ! jq_output=$(printf '%s\n' "$@" | jq -rs --arg target "${target_triple}" '
     [
       .[]
       | if type == "array" then .[] else empty end
@@ -141,7 +142,11 @@ select_latest_forwarder_asset_from_pages() {
     | select((.name // "") | (startswith("forwarder-") and endswith("-" + $target + ".tar.gz")))
     | .browser_download_url
     | select(type == "string" and length > 0)
-  ' | head -n 1
+  '); then
+    echo "Error: jq failed to process release pages" >&2
+    return 1
+  fi
+  printf '%s' "${jq_output}" | head -n 1
 }
 
 status_probe_url_from_bind() {

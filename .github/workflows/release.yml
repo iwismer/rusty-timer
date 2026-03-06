@@ -116,7 +116,7 @@ jobs:
             ]
           }
           JSON
-              )
+              ) || { echo "::error::jq failed to parse forwarder/emulator build matrix"; exit 1; }
               ;;
             receiver|streamer)
               MATRIX=$(jq -c . <<'JSON'
@@ -127,7 +127,7 @@ jobs:
             ]
           }
           JSON
-              )
+              ) || { echo "::error::jq failed to parse receiver/streamer build matrix"; exit 1; }
               ;;
             server)
               # Keep a valid matrix output, but skip binary build/package jobs.
@@ -138,7 +138,7 @@ jobs:
             ]
           }
           JSON
-              )
+              ) || { echo "::error::jq failed to parse server build matrix"; exit 1; }
               ;;
             *)
               echo "::error::Unknown service: $SERVICE"
@@ -147,10 +147,6 @@ jobs:
           esac
           if [[ -z "${MATRIX}" ]]; then
             echo "::error::Failed to generate build matrix (jq returned empty output)"
-            exit 1
-          fi
-          if ! echo "${MATRIX}" | jq empty 2>/dev/null; then
-            echo "::error::Build matrix is not valid JSON: ${MATRIX}"
             exit 1
           fi
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
@@ -182,17 +178,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.os }}-${{ matrix.arch }}
-
-      - name: Resolve build tool and output directory
-        id: build-env
-        shell: bash
-        run: |
-          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            echo "build_cmd=cross" >> "$GITHUB_OUTPUT"
-          else
-            echo "build_cmd=cargo" >> "$GITHUB_OUTPUT"
-          fi
-          echo "bin_dir=target/${{ matrix.target }}/release" >> "$GITHUB_OUTPUT"
 
       - name: Install cross (cross-compilation)
         if: matrix.use_cross == 'true'
@@ -228,16 +213,7 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
-          BUILD_CMD="${{ steps.build-env.outputs.build_cmd }}"
-          BIN_DIR="${{ steps.build-env.outputs.bin_dir }}"
-          if [[ -z "$BUILD_CMD" ]]; then
-            echo "::error::build_cmd is empty - build-env step may have failed"
-            exit 1
-          fi
-          if [[ -z "$BIN_DIR" ]]; then
-            echo "::error::bin_dir is empty - build-env step may have failed"
-            exit 1
-          fi
+          BUILD_CMD=${{ matrix.use_cross == 'true' && '"cross"' || '"cargo"' }}
           FEATURES=""
           case "${{ env.SERVICE }}" in
             forwarder|receiver)
@@ -250,7 +226,8 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C "${{ steps.build-env.outputs.bin_dir }}" ${{ env.SERVICE }}
+          BIN_DIR="target/${{ matrix.target }}/release"
+          tar -czf "$ARCHIVE" -C "${BIN_DIR}" ${{ env.SERVICE }}
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
@@ -259,7 +236,7 @@ jobs:
         shell: bash
         run: |
           ARCHIVE="${{ env.SERVICE }}-v${{ env.VERSION }}-${{ matrix.target }}.zip"
-          BIN_DIR="${{ steps.build-env.outputs.bin_dir }}"
+          BIN_DIR="target/${{ matrix.target }}/release"
           cp "${BIN_DIR}/${{ env.SERVICE }}.exe" .
           7z a "$ARCHIVE" "${{ env.SERVICE }}.exe"
           rm "${{ env.SERVICE }}.exe"
