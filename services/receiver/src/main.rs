@@ -91,11 +91,13 @@ async fn main() {
                 id
             }
             Err(e) => {
-                warn!(error = %e, "failed to load profile for receiver_id lookup; generating ephemeral ID");
-                generate_receiver_id()
+                let id = generate_receiver_id();
+                warn!(error = %e, receiver_id = %id, "failed to load profile; using ephemeral receiver ID");
+                id
             }
         },
     };
+    info!(receiver_id = %receiver_id, "resolved receiver ID");
 
     // -------------------------------------------------------------------------
     // 2. Create AppState
