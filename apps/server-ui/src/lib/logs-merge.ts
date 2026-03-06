@@ -3,13 +3,7 @@ export function mergeLogsWithPendingLive(
   pendingLive: string[],
   maxEntries = 500,
 ): string[] {
-  const merged = [...snapshot];
-  for (const entry of pendingLive) {
-    if (!merged.includes(entry)) {
-      merged.push(entry);
-    }
-  }
-  return merged.length <= maxEntries
-    ? merged
-    : merged.slice(merged.length - maxEntries);
+  const newEntries = pendingLive.filter((entry) => !snapshot.includes(entry));
+  const merged = [...newEntries.reverse(), ...snapshot];
+  return merged.length <= maxEntries ? merged : merged.slice(0, maxEntries);
 }
