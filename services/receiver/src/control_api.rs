@@ -643,11 +643,15 @@ async fn put_profile(
         }
     };
 
+    let persist_receiver_id = new_receiver_id
+        .clone()
+        .or_else(|| db.load_profile().ok().flatten().and_then(|p| p.receiver_id));
+
     match db.save_profile(
         &url,
         &body.token,
         &effective_update_mode,
-        new_receiver_id.as_deref(),
+        persist_receiver_id.as_deref(),
     ) {
         Ok(()) => {
             drop(db);

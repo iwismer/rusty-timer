@@ -577,3 +577,37 @@ async fn put_mode_emits_mode_changed_event() {
         }
     }
 }
+
+#[tokio::test]
+async fn put_profile_without_receiver_id_preserves_db_value() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db, "recv-original".to_owned());
+    let app = build_router(Arc::clone(&state));
+
+    // First save: set a receiver_id
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok", "receiver_id":"recv-original"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Second save: omit receiver_id entirely
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s2.com", "token":"tok2"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    // DB should still have the original receiver_id
+    let db = state.db.lock().await;
+    let profile = db.load_profile().unwrap().unwrap();
+    assert_eq!(profile.receiver_id, Some("recv-original".to_owned()));
+}
