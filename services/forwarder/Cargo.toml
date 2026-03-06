@@ -29,7 +29,7 @@ futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
-reqwest = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rt-protocol = { path = "../../crates/rt-protocol" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-ui-http = { path = "../../crates/rt-ui-http" }
