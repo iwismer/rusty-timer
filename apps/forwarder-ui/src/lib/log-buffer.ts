@@ -5,7 +5,7 @@ export function pushLogEntry(
 ): string[] {
   const normalized = next.trim();
   if (!normalized) return entries;
-  const appended = [...entries, normalized];
-  if (appended.length <= maxEntries) return appended;
-  return appended.slice(appended.length - maxEntries);
+  const prepended = [normalized, ...entries];
+  if (prepended.length <= maxEntries) return prepended;
+  return prepended.slice(0, maxEntries);
 }
