@@ -277,6 +277,19 @@ impl Db {
         Ok(count)
     }
 
+    pub fn update_subscription_port(
+        &self,
+        fwd: &str,
+        ip: &str,
+        port: Option<u16>,
+    ) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "UPDATE subscriptions SET local_port_override = ?1 WHERE forwarder_id = ?2 AND reader_ip = ?3",
+            rusqlite::params![port.map(|p| p as i64), fwd, ip],
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn delete_all_subscriptions(&self) -> DbResult<usize> {
         let count = self.conn.execute("DELETE FROM subscriptions", [])?;
         Ok(count)
@@ -587,5 +600,36 @@ mod tests {
         assert!(db.load_subscriptions().unwrap().is_empty());
         assert!(db.load_cursors().unwrap().is_empty());
         assert!(db.load_earliest_epochs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_subscription_port_changes_existing() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        let updated = db
+            .update_subscription_port("f1", "10.0.0.1", Some(9000))
+            .unwrap();
+        assert!(updated);
+        let subs = db.load_subscriptions().unwrap();
+        assert_eq!(subs[0].local_port_override, Some(9000));
+    }
+
+    #[test]
+    fn update_subscription_port_clears_override() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_subscription("f1", "10.0.0.1", Some(9000)).unwrap();
+        let updated = db.update_subscription_port("f1", "10.0.0.1", None).unwrap();
+        assert!(updated);
+        let subs = db.load_subscriptions().unwrap();
+        assert_eq!(subs[0].local_port_override, None);
+    }
+
+    #[test]
+    fn update_subscription_port_returns_false_for_missing() {
+        let db = Db::open_in_memory().unwrap();
+        let updated = db
+            .update_subscription_port("f1", "10.0.0.1", Some(9000))
+            .unwrap();
+        assert!(!updated);
     }
 }
