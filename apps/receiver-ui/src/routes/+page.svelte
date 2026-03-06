@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import * as api from "$lib/api";
+  import { buildUpdatedSubscriptions } from "$lib/subscriptions";
   import { initSSE, destroySSE } from "$lib/sse";
   import { waitForApplyResult } from "@rusty-timer/shared-ui/lib/update-flow";
   import {
@@ -657,6 +658,40 @@
     }
   }
 
+  async function toggleSubscription(stream: api.StreamEntry): Promise<void> {
+    if (streamActionBusy || !streams) {
+      return;
+    }
+
+    streamActionBusy = true;
+    const refreshVersion = ++streamRefreshVersion;
+    try {
+      error = null;
+      const result = buildUpdatedSubscriptions({
+        allStreams: streams.streams,
+        target: {
+          forwarder_id: stream.forwarder_id,
+          reader_ip: stream.reader_ip,
+          currentlySubscribed: stream.subscribed,
+        },
+      });
+      if (result.error) {
+        error = result.error;
+        return;
+      }
+      await api.putSubscriptions(result.subscriptions!);
+      const latestStreams = await api.getStreams();
+      if (refreshVersion === streamRefreshVersion) {
+        streams = latestStreams;
+        void prefetchEarliestEpochOptions(latestStreams.streams);
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      streamActionBusy = false;
+    }
+  }
+
   async function replayStream(stream: api.StreamEntry): Promise<void> {
     const parsed = resolveReplayTargetEpoch(stream);
     if (parsed === null) {
@@ -1207,6 +1242,10 @@
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                       local port: {stream.local_port}
                     </p>
+                  {:else if !stream.subscribed}
+                    <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
+                      not subscribed
+                    </p>
                   {/if}
                   {#if stream.stream_epoch !== undefined}
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
@@ -1298,6 +1337,14 @@
                       {stream.paused ? "Resume" : "Pause"}
                     </button>
                   {/if}
+                  <button
+                    data-testid="subscribe-toggle-{key}"
+                    class={stream.subscribed ? btnSecondary : btnPrimary}
+                    onclick={() => toggleSubscription(stream)}
+                    disabled={streamActionBusy}
+                  >
+                    {stream.subscribed ? "Unsubscribe" : "Subscribe"}
+                  </button>
                 </div>
               </div>
             {/each}
