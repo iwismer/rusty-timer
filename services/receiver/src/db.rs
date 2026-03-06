@@ -128,11 +128,8 @@ impl Db {
         )?;
         if updated == 0 {
             self.conn.execute(
-                &format!(
-                    "INSERT INTO profile (server_url, token, update_mode, receiver_id) VALUES ('', '', '{}', ?1)",
-                    DEFAULT_UPDATE_MODE
-                ),
-                rusqlite::params![receiver_id],
+                "INSERT INTO profile (server_url, token, update_mode, receiver_id) VALUES ('', '', ?1, ?2)",
+                rusqlite::params![DEFAULT_UPDATE_MODE, receiver_id],
             )?;
         }
         Ok(())
