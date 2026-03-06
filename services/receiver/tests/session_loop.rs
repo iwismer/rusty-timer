@@ -103,9 +103,6 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(16);
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(16);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(false));
-
     run_session_loop(
         ws,
         "session-1".to_owned(),
@@ -115,8 +112,6 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
             connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
         },
     )
@@ -159,64 +154,6 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
 }
 
 #[tokio::test]
-async fn run_session_loop_drops_events_when_all_paused() {
-    let (ack_tx, ack_rx) = oneshot::channel();
-    let (addr, task) = run_raw_ws_server_once(move |mut ws| async move {
-        let msg = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
-            session_id: "session-paused".to_owned(),
-            events: vec![ReadEvent {
-                forwarder_id: "fwd-1".to_owned(),
-                reader_ip: "10.0.0.1:10000".to_owned(),
-                stream_epoch: 1,
-                seq: 1,
-                reader_timestamp: "2026-02-01T00:00:00.000Z".to_owned(),
-                raw_frame: b"raw-1".to_vec(),
-                read_type: "RAW".to_owned(),
-            }],
-        });
-        ws.send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(75)).await;
-        let _ = ws.send(Message::Close(None)).await;
-        let _ = ack_tx.send(());
-    })
-    .await;
-
-    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
-        .await
-        .unwrap();
-    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
-    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(true));
-
-    run_session_loop(
-        ws,
-        "session-paused".to_owned(),
-        SessionLoopDeps {
-            db: db.clone(),
-            event_tx,
-            stream_counts: StreamCounts::new(),
-            ui_tx,
-            shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
-        },
-    )
-    .await
-    .unwrap();
-
-    assert!(event_rx.try_recv().is_err());
-    assert!(db.lock().await.load_resume_cursors().unwrap().is_empty());
-    let _ = ack_rx.await;
-    join_server_task(task).await;
-}
-
-#[tokio::test]
 async fn run_session_loop_drops_events_while_reconnect_is_pending() {
     let (ack_tx, ack_rx) = oneshot::channel();
     let (addr, task) = run_raw_ws_server_once(move |mut ws| async move {
@@ -248,9 +185,6 @@ async fn run_session_loop_drops_events_while_reconnect_is_pending() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(false));
-
     run_session_loop(
         ws,
         "session-reconnecting".to_owned(),
@@ -260,8 +194,6 @@ async fn run_session_loop_drops_events_while_reconnect_is_pending() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
             connection_state: Arc::new(RwLock::new(ConnectionState::Connecting)),
         },
     )
@@ -296,9 +228,6 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(false));
-
     let result = run_session_loop(
         ws,
         "session-2".to_owned(),
@@ -308,8 +237,6 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
             connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
         },
     )
@@ -340,9 +267,6 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(false));
-
     let result = run_session_loop(
         ws,
         "session-3".to_owned(),
@@ -352,8 +276,6 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
             connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
         },
     )
@@ -386,9 +308,6 @@ async fn run_session_loop_replies_to_ping_with_pong() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(false));
-
     let result = run_session_loop(
         ws,
         "session-4".to_owned(),
@@ -398,8 +317,6 @@ async fn run_session_loop_replies_to_ping_with_pong() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
             connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
         },
     )
@@ -425,9 +342,6 @@ async fn run_session_loop_stops_on_shutdown_signal() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(4);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(false));
-
     let handle = tokio::spawn(run_session_loop(
         ws,
         "session-5".to_owned(),
@@ -437,8 +351,6 @@ async fn run_session_loop_stops_on_shutdown_signal() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
             connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
         },
     ));
@@ -476,9 +388,6 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
-    let paused_streams = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let all_paused = Arc::new(RwLock::new(false));
-
     let result = run_session_loop(
         ws,
         "session-6".to_owned(),
@@ -488,8 +397,6 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            paused_streams,
-            all_paused,
             connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
         },
     )

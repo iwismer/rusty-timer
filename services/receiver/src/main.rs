@@ -471,8 +471,6 @@ async fn main() {
                                                 let bus = event_bus.clone();
                                                 let counts = state.stream_counts.clone();
                                                 let ui_tx = state.ui_tx.clone();
-                                                let paused_streams = Arc::clone(&state.paused_streams);
-                                                let all_paused = Arc::clone(&state.all_paused);
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
@@ -482,8 +480,6 @@ async fn main() {
                                                         stream_counts: counts,
                                                         ui_tx,
                                                         shutdown: cancel_rx,
-                                                        paused_streams,
-                                                        all_paused,
                                                         connection_state: Arc::clone(
                                                             &st.connection_state,
                                                         ),

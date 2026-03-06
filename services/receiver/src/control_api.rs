@@ -75,8 +75,6 @@ pub struct AppState {
     pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
-    pub paused_streams: Arc<RwLock<HashSet<String>>>,
-    pub all_paused: Arc<RwLock<bool>>,
     pub receiver_id: Arc<RwLock<String>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
@@ -101,8 +99,6 @@ impl AppState {
             staged_update_path: Arc::new(RwLock::new(None)),
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
-            paused_streams: Arc::new(RwLock::new(HashSet::new())),
-            all_paused: Arc::new(RwLock::new(true)),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
@@ -178,8 +174,6 @@ impl AppState {
     /// Build the merged streams response from local subscriptions and upstream server.
     pub async fn build_streams_response(&self) -> StreamsResponse {
         let counts_snapshot = self.stream_counts.snapshot();
-        let all_paused = *self.all_paused.read().await;
-        let paused_streams = self.paused_streams.read().await.clone();
         let db = self.db.lock().await;
         let subs = match db.load_subscriptions() {
             Ok(s) => s,
@@ -244,9 +238,6 @@ impl AppState {
                     current_epoch_name: si.current_epoch_name.clone(),
                     reads_total: counts.as_ref().map(|c| c.total),
                     reads_epoch: counts.as_ref().map(|c| c.epoch),
-                    paused: all_paused
-                        || paused_streams
-                            .contains(&format!("{}/{}", si.forwarder_id, si.reader_ip)),
                 });
                 seen.insert(key);
             }
@@ -273,8 +264,6 @@ impl AppState {
                 current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
-                paused: all_paused
-                    || paused_streams.contains(&format!("{}/{}", sub.forwarder_id, sub.reader_ip)),
             });
         }
 
@@ -299,58 +288,6 @@ impl AppState {
     /// Ask UI clients to reload full state from the control API.
     pub fn emit_resync(&self) {
         let _ = self.ui_tx.send(ReceiverUiEvent::Resync);
-    }
-
-    pub async fn is_stream_paused(&self, forwarder_id: &str, reader_ip: &str) -> bool {
-        if *self.all_paused.read().await {
-            return true;
-        }
-        self.paused_streams
-            .read()
-            .await
-            .contains(&format!("{forwarder_id}/{reader_ip}"))
-    }
-
-    pub async fn pause_stream(&self, forwarder_id: &str, reader_ip: &str) {
-        self.paused_streams
-            .write()
-            .await
-            .insert(format!("{forwarder_id}/{reader_ip}"));
-    }
-
-    pub async fn resume_stream(&self, forwarder_id: &str, reader_ip: &str) {
-        let target_key = format!("{forwarder_id}/{reader_ip}");
-        let subscriptions = if *self.all_paused.read().await {
-            let db = self.db.lock().await;
-            db.load_subscriptions().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        let mut all_paused = self.all_paused.write().await;
-        if *all_paused {
-            let mut paused_streams = self.paused_streams.write().await;
-            for subscription in subscriptions {
-                paused_streams.insert(format!(
-                    "{}/{}",
-                    subscription.forwarder_id, subscription.reader_ip
-                ));
-            }
-            paused_streams.remove(&target_key);
-            *all_paused = false;
-        } else {
-            drop(all_paused);
-            self.paused_streams.write().await.remove(&target_key);
-        }
-    }
-
-    pub async fn pause_all(&self) {
-        *self.all_paused.write().await = true;
-    }
-
-    pub async fn resume_all(&self) {
-        *self.all_paused.write().await = false;
-        self.paused_streams.write().await.clear();
     }
 }
 
@@ -442,7 +379,6 @@ pub struct StreamEntry {
     pub reads_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_epoch: Option<u64>,
-    pub paused: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -469,12 +405,6 @@ pub struct LogsResponse {
 struct ReplayTargetEpochsQuery {
     forwarder_id: String,
     reader_ip: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct StreamPauseRequest {
-    pub forwarder_id: String,
-    pub reader_ip: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -732,11 +662,6 @@ async fn put_mode(
     match db.save_receiver_mode(&mode) {
         Ok(()) => {
             drop(db);
-            if matches!(mode, ReceiverMode::TargetedReplay { .. }) {
-                state.resume_all().await;
-            } else {
-                state.pause_all().await;
-            }
             let _ = state
                 .ui_tx
                 .send(crate::ui_events::ReceiverUiEvent::ModeChanged { mode: mode.clone() });
@@ -749,42 +674,6 @@ async fn put_mode(
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
-}
-
-async fn post_pause_stream(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<StreamPauseRequest>,
-) -> impl IntoResponse {
-    state
-        .pause_stream(&body.forwarder_id, &body.reader_ip)
-        .await;
-    state.emit_streams_snapshot().await;
-    StatusCode::NO_CONTENT.into_response()
-}
-
-async fn post_resume_stream(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<StreamPauseRequest>,
-) -> impl IntoResponse {
-    let _ = state.request_reconnect_if_connected().await;
-    state
-        .resume_stream(&body.forwarder_id, &body.reader_ip)
-        .await;
-    state.emit_streams_snapshot().await;
-    StatusCode::NO_CONTENT.into_response()
-}
-
-async fn post_pause_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    state.pause_all().await;
-    state.emit_streams_snapshot().await;
-    StatusCode::NO_CONTENT.into_response()
-}
-
-async fn post_resume_all(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let _ = state.request_reconnect_if_connected().await;
-    state.resume_all().await;
-    state.emit_streams_snapshot().await;
-    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn put_earliest_epoch(
@@ -1531,10 +1420,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/profile", get(get_profile).put(put_profile))
         .route("/api/v1/mode", get(get_mode).put(put_mode))
         .route("/api/v1/streams", get(get_streams))
-        .route("/api/v1/streams/pause", post(post_pause_stream))
-        .route("/api/v1/streams/resume", post(post_resume_stream))
-        .route("/api/v1/streams/pause-all", post(post_pause_all))
-        .route("/api/v1/streams/resume-all", post(post_resume_all))
         .route(
             "/api/v1/streams/earliest-epoch",
             axum::routing::put(put_earliest_epoch),
