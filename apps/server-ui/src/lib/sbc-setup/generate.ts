@@ -111,6 +111,7 @@ export function generateNetworkConfig(config: SbcSetupFormData): string {
     `      routes:\n` +
     `        - to: default\n` +
     `          via: ${yamlQuote(config.gateway)}\n` +
+    `          metric: 600\n` +
     `      nameservers:\n` +
     `        addresses:\n` +
     `${dnsLines}\n`;

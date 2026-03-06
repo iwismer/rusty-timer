@@ -416,6 +416,7 @@ def render_network_config(config: SbcCloudInitConfig) -> str:
         "      routes:\n"
         "        - to: default\n"
         f"          via: {config.gateway_ipv4}\n"
+        "          metric: 600\n"
         "      nameservers:\n"
         "        addresses:\n"
         f"{dns_lines}\n"
