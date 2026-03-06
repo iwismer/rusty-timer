@@ -140,9 +140,11 @@ impl AppState {
             let db = self.db.lock().await;
             db.load_subscriptions().map(|s| s.len()).unwrap_or(0)
         };
+        let receiver_id = self.receiver_id.read().await.clone();
         let _ = self.ui_tx.send(ReceiverUiEvent::StatusChanged {
             connection_state: new_state.clone(),
             streams_count,
+            receiver_id,
         });
         let label = match &new_state {
             ConnectionState::Disconnected => "Disconnected",
@@ -1042,9 +1044,11 @@ async fn put_subscriptions(
             let conn_for_status = state.connection_state.read().await.clone();
             let db = state.db.lock().await;
             let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
+            let receiver_id = state.receiver_id.read().await.clone();
             let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
                 connection_state: conn_for_status,
                 streams_count,
+                receiver_id,
             });
             drop(db);
             state.emit_streams_snapshot().await;
