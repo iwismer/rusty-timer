@@ -28,6 +28,7 @@
   let editServerUrl = $state("");
   let editToken = $state("");
   let editUpdateMode = $state("check-and-download");
+  let editReceiverId = $state("");
   let checkingUpdate = $state(false);
   let checkMessage = $state<string | null>(null);
   let saving = $state(false);
@@ -506,6 +507,7 @@
         editServerUrl = p.server_url;
         editToken = p.token;
         editUpdateMode = p.update_mode || "check-and-download";
+        editReceiverId = p.receiver_id;
       }
       const us = await api.getUpdateStatus().catch(() => null);
       if (
@@ -723,6 +725,7 @@
         server_url: editServerUrl,
         token: editToken,
         update_mode: editUpdateMode,
+        receiver_id: editReceiverId,
       });
     } catch (e) {
       error = String(e);
@@ -976,6 +979,15 @@
     <Card title="Config">
       <section data-testid="config-section">
         <div class="grid gap-3">
+          <label class="block text-xs font-medium text-text-muted">
+            Receiver ID
+            <input
+              data-testid="receiver-id-input"
+              class="{inputClass} mt-1"
+              bind:value={editReceiverId}
+              placeholder="recv-a1b2c3d4"
+            />
+          </label>
           <label class="block text-xs font-medium text-text-muted">
             Server URL
             <input

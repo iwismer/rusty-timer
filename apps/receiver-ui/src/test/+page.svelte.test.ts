@@ -39,6 +39,7 @@ const apiMocks = vi.hoisted(() => ({
     connection_state: "disconnected",
     local_ok: true,
     streams_count: 1,
+    receiver_id: "recv-test",
   }),
   getStreams: vi.fn().mockResolvedValue(fixtures.activeStreamsResponse),
   getLogs: vi.fn().mockResolvedValue({ entries: [] }),
@@ -106,6 +107,49 @@ describe("receiver page mode controls", () => {
     expect(
       screen.getByRole("heading", { name: "Receiver" }),
     ).toBeInTheDocument();
+  });
+
+  it("renders receiver-id input populated from profile", async () => {
+    apiMocks.getProfile.mockResolvedValueOnce({
+      server_url: "wss://s.com",
+      token: "tok",
+      update_mode: "check-and-download",
+      receiver_id: "recv-from-profile",
+    });
+
+    render(Page);
+
+    const input = await screen.findByTestId("receiver-id-input");
+    await waitFor(() => {
+      expect((input as HTMLInputElement).value).toBe("recv-from-profile");
+    });
+  });
+
+  it("includes receiver_id when saving profile", async () => {
+    apiMocks.getProfile.mockResolvedValueOnce({
+      server_url: "wss://s.com",
+      token: "tok",
+      update_mode: "check-and-download",
+      receiver_id: "recv-original",
+    });
+
+    render(Page);
+
+    const input = await screen.findByTestId("receiver-id-input");
+    await waitFor(() => {
+      expect((input as HTMLInputElement).value).toBe("recv-original");
+    });
+
+    await fireEvent.input(input, { target: { value: "recv-updated" } });
+
+    const saveBtn = await screen.findByTestId("save-config-btn");
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(apiMocks.putProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ receiver_id: "recv-updated" }),
+      );
+    });
   });
 
   it("loadAll fetches mode and hydrates race state", async () => {

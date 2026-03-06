@@ -63,12 +63,13 @@ pub struct AppState {
     pub stream_counts: crate::cache::StreamCounts,
     pub paused_streams: Arc<RwLock<HashSet<String>>>,
     pub all_paused: Arc<RwLock<bool>>,
+    pub receiver_id: Arc<RwLock<String>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
 
 impl AppState {
-    pub fn new(db: Db) -> (Arc<Self>, watch::Receiver<bool>) {
+    pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (ui_tx, _) = broadcast::channel(256);
         let state = Arc::new(Self {
@@ -88,6 +89,7 @@ impl AppState {
             stream_counts: crate::cache::StreamCounts::new(),
             paused_streams: Arc::new(RwLock::new(HashSet::new())),
             all_paused: Arc::new(RwLock::new(true)),
+            receiver_id: Arc::new(RwLock::new(receiver_id)),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -346,10 +348,12 @@ pub struct ProfileRequest {
     pub token: String,
     #[serde(default)]
     pub update_mode: Option<String>,
+    #[serde(default)]
+    pub receiver_id: Option<String>,
 }
 
 fn default_update_mode() -> String {
-    "check-and-download".to_owned()
+    crate::db::DEFAULT_UPDATE_MODE.to_owned()
 }
 
 fn is_uuid_format(value: &str) -> bool {
@@ -368,6 +372,7 @@ pub struct ProfileResponse {
     pub server_url: String,
     pub token: String,
     pub update_mode: String,
+    pub receiver_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -418,6 +423,7 @@ pub struct StreamsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
+    pub receiver_id: String,
     pub connection_state: ConnectionState,
     pub local_ok: bool,
     pub streams_count: usize,
@@ -571,12 +577,14 @@ pub async fn fetch_server_streams(ws_url: &str) -> Result<Vec<UpstreamStreamInfo
 // ---------------------------------------------------------------------------
 
 async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let receiver_id = state.receiver_id.read().await.clone();
     let db = state.db.lock().await;
     match db.load_profile() {
         Ok(Some(p)) => Json(ProfileResponse {
             server_url: p.server_url,
             token: p.token,
             update_mode: p.update_mode,
+            receiver_id,
         })
         .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no profile").into_response(),
@@ -598,6 +606,14 @@ async fn put_profile(
     Json(body): Json<ProfileRequest>,
 ) -> impl IntoResponse {
     let url = normalize_server_url(&body.server_url);
+
+    let new_receiver_id = body
+        .receiver_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+
     let db = state.db.lock().await;
     let mut effective_update_mode = body.update_mode.clone().unwrap_or_else(|| {
         db.load_profile()
@@ -627,11 +643,19 @@ async fn put_profile(
         }
     };
 
-    match db.save_profile(&url, &body.token, &effective_update_mode) {
+    match db.save_profile(
+        &url,
+        &body.token,
+        &effective_update_mode,
+        new_receiver_id.as_deref(),
+    ) {
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
             *state.update_mode.write().await = parsed_update_mode;
+            if let Some(id) = new_receiver_id {
+                *state.receiver_id.write().await = id;
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -1054,11 +1078,13 @@ async fn get_subscriptions(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let receiver_id = state.receiver_id.read().await.clone();
     let conn = state.connection_state.read().await.clone();
     let db = state.db.lock().await;
     let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = db.integrity_check().is_ok();
     Json(StatusResponse {
+        receiver_id,
         connection_state: conn,
         local_ok,
         streams_count,

@@ -18,6 +18,16 @@ struct Cli {
     /// Disable automatic browser open on startup
     #[arg(long)]
     no_open_browser: bool,
+
+    /// Override the receiver ID (default: auto-generated)
+    #[arg(long)]
+    receiver_id: Option<String>,
+}
+
+fn generate_receiver_id() -> String {
+    let mut bytes = [0u8; 4];
+    getrandom::getrandom(&mut bytes).expect("failed to generate random bytes");
+    format!("recv-{:08x}", u32::from_be_bytes(bytes))
 }
 
 #[tokio::main]
@@ -49,9 +59,38 @@ async fn main() {
     });
 
     // -------------------------------------------------------------------------
+    // 1b. Resolve receiver ID: CLI flag > DB > auto-generate
+    // -------------------------------------------------------------------------
+    let receiver_id = match cli.receiver_id.map(|id| id.trim().to_owned()) {
+        Some(id) if !id.is_empty() => {
+            if let Err(e) = db.save_receiver_id(&id) {
+                warn!(error = %e, "failed to persist CLI receiver_id to DB");
+            }
+            id
+        }
+        _ => match db.load_profile() {
+            Ok(Some(p)) if p.receiver_id.as_deref().is_some_and(|id| !id.is_empty()) => {
+                p.receiver_id.unwrap()
+            }
+            Ok(_) => {
+                let id = generate_receiver_id();
+                if let Err(e) = db.save_receiver_id(&id) {
+                    warn!(error = %e, "failed to persist auto-generated receiver ID; ID will not survive restart");
+                }
+                info!(receiver_id = %id, "auto-generated receiver ID");
+                id
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load profile for receiver_id lookup; generating ephemeral ID");
+                generate_receiver_id()
+            }
+        },
+    };
+
+    // -------------------------------------------------------------------------
     // 2. Create AppState
     // -------------------------------------------------------------------------
-    let (state, mut shutdown_rx) = AppState::new(db);
+    let (state, mut shutdown_rx) = AppState::new(db, receiver_id);
     state.logger.log("Receiver started");
 
     // -------------------------------------------------------------------------
@@ -374,8 +413,9 @@ async fn main() {
                                     Ok((ws, _)) => {
                                         // Perform the receiver hello / heartbeat handshake.
                                         let (session_result, ws) = {
+                                            let receiver_id = state.receiver_id.read().await.clone();
                                             let db = state.db.lock().await;
-                                            do_handshake(ws, &db, &state.ui_tx).await
+                                            do_handshake(ws, &db, &state.ui_tx, &receiver_id).await
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -750,6 +790,7 @@ async fn do_handshake<S>(
     mut ws: S,
     db: &Db,
     ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
+    receiver_id: &str,
 ) -> (Result<String, receiver::session::SessionError>, Option<S>)
 where
     S: futures_util::Stream<
@@ -868,7 +909,7 @@ where
     }
 
     let hello = WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
-        receiver_id: "receiver-main".to_owned(),
+        receiver_id: receiver_id.to_owned(),
         mode,
         resume,
     });
@@ -1141,7 +1182,7 @@ mod tests {
 
             let heartbeat = WsMessage::Heartbeat(Heartbeat {
                 session_id: "session-handshake".to_owned(),
-                device_id: "receiver-main".to_owned(),
+                device_id: "test-receiver".to_owned(),
             });
             ws.send(Message::Text(
                 serde_json::to_string(&heartbeat)
@@ -1159,7 +1200,7 @@ mod tests {
         let db = Db::open_in_memory().expect("db");
         let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
 
-        let (result, _ws) = do_handshake(ws, &db, &ui_tx).await;
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver").await;
         assert!(result.is_ok(), "handshake should succeed");
 
         let mut log_entries = Vec::new();
@@ -1205,6 +1246,7 @@ mod tests {
             let ReceiverMode::TargetedReplay { targets } = hello.mode else {
                 panic!("expected targeted replay mode");
             };
+            assert_eq!(hello.receiver_id, "test-receiver");
             assert_eq!(targets.len(), 1);
             assert_eq!(targets[0].forwarder_id, "f1");
             assert_eq!(targets[0].reader_ip, "10.0.0.1");
@@ -1212,7 +1254,7 @@ mod tests {
 
             let heartbeat = WsMessage::Heartbeat(Heartbeat {
                 session_id: "session-targeted".to_owned(),
-                device_id: "receiver-main".to_owned(),
+                device_id: "test-receiver".to_owned(),
             });
             ws.send(Message::Text(
                 serde_json::to_string(&heartbeat)
@@ -1228,7 +1270,7 @@ mod tests {
             .await
             .expect("connect");
         let db = Db::open_in_memory().expect("db");
-        db.save_profile("ws://server.example", "token", "check-and-download")
+        db.save_profile("ws://server.example", "token", "check-and-download", None)
             .expect("save profile");
         let initial_mode = ReceiverMode::TargetedReplay {
             targets: vec![ReplayTarget {
@@ -1245,7 +1287,7 @@ mod tests {
         );
 
         let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
-        let (result, _ws) = do_handshake(ws, &db, &ui_tx).await;
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver").await;
         assert!(result.is_ok(), "handshake should succeed");
         assert_eq!(
             db.load_receiver_mode().expect("load mode after handshake"),
@@ -1260,7 +1302,7 @@ mod tests {
     #[tokio::test]
     async fn dropped_session_does_not_reconnect_when_disconnect_in_progress() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         state
@@ -1281,7 +1323,7 @@ mod tests {
     #[tokio::test]
     async fn recoverable_failure_reissues_connect_for_current_attempt() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         let attempt = state.current_connect_attempt();
@@ -1299,7 +1341,7 @@ mod tests {
     #[tokio::test]
     async fn recoverable_failure_does_not_reissue_when_attempt_is_stale() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         let stale_attempt = state.current_connect_attempt();
@@ -1325,7 +1367,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_backoff_wait_aborts_when_state_changes() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         let attempt = state.current_connect_attempt();
@@ -1350,7 +1392,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn reconnect_backoff_wait_completes_when_attempt_stays_current() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         let attempt = state.current_connect_attempt();
@@ -1370,7 +1412,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_backoff_wait_aborts_when_attempt_becomes_stale() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         let stale_attempt = state.current_connect_attempt();
@@ -1393,7 +1435,7 @@ mod tests {
     #[tokio::test]
     async fn manual_connect_resets_retry_backoff_state() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         let attempt = state.current_connect_attempt();
@@ -1421,6 +1463,7 @@ mod tests {
                 server_url: "ws://server".to_owned(),
                 token: String::new(),
                 update_mode: "check-only".to_owned(),
+                receiver_id: None,
             }
         )));
         assert!(!profile_has_connect_credentials(Some(
@@ -1428,6 +1471,7 @@ mod tests {
                 server_url: String::new(),
                 token: "token".to_owned(),
                 update_mode: "check-only".to_owned(),
+                receiver_id: None,
             }
         )));
         assert!(profile_has_connect_credentials(Some(
@@ -1435,6 +1479,7 @@ mod tests {
                 server_url: "ws://server".to_owned(),
                 token: "token".to_owned(),
                 update_mode: "check-only".to_owned(),
+                receiver_id: None,
             }
         )));
     }
@@ -1522,7 +1567,7 @@ mod tests {
     #[tokio::test]
     async fn stale_connect_attempt_failure_does_not_force_disconnected() {
         let db = receiver::db::Db::open_in_memory().expect("open db");
-        let (state, _shutdown_rx) = AppState::new(db);
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
         let stale_attempt = state.current_connect_attempt();

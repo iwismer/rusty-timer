@@ -8,6 +8,7 @@ export interface Profile {
   server_url: string;
   token: string;
   update_mode: string;
+  receiver_id: string;
 }
 
 export interface StreamEntry {
@@ -54,6 +55,7 @@ export interface StatusResponse {
   connection_state: ConnectionState;
   local_ok: boolean;
   streams_count: number;
+  receiver_id: string;
 }
 
 export interface LogsResponse {

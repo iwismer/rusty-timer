@@ -31,6 +31,7 @@ async function mockReceiverApi(
         connection_state: "connected",
         local_ok: true,
         streams_count: streams.length,
+        receiver_id: "recv-test",
       }),
     });
   });
@@ -44,6 +45,7 @@ async function mockReceiverApi(
           server_url: "wss://example.com",
           token: "token",
           update_mode: "check-and-download",
+          receiver_id: "recv-test",
         }),
       });
       return;

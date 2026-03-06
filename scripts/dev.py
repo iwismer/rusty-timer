@@ -55,9 +55,9 @@ RECEIVER_TOKEN_TEXT = "rusty-dev-receiver"
 
 # device_id values must match what each service sends in its hello message:
 #   forwarder: "fwd-" + sha256(token_bytes).hex()[:16]  (see services/forwarder/src/main.rs)
-#   receiver:  "receiver-main"                          (see services/receiver/src/main.rs)
+#   receiver:  set via --receiver-id flag                (see services/receiver/src/main.rs)
 FORWARDER_DEVICE_ID = "fwd-" + hashlib.sha256(FORWARDER_TOKEN_TEXT.encode()).hexdigest()[:16]
-RECEIVER_DEVICE_ID  = "receiver-main"
+RECEIVER_DEVICE_ID  = "recv-dev"
 
 PG_CONTAINER = "rt-postgres"
 PG_USER = "rt"
@@ -214,7 +214,7 @@ def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> li
             (f"Emulator {i + 1}", e.to_cmd()) for i, e in enumerate(emulators)
         ]
     panes_after_emulator = PANES_AFTER_EMULATOR + [
-        ("Receiver", f"RUST_LOG={shlex.quote(log_level)} ./target/debug/receiver"),
+        ("Receiver", f"RUST_LOG={shlex.quote(log_level)} ./target/debug/receiver --no-open-browser --receiver-id {RECEIVER_DEVICE_ID}"),
     ]
     return panes_before_emulator + emu_panes + panes_after_emulator
 

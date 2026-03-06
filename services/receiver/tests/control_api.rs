@@ -11,7 +11,7 @@ const TEST_RACE_ID: &str = "11111111-1111-1111-1111-111111111111";
 
 fn setup() -> axum::Router {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     build_router(state)
 }
 
@@ -76,6 +76,50 @@ async fn profile_round_trip() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(val["server_url"], "wss://s.com");
     assert_eq!(val["token"], "tok");
+    assert_eq!(val["receiver_id"], "test-receiver");
+}
+
+#[tokio::test]
+async fn put_profile_with_receiver_id_updates_state() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
+    let app = build_router(Arc::clone(&state));
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok", "receiver_id":"recv-new"})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (_, val) = get_json(app.clone(), "/api/v1/profile").await;
+    assert_eq!(val["receiver_id"], "recv-new");
+
+    let (_, status) = get_json(app, "/api/v1/status").await;
+    assert_eq!(status["receiver_id"], "recv-new");
+}
+
+#[tokio::test]
+async fn put_profile_with_whitespace_receiver_id_keeps_original() {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
+    let app = build_router(Arc::clone(&state));
+
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com", "token":"tok", "receiver_id":"  "})
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (_, val) = get_json(app.clone(), "/api/v1/profile").await;
+    assert_eq!(val["receiver_id"], "test-receiver");
 }
 
 #[tokio::test]
@@ -155,7 +199,7 @@ async fn put_mode_rejects_invalid_race_id_format() {
 #[tokio::test]
 async fn mode_switch_pauses_streams() {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     let app = build_router(Arc::clone(&state));
 
     assert_eq!(
@@ -204,7 +248,7 @@ async fn mode_switch_pauses_streams() {
 #[tokio::test]
 async fn targeted_replay_mode_keeps_streams_resumed_for_delivery() {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     let app = build_router(Arc::clone(&state));
 
     assert_eq!(
@@ -302,7 +346,7 @@ async fn pause_and_resume_stream_endpoints_update_stream_state() {
 #[tokio::test]
 async fn resume_stream_requests_reconnect_when_connected() {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     {
         let db = state.db.lock().await;
         db.save_subscription("f1", "10.0.0.1:10000", None).unwrap();
@@ -409,7 +453,7 @@ async fn pause_all_and_resume_all_endpoints_update_stream_state() {
 #[tokio::test]
 async fn concurrent_resume_stream_and_resume_all_does_not_deadlock() {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     {
         let db = state.db.lock().await;
         db.save_subscription("f1", "10.0.0.1:10000", None).unwrap();
@@ -453,7 +497,7 @@ async fn concurrent_resume_stream_and_resume_all_does_not_deadlock() {
 #[tokio::test]
 async fn put_earliest_epoch_persists_to_db() {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     let app = build_router(Arc::clone(&state));
 
     assert_eq!(
@@ -476,7 +520,7 @@ async fn put_earliest_epoch_persists_to_db() {
 #[tokio::test]
 async fn put_earliest_epoch_rejects_negative_values() {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     let app = build_router(Arc::clone(&state));
 
     assert_eq!(
@@ -496,7 +540,7 @@ async fn put_earliest_epoch_rejects_negative_values() {
 #[tokio::test]
 async fn put_mode_emits_mode_changed_event() {
     let db = Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     let mut ui_rx = state.ui_tx.subscribe();
     let app = build_router(Arc::clone(&state));
 
