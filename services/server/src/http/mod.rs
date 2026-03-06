@@ -13,3 +13,4 @@ pub mod response;
 pub mod sse;
 pub mod stream_epoch_races;
 pub mod streams;
+pub mod version;
