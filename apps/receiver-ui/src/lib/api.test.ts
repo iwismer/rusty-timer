@@ -216,64 +216,6 @@ describe("api client", () => {
     );
   });
 
-  it("pauseStream posts stream reference", async () => {
-    const { pauseStream } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(204, null));
-    const payload = {
-      forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1:10000",
-    };
-    await pauseStream(payload);
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/streams/pause",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
-    );
-  });
-
-  it("resumeStream posts stream reference", async () => {
-    const { resumeStream } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(204, null));
-    const payload = {
-      forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1:10000",
-    };
-    await resumeStream(payload);
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/streams/resume",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
-    );
-  });
-
-  it("pauseAll posts pause-all endpoint", async () => {
-    const { pauseAll } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(204, null));
-    await pauseAll();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/streams/pause-all",
-      expect.objectContaining({
-        method: "POST",
-      }),
-    );
-  });
-
-  it("resumeAll posts resume-all endpoint", async () => {
-    const { resumeAll } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(204, null));
-    await resumeAll();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/streams/resume-all",
-      expect.objectContaining({
-        method: "POST",
-      }),
-    );
-  });
-
   it("putEarliestEpoch sends earliest epoch override payload", async () => {
     const { putEarliestEpoch } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(204, null));

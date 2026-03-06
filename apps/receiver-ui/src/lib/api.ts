@@ -23,7 +23,6 @@ export interface StreamEntry {
   current_epoch_name?: string | null;
   reads_total?: number;
   reads_epoch?: number;
-  paused: boolean;
 }
 
 export interface StreamCountUpdate {
@@ -156,32 +155,6 @@ export async function putMode(mode: ReceiverMode): Promise<void> {
   await apiFetch("/api/v1/mode", {
     method: "PUT",
     body: JSON.stringify(mode),
-  });
-}
-
-export async function pauseStream(stream: StreamRef): Promise<void> {
-  await apiFetch("/api/v1/streams/pause", {
-    method: "POST",
-    body: JSON.stringify(stream),
-  });
-}
-
-export async function resumeStream(stream: StreamRef): Promise<void> {
-  await apiFetch("/api/v1/streams/resume", {
-    method: "POST",
-    body: JSON.stringify(stream),
-  });
-}
-
-export async function pauseAll(): Promise<void> {
-  await apiFetch("/api/v1/streams/pause-all", {
-    method: "POST",
-  });
-}
-
-export async function resumeAll(): Promise<void> {
-  await apiFetch("/api/v1/streams/resume-all", {
-    method: "POST",
   });
 }
 

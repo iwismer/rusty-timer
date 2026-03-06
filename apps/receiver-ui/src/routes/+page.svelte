@@ -600,64 +600,6 @@
     }
   }
 
-  async function pauseOrResumeStream(stream: api.StreamEntry): Promise<void> {
-    if (streamActionBusy) {
-      return;
-    }
-
-    streamActionBusy = true;
-    const refreshVersion = ++streamRefreshVersion;
-    try {
-      error = null;
-      if (stream.paused) {
-        await api.resumeStream({
-          forwarder_id: stream.forwarder_id,
-          reader_ip: stream.reader_ip,
-        });
-      } else {
-        await api.pauseStream({
-          forwarder_id: stream.forwarder_id,
-          reader_ip: stream.reader_ip,
-        });
-      }
-      const latestStreams = await api.getStreams();
-      if (refreshVersion === streamRefreshVersion) {
-        streams = latestStreams;
-        void prefetchEarliestEpochOptions(latestStreams.streams);
-      }
-    } catch (e) {
-      error = String(e);
-    } finally {
-      streamActionBusy = false;
-    }
-  }
-
-  async function pauseOrResumeAll(action: "pause" | "resume"): Promise<void> {
-    if (streamActionBusy) {
-      return;
-    }
-
-    streamActionBusy = true;
-    const refreshVersion = ++streamRefreshVersion;
-    try {
-      error = null;
-      if (action === "pause") {
-        await api.pauseAll();
-      } else {
-        await api.resumeAll();
-      }
-      const latestStreams = await api.getStreams();
-      if (refreshVersion === streamRefreshVersion) {
-        streams = latestStreams;
-        void prefetchEarliestEpochOptions(latestStreams.streams);
-      }
-    } catch (e) {
-      error = String(e);
-    } finally {
-      streamActionBusy = false;
-    }
-  }
-
   async function toggleSubscription(stream: api.StreamEntry): Promise<void> {
     if (streamActionBusy || !streams) {
       return;
@@ -927,22 +869,12 @@
     streams?.streams.filter((s) => s.subscribed).length ?? 0,
   );
   let totalCount = $derived(streams?.streams.length ?? 0);
-  let pausedCount = $derived(
-    streams?.streams.filter((stream) => stream.paused).length ?? 0,
-  );
-  let allStreamsPaused = $derived(totalCount > 0 && pausedCount === totalCount);
-  let allStreamsResumed = $derived(totalCount > 0 && pausedCount === 0);
-
   const inputClass =
     "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
   const btnSecondary =
     "px-3 py-1.5 text-sm font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
-  const btnWarn =
-    "px-3 py-1.5 text-sm font-medium rounded-md bg-status-warn-bg text-status-warn border border-status-warn-border cursor-pointer hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
-  const btnOk =
-    "px-3 py-1.5 text-sm font-medium rounded-md bg-status-ok-bg text-status-ok border border-status-ok-border cursor-pointer hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed";
 </script>
 
 <main class="max-w-[900px] mx-auto px-8 py-6">
@@ -1186,24 +1118,7 @@
             <span class="text-xs text-text-muted"
               >{subscribedCount} subscribed / {totalCount} available</span
             >
-            {#if modeDraft === "live" || modeDraft === "race"}
-              <button
-                data-testid="pause-all-btn"
-                class={btnWarn}
-                onclick={() => void pauseOrResumeAll("pause")}
-                disabled={streamActionBusy || allStreamsPaused}
-              >
-                Pause All
-              </button>
-              <button
-                data-testid="resume-all-btn"
-                class={btnOk}
-                onclick={() => void pauseOrResumeAll("resume")}
-                disabled={streamActionBusy || allStreamsResumed}
-              >
-                Resume All
-              </button>
-            {:else}
+            {#if modeDraft === "targeted_replay"}
               <button
                 data-testid="replay-all-btn"
                 class={btnSecondary}
@@ -1245,10 +1160,6 @@
                         state={stream.online ? "ok" : "err"}
                       />
                     {/if}
-                    <StatusBadge
-                      label={stream.paused ? "paused" : "active"}
-                      state={stream.paused ? "warn" : "ok"}
-                    />
                   </div>
                   <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
                     {stream.forwarder_id} / {stream.reader_ip}
@@ -1343,14 +1254,6 @@
                         {/each}
                       {/if}
                     </select>
-                    <button
-                      data-testid="pause-resume-{key}"
-                      class={stream.paused ? btnOk : btnWarn}
-                      onclick={() => pauseOrResumeStream(stream)}
-                      disabled={streamActionBusy}
-                    >
-                      {stream.paused ? "Resume" : "Pause"}
-                    </button>
                   {/if}
                   <button
                     data-testid="subscribe-toggle-{key}"
