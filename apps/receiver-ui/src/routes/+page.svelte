@@ -992,20 +992,35 @@
             <dd class="font-mono text-text-primary">{status.streams_count}</dd>
           </dl>
           <div class="flex gap-2 mt-3 pt-3 border-t border-border">
-            <button
-              class={btnPrimary}
-              onclick={handleConnect}
-              disabled={connectBusy || connectionState === "connected"}
-            >
-              Connect
-            </button>
-            <button
-              class="px-3 py-1.5 text-sm font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-              onclick={handleDisconnect}
-              disabled={connectBusy || connectionState === "disconnected"}
-            >
-              Disconnect
-            </button>
+            {#if connectionState === "connected"}
+              <button
+                data-testid="connect-toggle-btn"
+                class="px-3 py-1.5 text-sm font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+                onclick={handleDisconnect}
+                disabled={connectBusy}
+              >
+                Disconnect
+              </button>
+            {:else if connectionState === "disconnected"}
+              <button
+                data-testid="connect-toggle-btn"
+                class={btnPrimary}
+                onclick={handleConnect}
+                disabled={connectBusy}
+              >
+                Connect
+              </button>
+            {:else}
+              <button
+                data-testid="connect-toggle-btn"
+                class={btnPrimary}
+                disabled
+              >
+                {connectionState === "disconnecting"
+                  ? "Disconnecting…"
+                  : "Connecting…"}
+              </button>
+            {/if}
           </div>
         {/if}
       </section>

@@ -1011,4 +1011,95 @@ describe("receiver page mode controls", () => {
       });
     });
   });
+
+  it("shows Connect button when disconnected", async () => {
+    render(Page);
+
+    const btn = await screen.findByTestId("connect-toggle-btn");
+    expect(btn).toHaveTextContent("Connect");
+    expect(btn).not.toBeDisabled();
+  });
+
+  it("shows Disconnect button when connected", async () => {
+    apiMocks.getStatus.mockResolvedValueOnce({
+      connection_state: "connected",
+      local_ok: true,
+      streams_count: 1,
+      receiver_id: "recv-test",
+    });
+
+    render(Page);
+
+    const btn = await screen.findByTestId("connect-toggle-btn");
+    await waitFor(() => {
+      expect(btn).toHaveTextContent("Disconnect");
+    });
+    expect(btn).not.toBeDisabled();
+  });
+
+  it("shows disabled Connecting button in transitional state", async () => {
+    apiMocks.getStatus.mockResolvedValueOnce({
+      connection_state: "connecting",
+      local_ok: true,
+      streams_count: 0,
+      receiver_id: "recv-test",
+    });
+
+    render(Page);
+
+    const btn = await screen.findByTestId("connect-toggle-btn");
+    await waitFor(() => {
+      expect(btn).toHaveTextContent("Connecting…");
+      expect(btn).toBeDisabled();
+    });
+  });
+
+  it("calls connect when clicking Connect toggle", async () => {
+    render(Page);
+
+    const btn = await screen.findByTestId("connect-toggle-btn");
+    await fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(apiMocks.connect).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("calls disconnect when clicking Disconnect toggle", async () => {
+    apiMocks.getStatus.mockResolvedValueOnce({
+      connection_state: "connected",
+      local_ok: true,
+      streams_count: 1,
+      receiver_id: "recv-test",
+    });
+
+    render(Page);
+
+    const btn = await screen.findByTestId("connect-toggle-btn");
+    await waitFor(() => {
+      expect(btn).toHaveTextContent("Disconnect");
+    });
+    await fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(apiMocks.disconnect).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows disabled Disconnecting button in disconnecting state", async () => {
+    apiMocks.getStatus.mockResolvedValueOnce({
+      connection_state: "disconnecting",
+      local_ok: true,
+      streams_count: 0,
+      receiver_id: "recv-test",
+    });
+
+    render(Page);
+
+    const btn = await screen.findByTestId("connect-toggle-btn");
+    await waitFor(() => {
+      expect(btn).toHaveTextContent("Disconnecting…");
+      expect(btn).toBeDisabled();
+    });
+  });
 });
