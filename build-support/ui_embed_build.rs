@@ -34,10 +34,14 @@ fn main() {
     println!("cargo:rerun-if-changed=../../apps/shared-ui/src");
 
     // When cross-compiling, npm is not available inside the container.
-    // Skip the build if the output directory already exists (pre-built on the host).
+    // Skip the build only if cross-compiling AND the output already exists.
+    let is_cross_compiling = std::env::var("CROSS_COMPILE").is_ok()
+        || std::env::var("CARGO_CFG_TARGET_OS")
+            .map(|t| t != std::env::consts::OS)
+            .unwrap_or(false);
     let build_output = ui_dir.join("build");
-    if build_output.join("index.html").exists() {
-        println!("cargo:warning=UI already built at {}, skipping npm build", build_output.display());
+    if is_cross_compiling && build_output.join("index.html").exists() {
+        println!("cargo:warning=UI already built at {}, skipping npm build (cross-compile)", build_output.display());
         return;
     }
 

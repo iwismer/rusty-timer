@@ -53,7 +53,7 @@ fn receiver_mode_persists_via_receiver_db() {
     let db_path = d.path().join("receiver.db");
 
     let db = receiver::db::Db::open(&db_path).unwrap();
-    db.save_profile("wss://persist.example", "tok", "check-and-download")
+    db.save_profile("wss://persist.example", "tok", "check-and-download", None)
         .unwrap();
     db.save_receiver_mode(&ReceiverMode::Race {
         race_id: "race-1".to_owned(),
@@ -72,7 +72,7 @@ fn receiver_mode_persists_via_receiver_db() {
 #[test]
 fn targeted_replay_mode_round_trips_with_targets() {
     let db = receiver::db::Db::open_in_memory().unwrap();
-    db.save_profile("wss://persist.example", "tok", "check-and-download")
+    db.save_profile("wss://persist.example", "tok", "check-and-download", None)
         .unwrap();
     let mode = ReceiverMode::TargetedReplay {
         targets: vec![ReplayTarget {

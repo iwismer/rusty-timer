@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 fn make_state() -> Arc<AppState> {
     let db = receiver::Db::open_in_memory().unwrap();
-    let (state, _rx) = AppState::new(db);
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
     state
 }
 

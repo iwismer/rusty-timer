@@ -16,6 +16,7 @@ pub enum ReceiverUiEvent {
     StatusChanged {
         connection_state: ConnectionState,
         streams_count: usize,
+        receiver_id: String,
     },
     StreamsSnapshot {
         streams: Vec<StreamEntry>,
@@ -45,11 +46,13 @@ mod tests {
         let event = ReceiverUiEvent::StatusChanged {
             connection_state: ConnectionState::Connected,
             streams_count: 3,
+            receiver_id: "recv-abc".to_owned(),
         };
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "status_changed");
         assert_eq!(json["connection_state"], "connected");
         assert_eq!(json["streams_count"], 3);
+        assert_eq!(json["receiver_id"], "recv-abc");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 const SCHEMA_SQL: &str = include_str!("storage/schema.sql");
+pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("SQLite: {0}")]
@@ -24,6 +25,7 @@ pub struct Profile {
     pub server_url: String,
     pub token: String,
     pub update_mode: String,
+    pub receiver_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
@@ -69,22 +71,29 @@ impl Db {
     pub fn load_profile(&self) -> DbResult<Option<Profile>> {
         let mut s = self
             .conn
-            .prepare("SELECT server_url, token, update_mode FROM profile LIMIT 1")?;
+            .prepare("SELECT server_url, token, update_mode, receiver_id FROM profile LIMIT 1")?;
         let mut rows = s.query_map([], |r| {
             Ok(Profile {
                 server_url: r.get(0)?,
                 token: r.get(1)?,
                 update_mode: r.get(2)?,
+                receiver_id: r.get(3)?,
             })
         })?;
         Ok(rows.next().transpose()?)
     }
-    pub fn save_profile(&self, url: &str, tok: &str, update_mode: &str) -> DbResult<()> {
+    pub fn save_profile(
+        &self,
+        url: &str,
+        tok: &str,
+        update_mode: &str,
+        receiver_id: Option<&str>,
+    ) -> DbResult<()> {
         let receiver_mode_json = self.load_receiver_mode_json_raw()?;
         self.conn.execute_batch("DELETE FROM profile")?;
         self.conn.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id],
         )?;
         Ok(())
     }
@@ -104,6 +113,24 @@ impl Db {
         )?;
         if updated == 0 {
             return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    /// Persists the receiver ID. If no profile row exists yet, a minimal
+    /// placeholder row is created (empty server_url/token). Code that checks
+    /// for a configured profile must use `profile_has_connect_credentials`
+    /// rather than just testing for `Some(profile)`.
+    pub fn save_receiver_id(&self, receiver_id: &str) -> DbResult<()> {
+        let updated = self.conn.execute(
+            "UPDATE profile SET receiver_id = ?1",
+            rusqlite::params![receiver_id],
+        )?;
+        if updated == 0 {
+            self.conn.execute(
+                "INSERT INTO profile (server_url, token, update_mode, receiver_id) VALUES ('', '', ?1, ?2)",
+                rusqlite::params![DEFAULT_UPDATE_MODE, receiver_id],
+            )?;
         }
         Ok(())
     }
@@ -232,6 +259,11 @@ impl Db {
             "ALTER TABLE profile ADD COLUMN receiver_mode_json TEXT;",
             "receiver_mode_json",
         )?;
+        apply_profile_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN receiver_id TEXT;",
+            "receiver_id",
+        )?;
         Ok(())
     }
 
@@ -277,7 +309,7 @@ mod tests {
     #[test]
     fn profile_round_trip_with_update_mode() {
         let db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-only")
+        db.save_profile("wss://example.com", "tok", "check-only", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.update_mode, "check-only");
@@ -286,7 +318,7 @@ mod tests {
     #[test]
     fn profile_update_mode_defaults_for_existing_db() {
         let db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download")
+        db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.update_mode, "check-and-download");
@@ -307,7 +339,7 @@ mod tests {
     #[test]
     fn receiver_mode_round_trip() {
         let db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download")
+        db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let mode = ReceiverMode::Live {
             streams: vec![],
@@ -322,7 +354,7 @@ mod tests {
     #[test]
     fn targeted_replay_mode_round_trips_with_targets() {
         let db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download")
+        db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let targeted = ReceiverMode::TargetedReplay {
             targets: vec![rt_protocol::ReplayTarget {
@@ -340,7 +372,7 @@ mod tests {
     #[test]
     fn save_profile_tolerates_invalid_stored_receiver_mode_json() {
         let db = Db::open_in_memory().unwrap();
-        db.save_profile("wss://example.com", "tok", "check-and-download")
+        db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         db.conn
             .execute(
@@ -349,7 +381,7 @@ mod tests {
             )
             .unwrap();
 
-        let result = db.save_profile("wss://example.org", "tok-2", "check-only");
+        let result = db.save_profile("wss://example.org", "tok-2", "check-only", None);
         assert!(
             result.is_ok(),
             "profile updates should not fail due to malformed stored receiver_mode_json: {result:?}"
@@ -381,5 +413,52 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].forwarder_id, "f2");
         assert_eq!(rows[0].reader_ip, "10.0.0.2:10000");
+    }
+
+    #[test]
+    fn save_receiver_id_on_empty_db_creates_minimal_profile() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_receiver_id("recv-test1234").unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.receiver_id, Some("recv-test1234".to_owned()));
+        assert_eq!(p.server_url, "");
+        assert_eq!(p.token, "");
+        assert_eq!(p.update_mode, "check-and-download");
+    }
+
+    #[test]
+    fn save_receiver_id_on_existing_profile_updates_only_receiver_id() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "check-only", Some("recv-old"))
+            .unwrap();
+        db.save_receiver_id("recv-new").unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.receiver_id, Some("recv-new".to_owned()));
+        assert_eq!(p.server_url, "wss://example.com");
+        assert_eq!(p.token, "tok");
+        assert_eq!(p.update_mode, "check-only");
+    }
+
+    #[test]
+    fn save_profile_round_trips_receiver_id() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(
+            "wss://s.com",
+            "t",
+            "check-and-download",
+            Some("recv-roundtrip"),
+        )
+        .unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.receiver_id, Some("recv-roundtrip".to_owned()));
+    }
+
+    #[test]
+    fn save_profile_with_none_receiver_id_stores_null() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://s.com", "t", "check-and-download", None)
+            .unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.receiver_id, None);
     }
 }

@@ -25,6 +25,7 @@ describe("api client", () => {
         server_url: "wss://s.com",
         token: "tok",
         update_mode: "check-and-download",
+        receiver_id: "recv-test",
       }),
     );
     const p = await getProfile();
@@ -33,6 +34,7 @@ describe("api client", () => {
       expect.any(Object),
     );
     expect(p.server_url).toBe("wss://s.com");
+    expect(p.receiver_id).toBe("recv-test");
   });
 
   it("putProfile sends PUT with body", async () => {
@@ -42,6 +44,7 @@ describe("api client", () => {
       server_url: "wss://s.com",
       token: "t",
       update_mode: "check-and-download",
+      receiver_id: "recv-test",
     });
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/profile",
@@ -66,10 +69,12 @@ describe("api client", () => {
         connection_state: "disconnected",
         local_ok: true,
         streams_count: 0,
+        receiver_id: "recv-status",
       }),
     );
     const s = await getStatus();
     expect(s.connection_state).toBe("disconnected");
+    expect(s.receiver_id).toBe("recv-status");
   });
 
   it("connect accepts 200 or 202", async () => {
