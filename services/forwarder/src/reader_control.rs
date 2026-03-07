@@ -294,6 +294,12 @@ pub struct DownloadTracker {
     event_tx: broadcast::Sender<DownloadEvent>,
 }
 
+impl Default for DownloadTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DownloadTracker {
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(64);
