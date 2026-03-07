@@ -3,6 +3,7 @@ import {
   formatLastSeen,
   readerBadgeState,
   readerConnectionSummary,
+  formatClockDrift,
 } from "./status-view-model";
 
 describe("formatLastSeen", () => {
@@ -59,5 +60,16 @@ describe("readerConnectionSummary", () => {
       configured: 3,
       label: "2 connected / 3 configured",
     });
+  });
+});
+
+describe("formatClockDrift", () => {
+  it("formats milliseconds", () => {
+    expect(formatClockDrift(null)).toBe("\u2014");
+    expect(formatClockDrift(undefined)).toBe("\u2014");
+    expect(formatClockDrift(50)).toBe("+50ms");
+    expect(formatClockDrift(-200)).toBe("-200ms");
+    expect(formatClockDrift(1500)).toBe("+1.5s");
+    expect(formatClockDrift(-3200)).toBe("-3.2s");
   });
 });
