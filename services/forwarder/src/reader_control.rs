@@ -238,6 +238,7 @@ pub struct ReaderInfo {
     pub config3: Option<u8>,
     pub unique_tag_count: Option<u16>,
     pub stored_record_pages: Option<u8>,
+    pub recording: Option<bool>,
     pub reader_clock: Option<String>,
     pub clock_drift_ms: Option<i64>,
     pub read_mode: Option<String>,
@@ -272,6 +273,7 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
         Ok(ext) => {
             ri.unique_tag_count = Some(ext.unique_tag_count);
             ri.stored_record_pages = Some(ext.stored_record_pages);
+            ri.recording = Some(ext.recording_state == 0x01);
             info!(
                 unique_tags = ext.unique_tag_count,
                 stored_pages = ext.stored_record_pages,
@@ -299,6 +301,7 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
     if let Ok(ext) = client.get_extended_status().await {
         info.unique_tag_count = Some(ext.unique_tag_count);
         info.stored_record_pages = Some(ext.stored_record_pages);
+        info.recording = Some(ext.recording_state == 0x01);
     }
 
     if let Ok((mode, timeout)) = client.get_config3().await {
