@@ -31,6 +31,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, Uri, header};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rt_updater::UpdateStatus;
@@ -38,6 +39,7 @@ use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::io::Write as _;
 use std::net::{SocketAddr, SocketAddrV4};
@@ -2082,6 +2084,150 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+async fn download_reads_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"error":"reader not connected"}"#.to_string(),
+        );
+    };
+    let tracker = { state.download_trackers.read().unwrap().get(&ip).cloned() };
+    let Some(tracker) = tracker else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"error":"reader not connected"}"#.to_string(),
+        );
+    };
+
+    // Check current state and prepare
+    {
+        let mut dt = tracker.lock().await;
+        match &dt.state {
+            crate::reader_control::DownloadState::Downloading => {
+                return json_response(
+                    StatusCode::CONFLICT,
+                    r#"{"error":"download already in progress"}"#.to_string(),
+                );
+            }
+            crate::reader_control::DownloadState::Complete
+            | crate::reader_control::DownloadState::Error(_) => {
+                dt.reset();
+            }
+            crate::reader_control::DownloadState::Idle => {}
+        }
+    }
+
+    // Get estimated_stored_reads from reader_info
+    let estimated_reads = {
+        let ss = state.subsystem.lock().await;
+        ss.readers
+            .get(&ip)
+            .and_then(|r| r.reader_info.as_ref())
+            .and_then(|ri| ri.estimated_stored_reads)
+            .unwrap_or(0)
+    };
+
+    // Spawn background task to initiate the download
+    let bg_tracker = tracker.clone();
+    tokio::spawn(async move {
+        match client.start_download().await {
+            Ok(ext) => {
+                let mut dt = bg_tracker.lock().await;
+                dt.start(ext.stored_data_extent);
+            }
+            Err(e) => {
+                let mut dt = bg_tracker.lock().await;
+                dt.fail(format!("{}", e));
+            }
+        }
+    });
+
+    json_response(
+        StatusCode::ACCEPTED,
+        format!(
+            r#"{{"status":"started","estimated_reads":{}}}"#,
+            estimated_reads
+        ),
+    )
+}
+
+async fn download_progress_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let tracker = { state.download_trackers.read().unwrap().get(&ip).cloned() };
+    let Some(tracker) = tracker else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"error":"reader not connected"}"#.to_string(),
+        );
+    };
+
+    // Lock tracker, capture initial state if terminal, and subscribe
+    let (initial_event, mut rx) = {
+        let dt = tracker.lock().await;
+        let initial = match &dt.state {
+            crate::reader_control::DownloadState::Idle => {
+                Some(crate::reader_control::DownloadEvent::Idle)
+            }
+            crate::reader_control::DownloadState::Complete => {
+                Some(crate::reader_control::DownloadEvent::Complete {
+                    reads_received: dt.reads_received,
+                })
+            }
+            crate::reader_control::DownloadState::Error(msg) => {
+                Some(crate::reader_control::DownloadEvent::Error {
+                    message: msg.clone(),
+                })
+            }
+            crate::reader_control::DownloadState::Downloading => None,
+        };
+        let rx = dt.subscribe();
+        (initial, rx)
+    };
+
+    let stream = async_stream::stream! {
+        // If there's an initial terminal event, yield it and close
+        if let Some(evt) = initial_event {
+            let json = serde_json::to_string(&evt).unwrap_or_default();
+            yield Ok::<_, Infallible>(SseEvent::default().data(json));
+            return;
+        }
+
+        // Stream events from the broadcast channel
+        loop {
+            match rx.recv().await {
+                Ok(evt) => {
+                    let is_terminal = matches!(
+                        evt,
+                        crate::reader_control::DownloadEvent::Complete { .. }
+                            | crate::reader_control::DownloadEvent::Error { .. }
+                    );
+                    let json = serde_json::to_string(&evt).unwrap_or_default();
+                    yield Ok::<_, Infallible>(SseEvent::default().data(json));
+                    if is_terminal {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return;
+                }
+            }
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
@@ -2168,6 +2314,14 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route(
             "/api/v1/readers/{ip}/recording",
             put(set_recording_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/download-reads",
+            post(download_reads_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/download-reads/progress",
+            get(download_progress_handler::<J>),
         )
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)

@@ -978,6 +978,7 @@ dependencies = [
 name = "forwarder"
 version = "0.5.6"
 dependencies = [
+ "async-stream",
  "axum",
  "chrono",
  "futures-util",
