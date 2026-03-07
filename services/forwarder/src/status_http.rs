@@ -1775,12 +1775,13 @@ async fn estimate_one_way_latency(
 /// 1. Probing RTT to estimate one-way network latency
 /// 2. Reading the reader's clock to learn its centisecond phase
 /// 3. Choosing the SET_DATE_TIME second value that minimizes drift, accounting
-///    for the fact that SET_DATE_TIME cannot set the sub-second (centisecond)
-///    counter — the protocol spec says "Resolution is 1 second"
+///    for the fact that SET_DATE_TIME takes effect at the next centisecond
+///    rollover (next second boundary), not immediately.
 ///
-/// The reader's centisecond counter free-runs through SET_DATE_TIME. The best we
-/// can do is round the second value so that (set_second + reader_cs) ≈ wall_clock.
-/// This gives |drift| ≤ 500ms worst case, ~250ms average.
+/// The reader's centisecond counter free-runs through SET_DATE_TIME. The new
+/// second value is applied when the cs counter next wraps to 0. At that moment
+/// the reader shows S.000. We pick S = round(wall_at_rollover) so that
+/// |drift| ≤ 500ms worst case, ~250ms average.
 async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
@@ -1818,22 +1819,20 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     // Wall clock at the moment the command arrives
     let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or(chrono::Duration::zero());
     let arrival_wall = wall_now + arrival_offset;
-    let wall_frac = arrival_wall.nanosecond() as f64 / 1_000_000_000.0;
 
     // Step 3: choose the second value that minimizes drift.
-    // After SET_DATE_TIME, reader shows: S.reader_frac
-    // Actual wall time at that moment:   wall_second.wall_frac
-    // Drift = (S + reader_frac) - (wall_second + wall_frac)
-    // We pick S = wall_second, then adjust ±1s if the sub-second offset is > 500ms.
-    let offset = reader_frac - wall_frac;
-    let target = if offset > 0.5 {
-        // Reader cs is >500ms ahead of wall frac — set second 1s earlier
-        arrival_wall - chrono::Duration::seconds(1)
-    } else if offset < -0.5 {
-        // Reader cs is >500ms behind wall frac — set second 1s later
-        arrival_wall + chrono::Duration::seconds(1)
+    // SET_DATE_TIME takes effect at the next cs rollover (when cs wraps to 0),
+    // NOT immediately. At that moment the reader shows S.000.
+    // Time from arrival to rollover = (1.0 - reader_frac) seconds.
+    let rollover_delay_ms = ((1.0 - reader_frac) * 1000.0) as i64;
+    let wall_at_rollover = arrival_wall + chrono::Duration::milliseconds(rollover_delay_ms);
+    let rollover_frac = wall_at_rollover.nanosecond() as f64 / 1_000_000_000.0;
+
+    // Pick S = round(wall_at_rollover) so that |S.000 - wall_at_rollover| ≤ 500ms
+    let target = if rollover_frac >= 0.5 {
+        wall_at_rollover + chrono::Duration::seconds(1)
     } else {
-        arrival_wall
+        wall_at_rollover
     };
 
     let year = (target.year() % 100) as u8;
@@ -1880,12 +1879,12 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
             }
 
             state.logger.log(format!(
-                "reader {} clock synced to {} (one-way latency: {:.1}ms, cs phase: {:.0}, offset: {:.0}ms)",
+                "reader {} clock synced to {} (one-way latency: {:.1}ms, cs phase: {:.0}, rollover frac: {:.0}ms)",
                 ip,
                 reader_iso,
                 one_way.as_secs_f64() * 1000.0,
                 cs,
-                offset * 1000.0,
+                rollover_frac * 1000.0,
             ));
             let drift_json = match drift_ms {
                 Some(d) => format!("{}", d),

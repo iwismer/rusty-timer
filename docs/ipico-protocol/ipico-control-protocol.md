@@ -60,6 +60,7 @@ open questions.
 - [`captures/record-on-off.pcapng`](./captures/record-on-off.pcapng)
 - [`captures/testreads`](./captures/testreads)
 - [`captures/turnon-con-dis.pcapng`](./captures/turnon-con-dis.pcapng)
+- [`captures/setclock.pcapng`](./captures/setclock.pcapng)
 - [`IPICO-Reader-Serial-Protocol-100-20071120.pdf`](./IPICO-Reader-Serial-Protocol-100-20071120.pdf)
 - [`scripts/parse_pcap.py`](../../scripts/parse_pcap.py)
 
@@ -93,6 +94,7 @@ variants in the captures are therefore later-firmware extensions.
 | `docs/ipico-protocol/captures/direct-raw-reads-con-dis.pcapng` | Direct read session in raw mode; `aa` traffic only, with the same 36-character layout seen elsewhere |
 | `docs/ipico-protocol/captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 mode changes |
 | `docs/ipico-protocol/captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap sequence after fresh boot |
+| `docs/ipico-protocol/captures/setclock.pcapng` | Five consecutive SET_DATE_TIME attempts via the forwarder; confirms SET takes effect at next cs rollover, not immediately |
 
 ## Protocol Families
 
@@ -428,6 +430,13 @@ Notes:
   RTC interrupt to 1-second intervals
 - `Capture`: after a successful clock set, this reader emitted one unsolicited
   `0x4c` frame, then the management software read back `0x02` to verify
+- `Capture` (`setclock.pcapng`): SET_DATE_TIME does **not** take effect
+  immediately. The centisecond counter free-runs uninterrupted and the new
+  second value is applied at the next cs rollover (when cs wraps from 99 → 0).
+  Verify reads performed within the same second consistently show the
+  **pre-SET** second value with a continuing centisecond counter. This means
+  the effective reader clock after the SET is `S.000` at the rollover moment,
+  not `S.<current_cs>` at the command-arrival moment
 
 #### 0x02 - GET_DATE_TIME
 
@@ -1030,13 +1039,23 @@ While polling is active, the reader can also emit unsolicited traffic:
 
 `Capture`
 
-Observed in `docs/ipico-protocol/captures/settime.pcapng`:
+Observed in `docs/ipico-protocol/captures/settime.pcapng` and
+`docs/ipico-protocol/captures/setclock.pcapng`:
 
-1. Host sends `0x01`
+1. Host sends `0x01` (SET_DATE_TIME)
 2. Reader ACKs
-3. Reader emits `0x4c`
-4. Host sends `0x02`
+3. Reader may emit unsolicited `0x4c`
+4. Host sends `0x02` (GET_DATE_TIME) to verify
 5. Reader returns the updated clock
+
+**Timing behaviour** (confirmed in `setclock.pcapng` across 5 SET attempts):
+the new second value does **not** take effect at the moment the command is
+received. The centisecond counter continues free-running and the SET is applied
+at the next cs rollover (cs wraps 99 → 0). A verify read issued within the
+same second will still show the pre-SET second value with a continuing cs
+counter. Any clock-sync algorithm must account for this by predicting the wall
+time at the rollover moment (arrival + time-to-rollover) and rounding to the
+nearest second, since the reader will show `S.000` at rollover
 
 ### Read-mode workflow
 
