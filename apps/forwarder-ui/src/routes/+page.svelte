@@ -19,6 +19,11 @@
     formatReadMode,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
+  import {
+    subscribeDownloadProgress,
+    type DownloadProgressEvent,
+    type DownloadProgressHandle,
+  } from "$lib/download-progress";
 
   let status = $state<ForwarderStatus | null>(null);
   let error = $state<string | null>(null);
@@ -41,6 +46,8 @@
   let controlFeedback = $state<
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
   >({});
+  let downloadState = $state<Record<string, DownloadProgressEvent | null>>({});
+  let downloadHandles: Record<string, DownloadProgressHandle> = {};
   let localClockStr = $state("");
   let readerInfoReceivedAt = $state<Record<string, number>>({});
   let clockTickNow = $state(Date.now());
@@ -332,6 +339,65 @@
     }
   }
 
+  async function handleDownloadReads(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    downloadState = { ...downloadState, [ip]: null };
+
+    try {
+      await api.startDownloadReads(ip);
+
+      // Open SSE to track progress
+      downloadHandles[ip]?.close();
+      downloadHandles[ip] = subscribeDownloadProgress(
+        ip,
+        (event) => {
+          downloadState = { ...downloadState, [ip]: event };
+          if (event.state === "complete") {
+            controlFeedback = {
+              ...controlFeedback,
+              [ip]: {
+                kind: "ok",
+                message: `Download complete: ${event.reads_received} reads received`,
+              },
+            };
+            controlBusy = { ...controlBusy, [ip]: false };
+            delete downloadHandles[ip];
+          } else if (event.state === "error") {
+            controlFeedback = {
+              ...controlFeedback,
+              [ip]: {
+                kind: "err",
+                message: `Download failed: ${event.message}`,
+              },
+            };
+            controlBusy = { ...controlBusy, [ip]: false };
+            delete downloadHandles[ip];
+          }
+        },
+        () => {
+          // SSE connection error
+          controlFeedback = {
+            ...controlFeedback,
+            [ip]: {
+              kind: "err",
+              message: "Lost connection to download progress",
+            },
+          };
+          controlBusy = { ...controlBusy, [ip]: false };
+          downloadState = { ...downloadState, [ip]: null };
+          delete downloadHandles[ip];
+        },
+      );
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Download failed: ${e}` },
+      };
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
   let clockInterval: ReturnType<typeof setInterval>;
 
   function updateLocalClock() {
@@ -405,6 +471,9 @@
   onDestroy(() => {
     clearInterval(clockInterval);
     destroySSE();
+    for (const handle of Object.values(downloadHandles)) {
+      handle.close();
+    }
   });
 </script>
 
@@ -731,9 +800,11 @@
                           >
                         </div>
                         <div>
-                          <span class="text-text-muted">Stored Pages:</span>
+                          <span class="text-text-muted">Stored Reads:</span>
                           <span class="font-mono ml-2"
-                            >{info?.stored_record_pages ?? "\u2014"}</span
+                            >{info?.estimated_stored_reads != null
+                              ? info.estimated_stored_reads.toLocaleString()
+                              : "\u2014"}</span
                           >
                         </div>
                       </div>
@@ -795,6 +866,15 @@
                             : "Start Recording"}</button
                         >
                         <button
+                          class={btnPrimary}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleDownloadReads(reader.ip);
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}>Download Reads</button
+                        >
+                        <button
                           class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
                           onclick={(e) => {
                             e.stopPropagation();
@@ -804,6 +884,33 @@
                             reader.state !== "connected"}>Clear Records</button
                         >
                       </div>
+                      {#if downloadState[reader.ip]?.state === "downloading"}
+                        {@const dl = downloadState[reader.ip]}
+                        <div
+                          class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
+                        >
+                          <div
+                            class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden"
+                          >
+                            <div
+                              class="h-full bg-accent rounded-full transition-all"
+                              style="width: {dl && dl.total
+                                ? Math.round(
+                                    ((dl.progress ?? 0) / dl.total) * 100,
+                                  )
+                                : 0}%"
+                            ></div>
+                          </div>
+                          <span class="text-xs font-mono whitespace-nowrap">
+                            {dl?.reads_received ?? 0} reads
+                            {#if dl?.total}
+                              &middot; {Math.round(
+                                ((dl?.progress ?? 0) / dl.total) * 100,
+                              )}%
+                            {/if}
+                          </span>
+                        </div>
+                      {/if}
                       {#if controlFeedback[reader.ip]}
                         {@const fb = controlFeedback[reader.ip]}
                         {#if fb}
