@@ -191,6 +191,17 @@ impl ControlClient {
 
         Ok(())
     }
+
+    /// Toggle the reader's internal recording state.
+    pub async fn set_recording(&self, on: bool) -> Result<control::ExtendedStatus, ControlError> {
+        let state_byte = if on { 0x01 } else { 0x00 };
+        let frame = self
+            .send(&Command::SetExtendedStatus {
+                data: vec![0x00, state_byte],
+            })
+            .await?;
+        control::decode_extended_status(&frame)
+    }
 }
 
 impl ControlResponseSink {
@@ -453,5 +464,47 @@ mod tests {
             .await
             .expect("clear task join")
             .expect("clear task result");
+    }
+
+    #[tokio::test]
+    async fn set_recording_on_sends_correct_frame() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move { client.set_recording(true).await });
+
+        let cmd = cmd_rx.recv().await.expect("recording command");
+        assert_eq!(
+            std::str::from_utf8(&cmd).expect("utf8"),
+            "ab00024b000119\r\n"
+        );
+
+        // Reply with a 12-byte status: byte 0 = 0x01 (recording on)
+        assert!(sink.feed(b"ab000c4b010000000000000059058f015c").await);
+
+        task.await
+            .expect("task join")
+            .expect("set_recording result");
+    }
+
+    #[tokio::test]
+    async fn set_recording_off_sends_correct_frame() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move { client.set_recording(false).await });
+
+        let cmd = cmd_rx.recv().await.expect("recording command");
+        assert_eq!(
+            std::str::from_utf8(&cmd).expect("utf8"),
+            "ab00024b000018\r\n"
+        );
+
+        // Reply with a 12-byte status: byte 0 = 0x00 (recording off)
+        assert!(sink.feed(b"ab000c4b000000000000000059058f015b").await);
+
+        task.await
+            .expect("task join")
+            .expect("set_recording result");
     }
 }
