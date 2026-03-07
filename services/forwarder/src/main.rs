@@ -183,6 +183,7 @@ async fn run_reader(
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let (control_client, control_sink) = forwarder::reader_control::ControlClient::new(cmd_tx);
         let control_client = Arc::new(control_client);
+        status.register_control_client(&stream_key, control_client.clone());
 
         // Writer task: drains command channel to TCP socket
         let mut writer = write_half;
@@ -201,6 +202,8 @@ async fn run_reader(
         let mut poll_shutdown = shutdown_rx.clone();
         let poll_logger = logger.clone();
         let poll_reader_ip = reader_ip.clone();
+        let poll_status = status.clone();
+        let poll_stream_key = stream_key.clone();
         let poll_handle = tokio::spawn(async move {
             // Run initial connection sequence
             let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
@@ -210,6 +213,9 @@ async fn run_reader(
                 reader_info.fw_version.as_deref().unwrap_or("?"),
                 reader_info.unique_tag_count.unwrap_or(0),
             ));
+            poll_status
+                .update_reader_info(&poll_stream_key, reader_info.clone())
+                .await;
 
             // Transition to 30s polling
             let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -219,6 +225,7 @@ async fn run_reader(
                 tokio::select! {
                     _ = interval.tick() => {
                         forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
+                        poll_status.update_reader_info(&poll_stream_key, info.clone()).await;
                     }
                     _ = poll_shutdown.changed() => break,
                 }
@@ -236,6 +243,7 @@ async fn run_reader(
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
+                        status.deregister_control_client(&stream_key);
                         return;
                     }
                     continue;
@@ -372,6 +380,7 @@ async fn run_reader(
 
         writer_handle.abort();
         poll_handle.abort();
+        status.deregister_control_client(&stream_key);
 
         // Reconnect with backoff
         let delay = Duration::from_secs(backoff_secs);

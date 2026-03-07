@@ -83,6 +83,8 @@ pub struct ReaderStatus {
     pub local_port: u16,
     /// The name of the current epoch (set via the server), if any.
     pub current_epoch_name: Option<String>,
+    /// Control protocol info (firmware, clock, etc.) — populated on connect.
+    pub reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -175,6 +177,8 @@ pub struct StatusServer {
     subsystem: Arc<Mutex<SubsystemStatus>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    control_clients:
+        Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -200,6 +204,8 @@ struct AppState<J: JournalAccess + Send + 'static> {
     restart_signal: Option<Arc<Notify>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    control_clients:
+        Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -212,6 +218,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             restart_signal: self.restart_signal.clone(),
             ui_tx: self.ui_tx.clone(),
             logger: self.logger.clone(),
+            control_clients: self.control_clients.clone(),
         }
     }
 }
@@ -302,6 +309,44 @@ impl StatusServer {
         self.subsystem.lock().await.staged_update_path = Some(path);
     }
 
+    pub fn control_clients(
+        &self,
+    ) -> &Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>> {
+        &self.control_clients
+    }
+
+    pub async fn update_reader_info(
+        &self,
+        reader_ip: &str,
+        info: crate::reader_control::ReaderInfo,
+    ) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.reader_info = Some(info.clone());
+        }
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+                ip: reader_ip.to_owned(),
+                info,
+            });
+    }
+
+    pub fn register_control_client(
+        &self,
+        reader_ip: &str,
+        client: Arc<crate::reader_control::ControlClient>,
+    ) {
+        self.control_clients
+            .write()
+            .unwrap()
+            .insert(reader_ip.to_owned(), client);
+    }
+
+    pub fn deregister_control_client(&self, reader_ip: &str) {
+        self.control_clients.write().unwrap().remove(reader_ip);
+    }
+
     /// Pre-populate all configured reader IPs as Disconnected.
     ///
     /// Each entry is `(reader_addr, local_port)` where `reader_addr` is `"ip:port"`
@@ -316,6 +361,7 @@ impl StatusServer {
                 reads_total: 0,
                 local_port: *local_port,
                 current_epoch_name: None,
+                reader_info: None,
             });
         }
     }
@@ -426,6 +472,7 @@ impl StatusServer {
             500,
         ));
         let subsystem = Arc::new(Mutex::new(subsystem));
+        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -434,6 +481,7 @@ impl StatusServer {
             restart_signal: None,
             ui_tx: ui_tx.clone(),
             logger: logger.clone(),
+            control_clients: control_clients.clone(),
         };
 
         let app = build_router(state);
@@ -448,6 +496,7 @@ impl StatusServer {
             subsystem,
             ui_tx,
             logger,
+            control_clients,
         })
     }
 
@@ -469,6 +518,7 @@ impl StatusServer {
             500,
         ));
         let subsystem = Arc::new(Mutex::new(subsystem));
+        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -477,6 +527,7 @@ impl StatusServer {
             restart_signal: Some(restart_signal),
             ui_tx: ui_tx.clone(),
             logger: logger.clone(),
+            control_clients: control_clients.clone(),
         };
 
         let app = build_router(state);
@@ -491,6 +542,7 @@ impl StatusServer {
             subsystem,
             ui_tx,
             logger,
+            control_clients,
         })
     }
 }
@@ -1533,6 +1585,7 @@ struct ReaderStatusJson {
     last_seen_secs: Option<u64>,
     local_port: u16,
     current_epoch_name: Option<String>,
+    reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
@@ -1556,6 +1609,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                 local_port: r.local_port,
                 current_epoch_name: r.current_epoch_name.clone(),
+                reader_info: r.reader_info.clone(),
             }
         })
         .collect();
@@ -1602,6 +1656,9 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
                 crate::ui_events::ForwarderUiEvent::LogEntry { .. } => "log_entry",
                 crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { .. } => {
                     "update_status_changed"
+                }
+                crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { .. } => {
+                    "reader_info_updated"
                 }
             };
             match serde_json::to_string(&event) {
