@@ -247,7 +247,7 @@ impl ReaderStatistics {
 /// Decoded 0x4b extended status response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExtendedStatus {
-    pub reader_type: u8,
+    pub recording_state: u8,
     pub decoder_version: u8,
     pub unique_tag_count: u16,
     pub hw_identifier: u16,
@@ -404,7 +404,7 @@ pub fn decode_extended_status(frame: &ControlFrame) -> Result<ExtendedStatus, Co
         });
     }
     Ok(ExtendedStatus {
-        reader_type: frame.data[0],
+        recording_state: frame.data[0],
         decoder_version: frame.data[1],
         unique_tag_count: u16::from_be_bytes([frame.data[2], frame.data[3]]),
         hw_identifier: u16::from_be_bytes([frame.data[8], frame.data[9]]),
@@ -652,7 +652,7 @@ mod tests {
         let frame = parse_response(b"ab000d4b010b012f0000000059058f0c005a").unwrap();
         assert_eq!(frame.instruction, INSTR_EXT_STATUS);
         let ext = decode_extended_status(&frame).unwrap();
-        assert_eq!(ext.reader_type, 0x01);
+        assert_eq!(ext.recording_state, 0x01);
         assert_eq!(ext.decoder_version, 0x0b);
         assert_eq!(ext.unique_tag_count, 0x012f);
         assert_eq!(ext.hw_identifier, 0x5905);
