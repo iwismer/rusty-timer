@@ -1084,26 +1084,35 @@ async fn reconcile_proxies(
 ) {
     let assignments = resolve_ports(subs);
 
-    // Determine desired keys.
-    let desired_keys: std::collections::HashSet<String> = assignments
+    // Determine desired port for each stream key.
+    let desired_ports: HashMap<String, u16> = assignments
         .iter()
         .filter_map(|(k, v)| {
-            if matches!(v, PortAssignment::Assigned(_)) {
-                Some(k.clone())
+            if let PortAssignment::Assigned(port) = v {
+                Some((k.clone(), *port))
             } else {
                 None
             }
         })
         .collect();
 
-    // Stop proxies that are no longer wanted.
-    proxies.retain(|key, proxy| {
-        if !desired_keys.contains(key) {
+    // Stop proxies that are no longer wanted, or whose desired port changed.
+    proxies.retain(|key, proxy| match desired_ports.get(key) {
+        Some(desired_port) if *desired_port == proxy.port => true,
+        Some(desired_port) => {
+            info!(
+                key = %key,
+                old_port = proxy.port,
+                new_port = *desired_port,
+                "restarting local proxy for port change"
+            );
+            proxy.shutdown();
+            false
+        }
+        None => {
             info!(key = %key, port = proxy.port, "stopping removed local proxy");
             proxy.shutdown();
             false
-        } else {
-            true
         }
     });
 
@@ -1165,6 +1174,14 @@ mod tests {
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::protocol::Message;
 
+    async fn free_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        port
+    }
+
     async fn run_raw_ws_server_once<H, Fut>(handler: H) -> (std::net::SocketAddr, JoinHandle<()>)
     where
         H: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut
@@ -1180,6 +1197,40 @@ mod tests {
             handler(ws).await;
         });
         (addr, task)
+    }
+
+    #[tokio::test]
+    async fn reconcile_proxies_rebinds_when_port_changes() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        let event_bus = EventBus::new();
+        let mut proxies: HashMap<String, LocalProxy> = HashMap::new();
+        let first_port = free_port().await;
+        let second_port = free_port().await;
+        assert_ne!(first_port, second_port);
+
+        let initial = vec![Subscription {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            local_port_override: Some(first_port),
+        }];
+        reconcile_proxies(&initial, &mut proxies, &event_bus, &state.logger).await;
+
+        let key = stream_key("f1", "10.0.0.1:10000");
+        assert_eq!(proxies.get(&key).expect("proxy").port, first_port);
+
+        let updated = vec![Subscription {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            local_port_override: Some(second_port),
+        }];
+        reconcile_proxies(&updated, &mut proxies, &event_bus, &state.logger).await;
+
+        assert_eq!(proxies.get(&key).expect("proxy").port, second_port);
+
+        for proxy in proxies.values() {
+            proxy.shutdown();
+        }
     }
 
     #[tokio::test]

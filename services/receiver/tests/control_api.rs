@@ -59,6 +59,55 @@ async fn post_empty(app: axum::Router, path: &str) -> StatusCode {
     app.oneshot(req).await.unwrap().status()
 }
 
+fn setup_with_state() -> (axum::Router, Arc<AppState>) {
+    let db = Db::open_in_memory().unwrap();
+    let (state, _rx) = AppState::new(db, "test-receiver".to_owned());
+    let router = build_router(Arc::clone(&state));
+    (router, state)
+}
+
+async fn post_empty_with_intent(
+    app: axum::Router,
+    path: &str,
+    intent: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("x-rt-receiver-admin-intent", intent)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
+async fn post_json_with_intent(
+    app: axum::Router,
+    path: &str,
+    body: Value,
+    intent: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("x-rt-receiver-admin-intent", intent)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, val)
+}
+
 #[tokio::test]
 async fn profile_round_trip() {
     let app = setup();
@@ -653,4 +702,262 @@ async fn put_profile_accepts_valid_receiver_id() {
         .await,
         StatusCode::NO_CONTENT
     );
+}
+
+#[tokio::test]
+async fn admin_reset_all_cursors_requires_intent_header() {
+    let app = setup();
+    let status = post_empty(app, "/api/v1/admin/cursors/reset-all").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_reset_all_cursors_deletes_all() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_cursor("f1", "10.0.0.1:10000", 1, 10).unwrap();
+        db.save_cursor("f2", "10.0.0.2:10000", 2, 20).unwrap();
+    }
+    let (status, body) =
+        post_empty_with_intent(app, "/api/v1/admin/cursors/reset-all", "reset-all-cursors").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], 2);
+}
+
+#[tokio::test]
+async fn admin_reset_all_earliest_epochs_deletes_all() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+    }
+    let (status, body) = post_empty_with_intent(
+        app,
+        "/api/v1/admin/earliest-epochs/reset-all",
+        "reset-all-earliest-epochs",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], 1);
+}
+
+#[tokio::test]
+async fn admin_reset_earliest_epoch_per_stream() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.save_earliest_epoch("f2", "10.0.0.2", 3).unwrap();
+    }
+    let (status, _) = post_json_with_intent(
+        app,
+        "/api/v1/admin/earliest-epochs/reset",
+        json!({"forwarder_id": "f1", "reader_ip": "10.0.0.1"}),
+        "reset-earliest-epoch",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let remaining = state.db.lock().await.load_earliest_epochs().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].0, "f2");
+}
+
+#[tokio::test]
+async fn admin_purge_subscriptions_deletes_all() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+    }
+    let (status, body) = post_empty_with_intent(
+        app,
+        "/api/v1/admin/subscriptions/purge",
+        "purge-subscriptions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], 1);
+}
+
+#[tokio::test]
+async fn admin_purge_subscriptions_requests_reconnect_when_connected() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+    }
+    state.set_connection_state(ConnectionState::Connected).await;
+
+    let (status, _) = post_empty_with_intent(
+        app.clone(),
+        "/api/v1/admin/subscriptions/purge",
+        "purge-subscriptions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, runtime_status) = get_json(app, "/api/v1/status").await;
+    assert_eq!(runtime_status["connection_state"], "connecting");
+}
+
+#[tokio::test]
+async fn admin_reset_profile_clears_credentials() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+    }
+    let (status, _) =
+        post_empty_with_intent(app.clone(), "/api/v1/admin/profile/reset", "reset-profile").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, profile) = get_json(app, "/api/v1/profile").await;
+    assert_eq!(profile["server_url"], "");
+    assert_eq!(profile["token"], "");
+}
+
+#[tokio::test]
+async fn admin_reset_profile_disconnects_when_connected() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+    }
+    state.set_connection_state(ConnectionState::Connected).await;
+
+    let (status, _) =
+        post_empty_with_intent(app.clone(), "/api/v1/admin/profile/reset", "reset-profile").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, runtime_status) = get_json(app, "/api/v1/status").await;
+    assert_eq!(runtime_status["connection_state"], "disconnecting");
+}
+
+#[tokio::test]
+async fn admin_reset_profile_resets_runtime_update_mode_to_default() {
+    let (app, state) = setup_with_state();
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok","update_mode":"disabled"}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::Disabled
+    ));
+
+    let (status, _) =
+        post_empty_with_intent(app, "/api/v1/admin/profile/reset", "reset-profile").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::CheckAndDownload
+    ));
+}
+
+#[tokio::test]
+async fn admin_factory_reset_clears_everything() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 1, 10).unwrap();
+        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+    }
+    let (status, _) =
+        post_empty_with_intent(app.clone(), "/api/v1/admin/factory-reset", "factory-reset").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, profile) = get_json(app, "/api/v1/profile").await;
+    assert_eq!(profile["server_url"], "");
+    assert_eq!(profile["token"], "");
+}
+
+#[tokio::test]
+async fn admin_factory_reset_resets_runtime_update_mode_to_default() {
+    let (app, state) = setup_with_state();
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok","update_mode":"disabled"}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::Disabled
+    ));
+
+    let (status, _) =
+        post_empty_with_intent(app, "/api/v1/admin/factory-reset", "factory-reset").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::CheckAndDownload
+    ));
+}
+
+#[tokio::test]
+async fn admin_update_port_sets_override() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+    }
+    let (status, _) = post_json_with_intent(
+        app,
+        "/api/v1/admin/subscriptions/port",
+        json!({"forwarder_id": "f1", "reader_ip": "10.0.0.1", "local_port_override": 9000}),
+        "update-local-port",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let subs = state.db.lock().await.load_subscriptions().unwrap();
+    assert_eq!(subs[0].local_port_override, Some(9000));
+}
+
+#[tokio::test]
+async fn admin_update_port_returns_404_for_missing_subscription() {
+    let app = setup();
+    let (status, _) = post_json_with_intent(
+        app,
+        "/api/v1/admin/subscriptions/port",
+        json!({"forwarder_id": "f1", "reader_ip": "10.0.0.1", "local_port_override": 9000}),
+        "update-local-port",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_update_port_clears_override() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1", Some(9000)).unwrap();
+    }
+    let (status, _) = post_json_with_intent(
+        app,
+        "/api/v1/admin/subscriptions/port",
+        json!({"forwarder_id": "f1", "reader_ip": "10.0.0.1", "local_port_override": null}),
+        "update-local-port",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let subs = state.db.lock().await.load_subscriptions().unwrap();
+    assert_eq!(subs[0].local_port_override, None);
 }

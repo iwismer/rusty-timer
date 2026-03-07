@@ -24,7 +24,9 @@ const apiMocks = vi.hoisted(() => ({
     degraded: false,
     upstream_error: null,
   }),
+  getSubscriptions: vi.fn().mockResolvedValue({ subscriptions: [] }),
   resetStreamCursor: vi.fn().mockResolvedValue(undefined),
+  updateLocalPort: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("$lib/api", () => apiMocks);
@@ -37,9 +39,8 @@ describe("receiver admin page", () => {
   it("loads streams and renders cursor reset actions", async () => {
     render(Page);
 
-    expect(await screen.findByText("Finish")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Reset cursor for Finish" }),
+      await screen.findByRole("button", { name: "Reset cursor for Finish" }),
     ).toBeInTheDocument();
   });
 
@@ -80,11 +81,17 @@ describe("receiver admin page", () => {
   it("shows display_alias prominently when available", async () => {
     render(Page);
 
-    const finishAlias = await screen.findByText("Finish");
-    expect(finishAlias).toBeInTheDocument();
-    expect(finishAlias.tagName).toBe("SPAN");
+    // Wait for streams to load by checking for a button
+    await screen.findByRole("button", { name: "Reset cursor for Finish" });
+
+    // The alias appears in multiple cards; verify at least one is a styled span
+    const aliases = screen.getAllByText("Finish");
+    expect(aliases.length).toBeGreaterThanOrEqual(1);
+    expect(aliases[0].tagName).toBe("SPAN");
     // The alias should be accompanied by the forwarder/reader detail below it
-    expect(screen.getByText("f1 / 10.0.0.1:10000")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("f1 / 10.0.0.1:10000").length,
+    ).toBeGreaterThanOrEqual(1);
   });
 
   it("falls back to forwarder_id / reader_ip when no display_alias", async () => {
@@ -103,12 +110,15 @@ describe("receiver admin page", () => {
 
     render(Page);
 
-    expect(await screen.findByText("f3 / 10.0.0.3:10000")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "Reset cursor for f3 / 10.0.0.3:10000",
       }),
     ).toBeInTheDocument();
+    // The fallback label appears in multiple cards
+    expect(
+      screen.getAllByText("f3 / 10.0.0.3:10000").length,
+    ).toBeGreaterThanOrEqual(1);
   });
 
   it("only disables the active row while reset is in flight", async () => {
@@ -148,5 +158,30 @@ describe("receiver admin page", () => {
     await waitFor(() => {
       expect(finishButton).not.toBeDisabled();
     });
+  });
+
+  it("rejects malformed port strings and does not call update api", async () => {
+    apiMocks.getSubscriptions.mockResolvedValueOnce({
+      subscriptions: [
+        {
+          forwarder_id: "f1",
+          reader_ip: "10.0.0.1:10000",
+          local_port_override: null,
+        },
+      ],
+    });
+
+    render(Page);
+
+    const input = await screen.findByPlaceholderText("default");
+    await fireEvent.input(input, { target: { value: "9000abc" } });
+
+    const saveButton = await screen.findByRole("button", { name: "Save" });
+    await fireEvent.click(saveButton);
+
+    expect(
+      await screen.findByText("Port must be 1-65535 or empty to clear."),
+    ).toBeInTheDocument();
+    expect(apiMocks.updateLocalPort).not.toHaveBeenCalled();
   });
 });
