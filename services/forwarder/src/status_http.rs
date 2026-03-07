@@ -332,6 +332,7 @@ impl StatusServer {
         &self.control_clients
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn download_trackers(
         &self,
     ) -> &Arc<
