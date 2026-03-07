@@ -380,6 +380,25 @@
     }
   }
 
+  async function handleReconnect(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      await api.reconnectReader(ip);
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "ok", message: "Reconnect requested" },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Reconnect failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
   async function handleToggleRecording(ip: string) {
     const info = readerInfoMap[ip];
     const currentlyRecording = info?.recording === true;
@@ -702,6 +721,15 @@
                   label={reader.state}
                   state={readerBadgeState(reader.state)}
                 />
+                {#if reader.state === "disconnected"}
+                  <button
+                    class="ml-2 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    onclick={() => handleReconnect(reader.ip)}
+                    disabled={controlBusy[reader.ip]}
+                  >
+                    Reconnect
+                  </button>
+                {/if}
                 <button
                   class="ml-auto inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
                   onclick={() => toggleReaderExpand(reader.ip)}

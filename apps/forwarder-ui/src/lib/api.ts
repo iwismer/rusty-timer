@@ -246,3 +246,7 @@ export async function setRecording(
     body: JSON.stringify({ enabled }),
   });
 }
+
+export async function reconnectReader(ip: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/v1/readers/${ip}/reconnect`, { method: "POST" });
+}
