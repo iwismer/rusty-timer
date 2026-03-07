@@ -325,6 +325,7 @@ pub enum DownloadEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadState {
     Idle,
+    Starting,
     Downloading,
     Complete,
     Error(String),
@@ -381,6 +382,13 @@ impl DownloadTracker {
         }
         self.download_progress = progress;
         self.stored_data_extent = extent;
+    }
+
+    pub fn begin_startup(&mut self) {
+        self.state = DownloadState::Starting;
+        self.reads_received = 0;
+        self.stored_data_extent = 0;
+        self.download_progress = 0;
     }
 
     pub fn start(&mut self, stored_data_extent: u32) {

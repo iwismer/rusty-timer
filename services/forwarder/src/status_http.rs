@@ -2111,7 +2111,8 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     {
         let mut dt = tracker.lock().await;
         match &dt.state {
-            crate::reader_control::DownloadState::Downloading => {
+            crate::reader_control::DownloadState::Starting
+            | crate::reader_control::DownloadState::Downloading => {
                 return json_response(
                     StatusCode::CONFLICT,
                     r#"{"error":"download already in progress"}"#.to_string(),
@@ -2123,6 +2124,7 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
             }
             crate::reader_control::DownloadState::Idle => {}
         }
+        dt.begin_startup();
     }
 
     // Get estimated_stored_reads from reader_info
@@ -2188,7 +2190,8 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
                     message: msg.clone(),
                 })
             }
-            crate::reader_control::DownloadState::Downloading => None,
+            crate::reader_control::DownloadState::Starting
+            | crate::reader_control::DownloadState::Downloading => None,
         };
         let rx = dt.subscribe();
         (initial, rx)
@@ -4017,6 +4020,117 @@ target = "192.168.1.100:10000"
             .await
             .expect("POST download-reads again");
         assert_eq!(resp2.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn download_reads_second_trigger_conflicts_even_before_startup_completes() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        let tracker = Arc::new(tokio::sync::Mutex::new(
+            crate::reader_control::DownloadTracker::new(),
+        ));
+        server.register_download_tracker(reader_ip, Arc::clone(&tracker));
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, _control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{}", server.local_addr());
+
+        let resp1 = client
+            .post(format!(
+                "{}/api/v1/readers/{}/download-reads",
+                base, reader_ip
+            ))
+            .send()
+            .await
+            .expect("first POST download-reads");
+        assert_eq!(resp1.status(), StatusCode::ACCEPTED);
+
+        let resp2 = client
+            .post(format!(
+                "{}/api/v1/readers/{}/download-reads",
+                base, reader_ip
+            ))
+            .send()
+            .await
+            .expect("second POST download-reads");
+        assert_eq!(resp2.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn download_progress_does_not_emit_idle_immediately_after_start_trigger() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        let tracker = Arc::new(tokio::sync::Mutex::new(
+            crate::reader_control::DownloadTracker::new(),
+        ));
+        server.register_download_tracker(reader_ip, Arc::clone(&tracker));
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, _control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{}", server.local_addr());
+
+        let start_resp = client
+            .post(format!(
+                "{}/api/v1/readers/{}/download-reads",
+                base, reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST download-reads");
+        assert_eq!(start_resp.status(), StatusCode::ACCEPTED);
+
+        let progress_resp = client
+            .get(format!(
+                "{}/api/v1/readers/{}/download-reads/progress",
+                base, reader_ip
+            ))
+            .send()
+            .await
+            .expect("GET progress SSE");
+        assert_eq!(progress_resp.status(), StatusCode::OK);
+
+        let first_body =
+            tokio::time::timeout(Duration::from_millis(200), progress_resp.text()).await;
+        if let Ok(Ok(text)) = first_body {
+            assert!(
+                !text.contains(r#""state":"idle""#),
+                "progress stream must not terminate with idle immediately after start trigger; chunk={text:?}"
+            );
+        }
     }
 
     #[tokio::test]

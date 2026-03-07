@@ -102,6 +102,32 @@ fn chunk_for_replay(events: Vec<ReadEvent>, max_events_per_batch: u32) -> Vec<Ve
         .collect()
 }
 
+fn download_progress_advanced_or_started(
+    was_downloading: &mut bool,
+    last_download_progress: &mut u32,
+    last_download_reads: &mut u32,
+    last_progress_time: &mut tokio::time::Instant,
+    current_progress: u32,
+    current_reads: u32,
+) -> bool {
+    if !*was_downloading {
+        *was_downloading = true;
+        *last_download_progress = current_progress;
+        *last_download_reads = current_reads;
+        *last_progress_time = tokio::time::Instant::now();
+        return true;
+    }
+
+    if current_progress != *last_download_progress || current_reads != *last_download_reads {
+        *last_download_progress = current_progress;
+        *last_download_reads = current_reads;
+        *last_progress_time = tokio::time::Instant::now();
+        return true;
+    }
+
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
@@ -230,6 +256,7 @@ async fn run_reader(
             let mut last_download_progress = 0u32;
             let mut last_download_reads = 0u32;
             let mut last_progress_time = tokio::time::Instant::now();
+            let mut was_downloading = false;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -249,15 +276,19 @@ async fn run_reader(
                                 // Safety timeout: no progress for 30 seconds
                                 let current_progress = progress;
                                 let current_reads = dt.reads_received;
-                                if current_progress != last_download_progress || current_reads != last_download_reads {
-                                    last_download_progress = current_progress;
-                                    last_download_reads = current_reads;
-                                    last_progress_time = tokio::time::Instant::now();
-                                } else if last_progress_time.elapsed() > Duration::from_secs(30) {
+                                if !download_progress_advanced_or_started(
+                                    &mut was_downloading,
+                                    &mut last_download_progress,
+                                    &mut last_download_reads,
+                                    &mut last_progress_time,
+                                    current_progress,
+                                    current_reads,
+                                ) && last_progress_time.elapsed() > Duration::from_secs(30) {
                                     drop(dt);
                                     let _ = poll_client.stop_download().await;
                                     let mut dt = poll_download_tracker.lock().await;
                                     dt.fail("download stalled: no progress for 30 seconds".to_owned());
+                                    was_downloading = false;
                                     continue;
                                 }
 
@@ -270,7 +301,10 @@ async fn run_reader(
                                         let mut dt = poll_download_tracker.lock().await;
                                         dt.complete();
                                     }
+                                    was_downloading = false;
                                 }
+                            } else {
+                                was_downloading = false;
                             }
                         }
                     }
@@ -1645,6 +1679,58 @@ mod tests {
         let chunks = chunk_for_replay(events, 0);
         assert_eq!(chunks.len(), 3);
         assert!(chunks.iter().all(|chunk| chunk.len() == 1));
+    }
+
+    #[test]
+    fn download_progress_baseline_resets_when_download_starts() {
+        let mut was_downloading = false;
+        let mut last_download_progress = 0u32;
+        let mut last_download_reads = 0u32;
+        let mut last_progress_time = tokio::time::Instant::now();
+
+        let started = download_progress_advanced_or_started(
+            &mut was_downloading,
+            &mut last_download_progress,
+            &mut last_download_reads,
+            &mut last_progress_time,
+            0,
+            0,
+        );
+
+        assert!(started, "starting a download must reset stall baseline");
+        assert!(was_downloading);
+        assert_eq!(last_download_progress, 0);
+        assert_eq!(last_download_reads, 0);
+    }
+
+    #[test]
+    fn download_progress_baseline_only_advances_on_change_after_start() {
+        let mut was_downloading = true;
+        let mut last_download_progress = 10u32;
+        let mut last_download_reads = 20u32;
+        let mut last_progress_time = tokio::time::Instant::now();
+
+        let unchanged = download_progress_advanced_or_started(
+            &mut was_downloading,
+            &mut last_download_progress,
+            &mut last_download_reads,
+            &mut last_progress_time,
+            10,
+            20,
+        );
+        assert!(!unchanged);
+
+        let changed = download_progress_advanced_or_started(
+            &mut was_downloading,
+            &mut last_download_progress,
+            &mut last_download_reads,
+            &mut last_progress_time,
+            11,
+            20,
+        );
+        assert!(changed);
+        assert_eq!(last_download_progress, 11);
+        assert_eq!(last_download_reads, 20);
     }
 
     #[test]
