@@ -1746,11 +1746,11 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
             // Update stored reader_info so SSE subscribers see the new clock
             {
                 let mut ss = state.subsystem.lock().await;
-                if let Some(r) = ss.readers.get_mut(&ip) {
-                    if let Some(ref mut info) = r.reader_info {
-                        info.reader_clock = Some(reader_iso.clone());
-                        info.clock_drift_ms = drift_ms;
-                    }
+                if let Some(r) = ss.readers.get_mut(&ip)
+                    && let Some(ref mut info) = r.reader_info
+                {
+                    info.reader_clock = Some(reader_iso.clone());
+                    info.clock_drift_ms = drift_ms;
                 }
             }
 
