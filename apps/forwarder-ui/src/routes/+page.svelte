@@ -53,6 +53,8 @@
   let localClockStr = $state("");
   let readerInfoReceivedAt = $state<Record<string, number>>({});
   let clockTickNow = $state(Date.now());
+  let readerClockBaseTs = $state<Record<string, number>>({});
+  let readerClockBaseLocal = $state<Record<string, number>>({});
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -73,6 +75,8 @@
           if (r.reader_info) {
             readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
             readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
+            if (r.reader_info.reader_clock)
+              storeReaderClockBase(r.ip, r.reader_info.reader_clock);
           }
         }
       }
@@ -235,6 +239,7 @@
         },
       };
       readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+      if (result.reader_clock) storeReaderClockBase(ip, result.reader_clock);
       controlFeedback = {
         ...controlFeedback,
         [ip]: { kind: "ok", message: `Clock synced: ${result.reader_clock}` },
@@ -284,6 +289,7 @@
         [ip]: { ...readerInfoMap[ip], ...info },
       };
       readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+      if (info.reader_clock) storeReaderClockBase(ip, info.reader_clock);
     } catch (e) {
       controlFeedback = {
         ...controlFeedback,
@@ -414,6 +420,36 @@
     clockTickNow = Date.now();
   }
 
+  function parseReaderClock(iso: string): number {
+    // Parse as UTC to avoid timezone ambiguity
+    const normalized = iso.replace(" ", "T");
+    const withZ = normalized.endsWith("Z") ? normalized : normalized + "Z";
+    return new Date(withZ).getTime();
+  }
+
+  function storeReaderClockBase(ip: string, clockStr: string) {
+    const ts = parseReaderClock(clockStr);
+    if (!isNaN(ts)) {
+      readerClockBaseTs = { ...readerClockBaseTs, [ip]: ts };
+      readerClockBaseLocal = { ...readerClockBaseLocal, [ip]: Date.now() };
+    }
+  }
+
+  function tickingReaderClock(ip: string): string {
+    const baseTs = readerClockBaseTs[ip];
+    const baseLocal = readerClockBaseLocal[ip];
+    if (baseTs == null || baseLocal == null) return "\u2014";
+    const elapsed = clockTickNow - baseLocal;
+    const now = new Date(baseTs + elapsed);
+    const y = now.getUTCFullYear();
+    const mo = String(now.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(now.getUTCDate()).padStart(2, "0");
+    const h = String(now.getUTCHours()).padStart(2, "0");
+    const mi = String(now.getUTCMinutes()).padStart(2, "0");
+    const s = String(now.getUTCSeconds()).padStart(2, "0");
+    return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+  }
+
   onMount(() => {
     updateLocalClock();
     clockInterval = setInterval(updateLocalClock, 1000);
@@ -447,6 +483,7 @@
           [ip]: { ...readerInfoMap[ip], ...info },
         };
         readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+        if (info.reader_clock) storeReaderClockBase(ip, info.reader_clock);
       },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {
@@ -723,16 +760,8 @@
                     <div>
                       <span class="text-text-muted">Reader Clock:</span>
                       <span class="font-mono ml-2"
-                        >{info?.reader_clock ?? "\u2014"}</span
+                        >{tickingReaderClock(reader.ip)}</span
                       >
-                      {#if readerInfoReceivedAt[reader.ip]}
-                        <span class="text-xs text-text-muted ml-1"
-                          >({Math.round(
-                            (clockTickNow - readerInfoReceivedAt[reader.ip]) /
-                              1000,
-                          )}s ago)</span
-                        >
-                      {/if}
                     </div>
                     <div>
                       <span class="text-text-muted">Clock Drift:</span>
@@ -745,10 +774,39 @@
                       <span class="font-mono ml-2">{localClockStr}</span>
                     </div>
                     <div>
-                      <span class="text-text-muted">Read Mode:</span>
-                      <span class="font-mono ml-2"
-                        >{formatReadMode(info?.read_mode)}</span
+                      <span class="text-text-muted">Last Refresh:</span>
+                      <span class="ml-2"
+                        >{#if readerInfoReceivedAt[reader.ip]}{formatLastSeen(
+                            Math.round(
+                              (clockTickNow - readerInfoReceivedAt[reader.ip]) /
+                                1000,
+                            ),
+                          )}{:else}&mdash;{/if}</span
                       >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Read Mode:</span>
+                      <select
+                        class="ml-2 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                        onchange={(e) => {
+                          e.stopPropagation();
+                          handleSetReadMode(
+                            reader.ip,
+                            (e.currentTarget as HTMLSelectElement).value,
+                          );
+                        }}
+                        disabled={controlBusy[reader.ip] ||
+                          reader.state !== "connected"}
+                      >
+                        <option value="raw" selected={info?.read_mode === "raw"}
+                          >Raw</option
+                        >
+                        <option
+                          value="fsls"
+                          selected={info?.read_mode === "fsls"}
+                          >First/Last Seen</option
+                        >
+                      </select>
                     </div>
                   </div>
                   <div
@@ -763,25 +821,6 @@
                       disabled={controlBusy[reader.ip] ||
                         reader.state !== "connected"}>Sync Clock</button
                     >
-                    <select
-                      class="px-2 py-1.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
-                      onchange={(e) => {
-                        e.stopPropagation();
-                        handleSetReadMode(
-                          reader.ip,
-                          (e.currentTarget as HTMLSelectElement).value,
-                        );
-                      }}
-                      disabled={controlBusy[reader.ip] ||
-                        reader.state !== "connected"}
-                    >
-                      <option value="raw" selected={info?.read_mode === "raw"}
-                        >Raw</option
-                      >
-                      <option value="fsls" selected={info?.read_mode === "fsls"}
-                        >First/Last Seen</option
-                      >
-                    </select>
                     <button
                       class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
                       onclick={(e) => {
