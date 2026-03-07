@@ -17,6 +17,10 @@
 //! - `POST /update/apply`    — apply a staged update
 //! - `POST /update/check`    — check for updates (respects update mode)
 //! - `POST /update/download`  — download an available update (mode-independent)
+//! - `POST /api/v1/readers/{ip}/download-reads`
+//!   — trigger stored-read download from reader; 202 on success, 409 if already running
+//! - `GET /api/v1/readers/{ip}/download-reads/progress`
+//!   — SSE stream of download progress events
 //! - All other routes fall back to the embedded SvelteKit UI
 //!
 //! # Readiness contract
