@@ -180,6 +180,259 @@ pub fn lrc(ascii_bytes: &[u8]) -> u8 {
     ascii_bytes.iter().map(|&b| b as u32).sum::<u32>() as u8
 }
 
+// ── Response types ─────────────────────────────────────────────────────────
+
+/// Parsed control frame from the reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFrame {
+    pub reader_id: u8,
+    pub instruction: u8,
+    pub data: Vec<u8>,
+}
+
+/// Decoded reader date/time from GET_DATE_TIME (0x02) or GUN_TIME (0x2c).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReaderDateTime {
+    pub year: u8, // 2-digit
+    pub month: u8,
+    pub day: u8,
+    pub day_of_week: u8, // 1-7, Mon=1
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+    pub centisecond: u8, // 0-99 (plain hex, NOT BCD)
+    pub config: u8,
+}
+
+impl ReaderDateTime {
+    pub fn to_iso_string(&self) -> String {
+        format!(
+            "20{:02}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}",
+            self.year,
+            self.month,
+            self.day,
+            self.hour,
+            self.minute,
+            self.second,
+            self.centisecond as u16 * 10,
+        )
+    }
+}
+
+/// Decoded GET_STATISTICS (0x0a) response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReaderStatistics {
+    pub fw_version: u8,
+    pub reader_id: u8,
+    pub config1: u8,
+    pub crc_errors: u8,
+    pub powerup_count: u8,
+    pub activity_count: u8,
+    pub decoder_fw_i: u8,
+    pub decoder_fw_q: u8,
+    pub config2: u8,
+    pub wiegand_config: u8,
+    pub wiegand_timer: u8,
+    pub config3: u8,
+    pub hw_code: u8,
+    pub rejected_tags: u8,
+}
+
+impl ReaderStatistics {
+    pub fn fw_version_string(&self) -> String {
+        format!("{}.{}", self.fw_version >> 4, self.fw_version & 0x0f)
+    }
+}
+
+/// Decoded 0x4b extended status response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExtendedStatus {
+    pub reader_type: u8,
+    pub decoder_version: u8,
+    pub unique_tag_count: u16,
+    pub hw_identifier: u16,
+    pub hw_config: u8,
+    pub stored_record_pages: u8,
+    pub flags: Option<u8>, // optional byte 12 (absent in 12-byte responses)
+}
+
+/// Error from parsing or decoding a control frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlError {
+    TooShort,
+    InvalidHeader,
+    InvalidHex,
+    BadLrc,
+    ReaderError(u8),
+    UnexpectedLength { instruction: u8, got: usize },
+    Timeout,
+}
+
+impl fmt::Display for ControlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ControlError::TooShort => write!(f, "frame too short"),
+            ControlError::InvalidHeader => write!(f, "invalid header (expected 'ab')"),
+            ControlError::InvalidHex => write!(f, "invalid hex digit in frame"),
+            ControlError::BadLrc => write!(f, "LRC checksum mismatch"),
+            ControlError::ReaderError(code) => write!(f, "reader error 0x{code:02x}"),
+            ControlError::UnexpectedLength { instruction, got } => {
+                write!(
+                    f,
+                    "unexpected data length for instruction 0x{instruction:02x}: got {got}"
+                )
+            }
+            ControlError::Timeout => write!(f, "reader response timeout"),
+        }
+    }
+}
+
+impl std::error::Error for ControlError {}
+
+// ── Response parsing ───────────────────────────────────────────────────────
+
+/// Parse a hex byte pair from a string slice.
+fn parse_hex_byte(s: &str) -> Result<u8, ControlError> {
+    u8::from_str_radix(s, 16).map_err(|_| ControlError::InvalidHex)
+}
+
+/// Parse an `ab`-prefixed response line (without trailing \r\n) into a ControlFrame.
+pub fn parse_response(line: &[u8]) -> Result<ControlFrame, ControlError> {
+    let s = std::str::from_utf8(line).map_err(|_| ControlError::InvalidHex)?;
+
+    // Minimum length: ab + RR + LL + II + CC = 10 chars
+    if s.len() < 10 {
+        return Err(ControlError::TooShort);
+    }
+
+    if &s[..2] != "ab" {
+        return Err(ControlError::InvalidHeader);
+    }
+
+    // Verify LRC: body = everything between "ab" and the last 2 chars
+    let body = &s[2..s.len() - 2];
+    let expected_lrc = parse_hex_byte(&s[s.len() - 2..])?;
+    let computed = lrc(body.as_bytes());
+    if computed != expected_lrc {
+        return Err(ControlError::BadLrc);
+    }
+
+    let reader_id = parse_hex_byte(&s[2..4])?;
+    let _length = parse_hex_byte(&s[4..6])?;
+    let instruction = parse_hex_byte(&s[6..8])?;
+
+    // Check for error response
+    if instruction >= 0xf0 {
+        return Err(ControlError::ReaderError(instruction));
+    }
+
+    // Parse data bytes
+    let data_hex = &s[8..s.len() - 2];
+    if data_hex.len() % 2 != 0 {
+        return Err(ControlError::InvalidHex);
+    }
+    let mut data = Vec::with_capacity(data_hex.len() / 2);
+    for i in (0..data_hex.len()).step_by(2) {
+        data.push(parse_hex_byte(&data_hex[i..i + 2])?);
+    }
+
+    Ok(ControlFrame {
+        reader_id,
+        instruction,
+        data,
+    })
+}
+
+// ── Decode functions ───────────────────────────────────────────────────────
+
+/// Decode GET_DATE_TIME or GUN_TIME response (9+ data bytes).
+/// IMPORTANT: Centisecond (byte 7) is plain hex, NOT BCD.
+pub fn decode_date_time(frame: &ControlFrame) -> Result<ReaderDateTime, ControlError> {
+    if frame.data.len() < 9 {
+        return Err(ControlError::UnexpectedLength {
+            instruction: frame.instruction,
+            got: frame.data.len(),
+        });
+    }
+    Ok(ReaderDateTime {
+        year: from_bcd(frame.data[0]),
+        month: from_bcd(frame.data[1]),
+        day: from_bcd(frame.data[2]),
+        day_of_week: frame.data[3],
+        hour: from_bcd(frame.data[4]),
+        minute: from_bcd(frame.data[5]),
+        second: from_bcd(frame.data[6]),
+        centisecond: frame.data[7], // plain hex, NOT BCD
+        config: frame.data[8],
+    })
+}
+
+/// Decode GET_STATISTICS response (14+ data bytes).
+pub fn decode_statistics(frame: &ControlFrame) -> Result<ReaderStatistics, ControlError> {
+    if frame.data.len() < 14 {
+        return Err(ControlError::UnexpectedLength {
+            instruction: frame.instruction,
+            got: frame.data.len(),
+        });
+    }
+    Ok(ReaderStatistics {
+        fw_version: frame.data[0],
+        reader_id: frame.data[1],
+        config1: frame.data[2],
+        crc_errors: frame.data[3],
+        powerup_count: frame.data[4],
+        activity_count: frame.data[5],
+        decoder_fw_i: frame.data[6],
+        decoder_fw_q: frame.data[7],
+        config2: frame.data[8],
+        wiegand_config: frame.data[9],
+        wiegand_timer: frame.data[10],
+        config3: frame.data[11],
+        hw_code: frame.data[12],
+        rejected_tags: frame.data[13],
+    })
+}
+
+/// Decode extended status response (12 or 13 data bytes).
+/// bytes 4-7 are reserved (skip them), hw_identifier at bytes 8-9, hw_config at 10,
+/// stored_record_pages at 11, optional flags at 12.
+pub fn decode_extended_status(frame: &ControlFrame) -> Result<ExtendedStatus, ControlError> {
+    if frame.data.len() < 12 {
+        return Err(ControlError::UnexpectedLength {
+            instruction: frame.instruction,
+            got: frame.data.len(),
+        });
+    }
+    Ok(ExtendedStatus {
+        reader_type: frame.data[0],
+        decoder_version: frame.data[1],
+        unique_tag_count: u16::from_be_bytes([frame.data[2], frame.data[3]]),
+        hw_identifier: u16::from_be_bytes([frame.data[8], frame.data[9]]),
+        hw_config: frame.data[10],
+        stored_record_pages: frame.data[11],
+        flags: if frame.data.len() >= 13 {
+            Some(frame.data[12])
+        } else {
+            None
+        },
+    })
+}
+
+/// Decode CONFIG3 response (2 data bytes: mode + timeout).
+pub fn decode_config3(frame: &ControlFrame) -> Result<(ReadMode, u8), ControlError> {
+    if frame.data.len() < 2 {
+        return Err(ControlError::UnexpectedLength {
+            instruction: frame.instruction,
+            got: frame.data.len(),
+        });
+    }
+    let mode = ReadMode::from_config3(frame.data[0]).ok_or(ControlError::UnexpectedLength {
+        instruction: frame.instruction,
+        got: frame.data.len(),
+    })?;
+    Ok((mode, frame.data[1]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +601,124 @@ mod tests {
         assert_eq!(ReadMode::Raw.as_str(), "raw");
         assert_eq!(ReadMode::Event.as_str(), "event");
         assert_eq!(ReadMode::FirstLastSeen.as_str(), "fsls");
+    }
+
+    #[test]
+    fn parse_get_date_time_response() {
+        // From pcap: ab000902260306051855443727cf
+        let frame = parse_response(b"ab000902260306051855443727cf").unwrap();
+        assert_eq!(frame.instruction, INSTR_GET_DATE_TIME);
+        assert_eq!(frame.data.len(), 9);
+        let dt = decode_date_time(&frame).unwrap();
+        assert_eq!(dt.year, 26);
+        assert_eq!(dt.month, 3);
+        assert_eq!(dt.day, 6);
+        assert_eq!(dt.day_of_week, 5);
+        assert_eq!(dt.hour, 18);
+        assert_eq!(dt.minute, 55);
+        assert_eq!(dt.second, 44);
+        assert_eq!(dt.centisecond, 0x37); // plain hex, NOT BCD
+        assert_eq!(dt.to_iso_string(), "2026-03-06T18:55:44.550");
+        assert_eq!(dt.config, 0x27);
+    }
+
+    #[test]
+    fn parse_ack_response() {
+        let frame = parse_response(b"ab00000121").unwrap();
+        assert_eq!(frame.instruction, INSTR_SET_DATE_TIME);
+        assert_eq!(frame.data.len(), 0);
+    }
+
+    #[test]
+    fn parse_error_f2_response() {
+        let err = parse_response(b"ab0000f258").unwrap_err();
+        assert_eq!(err, ControlError::ReaderError(0xf2));
+    }
+
+    #[test]
+    fn parse_bad_lrc() {
+        let err = parse_response(b"ab000002ff").unwrap_err();
+        assert_eq!(err, ControlError::BadLrc);
+    }
+
+    #[test]
+    fn parse_too_short() {
+        let err = parse_response(b"ab0002").unwrap_err();
+        assert_eq!(err, ControlError::TooShort);
+    }
+
+    #[test]
+    fn parse_extended_status_13_bytes() {
+        let frame = parse_response(b"ab000d4b010b012f0000000059058f0c005a").unwrap();
+        assert_eq!(frame.instruction, INSTR_EXT_STATUS);
+        let ext = decode_extended_status(&frame).unwrap();
+        assert_eq!(ext.reader_type, 0x01);
+        assert_eq!(ext.decoder_version, 0x0b);
+        assert_eq!(ext.unique_tag_count, 0x012f);
+        assert_eq!(ext.hw_identifier, 0x5905);
+        assert_eq!(ext.hw_config, 0x8f);
+        assert_eq!(ext.stored_record_pages, 0x0c);
+        assert_eq!(ext.flags, Some(0x00));
+    }
+
+    #[test]
+    fn parse_extended_status_12_bytes() {
+        // Build a 12-byte payload manually
+        let data_hex = "000000000000000059058f01";
+        let body = format!("000c4b{}", data_hex);
+        let hex = format!("ab{}{:02x}", body, lrc(body.as_bytes()));
+        let frame = parse_response(hex.as_bytes()).unwrap();
+        let ext = decode_extended_status(&frame).unwrap();
+        assert_eq!(ext.unique_tag_count, 0);
+        assert_eq!(ext.stored_record_pages, 0x01);
+        assert_eq!(ext.flags, None);
+    }
+
+    #[test]
+    fn parse_config3_response() {
+        let frame = parse_response(b"ab0002090305f3").unwrap();
+        let (mode, timeout) = decode_config3(&frame).unwrap();
+        assert_eq!(mode, ReadMode::Event);
+        assert_eq!(timeout, 5);
+    }
+
+    #[test]
+    fn parse_config3_response_raw() {
+        let frame = parse_response(b"ab0002090005f0").unwrap();
+        let (mode, timeout) = decode_config3(&frame).unwrap();
+        assert_eq!(mode, ReadMode::Raw);
+        assert_eq!(timeout, 5);
+    }
+
+    #[test]
+    fn parse_gun_time_response() {
+        let frame = parse_response(b"ab000a2c260306052004151b2782ae").unwrap();
+        assert_eq!(frame.instruction, INSTR_GUN_TIME);
+        assert_eq!(frame.data.len(), 10);
+        let dt = decode_date_time(&frame).unwrap();
+        assert_eq!(dt.year, 26);
+        assert_eq!(dt.hour, 20);
+        assert_eq!(dt.minute, 4);
+        assert_eq!(dt.second, 15);
+        assert_eq!(dt.centisecond, 0x1b);
+        assert_eq!(dt.to_iso_string(), "2026-03-06T20:04:15.270");
+        assert_eq!(frame.data[9], 0x82); // extra unknown byte
+    }
+
+    #[test]
+    fn encode_then_parse_round_trip() {
+        for cmd in [
+            Command::GetDateTime,
+            Command::GetStatistics,
+            Command::PrintBanner,
+            Command::GetExtendedStatus,
+            Command::GetConfig3,
+            Command::InitE0,
+        ] {
+            let encoded = encode_command(&cmd, 0x00);
+            let line = &encoded[..encoded.len() - 2]; // strip \r\n
+            let frame = parse_response(line).unwrap();
+            assert_eq!(frame.instruction, cmd.instruction());
+        }
     }
 }
