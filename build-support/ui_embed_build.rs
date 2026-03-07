@@ -38,6 +38,9 @@ fn main() {
     let is_cross_compiling = std::env::var("CROSS_COMPILE").is_ok()
         || std::env::var("CARGO_CFG_TARGET_OS")
             .map(|t| t != std::env::consts::OS)
+            .unwrap_or(false)
+        || std::env::var("CARGO_CFG_TARGET_ARCH")
+            .map(|t| t != std::env::consts::ARCH)
             .unwrap_or(false);
     let build_output = ui_dir.join("build");
     if is_cross_compiling && build_output.join("index.html").exists() {
