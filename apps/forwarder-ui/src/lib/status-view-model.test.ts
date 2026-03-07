@@ -5,6 +5,7 @@ import {
   readerConnectionSummary,
   formatClockDrift,
   formatReadMode,
+  computeDownloadPercent,
 } from "./status-view-model";
 
 describe("formatLastSeen", () => {
@@ -88,5 +89,34 @@ describe("formatClockDrift", () => {
     expect(formatClockDrift(-200)).toBe("-200ms");
     expect(formatClockDrift(1500)).toBe("+1.5s");
     expect(formatClockDrift(-3200)).toBe("-3.2s");
+  });
+});
+
+describe("computeDownloadPercent", () => {
+  it("uses reads_received against estimated reads when available", () => {
+    expect(
+      computeDownloadPercent(
+        { state: "downloading", reads_received: 40, progress: 0, total: 3200 },
+        100,
+      ),
+    ).toBe(40);
+  });
+
+  it("falls back to progress/total when estimated reads unavailable", () => {
+    expect(
+      computeDownloadPercent(
+        { state: "downloading", reads_received: 5, progress: 25, total: 50 },
+        null,
+      ),
+    ).toBe(50);
+  });
+
+  it("clamps to 100", () => {
+    expect(
+      computeDownloadPercent(
+        { state: "downloading", reads_received: 120, progress: 0, total: 5000 },
+        100,
+      ),
+    ).toBe(100);
   });
 });

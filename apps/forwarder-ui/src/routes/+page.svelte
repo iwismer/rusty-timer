@@ -17,6 +17,7 @@
     readerConnectionSummary,
     formatClockDrift,
     formatReadMode,
+    computeDownloadPercent,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
   import {
@@ -886,6 +887,10 @@
                       </div>
                       {#if downloadState[reader.ip]?.state === "downloading"}
                         {@const dl = downloadState[reader.ip]}
+                        {@const percent = computeDownloadPercent(
+                          dl,
+                          info?.estimated_stored_reads,
+                        )}
                         <div
                           class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
                         >
@@ -894,20 +899,11 @@
                           >
                             <div
                               class="h-full bg-accent rounded-full transition-all"
-                              style="width: {dl && dl.total
-                                ? Math.round(
-                                    ((dl.progress ?? 0) / dl.total) * 100,
-                                  )
-                                : 0}%"
+                              style="width: {percent}%"
                             ></div>
                           </div>
                           <span class="text-xs font-mono whitespace-nowrap">
-                            {dl?.reads_received ?? 0} reads
-                            {#if dl?.total}
-                              &middot; {Math.round(
-                                ((dl?.progress ?? 0) / dl.total) * 100,
-                              )}%
-                            {/if}
+                            {dl?.reads_received ?? 0} reads &middot; {percent}%
                           </span>
                         </div>
                       {/if}

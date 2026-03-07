@@ -43,3 +43,39 @@ export function formatClockDrift(ms: number | null | undefined): string {
   if (abs < 1000) return `${sign}${abs}ms`;
   return `${sign}${(abs / 1000).toFixed(1)}s`;
 }
+
+export function computeDownloadPercent(
+  download:
+    | {
+        state?: "downloading" | "complete" | "error" | "idle";
+        progress?: number;
+        total?: number;
+        reads_received?: number;
+      }
+    | null
+    | undefined,
+  estimatedReads: number | null | undefined,
+): number {
+  if (!download) return 0;
+
+  if (
+    estimatedReads != null &&
+    estimatedReads > 0 &&
+    typeof download.reads_received === "number"
+  ) {
+    return Math.min(
+      100,
+      Math.max(0, Math.round((download.reads_received / estimatedReads) * 100)),
+    );
+  }
+
+  if (typeof download.total === "number" && download.total > 0) {
+    const progress = download.progress ?? 0;
+    return Math.min(
+      100,
+      Math.max(0, Math.round((progress / download.total) * 100)),
+    );
+  }
+
+  return 0;
+}
