@@ -107,6 +107,65 @@ PSH = 0x08
 # ---------------------------------------------------------------------------
 
 
+def format_ipv4(ip_bytes):
+    """Format a 4-byte IPv4 address as dotted decimal."""
+    return ".".join(str(octet) for octet in ip_bytes)
+
+
+def extract_tcp_flows(raw_pcap, port=10000):
+    """Extract TCP payload segments grouped by reader/client flow.
+
+    Returns a dict keyed by (reader_ip, reader_port, client_ip, client_port),
+    where each value is {"c2r": [...], "r2c": [...]} and each segment list
+    contains (seq, flags, payload) tuples in capture order.
+    """
+    flows = {}
+    for block_type, body in iter_blocks(raw_pcap):
+        if block_type == 6:  # Enhanced Packet Block
+            if len(body) < 20:
+                continue
+            captured_len = struct.unpack_from("<I", body, 12)[0]
+            frame = body[20 : 20 + captured_len]
+        elif block_type == 3:  # Simple Packet Block
+            if len(body) < 4:
+                continue
+            pkt_len = struct.unpack_from("<I", body, 0)[0]
+            frame = body[4 : 4 + pkt_len]
+        else:
+            continue
+
+        parsed = parse_tcp_packet(frame)
+        if parsed is None:
+            continue
+        src_ip, dst_ip, src_port, dst_port, seq, flags, payload = parsed
+
+        if src_port != port and dst_port != port:
+            continue
+        if not payload:
+            continue
+        if flags & SYN or flags & RST:
+            continue
+
+        if src_port == port:
+            reader_ip = src_ip
+            reader_port = src_port
+            client_ip = dst_ip
+            client_port = dst_port
+            direction = "r2c"
+        else:
+            reader_ip = dst_ip
+            reader_port = dst_port
+            client_ip = src_ip
+            client_port = src_port
+            direction = "c2r"
+
+        key = (reader_ip, reader_port, client_ip, client_port)
+        flow = flows.setdefault(key, {"c2r": [], "r2c": []})
+        flow[direction].append((seq, flags, payload))
+
+    return flows
+
+
 def extract_tcp_segments(raw_pcap, port_filter):
     """Extract TCP segments from pcapng data for one direction.
 
@@ -133,7 +192,7 @@ def extract_tcp_segments(raw_pcap, port_filter):
         parsed = parse_tcp_packet(frame)
         if parsed is None:
             continue
-        _sip, _dip, src_port, dst_port, seq, flags, payload = parsed
+        _src_ip, _dst_ip, src_port, dst_port, seq, flags, payload = parsed
 
         if not port_filter(src_port, dst_port):
             continue
@@ -438,15 +497,8 @@ def extract_text_lines(stream_bytes):
 # ---------------------------------------------------------------------------
 
 
-def process_file(filepath):
-    """Parse one pcapng file and print decoded frames."""
-    with open(filepath, "rb") as f:
-        raw = f.read()
-
-    # Extract and reassemble both directions
-    c2r_segs = extract_tcp_segments(raw, lambda sp, dp: dp == 10000)
-    r2c_segs = extract_tcp_segments(raw, lambda sp, dp: sp == 10000)
-
+def render_flow(reader_ip, reader_port, client_ip, client_port, c2r_segs, r2c_segs):
+    """Render one decoded reader/client TCP flow."""
     c2r_bytes = reassemble_stream(c2r_segs)
     r2c_bytes = reassemble_stream(r2c_segs)
 
@@ -469,10 +521,9 @@ def process_file(filepath):
     # then all R->C per "exchange" is helpful. But since we can't perfectly
     # correlate them without timestamps, we show them grouped.
 
-    basename = os.path.basename(filepath)
-    print(f"\n{'=' * 76}")
-    print(f"  {basename}")
-    print(f"{'=' * 76}")
+    reader = f"{format_ipv4(reader_ip)}:{reader_port}"
+    client = f"{format_ipv4(client_ip)}:{client_port}"
+    print(f"  Flow: {reader} -> {client}")
 
     frame_num = 0
 
@@ -577,6 +628,46 @@ def process_file(filepath):
 
     if frame_num == 0:
         print("  (no IPICO frames found)")
+
+
+def process_file(filepath):
+    """Parse one pcapng file and print decoded frames."""
+    with open(filepath, "rb") as f:
+        raw = f.read()
+
+    basename = os.path.basename(filepath)
+    print(f"\n{'=' * 76}")
+    print(f"  {basename}")
+    print(f"{'=' * 76}")
+
+    flows = extract_tcp_flows(raw)
+    if not flows:
+        print("  (no IPICO frames found)")
+        return
+
+    sorted_flows = sorted(
+        flows.items(),
+        key=lambda item: (
+            item[0][0],
+            item[0][2],
+            item[0][3],
+            item[0][1],
+        ),
+    )
+
+    first = True
+    for (reader_ip, reader_port, client_ip, client_port), directions in sorted_flows:
+        if not first:
+            print()
+        first = False
+        render_flow(
+            reader_ip,
+            reader_port,
+            client_ip,
+            client_port,
+            directions["c2r"],
+            directions["r2c"],
+        )
 
 
 # ---------------------------------------------------------------------------
