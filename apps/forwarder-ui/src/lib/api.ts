@@ -198,10 +198,11 @@ export async function getReadMode(
 export async function setReadMode(
   ip: string,
   mode: string,
+  timeout = 5,
 ): Promise<{ mode: string }> {
   return apiFetch(`/api/v1/readers/${ip}/read-mode`, {
     method: "PUT",
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ mode, timeout }),
   });
 }
 

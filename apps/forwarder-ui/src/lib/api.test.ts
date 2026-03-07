@@ -165,6 +165,21 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("setReadMode sends mode and timeout", async () => {
+    const { setReadMode } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { mode: "fsls" }));
+
+    await setReadMode("192.168.1.10", "fsls", 10);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/read-mode",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ mode: "fsls", timeout: 10 }),
+      }),
+    );
+  });
+
   it("downloadUpdate returns failed status payload on 409", async () => {
     const { downloadUpdate } = await import("./api");
     mockFetch.mockResolvedValue(

@@ -22,6 +22,11 @@
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
   import {
+    initialTimeoutDraft,
+    resolveTimeoutSeconds,
+    shouldShowTimeoutInput,
+  } from "$lib/read-mode-form";
+  import {
     subscribeDownloadProgress,
     type DownloadProgressEvent,
     type DownloadProgressHandle,
@@ -44,6 +49,8 @@
   >({});
   let expandedReader = $state<string | null>(null);
   let readerInfoMap = $state<Record<string, api.ReaderInfo>>({});
+  let readModeDrafts = $state<Record<string, string>>({});
+  let readModeTimeoutDrafts = $state<Record<string, string>>({});
   let controlBusy = $state<Record<string, boolean>>({});
   let controlFeedback = $state<
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
@@ -221,6 +228,37 @@
     expandedReader = expandedReader === ip ? null : ip;
   }
 
+  function readModeDraftValue(ip: string, info: api.ReaderInfo | undefined) {
+    return readModeDrafts[ip] ?? info?.read_mode ?? "raw";
+  }
+
+  function readModeTimeoutDraftValue(
+    ip: string,
+    info: api.ReaderInfo | undefined,
+  ) {
+    return (
+      readModeTimeoutDrafts[ip] ?? initialTimeoutDraft(info?.read_mode_timeout)
+    );
+  }
+
+  function updateReadModeDraft(
+    ip: string,
+    mode: string,
+    info: api.ReaderInfo | undefined,
+  ) {
+    readModeDrafts = { ...readModeDrafts, [ip]: mode };
+    if (mode === "fsls" && readModeTimeoutDrafts[ip] == null) {
+      readModeTimeoutDrafts = {
+        ...readModeTimeoutDrafts,
+        [ip]: initialTimeoutDraft(info?.read_mode_timeout),
+      };
+    }
+  }
+
+  function updateReadModeTimeoutDraft(ip: string, value: string) {
+    readModeTimeoutDrafts = { ...readModeTimeoutDrafts, [ip]: value };
+  }
+
   function readerDetailsId(ip: string): string {
     return `reader-details-${ip.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   }
@@ -254,20 +292,38 @@
     }
   }
 
-  async function handleSetReadMode(ip: string, mode: string) {
+  async function handleSetReadMode(
+    ip: string,
+    mode: string,
+    timeoutDraft: string,
+    currentTimeout: number | null | undefined,
+  ) {
+    const timeout = resolveTimeoutSeconds(timeoutDraft, currentTimeout);
     controlBusy = { ...controlBusy, [ip]: true };
     controlFeedback = { ...controlFeedback, [ip]: undefined };
     try {
-      const result = await api.setReadMode(ip, mode);
+      const result = await api.setReadMode(ip, mode, timeout);
       readerInfoMap = {
         ...readerInfoMap,
-        [ip]: { ...readerInfoMap[ip], read_mode: result.mode },
+        [ip]: {
+          ...readerInfoMap[ip],
+          read_mode: result.mode,
+          read_mode_timeout: timeout,
+        },
+      };
+      readModeDrafts = { ...readModeDrafts, [ip]: result.mode };
+      readModeTimeoutDrafts = {
+        ...readModeTimeoutDrafts,
+        [ip]: String(timeout),
       };
       controlFeedback = {
         ...controlFeedback,
         [ip]: {
           kind: "ok",
-          message: `Mode set to ${formatReadMode(result.mode)}`,
+          message:
+            result.mode === "fsls"
+              ? `Mode set to ${formatReadMode(result.mode)} (${timeout}s)`
+              : `Mode set to ${formatReadMode(result.mode)}`,
         },
       };
     } catch (e) {
@@ -786,27 +842,65 @@
                     </div>
                     <div>
                       <span class="text-text-muted">Read Mode:</span>
-                      <select
-                        class="ml-2 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
-                        onchange={(e) => {
-                          e.stopPropagation();
-                          handleSetReadMode(
-                            reader.ip,
-                            (e.currentTarget as HTMLSelectElement).value,
-                          );
-                        }}
-                        disabled={controlBusy[reader.ip] ||
-                          reader.state !== "connected"}
+                      <span
+                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
                       >
-                        <option value="raw" selected={info?.read_mode === "raw"}
-                          >Raw</option
+                        <select
+                          class="px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                          value={readModeDraftValue(reader.ip, info)}
+                          onchange={(e) => {
+                            e.stopPropagation();
+                            updateReadModeDraft(
+                              reader.ip,
+                              (e.currentTarget as HTMLSelectElement).value,
+                              info,
+                            );
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}
                         >
-                        <option
-                          value="fsls"
-                          selected={info?.read_mode === "fsls"}
-                          >First/Last Seen</option
+                          <option value="raw">Raw</option>
+                          <option value="fsls">First/Last Seen</option>
+                        </select>
+                        {#if shouldShowTimeoutInput(readModeDraftValue(reader.ip, info))}
+                          <label
+                            class="inline-flex items-center gap-1 text-xs text-text-secondary"
+                          >
+                            <span>Timeout</span>
+                            <input
+                              class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                              type="number"
+                              min="1"
+                              max="255"
+                              value={readModeTimeoutDraftValue(reader.ip, info)}
+                              oninput={(e) => {
+                                e.stopPropagation();
+                                updateReadModeTimeoutDraft(
+                                  reader.ip,
+                                  (e.currentTarget as HTMLInputElement).value,
+                                );
+                              }}
+                              disabled={controlBusy[reader.ip] ||
+                                reader.state !== "connected"}
+                            />
+                            <span>s</span>
+                          </label>
+                        {/if}
+                        <button
+                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleSetReadMode(
+                              reader.ip,
+                              readModeDraftValue(reader.ip, info),
+                              readModeTimeoutDraftValue(reader.ip, info),
+                              info?.read_mode_timeout,
+                            );
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}>Apply</button
                         >
-                      </select>
+                      </span>
                     </div>
                   </div>
                   <div
