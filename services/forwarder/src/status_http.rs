@@ -179,6 +179,11 @@ pub struct StatusServer {
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
     control_clients:
         Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
+    download_trackers: Arc<
+        std::sync::RwLock<
+            HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
+        >,
+    >,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -206,6 +211,11 @@ struct AppState<J: JournalAccess + Send + 'static> {
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
     control_clients:
         Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
+    download_trackers: Arc<
+        std::sync::RwLock<
+            HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
+        >,
+    >,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -219,6 +229,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             ui_tx: self.ui_tx.clone(),
             logger: self.logger.clone(),
             control_clients: self.control_clients.clone(),
+            download_trackers: self.download_trackers.clone(),
         }
     }
 }
@@ -313,6 +324,31 @@ impl StatusServer {
         &self,
     ) -> &Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>> {
         &self.control_clients
+    }
+
+    pub fn download_trackers(
+        &self,
+    ) -> &Arc<
+        std::sync::RwLock<
+            HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
+        >,
+    > {
+        &self.download_trackers
+    }
+
+    pub fn register_download_tracker(
+        &self,
+        reader_ip: &str,
+        tracker: Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>,
+    ) {
+        self.download_trackers
+            .write()
+            .unwrap()
+            .insert(reader_ip.to_owned(), tracker);
+    }
+
+    pub fn deregister_download_tracker(&self, reader_ip: &str) {
+        self.download_trackers.write().unwrap().remove(reader_ip);
     }
 
     pub async fn update_reader_info(
@@ -473,6 +509,7 @@ impl StatusServer {
         ));
         let subsystem = Arc::new(Mutex::new(subsystem));
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -482,6 +519,7 @@ impl StatusServer {
             ui_tx: ui_tx.clone(),
             logger: logger.clone(),
             control_clients: control_clients.clone(),
+            download_trackers: download_trackers.clone(),
         };
 
         let app = build_router(state);
@@ -497,6 +535,7 @@ impl StatusServer {
             ui_tx,
             logger,
             control_clients,
+            download_trackers,
         })
     }
 
@@ -519,6 +558,7 @@ impl StatusServer {
         ));
         let subsystem = Arc::new(Mutex::new(subsystem));
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -528,6 +568,7 @@ impl StatusServer {
             ui_tx: ui_tx.clone(),
             logger: logger.clone(),
             control_clients: control_clients.clone(),
+            download_trackers: download_trackers.clone(),
         };
 
         let app = build_router(state);
@@ -543,6 +584,7 @@ impl StatusServer {
             ui_tx,
             logger,
             control_clients,
+            download_trackers,
         })
     }
 }
