@@ -22,7 +22,7 @@ use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{Duration, sleep};
@@ -176,7 +176,24 @@ async fn run_reader(
             }
         }
 
-        let mut reader = BufReader::new(stream);
+        let (read_half, write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half);
+
+        // Set up control channels
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, control_sink) = forwarder::reader_control::ControlClient::new(cmd_tx);
+        let _control_client = Arc::new(control_client);
+
+        // Writer task: drains command channel to TCP socket
+        let mut writer = write_half;
+        let writer_handle = tokio::spawn(async move {
+            while let Some(frame) = cmd_rx.recv().await {
+                if writer.write_all(&frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         let mut frame_buf = Vec::new();
 
         loop {
@@ -233,6 +250,17 @@ async fn run_reader(
                 }
             };
             if raw_line.is_empty() {
+                continue;
+            }
+
+            // Demux: control responses vs tag reads
+            if raw_line.starts_with("ab") {
+                control_sink.feed(raw_line.as_bytes()).await;
+                continue;
+            }
+            if !raw_line.starts_with("aa") {
+                // Non-framed: banner text or other reader output
+                control_sink.feed_banner_line(raw_line.as_bytes()).await;
                 continue;
             }
 
@@ -310,6 +338,8 @@ async fn run_reader(
 
             status.record_read(&stream_key).await;
         }
+
+        writer_handle.abort();
 
         // Reconnect with backoff
         let delay = Duration::from_secs(backoff_secs);

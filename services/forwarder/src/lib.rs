@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub mod config;
 pub mod discovery;
 pub mod local_fanout;
+pub mod reader_control;
 pub mod replay;
 pub mod status_http;
 pub mod storage;
