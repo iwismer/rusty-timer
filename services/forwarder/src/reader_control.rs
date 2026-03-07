@@ -202,6 +202,54 @@ impl ControlClient {
             .await?;
         control::decode_extended_status(&frame)
     }
+
+    /// Send the 3-step download-start sequence (init, configure, start).
+    /// Returns the initial ExtendedStatus after the start command.
+    pub async fn start_download(&self) -> Result<control::ExtendedStatus, ControlError> {
+        let _in_flight = self.in_flight.lock().await;
+
+        // Step 1: init download (sub-cmd 0x02)
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus { data: vec![0x02] })
+            .await?;
+
+        // Step 2: configure download (sub-cmd 0x07, params [0x01, 0x05])
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x07, 0x01, 0x05],
+            })
+            .await?;
+
+        // Step 3: start download (sub-cmd 0x01, state=0x01)
+        let frame = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x01, 0x01],
+            })
+            .await?;
+
+        control::decode_extended_status(&frame)
+    }
+
+    /// Send the 2-step download-stop sequence (stop, cleanup).
+    pub async fn stop_download(&self) -> Result<(), ControlError> {
+        let _in_flight = self.in_flight.lock().await;
+
+        // Step 1: stop download (sub-cmd 0x01, state=0x00)
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x01, 0x00],
+            })
+            .await?;
+
+        // Step 2: cleanup (sub-cmd 0x07, param 0x00)
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x07, 0x00],
+            })
+            .await?;
+
+        Ok(())
+    }
 }
 
 impl ControlResponseSink {
@@ -684,5 +732,85 @@ mod tests {
 
         let ev = rx.try_recv().expect("error event");
         assert!(matches!(ev, DownloadEvent::Error { message } if message == "connection lost"));
+    }
+
+    #[tokio::test]
+    async fn start_download_sends_correct_3_step_sequence() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move { client.start_download().await });
+
+        let status_reply = |byte0: u8| -> String {
+            let data_hex = format!("{:02x}0204f60000000059058f0300", byte0);
+            let body = format!("000d4b{}", data_hex);
+            let lrc = control::lrc(body.as_bytes());
+            format!("ab{}{:02x}", body, lrc)
+        };
+
+        // Step 1: init (sub-cmd 0x02)
+        let step1 = cmd_rx.recv().await.expect("download step 1");
+        assert_eq!(
+            std::str::from_utf8(&step1).expect("step 1 utf8"),
+            "ab00014b02b9\r\n"
+        );
+        assert!(sink.feed(status_reply(0x01).as_bytes()).await);
+
+        // Step 2: configure (sub-cmd 0x07, params [0x01, 0x05])
+        let step2 = cmd_rx.recv().await.expect("download step 2");
+        assert_eq!(
+            std::str::from_utf8(&step2).expect("step 2 utf8"),
+            "ab00034b07010586\r\n"
+        );
+        assert!(sink.feed(status_reply(0x01).as_bytes()).await);
+
+        // Step 3: start (sub-cmd 0x01, state=0x01)
+        let step3 = cmd_rx.recv().await.expect("download step 3");
+        assert_eq!(
+            std::str::from_utf8(&step3).expect("step 3 utf8"),
+            "ab00024b01011a\r\n"
+        );
+        assert!(sink.feed(status_reply(0x03).as_bytes()).await);
+
+        let ext = task
+            .await
+            .expect("task join")
+            .expect("start_download result");
+        assert_eq!(ext.recording_state, 0x03);
+    }
+
+    #[tokio::test]
+    async fn stop_download_sends_correct_2_step_sequence() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move { client.stop_download().await });
+
+        let status_reply = |byte0: u8| -> String {
+            let data_hex = format!("{:02x}0204f60204f60059058f0300", byte0);
+            let body = format!("000d4b{}", data_hex);
+            let lrc = control::lrc(body.as_bytes());
+            format!("ab{}{:02x}", body, lrc)
+        };
+
+        // Step 1: stop (sub-cmd 0x01, state=0x00)
+        let step1 = cmd_rx.recv().await.expect("stop step 1");
+        assert_eq!(
+            std::str::from_utf8(&step1).expect("step 1 utf8"),
+            "ab00024b010019\r\n"
+        );
+        assert!(sink.feed(status_reply(0x00).as_bytes()).await);
+
+        // Step 2: cleanup (sub-cmd 0x07, param 0x00)
+        let step2 = cmd_rx.recv().await.expect("stop step 2");
+        assert_eq!(
+            std::str::from_utf8(&step2).expect("step 2 utf8"),
+            "ab00024b07001f\r\n"
+        );
+        assert!(sink.feed(status_reply(0x00).as_bytes()).await);
+
+        task.await
+            .expect("task join")
+            .expect("stop_download result");
     }
 }
