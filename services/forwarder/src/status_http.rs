@@ -21,6 +21,7 @@
 //!   — trigger stored-read download from reader; 202 on success, 409 if already running
 //! - `GET /api/v1/readers/{ip}/download-reads/progress`
 //!   — SSE stream of download progress events
+//! - `POST /api/v1/readers/{ip}/reconnect` — trigger immediate reader reconnect (cancels backoff)
 //! - All other routes fall back to the embedded SvelteKit UI
 //!
 //! # Readiness contract
@@ -190,6 +191,7 @@ pub struct StatusServer {
             HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
         >,
     >,
+    reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -222,6 +224,7 @@ struct AppState<J: JournalAccess + Send + 'static> {
             HashMap<String, Arc<tokio::sync::Mutex<crate::reader_control::DownloadTracker>>>,
         >,
     >,
+    reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -236,6 +239,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             logger: self.logger.clone(),
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
+            reconnect_notifies: self.reconnect_notifies.clone(),
         }
     }
 }
@@ -356,6 +360,21 @@ impl StatusServer {
 
     pub fn deregister_download_tracker(&self, reader_ip: &str) {
         self.download_trackers.write().unwrap().remove(reader_ip);
+    }
+
+    pub fn register_reconnect_notify(&self, reader_ip: &str, notify: Arc<Notify>) {
+        self.reconnect_notifies
+            .write()
+            .unwrap()
+            .insert(reader_ip.to_owned(), notify);
+    }
+
+    pub fn deregister_reconnect_notify(&self, reader_ip: &str) {
+        self.reconnect_notifies.write().unwrap().remove(reader_ip);
+    }
+
+    pub fn reconnect_notifies(&self) -> &Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>> {
+        &self.reconnect_notifies
     }
 
     pub async fn update_reader_info(
@@ -517,6 +536,7 @@ impl StatusServer {
         let subsystem = Arc::new(Mutex::new(subsystem));
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -527,6 +547,7 @@ impl StatusServer {
             logger: logger.clone(),
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
+            reconnect_notifies: reconnect_notifies.clone(),
         };
 
         let app = build_router(state);
@@ -543,6 +564,7 @@ impl StatusServer {
             logger,
             control_clients,
             download_trackers,
+            reconnect_notifies,
         })
     }
 
@@ -566,6 +588,7 @@ impl StatusServer {
         let subsystem = Arc::new(Mutex::new(subsystem));
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -576,6 +599,7 @@ impl StatusServer {
             logger: logger.clone(),
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
+            reconnect_notifies: reconnect_notifies.clone(),
         };
 
         let app = build_router(state);
@@ -592,6 +616,7 @@ impl StatusServer {
             logger,
             control_clients,
             download_trackers,
+            reconnect_notifies,
         })
     }
 }
@@ -2088,6 +2113,24 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+/// POST /api/v1/readers/{ip}/reconnect
+async fn reconnect_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let notify = { state.reconnect_notifies.read().unwrap().get(&ip).cloned() };
+    match notify {
+        Some(n) => {
+            n.notify_one();
+            json_response(StatusCode::OK, r#"{"ok":true}"#.to_string())
+        }
+        None => json_response(
+            StatusCode::NOT_FOUND,
+            r#"{"error":"reader not found"}"#.to_string(),
+        ),
+    }
+}
+
 async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
@@ -2329,6 +2372,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route(
             "/api/v1/readers/{ip}/download-reads/progress",
             get(download_progress_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/reconnect",
+            post(reconnect_handler::<J>),
         )
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
