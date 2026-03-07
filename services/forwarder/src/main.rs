@@ -185,6 +185,11 @@ async fn run_reader(
         let control_client = Arc::new(control_client);
         status.register_control_client(&stream_key, control_client.clone());
 
+        let download_tracker = Arc::new(tokio::sync::Mutex::new(
+            forwarder::reader_control::DownloadTracker::new(),
+        ));
+        status.register_download_tracker(&stream_key, download_tracker.clone());
+
         // Writer task: drains command channel to TCP socket
         let mut writer = write_half;
         let writer_handle = tokio::spawn(async move {
@@ -204,6 +209,7 @@ async fn run_reader(
         let poll_reader_ip = reader_ip.clone();
         let poll_status = status.clone();
         let poll_stream_key = stream_key.clone();
+        let poll_download_tracker = download_tracker.clone();
         let poll_handle = tokio::spawn(async move {
             // Run initial connection sequence
             let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
@@ -221,11 +227,52 @@ async fn run_reader(
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             interval.tick().await; // skip first immediate tick
             let mut info = reader_info;
+            let mut last_download_progress = 0u32;
+            let mut last_download_reads = 0u32;
+            let mut last_progress_time = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
                         poll_status.update_reader_info(&poll_stream_key, info.clone()).await;
+
+                        // Check download progress
+                        {
+                            let mut dt = poll_download_tracker.lock().await;
+                            if dt.state == forwarder::reader_control::DownloadState::Downloading
+                                && let Ok(ext) = poll_client.get_extended_status().await
+                            {
+                                let progress = u32::from(ext.stored_record_pages);
+                                let extent = dt.stored_data_extent;
+                                dt.update_progress(progress, extent);
+
+                                // Safety timeout: no progress for 30 seconds
+                                let current_progress = progress;
+                                let current_reads = dt.reads_received;
+                                if current_progress != last_download_progress || current_reads != last_download_reads {
+                                    last_download_progress = current_progress;
+                                    last_download_reads = current_reads;
+                                    last_progress_time = tokio::time::Instant::now();
+                                } else if last_progress_time.elapsed() > Duration::from_secs(30) {
+                                    drop(dt);
+                                    let _ = poll_client.stop_download().await;
+                                    let mut dt = poll_download_tracker.lock().await;
+                                    dt.fail("download stalled: no progress for 30 seconds".to_owned());
+                                    continue;
+                                }
+
+                                if extent > 0 && progress >= extent {
+                                    drop(dt); // release lock before sending commands
+                                    if let Err(e) = poll_client.stop_download().await {
+                                        let mut dt = poll_download_tracker.lock().await;
+                                        dt.fail(format!("stop_download failed: {}", e));
+                                    } else {
+                                        let mut dt = poll_download_tracker.lock().await;
+                                        dt.complete();
+                                    }
+                                }
+                            }
+                        }
                     }
                     _ = poll_shutdown.changed() => break,
                 }
@@ -244,6 +291,7 @@ async fn run_reader(
                     if *shutdown_rx.borrow() {
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
                         status.deregister_control_client(&stream_key);
+                        status.deregister_download_tracker(&stream_key);
                         return;
                     }
                     continue;
@@ -367,6 +415,11 @@ async fn run_reader(
                 "event journaled"
             );
 
+            {
+                let mut dt = download_tracker.lock().await;
+                dt.record_read();
+            }
+
             // Fan out the exact bytes read from the reader, preserving
             // upstream line framing (for example CRLF).
             let raw_bytes = frame_buf.clone();
@@ -381,6 +434,7 @@ async fn run_reader(
         writer_handle.abort();
         poll_handle.abort();
         status.deregister_control_client(&stream_key);
+        status.deregister_download_tracker(&stream_key);
 
         // Reconnect with backoff
         let delay = Duration::from_secs(backoff_secs);
