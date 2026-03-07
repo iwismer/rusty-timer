@@ -185,10 +185,7 @@ impl AppState {
                 };
             }
         };
-        let cursors = match db.load_cursors() {
-            Ok(c) => c,
-            Err(_) => vec![],
-        };
+        let cursors: Vec<crate::db::CursorRecord> = db.load_cursors().unwrap_or_default();
         drop(db);
 
         let cursor_map: HashMap<(&str, &str), &crate::db::CursorRecord> = cursors
