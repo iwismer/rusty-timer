@@ -3937,6 +3937,113 @@ target = "192.168.1.100:10000"
     }
 
     #[tokio::test]
+    async fn download_reads_returns_202_and_409_on_double_trigger() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        // Register a DownloadTracker for this reader
+        let tracker = Arc::new(tokio::sync::Mutex::new(
+            crate::reader_control::DownloadTracker::new(),
+        ));
+        server.register_download_tracker(reader_ip, Arc::clone(&tracker));
+
+        // Register a ControlClient so the handler doesn't 404
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        // Spawn a task to feed responses to the 3-step start_download sequence
+        let feeder = tokio::spawn(async move {
+            // Step 1: init (0x4b 0x02)
+            let _cmd1 = cmd_rx.recv().await.expect("init command");
+            control_sink
+                .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                .await;
+            // Step 2: configure (0x4b 0x07 0x01 0x05)
+            let _cmd2 = cmd_rx.recv().await.expect("configure command");
+            control_sink
+                .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                .await;
+            // Step 3: start (0x4b 0x01 0x01)
+            let _cmd3 = cmd_rx.recv().await.expect("start command");
+            control_sink
+                .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                .await;
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{}", server.local_addr());
+
+        // First POST should return 202 Accepted
+        let resp1 = client
+            .post(format!(
+                "{}/api/v1/readers/{}/download-reads",
+                base, reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST download-reads");
+        assert_eq!(resp1.status(), StatusCode::ACCEPTED);
+
+        let body: serde_json::Value = resp1.json().await.expect("json body");
+        assert_eq!(body["status"], "started");
+
+        // Wait for the background task to move tracker to Downloading state
+        feeder.await.expect("feeder task");
+        // Give the background spawn a moment to update state
+        sleep(Duration::from_millis(50)).await;
+
+        // Second POST should return 409 Conflict
+        let resp2 = client
+            .post(format!(
+                "{}/api/v1/readers/{}/download-reads",
+                base, reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST download-reads again");
+        assert_eq!(resp2.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn download_reads_returns_404_for_unknown_reader() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/10.0.0.99/download-reads",
+                server.local_addr()
+            ))
+            .send()
+            .await
+            .expect("POST download-reads unknown reader");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn status_json_epoch_name_null_when_not_set() {
         let server = StatusServer::start(
             StatusConfig {
