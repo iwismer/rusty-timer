@@ -227,280 +227,287 @@
   {:else if loadError}
     <p class="text-sm text-status-err">{loadError}</p>
   {:else}
-    <!-- Cursor Reset -->
-    <Card title="Cursor Reset" borderStatus="warn">
-      <p class="text-sm text-text-muted m-0 mb-4">
-        Reset resume cursors per stream. The selected stream will replay from
-        the beginning on next connect.
-      </p>
+    <div class="space-y-6">
+      <!-- Cursor Reset -->
+      <Card title="Cursor Reset" borderStatus="warn">
+        <p class="text-sm text-text-muted m-0 mb-4">
+          Reset resume cursors per stream. The selected stream will replay from
+          the beginning on next connect.
+        </p>
 
-      {#if streams.length === 0}
-        <p class="text-sm text-text-muted m-0">No streams available.</p>
-      {:else}
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="border-b border-border text-left text-text-muted">
-              <th class="py-2 pr-4 font-medium">Stream</th>
-              <th class="py-2 pr-4 font-medium">Forwarder</th>
-              <th class="py-2 pr-4 font-medium">Reader</th>
-              <th class="py-2 pr-4 font-medium">Epoch</th>
-              <th class="py-2 pr-4 font-medium">Seq</th>
-              <th class="py-2 font-medium"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each streams as stream (streamKey(stream))}
-              {@const key = streamKey(stream)}
-              <tr class="border-b border-border/50">
-                <td class="py-2 pr-4">
-                  {#if stream.display_alias}
-                    <span class="text-text-primary font-medium"
-                      >{stream.display_alias}</span
-                    >
-                    <span class="block text-xs text-text-muted"
-                      >{stream.forwarder_id} / {stream.reader_ip}</span
-                    >
-                  {:else}
-                    <span class="text-text-primary"
-                      >{stream.forwarder_id} / {stream.reader_ip}</span
-                    >
-                  {/if}
-                </td>
-                <td class="py-2 pr-4 text-text-secondary"
-                  >{stream.forwarder_id}</td
-                >
-                <td class="py-2 pr-4 text-text-secondary">{stream.reader_ip}</td
-                >
-                <td class="py-2 pr-4 text-text-secondary tabular-nums"
-                  >{stream.cursor_epoch ?? "\u2014"}</td
-                >
-                <td class="py-2 pr-4 text-text-secondary tabular-nums"
-                  >{stream.cursor_seq ?? "\u2014"}</td
-                >
-                <td class="py-2 text-right">
-                  <button
-                    onclick={() => handleResetCursor(stream)}
-                    disabled={inFlightKeys.has(key)}
-                    class="px-2.5 py-1 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-                    aria-label={"Reset cursor for " + streamLabel(stream)}
-                  >
-                    {inFlightKeys.has(key) ? "Resetting..." : "Reset Cursor"}
-                  </button>
-                </td>
+        {#if streams.length === 0}
+          <p class="text-sm text-text-muted m-0">No streams available.</p>
+        {:else}
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border text-left text-text-muted">
+                <th class="py-2 pr-4 font-medium">Stream</th>
+                <th class="py-2 pr-4 font-medium">Forwarder</th>
+                <th class="py-2 pr-4 font-medium">Reader</th>
+                <th class="py-2 pr-4 font-medium">Epoch</th>
+                <th class="py-2 pr-4 font-medium">Seq</th>
+                <th class="py-2 font-medium"></th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
-        <div class="mt-4 flex justify-end">
-          <button
-            onclick={() =>
-              handleBulkAction(
-                () => api.resetAllCursors(),
-                "Reset all cursors",
-                "reset-all-cursors",
-              )}
-            disabled={inFlightAction === "reset-all-cursors"}
-            class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {inFlightAction === "reset-all-cursors"
-              ? "Resetting..."
-              : "Reset All Cursors"}
-          </button>
-        </div>
-      {/if}
-    </Card>
-
-    <!-- Earliest-Epoch Overrides -->
-    <Card title="Earliest-Epoch Overrides" borderStatus="warn">
-      <p class="text-sm text-text-muted m-0 mb-4">
-        Clear earliest-epoch overrides per stream or all at once. Streams will
-        revert to receiving all available epochs.
-      </p>
-
-      {#if streams.length === 0}
-        <p class="text-sm text-text-muted m-0">No streams available.</p>
-      {:else}
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="border-b border-border text-left text-text-muted">
-              <th class="py-2 pr-4 font-medium">Stream</th>
-              <th class="py-2 font-medium"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each streams as stream (streamKey(stream))}
-              {@const key = `epoch-${streamKey(stream)}`}
-              <tr class="border-b border-border/50">
-                <td class="py-2 pr-4">
-                  <span class="text-text-primary">{streamLabel(stream)}</span>
-                </td>
-                <td class="py-2 text-right">
-                  <button
-                    onclick={() => handleResetEpoch(stream)}
-                    disabled={inFlightKeys.has(key)}
-                    class="px-2.5 py-1 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-                    aria-label={"Reset epoch for " + streamLabel(stream)}
+            </thead>
+            <tbody>
+              {#each streams as stream (streamKey(stream))}
+                {@const key = streamKey(stream)}
+                <tr class="border-b border-border/50">
+                  <td class="py-2 pr-4">
+                    {#if stream.display_alias}
+                      <span class="text-text-primary font-medium"
+                        >{stream.display_alias}</span
+                      >
+                      <span class="block text-xs text-text-muted"
+                        >{stream.forwarder_id} / {stream.reader_ip}</span
+                      >
+                    {:else}
+                      <span class="text-text-primary"
+                        >{stream.forwarder_id} / {stream.reader_ip}</span
+                      >
+                    {/if}
+                  </td>
+                  <td class="py-2 pr-4 text-text-secondary"
+                    >{stream.forwarder_id}</td
                   >
-                    {inFlightKeys.has(key) ? "Resetting..." : "Reset Epoch"}
-                  </button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-        <div class="mt-4 flex justify-end">
-          <button
-            onclick={() =>
-              handleBulkAction(
-                () => api.resetAllEarliestEpochs(),
-                "Reset all earliest-epoch overrides",
-                "reset-all-epochs",
-              )}
-            disabled={inFlightAction === "reset-all-epochs"}
-            class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {inFlightAction === "reset-all-epochs"
-              ? "Resetting..."
-              : "Reset All Epoch Overrides"}
-          </button>
-        </div>
-      {/if}
-    </Card>
-
-    <!-- Local Port Overrides -->
-    <Card title="Local Port Overrides">
-      <p class="text-sm text-text-muted m-0 mb-4">
-        Set or clear the local forwarding port per subscription. Leave empty to
-        use the default port.
-      </p>
-
-      {#if subscriptions.length === 0}
-        <p class="text-sm text-text-muted m-0">No subscriptions.</p>
-      {:else}
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="border-b border-border text-left text-text-muted">
-              <th class="py-2 pr-4 font-medium">Forwarder</th>
-              <th class="py-2 pr-4 font-medium">Reader</th>
-              <th class="py-2 pr-4 font-medium">Port Override</th>
-              <th class="py-2 font-medium"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each subscriptions as sub (streamKey(sub))}
-              {@const portKey = `port-${streamKey(sub)}`}
-              <tr class="border-b border-border/50">
-                <td class="py-2 pr-4 text-text-secondary">{sub.forwarder_id}</td
-                >
-                <td class="py-2 pr-4 text-text-secondary">{sub.reader_ip}</td>
-                <td class="py-2 pr-4">
-                  <input
-                    type="text"
-                    inputmode="numeric"
-                    placeholder="default"
-                    value={getPortDisplayValue(sub)}
-                    oninput={(e) =>
-                      handlePortInput(
-                        sub,
-                        (e.target as HTMLInputElement).value,
-                      )}
-                    class="w-24 px-2 py-1 text-sm rounded border border-border bg-bg-primary text-text-primary"
-                  />
-                </td>
-                <td class="py-2 text-right">
-                  <button
-                    onclick={() => handleSavePort(sub)}
-                    disabled={!isPortDirty(sub) || inFlightKeys.has(portKey)}
-                    class="px-2.5 py-1 text-xs font-medium rounded-md text-text-primary border border-border bg-bg-secondary cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+                  <td class="py-2 pr-4 text-text-secondary"
+                    >{stream.reader_ip}</td
                   >
-                    {inFlightKeys.has(portKey) ? "Saving..." : "Save"}
-                  </button>
-                </td>
+                  <td class="py-2 pr-4 text-text-secondary tabular-nums"
+                    >{stream.cursor_epoch ?? "\u2014"}</td
+                  >
+                  <td class="py-2 pr-4 text-text-secondary tabular-nums"
+                    >{stream.cursor_seq ?? "\u2014"}</td
+                  >
+                  <td class="py-2 text-right">
+                    <button
+                      onclick={() => handleResetCursor(stream)}
+                      disabled={inFlightKeys.has(key)}
+                      class="px-2.5 py-1 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+                      aria-label={"Reset cursor for " + streamLabel(stream)}
+                    >
+                      {inFlightKeys.has(key) ? "Resetting..." : "Reset Cursor"}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="mt-4 flex justify-end">
+            <button
+              onclick={() =>
+                handleBulkAction(
+                  () => api.resetAllCursors(),
+                  "Reset all cursors",
+                  "reset-all-cursors",
+                )}
+              disabled={inFlightAction === "reset-all-cursors"}
+              class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {inFlightAction === "reset-all-cursors"
+                ? "Resetting..."
+                : "Reset All Cursors"}
+            </button>
+          </div>
+        {/if}
+      </Card>
+
+      <!-- Earliest-Epoch Overrides -->
+      <Card title="Earliest-Epoch Overrides" borderStatus="warn">
+        <p class="text-sm text-text-muted m-0 mb-4">
+          Clear earliest-epoch overrides per stream or all at once. Streams will
+          revert to receiving all available epochs.
+        </p>
+
+        {#if streams.length === 0}
+          <p class="text-sm text-text-muted m-0">No streams available.</p>
+        {:else}
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border text-left text-text-muted">
+                <th class="py-2 pr-4 font-medium">Stream</th>
+                <th class="py-2 font-medium"></th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-    </Card>
+            </thead>
+            <tbody>
+              {#each streams as stream (streamKey(stream))}
+                {@const key = `epoch-${streamKey(stream)}`}
+                <tr class="border-b border-border/50">
+                  <td class="py-2 pr-4">
+                    <span class="text-text-primary">{streamLabel(stream)}</span>
+                  </td>
+                  <td class="py-2 text-right">
+                    <button
+                      onclick={() => handleResetEpoch(stream)}
+                      disabled={inFlightKeys.has(key)}
+                      class="px-2.5 py-1 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+                      aria-label={"Reset epoch for " + streamLabel(stream)}
+                    >
+                      {inFlightKeys.has(key) ? "Resetting..." : "Reset Epoch"}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+          <div class="mt-4 flex justify-end">
+            <button
+              onclick={() =>
+                handleBulkAction(
+                  () => api.resetAllEarliestEpochs(),
+                  "Reset all earliest-epoch overrides",
+                  "reset-all-epochs",
+                )}
+              disabled={inFlightAction === "reset-all-epochs"}
+              class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {inFlightAction === "reset-all-epochs"
+                ? "Resetting..."
+                : "Reset All Epoch Overrides"}
+            </button>
+          </div>
+        {/if}
+      </Card>
 
-    <!-- Purge Subscriptions -->
-    <Card title="Purge Subscriptions" borderStatus="warn">
-      <p class="text-sm text-text-muted m-0 mb-4">
-        Remove all stream subscriptions. The receiver will have no streams until
-        new ones are added.
-      </p>
-      <button
-        onclick={() =>
-          handleBulkAction(
-            () => api.purgeSubscriptions(),
-            "Purge subscriptions",
-            "purge-subs",
-          )}
-        disabled={inFlightAction === "purge-subs" || subscriptions.length === 0}
-        class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        {inFlightAction === "purge-subs"
-          ? "Purging..."
-          : "Purge All Subscriptions"}
-      </button>
-    </Card>
+      <!-- Local Port Overrides -->
+      <Card title="Local Port Overrides">
+        <p class="text-sm text-text-muted m-0 mb-4">
+          Set or clear the local forwarding port per subscription. Leave empty
+          to use the default port.
+        </p>
 
-    <!-- Reset Profile -->
-    <Card title="Reset Profile" borderStatus="warn">
-      <p class="text-sm text-text-muted m-0 mb-4">
-        Clear server URL, token, and receiver ID back to defaults. The receiver
-        will need to be reconfigured before connecting.
-      </p>
-      <button
-        onclick={() =>
-          handleBulkAction(
-            () => api.resetProfile(),
-            "Reset profile",
-            "reset-profile",
-          )}
-        disabled={inFlightAction === "reset-profile"}
-        class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        {inFlightAction === "reset-profile"
-          ? "Resetting..."
-          : "Reset Profile to Defaults"}
-      </button>
-    </Card>
+        {#if subscriptions.length === 0}
+          <p class="text-sm text-text-muted m-0">No subscriptions.</p>
+        {:else}
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border text-left text-text-muted">
+                <th class="py-2 pr-4 font-medium">Forwarder</th>
+                <th class="py-2 pr-4 font-medium">Reader</th>
+                <th class="py-2 pr-4 font-medium">Port Override</th>
+                <th class="py-2 font-medium"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each subscriptions as sub (streamKey(sub))}
+                {@const portKey = `port-${streamKey(sub)}`}
+                <tr class="border-b border-border/50">
+                  <td class="py-2 pr-4 text-text-secondary"
+                    >{sub.forwarder_id}</td
+                  >
+                  <td class="py-2 pr-4 text-text-secondary">{sub.reader_ip}</td>
+                  <td class="py-2 pr-4">
+                    <input
+                      type="text"
+                      inputmode="numeric"
+                      placeholder="default"
+                      value={getPortDisplayValue(sub)}
+                      oninput={(e) =>
+                        handlePortInput(
+                          sub,
+                          (e.target as HTMLInputElement).value,
+                        )}
+                      class="w-24 px-2 py-1 text-sm rounded border border-border bg-bg-primary text-text-primary"
+                    />
+                  </td>
+                  <td class="py-2 text-right">
+                    <button
+                      onclick={() => handleSavePort(sub)}
+                      disabled={!isPortDirty(sub) || inFlightKeys.has(portKey)}
+                      class="px-2.5 py-1 text-xs font-medium rounded-md text-text-primary border border-border bg-bg-secondary cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {inFlightKeys.has(portKey) ? "Saving..." : "Save"}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </Card>
 
-    <!-- Factory Reset -->
-    <Card title="Factory Reset" borderStatus="err">
-      <p class="text-sm text-text-muted m-0 mb-4">
-        Clear <strong>all</strong> local data: profile, subscriptions, cursors, and
-        epoch overrides. The receiver will disconnect and return to a fresh state.
-        This cannot be undone.
-      </p>
-      {#if confirmingFactoryReset}
-        <div class="flex items-center gap-3">
-          <span class="text-sm text-status-err font-medium">Are you sure?</span>
-          <button
-            onclick={handleFactoryReset}
-            disabled={inFlightAction === "factory-reset"}
-            class="px-3 py-1.5 text-xs font-medium rounded-md text-white bg-status-err border border-status-err cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {inFlightAction === "factory-reset"
-              ? "Resetting..."
-              : "Yes, Factory Reset"}
-          </button>
-          <button
-            onclick={() => (confirmingFactoryReset = false)}
-            class="px-3 py-1.5 text-xs font-medium rounded-md text-text-secondary border border-border bg-bg-secondary cursor-pointer hover:opacity-80"
-          >
-            Cancel
-          </button>
-        </div>
-      {:else}
+      <!-- Purge Subscriptions -->
+      <Card title="Purge Subscriptions" borderStatus="warn">
+        <p class="text-sm text-text-muted m-0 mb-4">
+          Remove all stream subscriptions. The receiver will have no streams
+          until new ones are added.
+        </p>
         <button
-          onclick={() => (confirmingFactoryReset = true)}
-          class="px-3 py-1.5 text-xs font-medium rounded-md text-status-err border border-status-err bg-transparent cursor-pointer hover:opacity-80"
+          onclick={() =>
+            handleBulkAction(
+              () => api.purgeSubscriptions(),
+              "Purge subscriptions",
+              "purge-subs",
+            )}
+          disabled={inFlightAction === "purge-subs" ||
+            subscriptions.length === 0}
+          class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Factory Reset...
+          {inFlightAction === "purge-subs"
+            ? "Purging..."
+            : "Purge All Subscriptions"}
         </button>
-      {/if}
-    </Card>
+      </Card>
+
+      <!-- Reset Profile -->
+      <Card title="Reset Profile" borderStatus="warn">
+        <p class="text-sm text-text-muted m-0 mb-4">
+          Clear server URL, token, and receiver ID back to defaults. The
+          receiver will need to be reconfigured before connecting.
+        </p>
+        <button
+          onclick={() =>
+            handleBulkAction(
+              () => api.resetProfile(),
+              "Reset profile",
+              "reset-profile",
+            )}
+          disabled={inFlightAction === "reset-profile"}
+          class="px-3 py-1.5 text-xs font-medium rounded-md text-status-warn border border-status-warn-border bg-status-warn-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {inFlightAction === "reset-profile"
+            ? "Resetting..."
+            : "Reset Profile to Defaults"}
+        </button>
+      </Card>
+
+      <!-- Factory Reset -->
+      <Card title="Factory Reset" borderStatus="err">
+        <p class="text-sm text-text-muted m-0 mb-4">
+          Clear <strong>all</strong> local data: profile, subscriptions, cursors,
+          and epoch overrides. The receiver will disconnect and return to a fresh
+          state. This cannot be undone.
+        </p>
+        {#if confirmingFactoryReset}
+          <div class="flex items-center gap-3">
+            <span class="text-sm text-status-err font-medium"
+              >Are you sure?</span
+            >
+            <button
+              onclick={handleFactoryReset}
+              disabled={inFlightAction === "factory-reset"}
+              class="px-3 py-1.5 text-xs font-medium rounded-md text-white bg-status-err border border-status-err cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {inFlightAction === "factory-reset"
+                ? "Resetting..."
+                : "Yes, Factory Reset"}
+            </button>
+            <button
+              onclick={() => (confirmingFactoryReset = false)}
+              class="px-3 py-1.5 text-xs font-medium rounded-md text-text-secondary border border-border bg-bg-secondary cursor-pointer hover:opacity-80"
+            >
+              Cancel
+            </button>
+          </div>
+        {:else}
+          <button
+            onclick={() => (confirmingFactoryReset = true)}
+            class="px-3 py-1.5 text-xs font-medium rounded-md text-status-err border border-status-err bg-transparent cursor-pointer hover:opacity-80"
+          >
+            Factory Reset...
+          </button>
+        {/if}
+      </Card>
+    </div>
   {/if}
 </main>
