@@ -1698,7 +1698,34 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+/// Estimate one-way network latency to a reader by measuring RTT of GET_DATE_TIME probes.
+/// Returns the median one-way latency (RTT/2) from 3 probes.
+async fn estimate_one_way_latency(
+    client: &crate::reader_control::ControlClient,
+) -> std::time::Duration {
+    const PROBES: usize = 3;
+    let mut rtts = Vec::with_capacity(PROBES);
+    for _ in 0..PROBES {
+        let start = std::time::Instant::now();
+        if client.get_date_time().await.is_ok() {
+            rtts.push(start.elapsed());
+        }
+    }
+    if rtts.is_empty() {
+        // Fallback: assume 20ms one-way if all probes failed
+        return std::time::Duration::from_millis(20);
+    }
+    rtts.sort();
+    let median_rtt = rtts[rtts.len() / 2];
+    median_rtt / 2
+}
+
 /// POST /api/v1/readers/{ip}/sync-clock
+///
+/// Minimizes clock drift by:
+/// 1. Probing RTT to estimate one-way network latency
+/// 2. Waiting until just before the next second boundary (offset by the one-way latency)
+/// 3. Sending SET_DATE_TIME timed so the command arrives at the reader on the second boundary
 async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
@@ -1708,16 +1735,33 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
 
-    let now = chrono::Local::now();
     use chrono::Datelike;
     use chrono::Timelike;
-    let year = (now.year() % 100) as u8;
-    let month = now.month() as u8;
-    let day = now.day() as u8;
-    let dow = now.weekday().number_from_monday() as u8;
-    let hour = now.hour() as u8;
-    let minute = now.minute() as u8;
-    let second = now.second() as u8;
+
+    // Step 1: estimate one-way latency
+    let one_way = estimate_one_way_latency(&client).await;
+
+    // Step 2: compute when to send so the command arrives at the next second boundary
+    let now = chrono::Local::now();
+    let nanos_into_second = now.nanosecond() % 1_000_000_000;
+    let nanos_until_next_sec = 1_000_000_000u64.saturating_sub(nanos_into_second as u64);
+    let send_ahead = std::time::Duration::from_nanos(nanos_until_next_sec).saturating_sub(one_way);
+
+    // The target time the reader should be set to (the next whole second)
+    let target = now + chrono::Duration::nanoseconds(nanos_until_next_sec as i64);
+
+    // Step 3: sleep until the optimal send moment
+    if !send_ahead.is_zero() {
+        tokio::time::sleep(send_ahead).await;
+    }
+
+    let year = (target.year() % 100) as u8;
+    let month = target.month() as u8;
+    let day = target.day() as u8;
+    let dow = target.weekday().number_from_monday() as u8;
+    let hour = target.hour() as u8;
+    let minute = target.minute() as u8;
+    let second = target.second() as u8;
 
     if let Err(e) = client
         .set_date_time(year, month, day, dow, hour, minute, second)
@@ -1754,9 +1798,12 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
                 }
             }
 
-            state
-                .logger
-                .log(format!("reader {} clock synced to {}", ip, reader_iso));
+            state.logger.log(format!(
+                "reader {} clock synced to {} (one-way latency estimate: {:.1}ms)",
+                ip,
+                reader_iso,
+                one_way.as_secs_f64() * 1000.0
+            ));
             let drift_json = match drift_ms {
                 Some(d) => format!("{}", d),
                 None => "null".to_owned(),
