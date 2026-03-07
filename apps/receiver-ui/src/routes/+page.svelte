@@ -711,17 +711,18 @@
 
   async function saveProfile() {
     saving = true;
+    const payload = {
+      server_url: editServerUrl,
+      token: editToken,
+      update_mode: editUpdateMode,
+      receiver_id: editReceiverId,
+    };
     try {
-      await api.putProfile({
-        server_url: editServerUrl,
-        token: editToken,
-        update_mode: editUpdateMode,
-        receiver_id: editReceiverId,
-      });
-      savedServerUrl = editServerUrl;
-      savedToken = editToken;
-      savedUpdateMode = editUpdateMode;
-      savedReceiverId = editReceiverId;
+      await api.putProfile(payload);
+      savedServerUrl = payload.server_url;
+      savedToken = payload.token;
+      savedUpdateMode = payload.update_mode;
+      savedReceiverId = payload.receiver_id;
     } catch (e) {
       error = String(e);
     } finally {
