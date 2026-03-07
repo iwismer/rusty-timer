@@ -1732,12 +1732,41 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     match client.get_date_time().await {
         Ok(dt) => {
             let reader_iso = dt.to_iso_string();
+            let verify_now = chrono::Local::now();
+            let drift_ms =
+                chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
+                    .ok()
+                    .map(|reader_naive| {
+                        verify_now
+                            .naive_local()
+                            .signed_duration_since(reader_naive)
+                            .num_milliseconds()
+                    });
+
+            // Update stored reader_info so SSE subscribers see the new clock
+            {
+                let mut ss = state.subsystem.lock().await;
+                if let Some(r) = ss.readers.get_mut(&ip) {
+                    if let Some(ref mut info) = r.reader_info {
+                        info.reader_clock = Some(reader_iso.clone());
+                        info.clock_drift_ms = drift_ms;
+                    }
+                }
+            }
+
             state
                 .logger
                 .log(format!("reader {} clock synced to {}", ip, reader_iso));
+            let drift_json = match drift_ms {
+                Some(d) => format!("{}", d),
+                None => "null".to_owned(),
+            };
             json_response(
                 StatusCode::OK,
-                format!("{{\"reader_clock\":\"{}\"}}", reader_iso),
+                format!(
+                    "{{\"reader_clock\":\"{}\",\"clock_drift_ms\":{}}}",
+                    reader_iso, drift_json
+                ),
             )
         }
         Err(e) => json_response(
