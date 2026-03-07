@@ -701,16 +701,24 @@
                           disabled={controlBusy[reader.ip] ||
                             reader.state !== "connected"}>Clear Records</button
                         >
-                        {#if controlFeedback[reader.ip]}
-                          {@const fb = controlFeedback[reader.ip]}
-                          {#if fb}
-                            <span
-                              class={`text-xs ${fb.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
-                              >{fb.message}</span
-                            >
-                          {/if}
-                        {/if}
                       </div>
+                      {#if controlFeedback[reader.ip]}
+                        {@const fb = controlFeedback[reader.ip]}
+                        {#if fb}
+                          <div class="mt-3">
+                            <AlertBanner
+                              variant={fb.kind}
+                              message={fb.message}
+                              onDismiss={() => {
+                                controlFeedback = {
+                                  ...controlFeedback,
+                                  [reader.ip]: undefined,
+                                };
+                              }}
+                            />
+                          </div>
+                        {/if}
+                      {/if}
                     </td>
                   </tr>
                 {/if}
