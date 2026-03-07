@@ -1,0 +1,454 @@
+//! IPICO reader control client for the forwarder.
+
+use ipico_core::control::{self, Command, ControlError, ControlFrame};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tracing::{info, warn};
+
+struct PendingRequest {
+    instruction: u8,
+    reply_tx: oneshot::Sender<Result<ControlFrame, ControlError>>,
+}
+
+pub struct ControlClient {
+    cmd_tx: mpsc::Sender<Vec<u8>>,
+    pending: Arc<Mutex<Option<PendingRequest>>>,
+    banner_buf: Arc<Mutex<Vec<String>>>,
+    in_flight: Arc<Mutex<()>>,
+    timeout: Duration,
+}
+
+pub struct ControlResponseSink {
+    pending: Arc<Mutex<Option<PendingRequest>>>,
+    banner_buf: Arc<Mutex<Vec<String>>>,
+}
+
+impl ControlClient {
+    pub fn new(cmd_tx: mpsc::Sender<Vec<u8>>) -> (Self, ControlResponseSink) {
+        let pending: Arc<Mutex<Option<PendingRequest>>> = Arc::new(Mutex::new(None));
+        let banner_buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let in_flight: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+        let sink = ControlResponseSink {
+            pending: pending.clone(),
+            banner_buf: banner_buf.clone(),
+        };
+        let client = ControlClient {
+            cmd_tx,
+            pending,
+            banner_buf,
+            in_flight,
+            timeout: Duration::from_secs(2),
+        };
+        (client, sink)
+    }
+
+    async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
+        let frame = control::encode_command(cmd, 0x00);
+        let instruction = cmd.instruction();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        {
+            let mut pending = self.pending.lock().await;
+            *pending = Some(PendingRequest {
+                instruction,
+                reply_tx,
+            });
+        }
+
+        self.cmd_tx
+            .send(frame)
+            .await
+            .map_err(|_| ControlError::Timeout)?;
+
+        match tokio::time::timeout(self.timeout, reply_rx).await {
+            Ok(Ok(result)) => result,
+            _ => {
+                let mut pending = self.pending.lock().await;
+                *pending = None;
+                Err(ControlError::Timeout)
+            }
+        }
+    }
+
+    async fn send(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
+        let _in_flight = self.in_flight.lock().await;
+        self.send_inner(cmd).await
+    }
+
+    pub async fn get_date_time(&self) -> Result<control::ReaderDateTime, ControlError> {
+        let frame = self.send(&Command::GetDateTime).await?;
+        control::decode_date_time(&frame)
+    }
+
+    pub async fn get_statistics(&self) -> Result<control::ReaderStatistics, ControlError> {
+        let frame = self.send(&Command::GetStatistics).await?;
+        control::decode_statistics(&frame)
+    }
+
+    pub async fn get_extended_status(&self) -> Result<control::ExtendedStatus, ControlError> {
+        let frame = self.send(&Command::GetExtendedStatus).await?;
+        control::decode_extended_status(&frame)
+    }
+
+    pub async fn get_config3(&self) -> Result<(control::ReadMode, u8), ControlError> {
+        let frame = self.send(&Command::GetConfig3).await?;
+        control::decode_config3(&frame)
+    }
+
+    pub async fn set_config3(
+        &self,
+        mode: control::ReadMode,
+        timeout: u8,
+    ) -> Result<(), ControlError> {
+        let _frame = self.send(&Command::SetConfig3 { mode, timeout }).await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_date_time(
+        &self,
+        year: u8,
+        month: u8,
+        day: u8,
+        dow: u8,
+        hour: u8,
+        min: u8,
+        sec: u8,
+    ) -> Result<(), ControlError> {
+        let _frame = self
+            .send(&Command::SetDateTime {
+                year,
+                month,
+                day,
+                day_of_week: dow,
+                hour,
+                minute: min,
+                second: sec,
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn print_banner(&self) -> Result<String, ControlError> {
+        {
+            self.banner_buf.lock().await.clear();
+        }
+        let _frame = self.send(&Command::PrintBanner).await?;
+        let buf = self.banner_buf.lock().await;
+        Ok(buf.join("\n").trim().to_owned())
+    }
+
+    /// Send the 3-step clear records sequence + CONFIG3 cycling.
+    pub async fn clear_records(&self) -> Result<(), ControlError> {
+        let _in_flight = self.in_flight.lock().await;
+
+        // Step 1: reset address
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x00, 0x00],
+            })
+            .await?;
+
+        // Step 2: set mode
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x01, 0x00],
+            })
+            .await?;
+
+        // Step 3: trigger erase
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus { data: vec![0xd0] })
+            .await?;
+
+        // Wait for erase to complete
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        // Reset counter
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x00, 0x00],
+            })
+            .await?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Cycle CONFIG3: Event -> Raw
+        let _ = self
+            .send_inner(&Command::SetConfig3 {
+                mode: control::ReadMode::Event,
+                timeout: 5,
+            })
+            .await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = self
+            .send_inner(&Command::SetConfig3 {
+                mode: control::ReadMode::Raw,
+                timeout: 5,
+            })
+            .await?;
+
+        Ok(())
+    }
+}
+
+impl ControlResponseSink {
+    /// Feed an `ab`-prefixed control response line (without \r\n).
+    pub async fn feed(&self, line: &[u8]) -> bool {
+        let result = control::parse_response(line);
+        let mut pending = self.pending.lock().await;
+        if let Some(req) = pending.take() {
+            match &result {
+                Ok(frame) if frame.instruction == req.instruction => {
+                    let _ = req.reply_tx.send(result);
+                    return true;
+                }
+                Err(_) => {
+                    let _ = req.reply_tx.send(result);
+                    return true;
+                }
+                Ok(_) => {
+                    // Wrong instruction (unsolicited) — put request back
+                    *pending = Some(req);
+                }
+            }
+        }
+        false
+    }
+
+    /// Feed a non-framed line (banner text).
+    pub async fn feed_banner_line(&self, line: &[u8]) {
+        if let Ok(s) = std::str::from_utf8(line) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                self.banner_buf.lock().await.push(trimmed.to_owned());
+            }
+        }
+    }
+}
+
+/// Reader info gathered on connect and refreshed by polling.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReaderInfo {
+    pub banner: Option<String>,
+    pub fw_version: Option<String>,
+    pub hw_code: Option<u8>,
+    pub reader_id: Option<u8>,
+    pub config3: Option<u8>,
+    pub unique_tag_count: Option<u16>,
+    pub stored_record_pages: Option<u8>,
+    pub reader_clock: Option<String>,
+    pub clock_drift_ms: Option<i64>,
+    pub read_mode: Option<String>,
+    pub read_mode_timeout: Option<u8>,
+}
+
+/// Run the initial connection sequence: statistics, banner, ext status, config3, clock.
+pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
+    let mut ri = ReaderInfo::default();
+
+    match client.get_statistics().await {
+        Ok(stats) => {
+            ri.fw_version = Some(stats.fw_version_string());
+            ri.hw_code = Some(stats.hw_code);
+            ri.reader_id = Some(stats.reader_id);
+            ri.config3 = Some(stats.config3);
+            info!(fw = %stats.fw_version_string(), hw = stats.hw_code, "reader statistics");
+        }
+        Err(e) => warn!("get_statistics failed: {}", e),
+    }
+
+    match client.print_banner().await {
+        Ok(banner) if !banner.is_empty() => {
+            info!(banner = %banner, "reader banner");
+            ri.banner = Some(banner);
+        }
+        Ok(_) => {}
+        Err(e) => warn!("print_banner failed: {}", e),
+    }
+
+    match client.get_extended_status().await {
+        Ok(ext) => {
+            ri.unique_tag_count = Some(ext.unique_tag_count);
+            ri.stored_record_pages = Some(ext.stored_record_pages);
+            info!(
+                unique_tags = ext.unique_tag_count,
+                stored_pages = ext.stored_record_pages,
+                "reader extended status"
+            );
+        }
+        Err(e) => warn!("get_extended_status failed: {}", e),
+    }
+
+    match client.get_config3().await {
+        Ok((mode, timeout)) => {
+            ri.read_mode = Some(mode.as_str().to_owned());
+            ri.read_mode_timeout = Some(timeout);
+        }
+        Err(e) => warn!("get_config3 failed: {}", e),
+    }
+
+    poll_clock(client, &mut ri).await;
+
+    ri
+}
+
+/// Poll clock and extended status, updating info in place.
+pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
+    if let Ok(ext) = client.get_extended_status().await {
+        info.unique_tag_count = Some(ext.unique_tag_count);
+        info.stored_record_pages = Some(ext.stored_record_pages);
+    }
+
+    if let Ok((mode, timeout)) = client.get_config3().await {
+        info.read_mode = Some(mode.as_str().to_owned());
+        info.read_mode_timeout = Some(timeout);
+    }
+
+    poll_clock(client, info).await;
+}
+
+async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) {
+    if let Ok(dt) = client.get_date_time().await {
+        let reader_iso = dt.to_iso_string();
+        info.reader_clock = Some(reader_iso.clone());
+
+        let now = chrono::Local::now();
+        if let Ok(reader_naive) =
+            chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
+        {
+            let system_naive = now.naive_local();
+            let drift = system_naive
+                .signed_duration_since(reader_naive)
+                .num_milliseconds();
+            info.clock_drift_ms = Some(drift);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn concurrent_control_calls_are_serialized_and_both_complete() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+        let client = Arc::new(client);
+
+        let c1 = client.clone();
+        let first_call = tokio::spawn(async move { c1.get_extended_status().await });
+
+        let first_cmd = cmd_rx.recv().await.expect("first command");
+        assert_eq!(
+            std::str::from_utf8(&first_cmd).expect("first command utf8"),
+            "ab00ff4bc2\r\n"
+        );
+
+        let c2 = client.clone();
+        let second_call = tokio::spawn(async move { c2.get_config3().await });
+
+        let maybe_second = timeout(Duration::from_millis(50), cmd_rx.recv()).await;
+        assert!(
+            maybe_second.is_err(),
+            "second command should not be sent before first response is consumed"
+        );
+
+        assert!(sink.feed(b"ab000d4b010b012f0000000059058f0c005a").await);
+
+        let second_cmd = cmd_rx.recv().await.expect("second command");
+        assert_eq!(
+            std::str::from_utf8(&second_cmd).expect("second command utf8"),
+            "ab00ff0995\r\n"
+        );
+        assert!(sink.feed(b"ab0002090305f3").await);
+
+        let ext = first_call
+            .await
+            .expect("first call task")
+            .expect("first call result");
+        assert_eq!(ext.unique_tag_count, 0x012f);
+
+        let (mode, timeout_secs) = second_call
+            .await
+            .expect("second call task")
+            .expect("second call result");
+        assert_eq!(mode, control::ReadMode::Event);
+        assert_eq!(timeout_secs, 5);
+    }
+
+    #[tokio::test]
+    async fn clear_records_uses_tracked_command_sequence() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let clear_task = tokio::spawn(async move { client.clear_records().await });
+
+        let ack_for = |instruction: u8| -> String {
+            let body = format!("0000{instruction:02x}");
+            let lrc = control::lrc(body.as_bytes());
+            format!("ab{body}{lrc:02x}")
+        };
+
+        let step1 = cmd_rx.recv().await.expect("clear step 1");
+        assert_eq!(
+            std::str::from_utf8(&step1).expect("clear step 1 utf8"),
+            "ab00024b000018\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step2 = cmd_rx.recv().await.expect("clear step 2");
+        assert_eq!(
+            std::str::from_utf8(&step2).expect("clear step 2 utf8"),
+            "ab00024b010019\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step3 = cmd_rx.recv().await.expect("clear step 3");
+        assert_eq!(
+            std::str::from_utf8(&step3).expect("clear step 3 utf8"),
+            "ab00014bd0eb\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step4 = cmd_rx.recv().await.expect("clear step 4");
+        assert_eq!(
+            std::str::from_utf8(&step4).expect("clear step 4 utf8"),
+            "ab00024b000018\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step5 = cmd_rx.recv().await.expect("clear step 5");
+        assert_eq!(
+            std::str::from_utf8(&step5).expect("clear step 5 utf8"),
+            "ab0003090305075b\r\n"
+        );
+        assert!(sink.feed(ack_for(control::INSTR_CONFIG3).as_bytes()).await);
+
+        let step6 = cmd_rx.recv().await.expect("clear step 6");
+        assert_eq!(
+            std::str::from_utf8(&step6).expect("clear step 6 utf8"),
+            "ab00030900050758\r\n"
+        );
+        assert!(sink.feed(ack_for(control::INSTR_CONFIG3).as_bytes()).await);
+
+        clear_task
+            .await
+            .expect("clear task join")
+            .expect("clear task result");
+    }
+}

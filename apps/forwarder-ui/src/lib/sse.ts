@@ -11,6 +11,9 @@ export type ForwarderSseCallbacks = {
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
+  onReaderInfoUpdated: (
+    data: { ip: string } & import("./api").ReaderInfo,
+  ) => void;
   onUpdateStatusChanged: (status: UpdateStatusResponse) => void;
 };
 
@@ -40,6 +43,9 @@ export function initSSE(callbacks: ForwarderSseCallbacks): void {
       },
       update_status_changed: (data: any) => {
         callbacks.onUpdateStatusChanged(data.status);
+      },
+      reader_info_updated: (data: any) => {
+        callbacks.onReaderInfoUpdated(data);
       },
     },
     (connected) => {

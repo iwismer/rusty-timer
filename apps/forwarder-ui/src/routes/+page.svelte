@@ -15,6 +15,8 @@
     formatLastSeen,
     readerBadgeState,
     readerConnectionSummary,
+    formatClockDrift,
+    formatReadMode,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
 
@@ -33,6 +35,15 @@
   let resetEpochFeedback = $state<
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
   >({});
+  let expandedReader = $state<string | null>(null);
+  let readerInfoMap = $state<Record<string, api.ReaderInfo>>({});
+  let controlBusy = $state<Record<string, boolean>>({});
+  let controlFeedback = $state<
+    Record<string, { kind: "ok" | "err"; message: string } | undefined>
+  >({});
+  let localClockStr = $state("");
+  let readerInfoReceivedAt = $state<Record<string, number>>({});
+  let clockTickNow = $state(Date.now());
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -47,6 +58,15 @@
     error = null;
     try {
       status = await api.getStatus();
+      if (status) {
+        const now = Date.now();
+        for (const r of status.readers) {
+          if (r.reader_info) {
+            readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
+            readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
+          }
+        }
+      }
       const [usResult, logsResp] = await Promise.allSettled([
         api.getUpdateStatus(),
         api.getLogs(),
@@ -184,7 +204,123 @@
     }
   }
 
+  function toggleReaderExpand(ip: string) {
+    expandedReader = expandedReader === ip ? null : ip;
+  }
+
+  function readerDetailsId(ip: string): string {
+    return `reader-details-${ip.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  }
+
+  async function handleSyncClock(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.syncReaderClock(ip);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: {
+          ...readerInfoMap[ip],
+          reader_clock: result.reader_clock,
+          clock_drift_ms: result.clock_drift_ms,
+        },
+      };
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "ok", message: `Clock synced: ${result.reader_clock}` },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Sync failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleSetReadMode(ip: string, mode: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.setReadMode(ip, mode);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], read_mode: result.mode },
+      };
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: {
+          kind: "ok",
+          message: `Mode set to ${formatReadMode(result.mode)}`,
+        },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Set mode failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleRefreshReader(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    try {
+      const info = await api.refreshReader(ip);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], ...info },
+      };
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Refresh failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleClearRecords(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      await api.clearReaderRecords(ip);
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "ok", message: "Records cleared" },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Clear failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  let clockInterval: ReturnType<typeof setInterval>;
+
+  function updateLocalClock() {
+    const now = new Date();
+    const y = now.getFullYear();
+    const mo = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    const h = String(now.getHours()).padStart(2, "0");
+    const mi = String(now.getMinutes()).padStart(2, "0");
+    const s = String(now.getSeconds()).padStart(2, "0");
+    localClockStr = `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+    clockTickNow = Date.now();
+  }
+
   onMount(() => {
+    updateLocalClock();
+    clockInterval = setInterval(updateLocalClock, 1000);
     loadAll();
     initSSE({
       onStatusChanged: (data) => {
@@ -208,6 +344,14 @@
       onLogEntry: (entry) => {
         logs = pushLogEntry(logs, entry);
       },
+      onReaderInfoUpdated: (data) => {
+        const { ip, ...info } = data;
+        readerInfoMap = {
+          ...readerInfoMap,
+          [ip]: { ...readerInfoMap[ip], ...info },
+        };
+        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+      },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {
         sseConnected = connected;
@@ -230,7 +374,10 @@
     });
   });
 
-  onDestroy(() => destroySSE());
+  onDestroy(() => {
+    clearInterval(clockInterval);
+    destroySSE();
+  });
 </script>
 
 <main class="max-w-[900px] mx-auto px-6 py-6">
@@ -375,8 +522,25 @@
             <tbody>
               {#each status.readers as reader}
                 <tr class="border-b border-border last:border-b-0">
-                  <td class="px-4 py-2.5 font-mono text-text-primary">
-                    {reader.ip}
+                  <td class="px-4 py-2.5 text-text-primary">
+                    <div class="flex items-center gap-2">
+                      <button
+                        class="inline-flex min-w-20 items-center justify-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                        onclick={() => toggleReaderExpand(reader.ip)}
+                        aria-expanded={expandedReader === reader.ip}
+                        aria-controls={readerDetailsId(reader.ip)}
+                        aria-label={expandedReader === reader.ip
+                          ? "Hide details"
+                          : "Show details"}
+                      >
+                        <span
+                          class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
+                          >▾</span
+                        >
+                        <span>Details</span>
+                      </button>
+                      <span class="font-mono">{reader.ip}</span>
+                    </div>
                   </td>
                   <td class="px-4 py-2.5">
                     <StatusBadge
@@ -471,6 +635,153 @@
                     </div>
                   </td>
                 </tr>
+                {#if expandedReader === reader.ip}
+                  {@const info = readerInfoMap[reader.ip]}
+                  <tr
+                    id={readerDetailsId(reader.ip)}
+                    class="border-b border-border bg-surface-0"
+                  >
+                    <td colspan="8" class="px-6 py-4">
+                      <div
+                        class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4"
+                      >
+                        <div>
+                          <span class="text-text-muted">Firmware:</span>
+                          <span class="font-mono ml-2"
+                            >{info?.fw_version ?? "\u2014"}</span
+                          >
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Hardware:</span>
+                          <span class="font-mono ml-2"
+                            >{info?.hw_code != null
+                              ? `0x${info.hw_code.toString(16)}`
+                              : "\u2014"}</span
+                          >
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Banner:</span>
+                          <span class="font-mono ml-2 text-xs"
+                            >{info?.banner ?? "\u2014"}</span
+                          >
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Unique Tags:</span>
+                          <span class="font-mono ml-2"
+                            >{info?.unique_tag_count ?? "\u2014"}</span
+                          >
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Reader Clock:</span>
+                          <span class="font-mono ml-2"
+                            >{info?.reader_clock ?? "\u2014"}</span
+                          >
+                          {#if readerInfoReceivedAt[reader.ip]}
+                            <span class="text-xs text-text-muted ml-1"
+                              >({Math.round(
+                                (clockTickNow -
+                                  readerInfoReceivedAt[reader.ip]) /
+                                  1000,
+                              )}s ago)</span
+                            >
+                          {/if}
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Clock Drift:</span>
+                          <span class="font-mono ml-2"
+                            >{formatClockDrift(info?.clock_drift_ms)}</span
+                          >
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Local Clock:</span>
+                          <span class="font-mono ml-2">{localClockStr}</span>
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Read Mode:</span>
+                          <span class="font-mono ml-2"
+                            >{formatReadMode(info?.read_mode)}</span
+                          >
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Stored Pages:</span>
+                          <span class="font-mono ml-2"
+                            >{info?.stored_record_pages ?? "\u2014"}</span
+                          >
+                        </div>
+                      </div>
+                      <div
+                        class="flex items-center gap-3 pt-3 border-t border-border"
+                      >
+                        <button
+                          class={btnPrimary}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleSyncClock(reader.ip);
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}>Sync Clock</button
+                        >
+                        <select
+                          class="px-2 py-1.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                          onchange={(e) => {
+                            e.stopPropagation();
+                            handleSetReadMode(
+                              reader.ip,
+                              (e.currentTarget as HTMLSelectElement).value,
+                            );
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}
+                        >
+                          <option
+                            value="raw"
+                            selected={info?.read_mode === "raw"}>Raw</option
+                          >
+                          <option
+                            value="fsls"
+                            selected={info?.read_mode === "fsls"}
+                            >First/Last Seen</option
+                          >
+                        </select>
+                        <button
+                          class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleRefreshReader(reader.ip);
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}>Refresh</button
+                        >
+                        <button
+                          class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleClearRecords(reader.ip);
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}>Clear Records</button
+                        >
+                      </div>
+                      {#if controlFeedback[reader.ip]}
+                        {@const fb = controlFeedback[reader.ip]}
+                        {#if fb}
+                          <div class="mt-3">
+                            <AlertBanner
+                              variant={fb.kind}
+                              message={fb.message}
+                              onDismiss={() => {
+                                controlFeedback = {
+                                  ...controlFeedback,
+                                  [reader.ip]: undefined,
+                                };
+                              }}
+                            />
+                          </div>
+                        {/if}
+                      {/if}
+                    </td>
+                  </tr>
+                {/if}
               {/each}
             </tbody>
           </table>

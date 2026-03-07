@@ -22,7 +22,7 @@ use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{Duration, sleep};
@@ -176,7 +176,62 @@ async fn run_reader(
             }
         }
 
-        let mut reader = BufReader::new(stream);
+        let (read_half, write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half);
+
+        // Set up control channels
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, control_sink) = forwarder::reader_control::ControlClient::new(cmd_tx);
+        let control_client = Arc::new(control_client);
+        status.register_control_client(&stream_key, control_client.clone());
+
+        // Writer task: drains command channel to TCP socket
+        let mut writer = write_half;
+        let writer_handle = tokio::spawn(async move {
+            while let Some(frame) = cmd_rx.recv().await {
+                if writer.write_all(&frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Spawn connect sequence + 30s status polling task.
+        // This runs concurrently with the read loop so that control
+        // responses arriving on the socket can be demuxed to the sink.
+        let poll_client = control_client.clone();
+        let mut poll_shutdown = shutdown_rx.clone();
+        let poll_logger = logger.clone();
+        let poll_reader_ip = reader_ip.clone();
+        let poll_status = status.clone();
+        let poll_stream_key = stream_key.clone();
+        let poll_handle = tokio::spawn(async move {
+            // Run initial connection sequence
+            let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
+            poll_logger.log(format!(
+                "reader {} identified: fw={}, tags={}",
+                poll_reader_ip,
+                reader_info.fw_version.as_deref().unwrap_or("?"),
+                reader_info.unique_tag_count.unwrap_or(0),
+            ));
+            poll_status
+                .update_reader_info(&poll_stream_key, reader_info.clone())
+                .await;
+
+            // Transition to 10s polling
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            interval.tick().await; // skip first immediate tick
+            let mut info = reader_info;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
+                        poll_status.update_reader_info(&poll_stream_key, info.clone()).await;
+                    }
+                    _ = poll_shutdown.changed() => break,
+                }
+            }
+        });
+
         let mut frame_buf = Vec::new();
 
         loop {
@@ -188,6 +243,7 @@ async fn run_reader(
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
+                        status.deregister_control_client(&stream_key);
                         return;
                     }
                     continue;
@@ -233,6 +289,17 @@ async fn run_reader(
                 }
             };
             if raw_line.is_empty() {
+                continue;
+            }
+
+            // Demux: control responses vs tag reads
+            if raw_line.starts_with("ab") {
+                control_sink.feed(raw_line.as_bytes()).await;
+                continue;
+            }
+            if !raw_line.starts_with("aa") {
+                // Non-framed: banner text or other reader output
+                control_sink.feed_banner_line(raw_line.as_bytes()).await;
                 continue;
             }
 
@@ -310,6 +377,10 @@ async fn run_reader(
 
             status.record_read(&stream_key).await;
         }
+
+        writer_handle.abort();
+        poll_handle.abort();
+        status.deregister_control_client(&stream_key);
 
         // Reconnect with backoff
         let delay = Duration::from_secs(backoff_secs);
@@ -1704,7 +1775,11 @@ mod tests {
             .write_all(b"aa400000000123450a2a01123018455927a7FS\n")
             .await
             .expect("write fsls read");
-        drop(reader_stream);
+        // Graceful shutdown: the forwarder's connect sequence sends control
+        // commands to the socket; if we drop with unread data the OS may
+        // RST and discard our buffered writes. Shut down the write half
+        // first so the reader sees EOF cleanly.
+        let _ = reader_stream.shutdown().await;
 
         let mut events = Vec::new();
         for _ in 0..50 {

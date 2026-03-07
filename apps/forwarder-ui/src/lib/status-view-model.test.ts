@@ -3,6 +3,8 @@ import {
   formatLastSeen,
   readerBadgeState,
   readerConnectionSummary,
+  formatClockDrift,
+  formatReadMode,
 } from "./status-view-model";
 
 describe("formatLastSeen", () => {
@@ -59,5 +61,32 @@ describe("readerConnectionSummary", () => {
       configured: 3,
       label: "2 connected / 3 configured",
     });
+  });
+});
+
+describe("formatReadMode", () => {
+  it("formats known modes", () => {
+    expect(formatReadMode("fsls")).toBe("FS/LS");
+    expect(formatReadMode("raw")).toBe("Raw");
+  });
+
+  it("returns em dash for null/undefined", () => {
+    expect(formatReadMode(null)).toBe("\u2014");
+    expect(formatReadMode(undefined)).toBe("\u2014");
+  });
+
+  it("passes through unknown modes", () => {
+    expect(formatReadMode("other")).toBe("other");
+  });
+});
+
+describe("formatClockDrift", () => {
+  it("formats milliseconds", () => {
+    expect(formatClockDrift(null)).toBe("\u2014");
+    expect(formatClockDrift(undefined)).toBe("\u2014");
+    expect(formatClockDrift(50)).toBe("+50ms");
+    expect(formatClockDrift(-200)).toBe("-200ms");
+    expect(formatClockDrift(1500)).toBe("+1.5s");
+    expect(formatClockDrift(-3200)).toBe("-3.2s");
   });
 });

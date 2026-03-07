@@ -83,6 +83,8 @@ pub struct ReaderStatus {
     pub local_port: u16,
     /// The name of the current epoch (set via the server), if any.
     pub current_epoch_name: Option<String>,
+    /// Control protocol info (firmware, clock, etc.) — populated on connect.
+    pub reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
@@ -175,6 +177,8 @@ pub struct StatusServer {
     subsystem: Arc<Mutex<SubsystemStatus>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    control_clients:
+        Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -200,6 +204,8 @@ struct AppState<J: JournalAccess + Send + 'static> {
     restart_signal: Option<Arc<Notify>>,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ForwarderUiEvent>,
     logger: Arc<rt_ui_log::UiLogger<crate::ui_events::ForwarderUiEvent>>,
+    control_clients:
+        Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -212,6 +218,7 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             restart_signal: self.restart_signal.clone(),
             ui_tx: self.ui_tx.clone(),
             logger: self.logger.clone(),
+            control_clients: self.control_clients.clone(),
         }
     }
 }
@@ -302,6 +309,44 @@ impl StatusServer {
         self.subsystem.lock().await.staged_update_path = Some(path);
     }
 
+    pub fn control_clients(
+        &self,
+    ) -> &Arc<std::sync::RwLock<HashMap<String, Arc<crate::reader_control::ControlClient>>>> {
+        &self.control_clients
+    }
+
+    pub async fn update_reader_info(
+        &self,
+        reader_ip: &str,
+        info: crate::reader_control::ReaderInfo,
+    ) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            r.reader_info = Some(info.clone());
+        }
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+                ip: reader_ip.to_owned(),
+                info,
+            });
+    }
+
+    pub fn register_control_client(
+        &self,
+        reader_ip: &str,
+        client: Arc<crate::reader_control::ControlClient>,
+    ) {
+        self.control_clients
+            .write()
+            .unwrap()
+            .insert(reader_ip.to_owned(), client);
+    }
+
+    pub fn deregister_control_client(&self, reader_ip: &str) {
+        self.control_clients.write().unwrap().remove(reader_ip);
+    }
+
     /// Pre-populate all configured reader IPs as Disconnected.
     ///
     /// Each entry is `(reader_addr, local_port)` where `reader_addr` is `"ip:port"`
@@ -316,6 +361,7 @@ impl StatusServer {
                 reads_total: 0,
                 local_port: *local_port,
                 current_epoch_name: None,
+                reader_info: None,
             });
         }
     }
@@ -426,6 +472,7 @@ impl StatusServer {
             500,
         ));
         let subsystem = Arc::new(Mutex::new(subsystem));
+        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -434,6 +481,7 @@ impl StatusServer {
             restart_signal: None,
             ui_tx: ui_tx.clone(),
             logger: logger.clone(),
+            control_clients: control_clients.clone(),
         };
 
         let app = build_router(state);
@@ -448,6 +496,7 @@ impl StatusServer {
             subsystem,
             ui_tx,
             logger,
+            control_clients,
         })
     }
 
@@ -469,6 +518,7 @@ impl StatusServer {
             500,
         ));
         let subsystem = Arc::new(Mutex::new(subsystem));
+        let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -477,6 +527,7 @@ impl StatusServer {
             restart_signal: Some(restart_signal),
             ui_tx: ui_tx.clone(),
             logger: logger.clone(),
+            control_clients: control_clients.clone(),
         };
 
         let app = build_router(state);
@@ -491,6 +542,7 @@ impl StatusServer {
             subsystem,
             ui_tx,
             logger,
+            control_clients,
         })
     }
 }
@@ -1533,6 +1585,7 @@ struct ReaderStatusJson {
     last_seen_secs: Option<u64>,
     local_port: u16,
     current_epoch_name: Option<String>,
+    reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
 async fn status_json_handler<J: JournalAccess + Send + 'static>(
@@ -1556,6 +1609,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                 local_port: r.local_port,
                 current_epoch_name: r.current_epoch_name.clone(),
+                reader_info: r.reader_info.clone(),
             }
         })
         .collect();
@@ -1603,6 +1657,9 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
                 crate::ui_events::ForwarderUiEvent::UpdateStatusChanged { .. } => {
                     "update_status_changed"
                 }
+                crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { .. } => {
+                    "reader_info_updated"
+                }
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
@@ -1617,6 +1674,318 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Reader control API handlers
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/readers/{ip}/info
+async fn reader_info_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let ss = state.subsystem.lock().await;
+    match ss.readers.get(&ip) {
+        Some(r) => match &r.reader_info {
+            Some(info) => json_response(
+                StatusCode::OK,
+                serde_json::to_string(info).unwrap_or_else(|_| "{}".to_owned()),
+            ),
+            None => json_response(StatusCode::OK, "{}".to_owned()),
+        },
+        None => text_response(StatusCode::NOT_FOUND, "unknown reader"),
+    }
+}
+
+/// Estimate one-way network latency to a reader by measuring RTT of GET_DATE_TIME probes.
+/// Returns the median one-way latency (RTT/2) from 3 probes.
+async fn estimate_one_way_latency(
+    client: &crate::reader_control::ControlClient,
+) -> std::time::Duration {
+    const PROBES: usize = 3;
+    let mut rtts = Vec::with_capacity(PROBES);
+    for _ in 0..PROBES {
+        let start = std::time::Instant::now();
+        if client.get_date_time().await.is_ok() {
+            rtts.push(start.elapsed());
+        }
+    }
+    if rtts.is_empty() {
+        // Fallback: assume 20ms one-way if all probes failed
+        return std::time::Duration::from_millis(20);
+    }
+    rtts.sort();
+    let median_rtt = rtts[rtts.len() / 2];
+    median_rtt / 2
+}
+
+/// POST /api/v1/readers/{ip}/sync-clock
+///
+/// Minimizes clock drift by:
+/// 1. Probing RTT to estimate one-way network latency
+/// 2. Reading the reader's clock to learn its centisecond phase
+/// 3. Choosing the SET_DATE_TIME second value that minimizes drift, accounting
+///    for the fact that SET_DATE_TIME cannot set the sub-second (centisecond)
+///    counter — the protocol spec says "Resolution is 1 second"
+///
+/// The reader's centisecond counter free-runs through SET_DATE_TIME. The best we
+/// can do is round the second value so that (set_second + reader_cs) ≈ wall_clock.
+/// This gives |drift| ≤ 500ms worst case, ~250ms average.
+async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+
+    use chrono::Datelike;
+    use chrono::Timelike;
+
+    // Step 1: estimate one-way latency
+    let one_way = estimate_one_way_latency(&client).await;
+
+    // Step 2: read the reader's clock to learn its centisecond phase
+    let dt = match client.get_date_time().await {
+        Ok(dt) => dt,
+        Err(e) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{{\"error\":\"failed to read reader clock: {}\"}}", e),
+            );
+        }
+    };
+    let wall_now = chrono::Local::now();
+
+    // The reader sampled its clock ~one_way ago. The SET_DATE_TIME we're about
+    // to send will arrive ~one_way from now. So from sample to arrival ≈ 2*one_way.
+    // Reader centisecond at arrival: (cs*10 + 2*one_way_ms) mod 1000
+    let cs = dt.centisecond as f64;
+    let reader_cs_at_arrival_ms = (cs * 10.0 + one_way.as_secs_f64() * 2000.0) % 1000.0;
+    let reader_frac = reader_cs_at_arrival_ms / 1000.0; // 0.0 .. 1.0
+
+    // Wall clock at the moment the command arrives
+    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or(chrono::Duration::zero());
+    let arrival_wall = wall_now + arrival_offset;
+    let wall_frac = arrival_wall.nanosecond() as f64 / 1_000_000_000.0;
+
+    // Step 3: choose the second value that minimizes drift.
+    // After SET_DATE_TIME, reader shows: S.reader_frac
+    // Actual wall time at that moment:   wall_second.wall_frac
+    // Drift = (S + reader_frac) - (wall_second + wall_frac)
+    // We pick S = wall_second, then adjust ±1s if the sub-second offset is > 500ms.
+    let offset = reader_frac - wall_frac;
+    let target = if offset > 0.5 {
+        // Reader cs is >500ms ahead of wall frac — set second 1s earlier
+        arrival_wall - chrono::Duration::seconds(1)
+    } else if offset < -0.5 {
+        // Reader cs is >500ms behind wall frac — set second 1s later
+        arrival_wall + chrono::Duration::seconds(1)
+    } else {
+        arrival_wall
+    };
+
+    let year = (target.year() % 100) as u8;
+    let month = target.month() as u8;
+    let day = target.day() as u8;
+    let dow = target.weekday().number_from_monday() as u8;
+    let hour = target.hour() as u8;
+    let minute = target.minute() as u8;
+    let second = target.second() as u8;
+
+    if let Err(e) = client
+        .set_date_time(year, month, day, dow, hour, minute, second)
+        .await
+    {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        );
+    }
+
+    match client.get_date_time().await {
+        Ok(dt) => {
+            let reader_iso = dt.to_iso_string();
+            let verify_now = chrono::Local::now();
+            let drift_ms =
+                chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
+                    .ok()
+                    .map(|reader_naive| {
+                        verify_now
+                            .naive_local()
+                            .signed_duration_since(reader_naive)
+                            .num_milliseconds()
+                    });
+
+            // Update stored reader_info so SSE subscribers see the new clock
+            {
+                let mut ss = state.subsystem.lock().await;
+                if let Some(r) = ss.readers.get_mut(&ip)
+                    && let Some(ref mut info) = r.reader_info
+                {
+                    info.reader_clock = Some(reader_iso.clone());
+                    info.clock_drift_ms = drift_ms;
+                }
+            }
+
+            state.logger.log(format!(
+                "reader {} clock synced to {} (one-way latency: {:.1}ms, cs phase: {:.0}, offset: {:.0}ms)",
+                ip,
+                reader_iso,
+                one_way.as_secs_f64() * 1000.0,
+                cs,
+                offset * 1000.0,
+            ));
+            let drift_json = match drift_ms {
+                Some(d) => format!("{}", d),
+                None => "null".to_owned(),
+            };
+            json_response(
+                StatusCode::OK,
+                format!(
+                    "{{\"reader_clock\":\"{}\",\"clock_drift_ms\":{}}}",
+                    reader_iso, drift_json
+                ),
+            )
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"set ok but verify failed: {}\"}}", e),
+        ),
+    }
+}
+
+/// GET /api/v1/readers/{ip}/read-mode
+async fn get_read_mode_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    match client.get_config3().await {
+        Ok((mode, timeout)) => json_response(
+            StatusCode::OK,
+            format!("{{\"mode\":\"{}\",\"timeout\":{}}}", mode.as_str(), timeout),
+        ),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SetReadModeBody {
+    mode: String,
+    #[serde(default = "default_timeout")]
+    timeout: u8,
+}
+fn default_timeout() -> u8 {
+    5
+}
+
+/// PUT /api/v1/readers/{ip}/read-mode
+async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+    axum::Json(body): axum::Json<SetReadModeBody>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    let mode = match body.mode.as_str() {
+        "raw" => ipico_core::control::ReadMode::Raw,
+        "event" => ipico_core::control::ReadMode::Event,
+        "fsls" => ipico_core::control::ReadMode::FirstLastSeen,
+        _ => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": format!("unknown mode: {}", body.mode)
+                })
+                .to_string(),
+            );
+        }
+    };
+    match client.set_config3(mode, body.timeout).await {
+        Ok(()) => {
+            state
+                .logger
+                .log(format!("reader {} read mode set to {}", ip, mode));
+            json_response(
+                StatusCode::OK,
+                format!("{{\"mode\":\"{}\"}}", mode.as_str()),
+            )
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        ),
+    }
+}
+
+/// POST /api/v1/readers/{ip}/refresh
+async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    let mut info = {
+        let ss = state.subsystem.lock().await;
+        ss.readers
+            .get(&ip)
+            .and_then(|r| r.reader_info.clone())
+            .unwrap_or_default()
+    };
+    crate::reader_control::run_status_poll(&client, &mut info).await;
+    {
+        let mut ss = state.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(&ip) {
+            r.reader_info = Some(info.clone());
+        }
+    }
+    let _ = state
+        .ui_tx
+        .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+            ip: ip.clone(),
+            info: info.clone(),
+        });
+    json_response(
+        StatusCode::OK,
+        serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_owned()),
+    )
+}
+
+/// POST /api/v1/readers/{ip}/clear-records
+async fn clear_records_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    state
+        .logger
+        .log(format!("reader {} clearing onboard records...", ip));
+    match client.clear_records().await {
+        Ok(()) => {
+            state.logger.log(format!("reader {} records cleared", ip));
+            json_response(StatusCode::OK, "{\"ok\":true}".to_owned())
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        ),
+    }
 }
 
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
@@ -1685,6 +2054,23 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route("/api/v1/status", get(status_json_handler::<J>))
         .route("/api/v1/logs", get(logs_handler::<J>))
         .route("/api/v1/events", get(events_handler::<J>))
+        .route("/api/v1/readers/{ip}/info", get(reader_info_handler::<J>))
+        .route(
+            "/api/v1/readers/{ip}/sync-clock",
+            post(sync_clock_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/read-mode",
+            get(get_read_mode_handler::<J>).put(set_read_mode_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/refresh",
+            post(refresh_handler_reader::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/clear-records",
+            post(clear_records_handler::<J>),
+        )
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
@@ -2367,6 +2753,136 @@ mod tests {
         assert_eq!(body["restart_needed"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn refresh_reader_preserves_static_reader_info_fields() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    fw_version: Some("15.8".to_owned()),
+                    banner: Some("ARM9 Controller".to_owned()),
+                    hw_code: Some(0x8f),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let ext_status_cmd = cmd_rx.recv().await.expect("ext status command");
+            assert_eq!(
+                std::str::from_utf8(&ext_status_cmd).expect("ext status command utf8"),
+                "ab00ff4bc2\r\n"
+            );
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            let config3_cmd = cmd_rx.recv().await.expect("config3 command");
+            assert_eq!(
+                std::str::from_utf8(&config3_cmd).expect("config3 command utf8"),
+                "ab00ff0995\r\n"
+            );
+            assert!(control_sink.feed(b"ab0002090305f3").await);
+
+            let date_time_cmd = cmd_rx.recv().await.expect("date/time command");
+            assert_eq!(
+                std::str::from_utf8(&date_time_cmd).expect("date/time command utf8"),
+                "ab00000222\r\n"
+            );
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let refresh = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/refresh",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST refresh");
+        assert_eq!(refresh.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+        let body: serde_json::Value = status.json().await.expect("status json");
+
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["fw_version"], "15.8");
+        assert_eq!(info["banner"], "ARM9 Controller");
+        assert_eq!(info["hw_code"], 143);
+    }
+
+    #[tokio::test]
+    async fn set_read_mode_invalid_mode_returns_valid_json_error() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let (control_client, _control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/read-mode",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"bad\"mode"}"#)
+            .send()
+            .await
+            .expect("PUT read-mode");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body: serde_json::Value = resp.json().await.expect("json error response");
+        assert_eq!(body["error"], "unknown mode: bad\"mode");
     }
 
     #[tokio::test]

@@ -28,3 +28,18 @@ export function readerConnectionSummary(readers: ReaderStatus[]): {
     label: `${connected} connected / ${configured} configured`,
   };
 }
+
+export function formatReadMode(mode: string | null | undefined): string {
+  if (mode == null) return "\u2014";
+  if (mode === "fsls") return "FS/LS";
+  if (mode === "raw") return "Raw";
+  return mode;
+}
+
+export function formatClockDrift(ms: number | null | undefined): string {
+  if (ms == null) return "\u2014";
+  const abs = Math.abs(ms);
+  const sign = ms >= 0 ? "+" : "-";
+  if (abs < 1000) return `${sign}${abs}ms`;
+  return `${sign}${(abs / 1000).toFixed(1)}s`;
+}

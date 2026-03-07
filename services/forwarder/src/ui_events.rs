@@ -23,6 +23,11 @@ pub enum ForwarderUiEvent {
     UpdateStatusChanged {
         status: rt_updater::UpdateStatus,
     },
+    ReaderInfoUpdated {
+        ip: String,
+        #[serde(flatten)]
+        info: crate::reader_control::ReaderInfo,
+    },
 }
 
 #[cfg(test)]
@@ -57,6 +62,22 @@ mod tests {
         assert_eq!(json["ip"], "192.168.1.10");
         assert_eq!(json["local_port"], 10010);
         assert_eq!(json["current_epoch_name"], "Race Day");
+    }
+
+    #[test]
+    fn reader_info_updated_serializes_with_type_tag() {
+        let event = ForwarderUiEvent::ReaderInfoUpdated {
+            ip: "192.168.0.155".to_owned(),
+            info: crate::reader_control::ReaderInfo {
+                fw_version: Some("15.8".to_owned()),
+                banner: Some("ARM9 Controller".to_owned()),
+                ..Default::default()
+            },
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "reader_info_updated");
+        assert_eq!(json["ip"], "192.168.0.155");
+        assert_eq!(json["fw_version"], "15.8");
     }
 
     #[test]
