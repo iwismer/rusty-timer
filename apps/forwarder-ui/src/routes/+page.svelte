@@ -62,6 +62,8 @@
   let clockTickNow = $state(Date.now());
   let readerClockBaseTs = $state<Record<string, number>>({});
   let readerClockBaseLocal = $state<Record<string, number>>({});
+  let lastSeenBase = $state<Record<string, number | null>>({});
+  let lastSeenReceivedAt = $state<Record<string, number>>({});
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -79,6 +81,8 @@
       if (status) {
         const now = Date.now();
         for (const r of status.readers) {
+          lastSeenBase = { ...lastSeenBase, [r.ip]: r.last_seen_secs };
+          lastSeenReceivedAt = { ...lastSeenReceivedAt, [r.ip]: now };
           if (r.reader_info) {
             readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
             readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
@@ -491,6 +495,15 @@
     }
   }
 
+  function tickingLastSeen(ip: string): number | null {
+    const base = lastSeenBase[ip];
+    if (base == null) return null;
+    const receivedAt = lastSeenReceivedAt[ip];
+    if (receivedAt == null) return base;
+    const elapsedSecs = Math.floor((clockTickNow - receivedAt) / 1000);
+    return base + elapsedSecs;
+  }
+
   function tickingReaderClock(ip: string): string {
     const baseTs = readerClockBaseTs[ip];
     const baseLocal = readerClockBaseLocal[ip];
@@ -527,6 +540,14 @@
             r.ip === reader.ip ? reader : r,
           );
           status = { ...status, readers };
+          lastSeenBase = {
+            ...lastSeenBase,
+            [reader.ip]: reader.last_seen_secs,
+          };
+          lastSeenReceivedAt = {
+            ...lastSeenReceivedAt,
+            [reader.ip]: Date.now(),
+          };
         }
       },
       onLogEntry: (entry) => {
@@ -721,7 +742,7 @@
                 <div>
                   <span class="text-text-muted">Last seen:</span>
                   <span class="ml-1 text-text-secondary"
-                    >{formatLastSeen(reader.last_seen_secs)}</span
+                    >{formatLastSeen(tickingLastSeen(reader.ip))}</span
                   >
                 </div>
               </div>
