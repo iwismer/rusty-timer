@@ -461,6 +461,7 @@ async fn apply_mode(
         } => {
             let (targets, warnings) = resolve_live_targets(state, streams).await?;
             let earliest_map = earliest_epoch_map(earliest_epochs);
+            let resume_map = resume_cursor_map(&hello.resume);
 
             let mut next_subscriptions = Vec::with_capacity(targets.len());
             for target in &targets {
@@ -469,6 +470,9 @@ async fn apply_mode(
                     device_id,
                     target,
                     earliest_map
+                        .get(&(target.forwarder_id.clone(), target.reader_ip.clone()))
+                        .copied(),
+                    resume_map
                         .get(&(target.forwarder_id.clone(), target.reader_ip.clone()))
                         .copied(),
                 )
@@ -663,6 +667,25 @@ fn race_refresh_needed(
         .any(|target| !baseline.includes(target.stream_id, target.current_stream_epoch))
 }
 
+fn resume_cursor_map(
+    cursors: &[rt_protocol::ResumeCursor],
+) -> HashMap<(String, String), (i64, i64)> {
+    let mut map: HashMap<(String, String), (i64, i64)> = HashMap::new();
+    for c in cursors {
+        let key = (c.forwarder_id.clone(), c.reader_ip.clone());
+        let epoch = c.stream_epoch as i64;
+        let seq = c.last_seq as i64;
+        map.entry(key)
+            .and_modify(|existing| {
+                if cursor_gt(epoch, seq, existing.0, existing.1) {
+                    *existing = (epoch, seq);
+                }
+            })
+            .or_insert((epoch, seq));
+    }
+    map
+}
+
 fn earliest_epoch_map(overrides: &[EarliestEpochOverride]) -> HashMap<(String, String), i64> {
     let mut map = HashMap::new();
     for override_row in overrides {
@@ -682,14 +705,31 @@ async fn compute_live_start_cursor(
     device_id: &str,
     target: &ResolvedStreamTarget,
     earliest_epoch: Option<i64>,
+    resume_cursor: Option<(i64, i64)>,
 ) -> Result<(i64, i64), Box<dyn std::error::Error + Send + Sync>> {
-    // Cursor precedence: persisted > earliest override > current stream epoch.
-    let cursor = match fetch_cursor(&state.pool, device_id, target.stream_id).await? {
+    // Cursor precedence: max(persisted, capped resume) > earliest override > current stream epoch.
+    // The client-provided resume cursor is only trusted when it falls within
+    // the range of actual stored data — a stale cursor beyond the stream's max
+    // event must not suppress replay or live delivery.
+    let base = match fetch_cursor(&state.pool, device_id, target.stream_id).await? {
         Some(persisted) => persisted,
         None => match earliest_epoch {
             Some(earliest) => (earliest, 0),
             None => (target.current_stream_epoch, 0),
         },
+    };
+    let cursor = match resume_cursor {
+        Some(resume) if cursor_gt(resume.0, resume.1, base.0, base.1) => {
+            // Cap the resume cursor at the stream's max stored event so that a
+            // stale/future cursor cannot skip real data or block live events.
+            let max_cursor = fetch_max_event_cursor(&state.pool, target.stream_id).await?;
+            match max_cursor {
+                Some(max) if cursor_gt(resume.0, resume.1, max.0, max.1) => base,
+                Some(_) => resume,
+                None => base,
+            }
+        }
+        _ => base,
     };
     Ok(cursor)
 }
