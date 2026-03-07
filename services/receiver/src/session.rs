@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, WsMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, watch};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, error, info, warn};
 #[derive(Debug, thiserror::Error)]
@@ -33,9 +33,7 @@ pub struct SessionLoopDeps {
     pub stream_counts: crate::cache::StreamCounts,
     pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     pub shutdown: watch::Receiver<bool>,
-    pub paused_streams: Arc<RwLock<HashSet<String>>>,
-    pub all_paused: Arc<RwLock<bool>>,
-    pub connection_state: Arc<RwLock<ConnectionState>>,
+    pub connection_state: Arc<tokio::sync::RwLock<ConnectionState>>,
 }
 
 fn apply_batch_counts(
@@ -110,26 +108,13 @@ where
                         match serde_json::from_str::<WsMessage>(&t) {
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
-                                let all_paused_now = *deps.all_paused.read().await;
                                 let reconnect_pending =
                                     deps.connection_state.read().await.clone()
                                         != ConnectionState::Connected;
-                                let paused_set = deps.paused_streams.read().await;
-                                let forwarded_events: Vec<ReadEvent> = b
-                                    .events
-                                    .iter()
-                                    .filter(|e| {
-                                        if all_paused_now || reconnect_pending {
-                                            return false;
-                                        }
-                                        !paused_set.contains(&format!("{}/{}", e.forwarder_id, e.reader_ip))
-                                    })
-                                    .cloned()
-                                    .collect();
-                                drop(paused_set);
-                                if forwarded_events.is_empty() {
+                                if reconnect_pending {
                                     continue;
                                 }
+                                let forwarded_events = b.events;
 
                                 for e in &forwarded_events { let _ = deps.event_tx.send(e.clone()); }
                                 let updates = apply_batch_counts(&deps.stream_counts, &forwarded_events);
