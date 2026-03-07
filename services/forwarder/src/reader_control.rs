@@ -295,8 +295,7 @@ pub struct ReaderInfo {
     pub hw_code: Option<u8>,
     pub reader_id: Option<u8>,
     pub config3: Option<u8>,
-    pub unique_tag_count: Option<u16>,
-    pub stored_record_pages: Option<u8>,
+    pub estimated_stored_reads: Option<u32>,
     pub recording: Option<bool>,
     pub reader_clock: Option<String>,
     pub clock_drift_ms: Option<i64>,
@@ -437,12 +436,11 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
 
     match client.get_extended_status().await {
         Ok(ext) => {
-            ri.unique_tag_count = Some(ext.unique_tag_count);
-            ri.stored_record_pages = Some(ext.stored_record_pages);
+            ri.estimated_stored_reads = Some(ext.estimated_stored_reads());
             ri.recording = Some(ext.recording_state == 0x01);
             info!(
-                unique_tags = ext.unique_tag_count,
-                stored_pages = ext.stored_record_pages,
+                estimated_stored_reads = ext.estimated_stored_reads(),
+                storage_state = ext.storage_state,
                 "reader extended status"
             );
         }
@@ -465,8 +463,7 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
 /// Poll clock and extended status, updating info in place.
 pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
     if let Ok(ext) = client.get_extended_status().await {
-        info.unique_tag_count = Some(ext.unique_tag_count);
-        info.stored_record_pages = Some(ext.stored_record_pages);
+        info.estimated_stored_reads = Some(ext.estimated_stored_reads());
         info.recording = Some(ext.recording_state == 0x01);
     }
 
@@ -538,7 +535,7 @@ mod tests {
             .await
             .expect("first call task")
             .expect("first call result");
-        assert_eq!(ext.unique_tag_count, 0x012f);
+        assert_eq!(ext.stored_data_extent, 0x0b012f);
 
         let (mode, timeout_secs) = second_call
             .await

@@ -214,10 +214,10 @@ async fn run_reader(
             // Run initial connection sequence
             let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
             poll_logger.log(format!(
-                "reader {} identified: fw={}, tags={}",
+                "reader {} identified: fw={}, stored_reads={}",
                 poll_reader_ip,
                 reader_info.fw_version.as_deref().unwrap_or("?"),
-                reader_info.unique_tag_count.unwrap_or(0),
+                reader_info.estimated_stored_reads.unwrap_or(0),
             ));
             poll_status
                 .update_reader_info(&poll_stream_key, reader_info.clone())
@@ -242,8 +242,8 @@ async fn run_reader(
                             if dt.state == forwarder::reader_control::DownloadState::Downloading
                                 && let Ok(ext) = poll_client.get_extended_status().await
                             {
-                                let progress = u32::from(ext.stored_record_pages);
-                                let extent = dt.stored_data_extent;
+                                let progress = ext.download_progress;
+                                let extent = ext.stored_data_extent;
                                 dt.update_progress(progress, extent);
 
                                 // Safety timeout: no progress for 30 seconds

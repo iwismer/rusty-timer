@@ -249,12 +249,22 @@ impl ReaderStatistics {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExtendedStatus {
     pub recording_state: u8,
-    pub decoder_version: u8,
-    pub unique_tag_count: u16,
+    /// 24-bit big-endian stored-data extent (bytes 1-3).
+    pub stored_data_extent: u32,
+    /// 24-bit big-endian download progress (bytes 4-6).
+    pub download_progress: u32,
     pub hw_identifier: u16,
     pub hw_config: u8,
-    pub stored_record_pages: u8,
+    /// Coarse storage state (byte 11): 0x01 = empty, 0x03/0x0c = data present.
+    pub storage_state: u8,
     pub flags: Option<u8>, // optional byte 12 (absent in 12-byte responses)
+}
+
+impl ExtendedStatus {
+    /// Approximate number of stored reads based on ~32 bytes per record.
+    pub fn estimated_stored_reads(&self) -> u32 {
+        self.stored_data_extent / 32
+    }
 }
 
 /// Error from parsing or decoding a control frame.
@@ -395,8 +405,9 @@ pub fn decode_statistics(frame: &ControlFrame) -> Result<ReaderStatistics, Contr
 }
 
 /// Decode extended status response (12 or 13 data bytes).
-/// bytes 4-7 are reserved (skip them), hw_identifier at bytes 8-9, hw_config at 10,
-/// stored_record_pages at 11, optional flags at 12.
+/// Bytes 1-3: 24-bit stored-data extent, bytes 4-6: 24-bit download progress,
+/// byte 7 reserved, hw_identifier at bytes 8-9, hw_config at 10,
+/// storage_state at 11, optional flags at 12.
 pub fn decode_extended_status(frame: &ControlFrame) -> Result<ExtendedStatus, ControlError> {
     if frame.data.len() < 12 {
         return Err(ControlError::UnexpectedLength {
@@ -406,11 +417,11 @@ pub fn decode_extended_status(frame: &ControlFrame) -> Result<ExtendedStatus, Co
     }
     Ok(ExtendedStatus {
         recording_state: frame.data[0],
-        decoder_version: frame.data[1],
-        unique_tag_count: u16::from_be_bytes([frame.data[2], frame.data[3]]),
+        stored_data_extent: u32::from_be_bytes([0, frame.data[1], frame.data[2], frame.data[3]]),
+        download_progress: u32::from_be_bytes([0, frame.data[4], frame.data[5], frame.data[6]]),
         hw_identifier: u16::from_be_bytes([frame.data[8], frame.data[9]]),
         hw_config: frame.data[10],
-        stored_record_pages: frame.data[11],
+        storage_state: frame.data[11],
         flags: if frame.data.len() >= 13 {
             Some(frame.data[12])
         } else {
@@ -654,12 +665,13 @@ mod tests {
         assert_eq!(frame.instruction, INSTR_EXT_STATUS);
         let ext = decode_extended_status(&frame).unwrap();
         assert_eq!(ext.recording_state, 0x01);
-        assert_eq!(ext.decoder_version, 0x0b);
-        assert_eq!(ext.unique_tag_count, 0x012f);
+        assert_eq!(ext.stored_data_extent, 0x0b012f);
+        assert_eq!(ext.download_progress, 0);
         assert_eq!(ext.hw_identifier, 0x5905);
         assert_eq!(ext.hw_config, 0x8f);
-        assert_eq!(ext.stored_record_pages, 0x0c);
+        assert_eq!(ext.storage_state, 0x0c);
         assert_eq!(ext.flags, Some(0x00));
+        assert_eq!(ext.estimated_stored_reads(), 0x0b012f / 32);
     }
 
     #[test]
@@ -670,9 +682,10 @@ mod tests {
         let hex = format!("ab{}{:02x}", body, lrc(body.as_bytes()));
         let frame = parse_response(hex.as_bytes()).unwrap();
         let ext = decode_extended_status(&frame).unwrap();
-        assert_eq!(ext.unique_tag_count, 0);
-        assert_eq!(ext.stored_record_pages, 0x01);
+        assert_eq!(ext.stored_data_extent, 0);
+        assert_eq!(ext.storage_state, 0x01);
         assert_eq!(ext.flags, None);
+        assert_eq!(ext.estimated_stored_reads(), 0);
     }
 
     #[test]
