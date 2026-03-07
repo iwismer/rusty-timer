@@ -185,7 +185,19 @@ impl AppState {
                 };
             }
         };
+        let cursors = match db.load_cursors() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "failed to load cursors");
+                vec![]
+            }
+        };
         drop(db);
+
+        let cursor_map: HashMap<(&str, &str), &crate::db::CursorRecord> = cursors
+            .iter()
+            .map(|c| ((c.forwarder_id.as_str(), c.reader_ip.as_str()), c))
+            .collect();
 
         let sub_map: HashMap<(&str, &str), &Subscription> = subs
             .iter()
@@ -227,6 +239,7 @@ impl AppState {
                 } else {
                     None
                 };
+                let cursor = cursor_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
                 streams.push(StreamEntry {
                     forwarder_id: si.forwarder_id.clone(),
                     reader_ip: si.reader_ip.clone(),
@@ -238,6 +251,8 @@ impl AppState {
                     current_epoch_name: si.current_epoch_name.clone(),
                     reads_total: counts.as_ref().map(|c| c.total),
                     reads_epoch: counts.as_ref().map(|c| c.epoch),
+                    cursor_epoch: cursor.map(|c| c.stream_epoch),
+                    cursor_seq: cursor.map(|c| c.last_seq),
                 });
                 seen.insert(key);
             }
@@ -253,6 +268,7 @@ impl AppState {
             let sk =
                 crate::cache::StreamKey::new(sub.forwarder_id.as_str(), sub.reader_ip.as_str());
             let counts = counts_snapshot.get(&sk);
+            let cursor = cursor_map.get(&(sub.forwarder_id.as_str(), sub.reader_ip.as_str()));
             streams.push(StreamEntry {
                 forwarder_id: sub.forwarder_id.clone(),
                 reader_ip: sub.reader_ip.clone(),
@@ -264,6 +280,8 @@ impl AppState {
                 current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
+                cursor_epoch: cursor.map(|c| c.stream_epoch),
+                cursor_seq: cursor.map(|c| c.last_seq),
             });
         }
 
@@ -379,6 +397,10 @@ pub struct StreamEntry {
     pub reads_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_seq: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

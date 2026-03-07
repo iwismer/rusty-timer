@@ -23,6 +23,8 @@ export interface StreamEntry {
   current_epoch_name?: string | null;
   reads_total?: number;
   reads_epoch?: number;
+  cursor_epoch?: number;
+  cursor_seq?: number;
 }
 
 export interface StreamCountUpdate {

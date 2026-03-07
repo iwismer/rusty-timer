@@ -243,6 +243,8 @@
               <th class="py-2 pr-4 font-medium">Stream</th>
               <th class="py-2 pr-4 font-medium">Forwarder</th>
               <th class="py-2 pr-4 font-medium">Reader</th>
+              <th class="py-2 pr-4 font-medium">Epoch</th>
+              <th class="py-2 pr-4 font-medium">Seq</th>
               <th class="py-2 font-medium"></th>
             </tr>
           </thead>
@@ -268,6 +270,12 @@
                   >{stream.forwarder_id}</td
                 >
                 <td class="py-2 pr-4 text-text-secondary">{stream.reader_ip}</td
+                >
+                <td class="py-2 pr-4 text-text-secondary tabular-nums"
+                  >{stream.cursor_epoch ?? "\u2014"}</td
+                >
+                <td class="py-2 pr-4 text-text-secondary tabular-nums"
+                  >{stream.cursor_seq ?? "\u2014"}</td
                 >
                 <td class="py-2 text-right">
                   <button
