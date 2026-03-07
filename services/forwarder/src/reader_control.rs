@@ -15,6 +15,7 @@ pub struct ControlClient {
     cmd_tx: mpsc::Sender<Vec<u8>>,
     pending: Arc<Mutex<Option<PendingRequest>>>,
     banner_buf: Arc<Mutex<Vec<String>>>,
+    in_flight: Arc<Mutex<()>>,
     timeout: Duration,
 }
 
@@ -27,6 +28,7 @@ impl ControlClient {
     pub fn new(cmd_tx: mpsc::Sender<Vec<u8>>) -> (Self, ControlResponseSink) {
         let pending: Arc<Mutex<Option<PendingRequest>>> = Arc::new(Mutex::new(None));
         let banner_buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let in_flight: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
         let sink = ControlResponseSink {
             pending: pending.clone(),
             banner_buf: banner_buf.clone(),
@@ -35,12 +37,13 @@ impl ControlClient {
             cmd_tx,
             pending,
             banner_buf,
+            in_flight,
             timeout: Duration::from_secs(2),
         };
         (client, sink)
     }
 
-    async fn send(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
+    async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
         let frame = control::encode_command(cmd, 0x00);
         let instruction = cmd.instruction();
 
@@ -66,6 +69,11 @@ impl ControlClient {
                 Err(ControlError::Timeout)
             }
         }
+    }
+
+    async fn send(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
+        let _in_flight = self.in_flight.lock().await;
+        self.send_inner(cmd).await
     }
 
     pub async fn get_date_time(&self) -> Result<control::ReaderDateTime, ControlError> {
@@ -132,57 +140,53 @@ impl ControlClient {
 
     /// Send the 3-step clear records sequence + CONFIG3 cycling.
     pub async fn clear_records(&self) -> Result<(), ControlError> {
+        let _in_flight = self.in_flight.lock().await;
+
         // Step 1: reset address
-        self.cmd_tx
-            .send(control::encode_command(
-                &Command::SetExtendedStatus {
-                    data: vec![0x00, 0x00],
-                },
-                0x00,
-            ))
-            .await
-            .map_err(|_| ControlError::Timeout)?;
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x00, 0x00],
+            })
+            .await?;
 
         // Step 2: set mode
-        self.cmd_tx
-            .send(control::encode_command(
-                &Command::SetExtendedStatus {
-                    data: vec![0x01, 0x00],
-                },
-                0x00,
-            ))
-            .await
-            .map_err(|_| ControlError::Timeout)?;
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x01, 0x00],
+            })
+            .await?;
 
         // Step 3: trigger erase
-        self.cmd_tx
-            .send(control::encode_command(
-                &Command::SetExtendedStatus { data: vec![0xd0] },
-                0x00,
-            ))
-            .await
-            .map_err(|_| ControlError::Timeout)?;
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus { data: vec![0xd0] })
+            .await?;
 
         // Wait for erase to complete
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         // Reset counter
-        self.cmd_tx
-            .send(control::encode_command(
-                &Command::SetExtendedStatus {
-                    data: vec![0x00, 0x00],
-                },
-                0x00,
-            ))
-            .await
-            .map_err(|_| ControlError::Timeout)?;
+        let _ = self
+            .send_inner(&Command::SetExtendedStatus {
+                data: vec![0x00, 0x00],
+            })
+            .await?;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Cycle CONFIG3: Event -> Raw
-        self.set_config3(control::ReadMode::Event, 5).await?;
+        let _ = self
+            .send_inner(&Command::SetConfig3 {
+                mode: control::ReadMode::Event,
+                timeout: 5,
+            })
+            .await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        self.set_config3(control::ReadMode::Raw, 5).await?;
+        let _ = self
+            .send_inner(&Command::SetConfig3 {
+                mode: control::ReadMode::Raw,
+                timeout: 5,
+            })
+            .await?;
 
         Ok(())
     }
@@ -319,5 +323,131 @@ async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) {
                 .num_milliseconds();
             info.clock_drift_ms = Some(drift);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn concurrent_control_calls_are_serialized_and_both_complete() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+        let client = Arc::new(client);
+
+        let c1 = client.clone();
+        let first_call = tokio::spawn(async move { c1.get_extended_status().await });
+
+        let first_cmd = cmd_rx.recv().await.expect("first command");
+        assert_eq!(
+            std::str::from_utf8(&first_cmd).expect("first command utf8"),
+            "ab00ff4bc2\r\n"
+        );
+
+        let c2 = client.clone();
+        let second_call = tokio::spawn(async move { c2.get_config3().await });
+
+        let maybe_second = timeout(Duration::from_millis(50), cmd_rx.recv()).await;
+        assert!(
+            maybe_second.is_err(),
+            "second command should not be sent before first response is consumed"
+        );
+
+        assert!(sink.feed(b"ab000d4b010b012f0000000059058f0c005a").await);
+
+        let second_cmd = cmd_rx.recv().await.expect("second command");
+        assert_eq!(
+            std::str::from_utf8(&second_cmd).expect("second command utf8"),
+            "ab00ff0995\r\n"
+        );
+        assert!(sink.feed(b"ab0002090305f3").await);
+
+        let ext = first_call
+            .await
+            .expect("first call task")
+            .expect("first call result");
+        assert_eq!(ext.unique_tag_count, 0x012f);
+
+        let (mode, timeout_secs) = second_call
+            .await
+            .expect("second call task")
+            .expect("second call result");
+        assert_eq!(mode, control::ReadMode::Event);
+        assert_eq!(timeout_secs, 5);
+    }
+
+    #[tokio::test]
+    async fn clear_records_uses_tracked_command_sequence() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let clear_task = tokio::spawn(async move { client.clear_records().await });
+
+        let ack_for = |instruction: u8| -> String {
+            let body = format!("0000{instruction:02x}");
+            let lrc = control::lrc(body.as_bytes());
+            format!("ab{body}{lrc:02x}")
+        };
+
+        let step1 = cmd_rx.recv().await.expect("clear step 1");
+        assert_eq!(
+            std::str::from_utf8(&step1).expect("clear step 1 utf8"),
+            "ab00024b000018\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step2 = cmd_rx.recv().await.expect("clear step 2");
+        assert_eq!(
+            std::str::from_utf8(&step2).expect("clear step 2 utf8"),
+            "ab00024b010019\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step3 = cmd_rx.recv().await.expect("clear step 3");
+        assert_eq!(
+            std::str::from_utf8(&step3).expect("clear step 3 utf8"),
+            "ab00014bd0eb\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step4 = cmd_rx.recv().await.expect("clear step 4");
+        assert_eq!(
+            std::str::from_utf8(&step4).expect("clear step 4 utf8"),
+            "ab00024b000018\r\n"
+        );
+        assert!(
+            sink.feed(ack_for(control::INSTR_EXT_STATUS).as_bytes())
+                .await
+        );
+
+        let step5 = cmd_rx.recv().await.expect("clear step 5");
+        assert_eq!(
+            std::str::from_utf8(&step5).expect("clear step 5 utf8"),
+            "ab0003090305075b\r\n"
+        );
+        assert!(sink.feed(ack_for(control::INSTR_CONFIG3).as_bytes()).await);
+
+        let step6 = cmd_rx.recv().await.expect("clear step 6");
+        assert_eq!(
+            std::str::from_utf8(&step6).expect("clear step 6 utf8"),
+            "ab00030900050758\r\n"
+        );
+        assert!(sink.feed(ack_for(control::INSTR_CONFIG3).as_bytes()).await);
+
+        clear_task
+            .await
+            .expect("clear task join")
+            .expect("clear task result");
     }
 }
