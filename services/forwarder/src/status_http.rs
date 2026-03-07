@@ -1888,6 +1888,11 @@ fn default_timeout() -> u8 {
     5
 }
 
+#[derive(serde::Deserialize)]
+struct SetRecordingBody {
+    enabled: bool,
+}
+
 /// PUT /api/v1/readers/{ip}/read-mode
 async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
@@ -1988,6 +1993,53 @@ async fn clear_records_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+/// PUT /api/v1/readers/{ip}/recording
+async fn set_recording_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+    axum::Json(body): axum::Json<SetRecordingBody>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    let label = if body.enabled { "on" } else { "off" };
+    state
+        .logger
+        .log(format!("reader {} setting recording {}", ip, label));
+    match client.set_recording(body.enabled).await {
+        Ok(_ext) => {
+            // Refresh full status so SSE subscribers see the new recording state
+            let mut info = {
+                let ss = state.subsystem.lock().await;
+                ss.readers
+                    .get(&ip)
+                    .and_then(|r| r.reader_info.clone())
+                    .unwrap_or_default()
+            };
+            crate::reader_control::run_status_poll(&client, &mut info).await;
+            {
+                let mut ss = state.subsystem.lock().await;
+                if let Some(r) = ss.readers.get_mut(&ip) {
+                    r.reader_info = Some(info.clone());
+                }
+            }
+            let _ = state
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+                    ip: ip.clone(),
+                    info: info.clone(),
+                });
+            let recording = info.recording.unwrap_or(false);
+            json_response(StatusCode::OK, format!("{{\"recording\":{}}}", recording))
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        ),
+    }
+}
+
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
@@ -2070,6 +2122,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route(
             "/api/v1/readers/{ip}/clear-records",
             post(clear_records_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/recording",
+            put(set_recording_handler::<J>),
         )
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
