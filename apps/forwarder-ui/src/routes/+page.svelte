@@ -219,7 +219,11 @@
       const result = await api.syncReaderClock(ip);
       readerInfoMap = {
         ...readerInfoMap,
-        [ip]: { ...readerInfoMap[ip], reader_clock: result.reader_clock },
+        [ip]: {
+          ...readerInfoMap[ip],
+          reader_clock: result.reader_clock,
+          clock_drift_ms: 0,
+        },
       };
       readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
       controlFeedback = {
@@ -304,7 +308,13 @@
 
   function updateLocalClock() {
     const now = new Date();
-    localClockStr = now.toLocaleTimeString([], { hour12: false });
+    const y = now.getFullYear();
+    const mo = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    const h = String(now.getHours()).padStart(2, "0");
+    const mi = String(now.getMinutes()).padStart(2, "0");
+    const s = String(now.getSeconds()).padStart(2, "0");
+    localClockStr = `${y}-${mo}-${d} ${h}:${mi}:${s}`;
     clockTickNow = Date.now();
   }
 
@@ -677,14 +687,14 @@
                           {/if}
                         </div>
                         <div>
-                          <span class="text-text-muted">Local Clock:</span>
-                          <span class="font-mono ml-2">{localClockStr}</span>
-                        </div>
-                        <div>
                           <span class="text-text-muted">Clock Drift:</span>
                           <span class="font-mono ml-2"
                             >{formatClockDrift(info?.clock_drift_ms)}</span
                           >
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Local Clock:</span>
+                          <span class="font-mono ml-2">{localClockStr}</span>
                         </div>
                         <div>
                           <span class="text-text-muted">Read Mode:</span>
