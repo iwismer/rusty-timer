@@ -814,6 +814,12 @@
                   class="mt-4 pt-4 border-t border-border"
                 >
                   <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
+                    <div class="col-span-2">
+                      <span class="text-text-muted">Banner:</span>
+                      <span class="font-mono ml-2 text-xs"
+                        >{info?.banner ?? "\u2014"}</span
+                      >
+                    </div>
                     <div>
                       <span class="text-text-muted">Firmware:</span>
                       <span class="font-mono ml-2"
@@ -826,12 +832,6 @@
                         >{info?.hw_code != null
                           ? `0x${info.hw_code.toString(16)}`
                           : "\u2014"}</span
-                      >
-                    </div>
-                    <div class="col-span-2">
-                      <span class="text-text-muted">Banner:</span>
-                      <span class="font-mono ml-2 text-xs"
-                        >{info?.banner ?? "\u2014"}</span
                       >
                     </div>
                     <div>
@@ -861,7 +861,7 @@
                           )}{:else}&mdash;{/if}</span
                       >
                     </div>
-                    <div>
+                    <div class="col-span-2">
                       <span class="text-text-muted">Read Mode:</span>
                       <span
                         class="ml-2 inline-flex items-center gap-2 flex-wrap"
