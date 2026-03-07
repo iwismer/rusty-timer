@@ -1,5 +1,18 @@
 import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
 
+export interface ReaderInfo {
+  banner?: string | null;
+  fw_version?: string | null;
+  hw_code?: number | null;
+  reader_id?: number | null;
+  unique_tag_count?: number | null;
+  stored_record_pages?: number | null;
+  reader_clock?: string | null;
+  clock_drift_ms?: number | null;
+  read_mode?: string | null;
+  read_mode_timeout?: number | null;
+}
+
 export interface ReaderStatus {
   ip: string;
   state: "connected" | "connecting" | "disconnected";
@@ -8,6 +21,7 @@ export interface ReaderStatus {
   last_seen_secs: number | null;
   local_port: number;
   current_epoch_name?: string | null;
+  reader_info?: ReaderInfo | null;
 }
 
 export interface ForwarderStatus {
@@ -161,4 +175,40 @@ export async function downloadUpdate(): Promise<UpdateStatusResponse> {
     throw new Error(`download update -> ${resp.status}: ${text}`);
   }
   return (await resp.json()) as UpdateStatusResponse;
+}
+
+export async function getReaderInfo(ip: string): Promise<ReaderInfo> {
+  return apiFetch<ReaderInfo>(`/api/v1/readers/${ip}/info`);
+}
+
+export async function syncReaderClock(
+  ip: string,
+): Promise<{ reader_clock: string }> {
+  return apiFetch(`/api/v1/readers/${ip}/sync-clock`, { method: "POST" });
+}
+
+export async function getReadMode(
+  ip: string,
+): Promise<{ mode: string; timeout: number }> {
+  return apiFetch(`/api/v1/readers/${ip}/read-mode`);
+}
+
+export async function setReadMode(
+  ip: string,
+  mode: string,
+): Promise<{ mode: string }> {
+  return apiFetch(`/api/v1/readers/${ip}/read-mode`, {
+    method: "PUT",
+    body: JSON.stringify({ mode }),
+  });
+}
+
+export async function refreshReader(ip: string): Promise<ReaderInfo> {
+  return apiFetch<ReaderInfo>(`/api/v1/readers/${ip}/refresh`, {
+    method: "POST",
+  });
+}
+
+export async function clearReaderRecords(ip: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/v1/readers/${ip}/clear-records`, { method: "POST" });
 }
