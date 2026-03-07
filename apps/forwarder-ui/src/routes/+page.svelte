@@ -217,6 +217,11 @@
     controlFeedback = { ...controlFeedback, [ip]: undefined };
     try {
       const result = await api.syncReaderClock(ip);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], reader_clock: result.reader_clock },
+      };
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
       controlFeedback = {
         ...controlFeedback,
         [ip]: { kind: "ok", message: `Clock synced: ${result.reader_clock}` },
@@ -235,10 +240,17 @@
     controlBusy = { ...controlBusy, [ip]: true };
     controlFeedback = { ...controlFeedback, [ip]: undefined };
     try {
-      await api.setReadMode(ip, mode);
+      const result = await api.setReadMode(ip, mode);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], read_mode: result.mode },
+      };
       controlFeedback = {
         ...controlFeedback,
-        [ip]: { kind: "ok", message: `Mode set to ${mode}` },
+        [ip]: {
+          kind: "ok",
+          message: `Mode set to ${formatReadMode(result.mode)}`,
+        },
       };
     } catch (e) {
       controlFeedback = {
@@ -253,7 +265,12 @@
   async function handleRefreshReader(ip: string) {
     controlBusy = { ...controlBusy, [ip]: true };
     try {
-      await api.refreshReader(ip);
+      const info = await api.refreshReader(ip);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], ...info },
+      };
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
     } catch (e) {
       controlFeedback = {
         ...controlFeedback,
