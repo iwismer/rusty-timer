@@ -12,6 +12,7 @@ export interface ReaderInfo {
   read_mode?: string | null;
   read_mode_timeout?: number | null;
   recording?: boolean | null;
+  estimated_stored_reads?: number | null;
 }
 
 export interface ReaderStatus {
@@ -212,6 +213,27 @@ export async function refreshReader(ip: string): Promise<ReaderInfo> {
 
 export async function clearReaderRecords(ip: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/v1/readers/${ip}/clear-records`, { method: "POST" });
+}
+
+export interface DownloadReadsResponse {
+  status: string;
+  estimated_reads: number;
+}
+
+export async function startDownloadReads(
+  ip: string,
+): Promise<DownloadReadsResponse> {
+  const resp = await fetch(`/api/v1/readers/${ip}/download-reads`, {
+    method: "POST",
+  });
+  if (resp.status === 409) {
+    throw new Error("Download already in progress");
+  }
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`download reads -> ${resp.status}: ${text}`);
+  }
+  return (await resp.json()) as DownloadReadsResponse;
 }
 
 export async function setRecording(

@@ -134,6 +134,37 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("startDownloadReads returns parsed JSON on 202", async () => {
+    const { startDownloadReads } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(202, { status: "started", estimated_reads: 42 }),
+    );
+    const result = await startDownloadReads("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/download-reads",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result).toEqual({ status: "started", estimated_reads: 42 });
+  });
+
+  it("startDownloadReads throws on 409 conflict", async () => {
+    const { startDownloadReads } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(409, { error: "download already in progress" }),
+    );
+    await expect(startDownloadReads("192.168.1.10")).rejects.toThrow(
+      "Download already in progress",
+    );
+  });
+
+  it("startDownloadReads throws on other errors", async () => {
+    const { startDownloadReads } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(500, "Internal Server Error"));
+    await expect(startDownloadReads("192.168.1.10")).rejects.toThrow(
+      "download reads -> 500",
+    );
+  });
+
   it("downloadUpdate returns failed status payload on 409", async () => {
     const { downloadUpdate } = await import("./api");
     mockFetch.mockResolvedValue(
