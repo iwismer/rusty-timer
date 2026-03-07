@@ -159,10 +159,14 @@ async fn run_reader(
     let stream_key = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
 
+    let reconnect_notify = Arc::new(Notify::new());
+    status.register_reconnect_notify(&stream_key, reconnect_notify.clone());
+
     loop {
         // Check for shutdown before attempting connect
         if *shutdown_rx.borrow() {
             info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
+            status.deregister_reconnect_notify(&stream_key);
             return;
         }
 
@@ -193,8 +197,13 @@ async fn run_reader(
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
+                    _ = reconnect_notify.notified() => {
+                        info!(reader_ip = %reader_ip, "reconnect requested during connect backoff");
+                        backoff_secs = 1;
+                    }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
+                            status.deregister_reconnect_notify(&stream_key);
                             return;
                         }
                     }
@@ -368,6 +377,7 @@ async fn run_reader(
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
                         status.deregister_control_client(&stream_key);
                         status.deregister_download_tracker(&stream_key);
+                        status.deregister_reconnect_notify(&stream_key);
                         return;
                     }
                     continue;
@@ -521,8 +531,13 @@ async fn run_reader(
         );
         tokio::select! {
             _ = sleep(delay) => {}
+            _ = reconnect_notify.notified() => {
+                info!(reader_ip = %reader_ip, "reconnect requested during backoff");
+                backoff_secs = 1;
+            }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
+                    status.deregister_reconnect_notify(&stream_key);
                     return;
                 }
             }

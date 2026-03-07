@@ -4232,4 +4232,64 @@ target = "192.168.1.100:10000"
         let body: serde_json::Value = resp.json().await.expect("json body");
         assert!(body["readers"][0]["current_epoch_name"].is_null());
     }
+
+    #[tokio::test]
+    async fn reconnect_endpoint_fires_notify() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server
+            .init_readers(&[("192.168.1.10".to_owned(), 10010)])
+            .await;
+
+        let notify = Arc::new(tokio::sync::Notify::new());
+        server.register_reconnect_notify("192.168.1.10", notify.clone());
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/192.168.1.10/reconnect",
+                server.local_addr()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Notify should have been fired — notified() should complete immediately
+        tokio::time::timeout(std::time::Duration::from_millis(100), notify.notified())
+            .await
+            .expect("notify should have been fired");
+    }
+
+    #[tokio::test]
+    async fn reconnect_endpoint_returns_404_for_unknown_reader() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/10.0.0.99/reconnect",
+                server.local_addr()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
 }
