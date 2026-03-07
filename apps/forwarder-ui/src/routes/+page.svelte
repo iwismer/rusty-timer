@@ -14,6 +14,7 @@
   import {
     formatLastSeen,
     readerBadgeState,
+    readerBorderStatus,
     readerConnectionSummary,
     formatClockDrift,
     formatReadMode,
@@ -575,361 +576,297 @@
       {#if status.readers.length === 0}
         <p class="text-sm text-text-muted m-0">No readers configured.</p>
       {:else}
-        <div class="overflow-x-auto -mx-4 -mb-4">
-          <table class="w-full text-sm border-collapse">
-            <thead>
-              <tr class="border-b border-border">
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
+        <div class="flex flex-col gap-4">
+          {#each status.readers as reader}
+            {@const info = readerInfoMap[reader.ip]}
+            <Card borderStatus={readerBorderStatus(reader.state)}>
+              {#snippet header()}
+                <span class="font-mono text-sm text-text-primary"
+                  >{reader.ip}</span
                 >
-                  Reader IP
-                </th>
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
+                <StatusBadge
+                  label={reader.state}
+                  state={readerBadgeState(reader.state)}
+                />
+                <button
+                  class="ml-auto inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                  onclick={() => toggleReaderExpand(reader.ip)}
+                  aria-expanded={expandedReader === reader.ip}
+                  aria-controls={readerDetailsId(reader.ip)}
+                  aria-label={expandedReader === reader.ip
+                    ? "Hide details"
+                    : "Show details"}
                 >
-                  Status
-                </th>
-                <th
-                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Reads (session)
-                </th>
-                <th
-                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Reads (total)
-                </th>
-                <th
-                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Local Port
-                </th>
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Last seen
-                </th>
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Current epoch name
-                </th>
-                <th class="px-4 py-2.5"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each status.readers as reader}
-                <tr class="border-b border-border last:border-b-0">
-                  <td class="px-4 py-2.5 text-text-primary">
-                    <div class="flex items-center gap-2">
-                      <button
-                        class="inline-flex min-w-20 items-center justify-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
-                        onclick={() => toggleReaderExpand(reader.ip)}
-                        aria-expanded={expandedReader === reader.ip}
-                        aria-controls={readerDetailsId(reader.ip)}
-                        aria-label={expandedReader === reader.ip
-                          ? "Hide details"
-                          : "Show details"}
-                      >
-                        <span
-                          class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
-                          >▾</span
-                        >
-                        <span>Details</span>
-                      </button>
-                      <span class="font-mono">{reader.ip}</span>
-                    </div>
-                  </td>
-                  <td class="px-4 py-2.5">
-                    <StatusBadge
-                      label={reader.state}
-                      state={readerBadgeState(reader.state)}
-                    />
-                  </td>
-                  <td
-                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                  <span
+                    class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
+                    >▾</span
                   >
-                    {reader.reads_session.toLocaleString()}
-                  </td>
-                  <td
-                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                  <span>Details</span>
+                </button>
+              {/snippet}
+
+              <!-- Always-visible stats row -->
+              <div class="flex flex-wrap gap-x-6 gap-y-2 text-sm mb-3">
+                <div>
+                  <span class="text-text-muted">Reads (session):</span>
+                  <span class="font-mono ml-1 text-text-primary"
+                    >{reader.reads_session.toLocaleString()}</span
                   >
-                    {reader.reads_total.toLocaleString()}
-                  </td>
-                  <td
-                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                </div>
+                <div>
+                  <span class="text-text-muted">Reads (total):</span>
+                  <span class="font-mono ml-1 text-text-primary"
+                    >{reader.reads_total.toLocaleString()}</span
                   >
-                    {reader.local_port}
-                  </td>
-                  <td class="px-4 py-2.5 text-xs text-text-secondary">
-                    {formatLastSeen(reader.last_seen_secs)}
-                  </td>
-                  <td class="px-4 py-2.5">
-                    <div class="flex flex-col gap-1">
-                      {#if reader.current_epoch_name}
-                        <span class="text-xs text-text-muted font-mono">
-                          Active: {reader.current_epoch_name}
-                        </span>
-                      {/if}
-                      <div class="flex items-center gap-2">
-                        <input
-                          type="text"
-                          class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
-                          placeholder="Set name"
-                          value={epochNameDrafts[reader.ip] ?? ""}
-                          oninput={(event) =>
-                            updateEpochNameDraft(
-                              reader.ip,
-                              (event.currentTarget as HTMLInputElement).value,
-                            )}
-                          disabled={epochNameBusy[reader.ip] === true}
-                        />
-                        <button
-                          onclick={() =>
-                            handleSetCurrentEpochName(
-                              reader.ip,
-                              (epochNameDrafts[reader.ip] ?? "").trim() || null,
-                            )}
-                          class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                          disabled={epochNameBusy[reader.ip] === true}
-                        >
-                          Save
-                        </button>
-                      </div>
-                      {#if epochNameFeedback[reader.ip]}
-                        {@const feedback = epochNameFeedback[reader.ip]}
-                        {#if feedback}
-                          <span
-                            class={`text-xs ${
-                              feedback.kind === "ok"
-                                ? "text-status-ok"
-                                : "text-status-err"
-                            }`}
-                          >
-                            {feedback.message}
-                          </span>
-                        {/if}
-                      {/if}
-                    </div>
-                  </td>
-                  <td class="px-4 py-2.5 text-right">
-                    <div class="flex flex-col items-end gap-1">
-                      <button
-                        onclick={() => handleResetEpoch(reader.ip)}
-                        class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
-                      >
-                        Advance Epoch
-                      </button>
-                      {#if resetEpochFeedback[reader.ip]}
-                        {@const rf = resetEpochFeedback[reader.ip]}
-                        {#if rf}
-                          <span
-                            class={`text-xs ${rf.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
-                          >
-                            {rf.message}
-                          </span>
-                        {/if}
-                      {/if}
-                    </div>
-                  </td>
-                </tr>
-                {#if expandedReader === reader.ip}
-                  {@const info = readerInfoMap[reader.ip]}
-                  <tr
-                    id={readerDetailsId(reader.ip)}
-                    class="border-b border-border bg-surface-0"
+                </div>
+                <div>
+                  <span class="text-text-muted">Local Port:</span>
+                  <span class="font-mono ml-1 text-text-primary"
+                    >{reader.local_port}</span
                   >
-                    <td colspan="8" class="px-6 py-4">
-                      <div
-                        class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4"
-                      >
-                        <div>
-                          <span class="text-text-muted">Firmware:</span>
-                          <span class="font-mono ml-2"
-                            >{info?.fw_version ?? "\u2014"}</span
-                          >
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Hardware:</span>
-                          <span class="font-mono ml-2"
-                            >{info?.hw_code != null
-                              ? `0x${info.hw_code.toString(16)}`
-                              : "\u2014"}</span
-                          >
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Banner:</span>
-                          <span class="font-mono ml-2 text-xs"
-                            >{info?.banner ?? "\u2014"}</span
-                          >
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Unique Tags:</span>
-                          <span class="font-mono ml-2"
-                            >{info?.unique_tag_count ?? "\u2014"}</span
-                          >
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Reader Clock:</span>
-                          <span class="font-mono ml-2"
-                            >{info?.reader_clock ?? "\u2014"}</span
-                          >
-                          {#if readerInfoReceivedAt[reader.ip]}
-                            <span class="text-xs text-text-muted ml-1"
-                              >({Math.round(
-                                (clockTickNow -
-                                  readerInfoReceivedAt[reader.ip]) /
-                                  1000,
-                              )}s ago)</span
-                            >
-                          {/if}
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Clock Drift:</span>
-                          <span class="font-mono ml-2"
-                            >{formatClockDrift(info?.clock_drift_ms)}</span
-                          >
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Local Clock:</span>
-                          <span class="font-mono ml-2">{localClockStr}</span>
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Read Mode:</span>
-                          <span class="font-mono ml-2"
-                            >{formatReadMode(info?.read_mode)}</span
-                          >
-                        </div>
-                        <div>
-                          <span class="text-text-muted">Stored Reads:</span>
-                          <span class="font-mono ml-2"
-                            >{info?.estimated_stored_reads != null
-                              ? info.estimated_stored_reads.toLocaleString()
-                              : "\u2014"}</span
-                          >
-                        </div>
-                      </div>
-                      <div
-                        class="flex items-center gap-3 pt-3 border-t border-border"
-                      >
-                        <button
-                          class={btnPrimary}
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleSyncClock(reader.ip);
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}>Sync Clock</button
-                        >
-                        <select
-                          class="px-2 py-1.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
-                          onchange={(e) => {
-                            e.stopPropagation();
-                            handleSetReadMode(
-                              reader.ip,
-                              (e.currentTarget as HTMLSelectElement).value,
-                            );
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}
-                        >
-                          <option
-                            value="raw"
-                            selected={info?.read_mode === "raw"}>Raw</option
-                          >
-                          <option
-                            value="fsls"
-                            selected={info?.read_mode === "fsls"}
-                            >First/Last Seen</option
-                          >
-                        </select>
-                        <button
-                          class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleRefreshReader(reader.ip);
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}>Refresh</button
-                        >
-                        <button
-                          class={info?.recording
-                            ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                            : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleToggleRecording(reader.ip);
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}
-                          >{info?.recording
-                            ? "Stop Recording"
-                            : "Start Recording"}</button
-                        >
-                        <button
-                          class={btnPrimary}
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleDownloadReads(reader.ip);
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}>Download Reads</button
-                        >
-                        <button
-                          class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleClearRecords(reader.ip);
-                          }}
-                          disabled={controlBusy[reader.ip] ||
-                            reader.state !== "connected"}>Clear Records</button
-                        >
-                      </div>
-                      {#if downloadState[reader.ip]?.state === "downloading"}
-                        {@const dl = downloadState[reader.ip]}
-                        {@const percent = computeDownloadPercent(
-                          dl,
-                          info?.estimated_stored_reads,
-                        )}
-                        <div
-                          class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
-                        >
-                          <div
-                            class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden"
-                          >
-                            <div
-                              class="h-full bg-accent rounded-full transition-all"
-                              style="width: {percent}%"
-                            ></div>
-                          </div>
-                          <span class="text-xs font-mono whitespace-nowrap">
-                            {dl?.reads_received ?? 0} reads &middot; {percent}%
-                          </span>
-                        </div>
-                      {/if}
-                      {#if controlFeedback[reader.ip]}
-                        {@const fb = controlFeedback[reader.ip]}
-                        {#if fb}
-                          <div class="mt-3">
-                            <AlertBanner
-                              variant={fb.kind}
-                              message={fb.message}
-                              onDismiss={() => {
-                                controlFeedback = {
-                                  ...controlFeedback,
-                                  [reader.ip]: undefined,
-                                };
-                              }}
-                            />
-                          </div>
-                        {/if}
-                      {/if}
-                    </td>
-                  </tr>
+                </div>
+                <div>
+                  <span class="text-text-muted">Last seen:</span>
+                  <span class="ml-1 text-text-secondary"
+                    >{formatLastSeen(reader.last_seen_secs)}</span
+                  >
+                </div>
+              </div>
+
+              <!-- Epoch name row -->
+              <div class="flex flex-col gap-1">
+                {#if reader.current_epoch_name}
+                  <span class="text-xs text-text-muted font-mono">
+                    Active epoch: {reader.current_epoch_name}
+                  </span>
                 {/if}
-              {/each}
-            </tbody>
-          </table>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
+                    placeholder="Set epoch name"
+                    value={epochNameDrafts[reader.ip] ?? ""}
+                    oninput={(event) =>
+                      updateEpochNameDraft(
+                        reader.ip,
+                        (event.currentTarget as HTMLInputElement).value,
+                      )}
+                    disabled={epochNameBusy[reader.ip] === true}
+                  />
+                  <button
+                    onclick={() =>
+                      handleSetCurrentEpochName(
+                        reader.ip,
+                        (epochNameDrafts[reader.ip] ?? "").trim() || null,
+                      )}
+                    class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={epochNameBusy[reader.ip] === true}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onclick={() => handleResetEpoch(reader.ip)}
+                    class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                  >
+                    Advance Epoch
+                  </button>
+                </div>
+                {#if epochNameFeedback[reader.ip]}
+                  {@const feedback = epochNameFeedback[reader.ip]}
+                  {#if feedback}
+                    <span
+                      class={`text-xs ${feedback.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
+                    >
+                      {feedback.message}
+                    </span>
+                  {/if}
+                {/if}
+                {#if resetEpochFeedback[reader.ip]}
+                  {@const rf = resetEpochFeedback[reader.ip]}
+                  {#if rf}
+                    <span
+                      class={`text-xs ${rf.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
+                    >
+                      {rf.message}
+                    </span>
+                  {/if}
+                {/if}
+              </div>
+
+              <!-- Expanded details -->
+              {#if expandedReader === reader.ip}
+                <div
+                  id={readerDetailsId(reader.ip)}
+                  class="mt-4 pt-4 border-t border-border"
+                >
+                  <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
+                    <div>
+                      <span class="text-text-muted">Firmware:</span>
+                      <span class="font-mono ml-2"
+                        >{info?.fw_version ?? "\u2014"}</span
+                      >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Hardware:</span>
+                      <span class="font-mono ml-2"
+                        >{info?.hw_code != null
+                          ? `0x${info.hw_code.toString(16)}`
+                          : "\u2014"}</span
+                      >
+                    </div>
+                    <div class="col-span-2">
+                      <span class="text-text-muted">Banner:</span>
+                      <span class="font-mono ml-2 text-xs"
+                        >{info?.banner ?? "\u2014"}</span
+                      >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Reader Clock:</span>
+                      <span class="font-mono ml-2"
+                        >{info?.reader_clock ?? "\u2014"}</span
+                      >
+                      {#if readerInfoReceivedAt[reader.ip]}
+                        <span class="text-xs text-text-muted ml-1"
+                          >({Math.round(
+                            (clockTickNow - readerInfoReceivedAt[reader.ip]) /
+                              1000,
+                          )}s ago)</span
+                        >
+                      {/if}
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Clock Drift:</span>
+                      <span class="font-mono ml-2"
+                        >{formatClockDrift(info?.clock_drift_ms)}</span
+                      >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Local Clock:</span>
+                      <span class="font-mono ml-2">{localClockStr}</span>
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Read Mode:</span>
+                      <span class="font-mono ml-2"
+                        >{formatReadMode(info?.read_mode)}</span
+                      >
+                    </div>
+                  </div>
+                  <div
+                    class="flex items-center gap-3 pt-3 border-t border-border flex-wrap"
+                  >
+                    <button
+                      class={btnPrimary}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleSyncClock(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Sync Clock</button
+                    >
+                    <select
+                      class="px-2 py-1.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                      onchange={(e) => {
+                        e.stopPropagation();
+                        handleSetReadMode(
+                          reader.ip,
+                          (e.currentTarget as HTMLSelectElement).value,
+                        );
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}
+                    >
+                      <option value="raw" selected={info?.read_mode === "raw"}
+                        >Raw</option
+                      >
+                      <option value="fsls" selected={info?.read_mode === "fsls"}
+                        >First/Last Seen</option
+                      >
+                    </select>
+                    <button
+                      class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleRefreshReader(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Refresh</button
+                    >
+                    <button
+                      class={info?.recording
+                        ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                        : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleToggleRecording(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}
+                      >{info?.recording
+                        ? "Stop Recording"
+                        : "Start Recording"}</button
+                    >
+                    <button
+                      class={btnPrimary}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleDownloadReads(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Download Reads</button
+                    >
+                    <button
+                      class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleClearRecords(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Clear Records</button
+                    >
+                  </div>
+                  {#if downloadState[reader.ip]?.state === "downloading"}
+                    {@const dl = downloadState[reader.ip]}
+                    {@const percent = computeDownloadPercent(
+                      dl,
+                      info?.estimated_stored_reads,
+                    )}
+                    <div
+                      class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
+                    >
+                      <div
+                        class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden"
+                      >
+                        <div
+                          class="h-full bg-accent rounded-full transition-all"
+                          style="width: {percent}%"
+                        ></div>
+                      </div>
+                      <span class="text-xs font-mono whitespace-nowrap">
+                        {dl?.reads_received ?? 0} reads &middot; {percent}%
+                      </span>
+                    </div>
+                  {/if}
+                  {#if controlFeedback[reader.ip]}
+                    {@const fb = controlFeedback[reader.ip]}
+                    {#if fb}
+                      <div class="mt-3">
+                        <AlertBanner
+                          variant={fb.kind}
+                          message={fb.message}
+                          onDismiss={() => {
+                            controlFeedback = {
+                              ...controlFeedback,
+                              [reader.ip]: undefined,
+                            };
+                          }}
+                        />
+                      </div>
+                    {/if}
+                  {/if}
+                </div>
+              {/if}
+            </Card>
+          {/each}
         </div>
       {/if}
     </Card>
