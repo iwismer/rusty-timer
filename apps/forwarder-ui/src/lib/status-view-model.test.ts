@@ -7,6 +7,7 @@ import {
   formatClockDrift,
   formatReadMode,
   computeDownloadPercent,
+  computeTickingLastSeen,
 } from "./status-view-model";
 
 describe("formatLastSeen", () => {
@@ -127,5 +128,27 @@ describe("readerBorderStatus", () => {
     expect(readerBorderStatus("connected")).toBe("ok");
     expect(readerBorderStatus("connecting")).toBe("warn");
     expect(readerBorderStatus("disconnected")).toBe("err");
+  });
+});
+
+describe("computeTickingLastSeen", () => {
+  it("returns null when base is null", () => {
+    expect(computeTickingLastSeen(null, 1000, 2000)).toBe(null);
+  });
+
+  it("returns base when receivedAt is null", () => {
+    expect(computeTickingLastSeen(5, null, 2000)).toBe(5);
+  });
+
+  it("adds elapsed seconds to base", () => {
+    expect(computeTickingLastSeen(5, 10000, 13000)).toBe(8);
+  });
+
+  it("floors partial seconds", () => {
+    expect(computeTickingLastSeen(5, 10000, 12999)).toBe(7);
+  });
+
+  it("handles zero base", () => {
+    expect(computeTickingLastSeen(0, 10000, 11500)).toBe(1);
   });
 });

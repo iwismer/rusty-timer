@@ -19,6 +19,7 @@
     formatClockDrift,
     formatReadMode,
     computeDownloadPercent,
+    computeTickingLastSeen,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
   import {
@@ -496,12 +497,11 @@
   }
 
   function tickingLastSeen(ip: string): number | null {
-    const base = lastSeenBase[ip];
-    if (base == null) return null;
-    const receivedAt = lastSeenReceivedAt[ip];
-    if (receivedAt == null) return base;
-    const elapsedSecs = Math.floor((clockTickNow - receivedAt) / 1000);
-    return base + elapsedSecs;
+    return computeTickingLastSeen(
+      lastSeenBase[ip] ?? null,
+      lastSeenReceivedAt[ip] ?? null,
+      clockTickNow,
+    );
   }
 
   function tickingReaderClock(ip: string): string {

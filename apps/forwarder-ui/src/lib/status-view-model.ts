@@ -87,3 +87,14 @@ export function computeDownloadPercent(
 
   return 0;
 }
+
+export function computeTickingLastSeen(
+  baseSecs: number | null,
+  receivedAt: number | null,
+  now: number,
+): number | null {
+  if (baseSecs == null) return null;
+  if (receivedAt == null) return baseSecs;
+  const elapsedSecs = Math.floor((now - receivedAt) / 1000);
+  return baseSecs + elapsedSecs;
+}
