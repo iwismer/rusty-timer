@@ -652,3 +652,29 @@ async fn admin_update_port_clears_override() {
     let subs = state.db.lock().await.load_subscriptions().unwrap();
     assert_eq!(subs[0].local_port_override, None);
 }
+
+#[tokio::test]
+async fn streams_response_includes_cursor_data() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f2", "10.0.0.2", None).unwrap();
+        db.save_cursor("f1", "10.0.0.1", 5, 42).unwrap();
+        // f2 has no cursor — fields should be absent
+    }
+    let (status, body) = get_json(app, "/api/v1/streams").await;
+    assert_eq!(status, StatusCode::OK);
+    let streams = body["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 2);
+
+    // Find f1 — should have cursor data
+    let f1 = streams.iter().find(|s| s["forwarder_id"] == "f1").unwrap();
+    assert_eq!(f1["cursor_epoch"], 5);
+    assert_eq!(f1["cursor_seq"], 42);
+
+    // Find f2 — should have no cursor fields (skip_serializing_if)
+    let f2 = streams.iter().find(|s| s["forwarder_id"] == "f2").unwrap();
+    assert!(f2.get("cursor_epoch").is_none() || f2["cursor_epoch"].is_null());
+    assert!(f2.get("cursor_seq").is_none() || f2["cursor_seq"].is_null());
+}
