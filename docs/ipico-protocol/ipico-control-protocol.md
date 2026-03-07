@@ -1,12 +1,13 @@
 # IPICO Reader Protocol Reference
 
 This document consolidates what this repository knows about the IPICO reader
-protocol as of March 6, 2026. It covers:
+protocol as of March 7, 2026. It covers:
 
 - The ASCII-hex control and tag protocol observed on TCP port `10000`
 - The legacy serial specification in
   `docs/IPICO-Reader-Serial-Protocol-100-20071120.pdf`
 - The packet captures under `docs/ipico-protocol/captures/*.pcapng`
+- The exported download artifact `docs/ipico-protocol/captures/testreads`
 - The local decoder in `scripts/parse_pcap.py`
 - The local Rust implementation in `crates/ipico-core/src/control.rs`
 
@@ -30,8 +31,13 @@ open questions.
 - `docs/ipico-protocol/captures/delete-records.pcapng`
 - `docs/ipico-protocol/captures/guntime.pcapng`
 - `docs/ipico-protocol/captures/read4tags.pcapng`
+- `docs/ipico-protocol/captures/con-dis-w-4k-reads.pcapng`
 - `docs/ipico-protocol/captures/download-events.pcapng`
+- `docs/ipico-protocol/captures/downloadreads.pcapng`
+- `docs/ipico-protocol/captures/direct-fslsreads-con-dis.pcapng`
+- `docs/ipico-protocol/captures/direct-raw-reads-con-dis.pcapng`
 - `docs/ipico-protocol/captures/record-on-off.pcapng`
+- `docs/ipico-protocol/captures/testreads`
 - `docs/ipico-protocol/captures/turnon-con-dis.pcapng`
 - `docs/IPICO-Reader-Serial-Protocol-100-20071120.pdf`
 - `scripts/parse_pcap.py`
@@ -59,7 +65,11 @@ variants in the captures are therefore later-firmware extensions.
 | `docs/ipico-protocol/captures/delete-records.pcapng` | Full bootstrap, record-clear sequence via `0x4b` |
 | `docs/ipico-protocol/captures/guntime.pcapng` | Mid-stream trigger-button / gun-time event during a live session |
 | `docs/ipico-protocol/captures/read4tags.pcapng` | Mid-stream `aa` tag reports plus concurrent polling traffic |
+| `docs/ipico-protocol/captures/con-dis-w-4k-reads.pcapng` | Dashboard connect/disconnect while stored reads were already present; confirms non-empty idle `0x4b` status |
 | `docs/ipico-protocol/captures/download-events.pcapng` | Download-events workflow via `0x4b` sub-commands; memory was empty so no records streamed |
+| `docs/ipico-protocol/captures/downloadreads.pcapng` | Stored-read download via `0x4b`; shows 4,102 archived reads streamed as `aa` frames plus periodic progress/status replies |
+| `docs/ipico-protocol/captures/direct-fslsreads-con-dis.pcapng` | Direct read session in FSLS mode; only one `aa` frame was captured and it had no `FS` / `LS` suffix |
+| `docs/ipico-protocol/captures/direct-raw-reads-con-dis.pcapng` | Direct read session in raw mode; `aa` traffic only, with the same 36-character layout seen elsewhere |
 | `docs/ipico-protocol/captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 mode changes |
 | `docs/ipico-protocol/captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap sequence after fresh boot |
 
@@ -323,6 +333,32 @@ literal `FS` or `LS` suffix on the end of an `aa` frame. That convention exists
 in local code and tests, but it is not backed by the 2007 PDF and it is not
 present in any of the captures in this repo. Treat it as a repo-local
 assumption, not a confirmed reader protocol rule.
+
+The new direct-read captures strengthen that warning:
+
+- `Capture`: `direct-raw-reads-con-dis.pcapng` still shows only ordinary
+  36-character `aa` frames
+- `Capture`: `direct-fslsreads-con-dis.pcapng` shows one FSLS-session `aa`
+  frame, `aa00058000120e38000e26030713560136b0`, and it also has no literal
+  `FS` / `LS` suffix
+
+### Stored-read downloads use the same `aa` format
+
+`Capture`
+
+`downloadreads.pcapng` shows the reader streaming stored records as ordinary
+36-character `aa` frames once `0x4b [01, 01]` starts the download. No separate
+download-only binary record envelope was observed on the wire.
+
+Observed facts:
+
+- The download streamed 4,102 `aa` frames
+- The frames use the same reader ID / tag ID / `IIQQ` / timestamp / checksum
+  layout as live raw reads
+- The exported `docs/ipico-protocol/captures/testreads` file uses that same
+  ASCII `aa` line format
+- The downloaded records preserve original read timestamps rather than being
+  rewritten to download-time timestamps
 
 ## Control Command Reference
 
@@ -669,25 +705,27 @@ Observed request:
 ab00ff4bc2\r\n
 ```
 
-Observed replies:
+Observed payload shapes:
 
 ```text
-ab000d4b010b012f0000000059058f0c005a\r\n
-ab000c4b000000000000000059058f015b\r\n
+000000000000000059058f0100      # empty idle state
+010204f60000000059058f0314      # stored-data idle, before download
+030204f600016c0059058f0300      # stored-data download in progress
+010204f60204f60059058f0300      # stored-data idle, after download
 ```
 
 Observed payload layout:
 
-| Byte | Meaning | Confidence |
+| Byte(s) | Meaning | Confidence |
 | --- | --- | --- |
 | 0 | Recorder/access state byte | Capture |
-| 1 | Unknown recorder/memory byte; changes with stored-data state | Capture |
-| 2..3 | Unique tag count, big-endian | Inference |
-| 4..7 | Always zero in these captures | Capture |
+| 1..3 | Stored-data extent / end cursor | Inference |
+| 4..6 | Download-progress cursor in the same units as bytes 1..3 | Inference |
+| 7 | Always `0x00` in these captures | Capture |
 | 8..9 | Hardware identifier (`0x5905`) | Inference |
 | 10 | Hardware config (`0x8f`) | Inference |
-| 11 | Stored-record page count or raw used-page counter | Inference |
-| 12 | Optional flags byte | Inference |
+| 11 | Coarse storage-state byte (`0x01` empty, `0x03` with stored reads on this reader) | Capture |
+| 12 | Optional flags byte; `0x14` before download, `0x00` after download or in empty state | Inference |
 
 Byte 0 recording/download state values:
 
@@ -695,41 +733,54 @@ Byte 0 recording/download state values:
 | --- | --- | --- |
 | `0x00` | Recording disabled / idle-off state | Inference from record-on-off and clear-records captures |
 | `0x01` | Recording-enabled idle state | Inference from record-on-off capture |
-| `0x03` | Download/access mode entered by IPICO Connect | Inference from download-events capture |
+| `0x03` | Download/access mode entered by the host software | Inference from download captures |
 
 Observed states:
 
 - Recording off: `000000000000000059058f0100`
 - Recording on, empty memory: `010000000000000059058f0100`
 - Downloading: `030000000000000059058f0100`
+- Stored-data idle, pre-download: `010204f60000000059058f0314`
+- Downloading with progress underway: `030204f600016c0059058f0300`
+- Stored-data idle, post-download: `010204f60204f60059058f0300`
 - Before record clear: `010b012f0000000059058f0c00`
 - After record clear: `000000000000000059058f0100`
 
 What changed after clearing records:
 
 - Byte 0 changed from `01` to `00` (recording state reset)
-- Byte 1 changed from `0b` to `00`
-- Unique tag count changed from `0x012f` to `0x0000`
-- Stored-record pages changed from `0x0c` to `0x01`
+- Bytes 1..3 changed from `0b012f` to `000000`
+- Bytes 4..6 remained `000000`
+- Byte 11 changed from `0x0c` to `0x01`
 - Optional flags byte remained present when the 13-byte form was used
 
-#### Internal memory usage hypothesis
+#### Stored-data extent and download-progress hypothesis
 
 `Inference`
 
-During capture collection, IPICO Connect reported internal memory as
-`0k/126kb` in the empty-state workflows. On the wire, the empty state was
-`010000000000000059058f0100`, while the pre-clear state with stored data was
-`010b012f0000000059058f0c00`.
+The new non-empty captures invalidate the older "bytes 2..3 = unique tag
+count" interpretation. In `con-dis-w-4k-reads.pcapng`, the idle stored-data
+status is `010204f60000000059058f0314`. In `downloadreads.pcapng`, byte 0 flips
+to `0x03` when the download starts, bytes 1..3 stay fixed at `0204f6`, and
+bytes 4..6 advance through intermediate values until they also reach `0204f6`.
 
-That is enough to say byte 1 and byte 11 are related to stored-data usage:
+That strongly suggests:
 
-- Empty state: byte 1 = `0x00`, byte 11 = `0x01`
-- Pre-clear state: byte 1 = `0x0b`, byte 11 = `0x0c`
+- Bytes 1..3 encode a stored-data extent / end cursor
+- Bytes 4..6 encode current download progress in the same units
+- Byte 11 is a coarse empty/non-empty state byte, not a page counter
 
-It is not enough to prove whether the UI's used-memory value comes from byte 1,
-byte 11, or an offset such as `byte11 - 1`. The total capacity of 126kb is also
-not obviously encoded in the status bytes.
+What remains unknown is the exact unit and endianness of those counters. They
+do not yet map cleanly to the UI's `126kb` capacity display.
+
+Byte 12 now also looks more like a flags field than a size field:
+
+- Empty memory query: `...0100`
+- Stored reads, pre-download query: `...0314`
+- Stored reads, post-download query: `...0300`
+
+That pattern hints at an "undownloaded records present" flag, but that part is
+still only an inference.
 
 #### Observed sub-command roles for writes
 
@@ -741,9 +792,9 @@ in the observed flows:
 | Sub-cmd | Payload | Meaning | Source |
 | --- | --- | --- | --- |
 | `0x00` | `[state]` | Recording-state write: `0x00`=off, `0x01`=on | Inference from record-on-off |
-| `0x01` | `[state]` | Access/download state write: `0x00`=stop, `0x01`=start | Inference from download-events |
+| `0x01` | `[state]` | Access/download state write: `0x00`=stop, `0x01`=start | Inference from download captures |
 | `0x02` | (none) | Preparatory step in download workflow | Capture |
-| `0x07` | `[byte1, byte2?]` | Download-workflow parameter block / cleanup | Inference from download-events |
+| `0x07` | `[byte1, byte2?]` | Download-workflow parameter block / cleanup | Inference from download captures |
 | `0xd0` | (none) | Trigger record clear | Capture |
 
 #### Record on/off workflow
@@ -787,9 +838,10 @@ Notes:
 
 `Capture`
 
-Observed in `docs/ipico-protocol/captures/download-events.pcapng`. The reader's
-internal memory was reported empty in IPICO Connect during capture collection,
-so no record payload appeared on the wire:
+Observed in both `docs/ipico-protocol/captures/download-events.pcapng`
+(empty memory) and `docs/ipico-protocol/captures/downloadreads.pcapng`
+(stored reads present). The host-side sub-command sequence is the same in both
+captures:
 
 ```text
 C->R  ab00014b02b9          # sub-cmd 0x02: init download
@@ -801,7 +853,8 @@ R->C  ab000c4b01...         # status unchanged
 C->R  ab00024b01011a        # sub-cmd 0x01: start download [0x01]
 R->C  ab000c4b03...         # byte 0 → 0x03 (download/access mode)
 
-# No record payload appeared in this empty-memory capture
+# Empty-memory capture: no record payload appears
+# Stored-read capture: 4,102 aa frames stream back-to-back
 
 C->R  ab00024b010019        # sub-cmd 0x01: stop download [0x00]
 R->C  ab000c4b01...         # byte 0 → 0x01 (back to recording)
@@ -814,8 +867,12 @@ R->C  ab000c4b01...         # status unchanged
 
 Notes:
 
-- A capture with stored records is needed to see the actual download data
-  format
+- `downloadreads.pcapng` showed that stored records are transferred as ordinary
+  `aa` frames, not as a separate binary dump format
+- During the stored-read download, periodic `0x4b` replies continued with
+  bytes 4..6 advancing toward the same value held in bytes 1..3
+- The exported `testreads` file uses the same `aa` line format as the wire
+  capture
 - The download workflow does not change CONFIG3 mode, unlike record on/off
 
 #### Clear-records workflow
@@ -830,7 +887,7 @@ C->R  ab00024b010019        # sub-cmd 0x01: [0x00]
 C->R  ab00014bd0eb          # sub-cmd 0xd0: trigger clear
 R->C  90 progress frames    # pages 0x00..0x59
 C->R  ab00ff4bc2            # query to confirm
-R->C  cleared status        # byte 11 = 0x01, tag count = 0
+R->C  cleared status        # bytes 1..6 reset to zero, byte 11 = 0x01
 ```
 
 After the `0xd0` trigger, the reader emits a progress stream of `0x4b` frames:
@@ -992,15 +1049,18 @@ See the `0x4b` command reference for full frame details.
 
 `Capture`
 
-Observed in `docs/ipico-protocol/captures/download-events.pcapng`:
+Observed in `docs/ipico-protocol/captures/download-events.pcapng` and
+`docs/ipico-protocol/captures/downloadreads.pcapng`:
 
 1. Host sends `0x4b [02]` to init download
 2. Host sends `0x4b [07, 01, 05]` to configure download
 3. Host sends `0x4b [01, 01]` to start download (status byte 0 → `0x03`)
-4. No record payload appeared in this empty-memory capture
-5. Host sends `0x4b [01, 00]` to stop download (status byte 0 → `0x01`)
-6. Host sends `0x4b [07, 00]` to clean up
-7. Normal polling resumes
+4. Empty-memory case: no records stream back
+5. Stored-read case: 4,102 `aa` records stream back in the normal live-read format
+6. Periodic `0x4b` replies continue during transfer and expose a moving progress field
+7. Host sends `0x4b [01, 00]` to stop download (status byte 0 → `0x01`)
+8. Host sends `0x4b [07, 00]` to clean up
+9. Normal polling resumes
 
 See the `0x4b` command reference for full frame details.
 
@@ -1122,18 +1182,20 @@ the host-facing TCP wire protocol in this repo and is not expanded here.
 
 - What exactly does `0xe0` initialize?
 - What is the exact schema of the `0x4c` payload?
-- In `0x4b`, what do bytes 1, 8, 9, 10, and 12 mean exactly? Byte 0 now appears
-  to encode recorder/access state.
+- In `0x4b`, what are the exact units and endianness of bytes 1..3 and 4..6?
+  The new captures strongly suggest "extent" and "progress", but not the
+  exact arithmetic.
+- In `0x4b`, what exactly do bytes 8, 9, and 10 describe? They still look like
+  a hardware / board identifier block, but that is not proven.
+- Does `0x4b` byte 12 = `0x14` mean "undownloaded records present"? It dropped
+  to `0x00` after the stored-read download completed.
 - Where does the 126kb total memory capacity come from? It is not obviously
   encoded in the `0x4b` status bytes. It may be hardcoded in IPICO Connect per
   reader model.
-- What is the page-to-KB ratio for internal memory, and does the UI use byte 1,
-  byte 11, or an offset between them? The empty and pre-clear captures show the
-  pairings `0x00/0x01` and `0x0b/0x0c`, but the KB mapping is still unproven.
+- How do the `0x4b` extent/progress counters map to the UI's `126kb` capacity
+  display and to the apparent number of stored reads?
 - What does the constant `0x59` represent in the record-clear progress frames?
   It also appears as byte 8 of the status response — possibly total page count?
-- What data format does the download-events flow produce when records exist?
-  The empty-memory capture showed no streamed data.
 - What is the purpose of `0x4b` sub-command `0x07` parameters (`[01, 05]` to
   configure, `[00]` to clean up)?
 - What is the purpose of the large NUL-byte burst sent during bootstrap?
@@ -1165,4 +1227,4 @@ Observed in `docs/ipico-protocol/captures/turnon-con-dis.pcapng`:
 - Treat the PDF as the best source for generic field names, filter semantics,
   CONFIG3 bits, banner modifiers, and the configurable `aa` tag-report format
 - Treat repo-local `FS` / `LS` suffix handling as provisional until a real
-  capture confirms it
+  capture confirms it; the direct-FSLS capture added here still did not show it

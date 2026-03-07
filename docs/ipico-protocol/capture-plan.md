@@ -28,7 +28,11 @@ These have already been collected and analyzed:
 | `delete-records.pcapng` | Full bootstrap, record-clear sequence via `0x4b` |
 | `guntime.pcapng` | Mid-stream trigger-button / gun-time event |
 | `read4tags.pcapng` | Mid-stream `aa` tag reports plus concurrent polling traffic |
+| `con-dis-w-4k-reads.pcapng` | Dashboard connect/disconnect while stored reads were already present; confirms non-empty idle `0x4b` status |
 | `captures/download-events.pcapng` | Download-events workflow via `0x4b` sub-commands (memory was empty) |
+| `captures/downloadreads.pcapng` | Dashboard download with stored reads present; shows the records stream back as ordinary `aa` lines |
+| `captures/direct-fslsreads-con-dis.pcapng` | Direct FSLS session; only one `aa` frame was captured and it had no literal `FS` / `LS` suffix |
+| `captures/direct-raw-reads-con-dis.pcapng` | Direct raw session; `aa` traffic only, with the same 36-character layout seen elsewhere |
 | `captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 |
 | `captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap after fresh boot but does not isolate power-off |
 
@@ -39,6 +43,7 @@ Use `IPICO Dashboard` for:
 - connect / disconnect
 - status polling
 - clock sync
+- download stored reads
 - reader info
 - read-mode changes
 - filter changes, if exposed
@@ -58,6 +63,8 @@ Use `IPICO Connect` for:
   cycles.
 - If you change a setting and then want to observe resulting traffic, split that
   into two files: one for the setting change, one for the resulting behavior.
+- If the workflow exports a file, keep that file next to the `.pcapng` with a
+  matching base name.
 - Write down:
   - which app you used
   - the exact button/setting you changed
@@ -68,42 +75,81 @@ Use `IPICO Connect` for:
 
 Ordered by priority — highest-value gaps first.
 
-### 1. Download events with stored records
+### 1. Small known-count stored-read download
 
 Why:
 
-- The download-events capture had an empty memory (0k/126kb), so we never saw
-  the actual download data format
-- This is the single biggest remaining gap in the `0x4b` sub-command
-  documentation
-- Also resolves whether byte 1, byte 11, or an offset between them maps to the
-  UI's used-memory value
+- `downloadreads.pcapng` answered the format question: stored reads come back
+  as ordinary `aa` lines
+- What is still unknown is how the `0x4b` extent/progress fields map to a known
+  number of records and to the UI's capacity display
+- A small, counted sample is much easier to reason about than the 4,102-read
+  download we already have
 
 Suggested files:
 
-- `download-with-records.pcapng`
+- `download-small-known-count.pcapng`
+- `download-small-known-count.txt`
 
 App:
 
-- `IPICO Connect`
+- `IPICO Dashboard`
 
 Steps:
 
-1. Turn on recording (or confirm it is already on).
-2. Present a few tags to the reader so some records are stored.
-3. Note the memory usage shown in IPICO Connect (e.g., "3k/126kb").
+1. Start from empty memory if possible.
+2. Generate a small, known number of stored reads, ideally 8-16 total.
+3. Write down the exact count you generated and the memory display before
+   download.
 4. Start capture.
-5. Click the "Download Events" button.
+5. Use `IPICO Dashboard` to download the stored reads and save the exported
+   file alongside the capture.
 6. Wait for the download to complete and a few poll cycles.
 7. Stop capture.
 
 Important:
 
-- Write down the exact memory display before and after the download.
-- Compare both byte 1 and byte 11 of the `0x4b` status with the displayed KB
-  value.
+- Keep the exported file so the downloaded `aa` lines can be counted exactly.
+- This capture is now about the meaning of the `0x4b` counters, not about the
+  download data format itself.
 
-### 2. Trigger-button captures
+### 2. Repeat download without new reads
+
+Why:
+
+- In `downloadreads.pcapng`, `0x4b` byte 12 changed from `0x14` to `0x00`
+  after the download completed
+- Bytes 1..3 stayed nonzero, so the reader still thought stored data existed
+- We need to know whether that flag means "undownloaded records present"
+
+Suggested files:
+
+- `post-download-status-no-new-reads.pcapng`
+- `download-same-buffer-again.pcapng`
+- `download-same-buffer-again.txt`
+
+App:
+
+- `IPICO Dashboard`
+
+Steps for `post-download-status-no-new-reads.pcapng`:
+
+1. Leave the reader as-is after a successful download.
+2. Do not generate any new reads.
+3. Start capture.
+4. Reconnect `IPICO Dashboard` and watch steady `0x4b` polling for 10-15
+   seconds.
+5. Stop capture.
+
+Steps for `download-same-buffer-again.pcapng`:
+
+1. Without generating new reads after the first download, start a new capture.
+2. Use `IPICO Dashboard` to run the same download action again.
+3. Save the second exported file.
+4. Wait for cleanup and a few poll cycles.
+5. Stop capture.
+
+### 3. Trigger-button captures
 
 Why:
 
@@ -156,7 +202,7 @@ Steps for `trigger-while-reading.pcapng`:
 5. Wait for the reads to finish and for a few more polls.
 6. Stop capture.
 
-### 3. Clock-sync captures
+### 4. Clock-sync captures
 
 Why:
 
@@ -206,11 +252,13 @@ Risk note:
 
 - Do not start with huge time jumps or far-future dates.
 
-### 4. FSLS on a real reader
+### 5. FSLS on a real reader
 
 Why:
 
-- This is the cleanest way to settle what real FSLS output looks like
+- `direct-fslsreads-con-dis.pcapng` already argues against a literal `FS` /
+  `LS` suffix
+- What is still missing is a full enter/hold/exit sequence on a real reader
 
 Suggested files:
 
@@ -238,33 +286,6 @@ Steps for `fsls-one-tag-enter-exit.pcapng`:
 4. Leave it in place for a few seconds.
 5. Remove it.
 6. Wait longer than the configured FSLS timeout.
-7. Stop capture.
-
-### 5. Extended-status with stored records
-
-Why:
-
-- We have many `0x4b` status responses but always with empty or just-cleared
-  memory
-- Seeing status with varying record counts helps decode bytes 1-3
-
-Suggested files:
-
-- `extstatus-after-reads.pcapng`
-
-App:
-
-- `IPICO Dashboard`
-- `IPICO Connect` so live reads are happening between Dashboard polls
-
-Steps:
-
-1. Make sure recording is on.
-2. Start a new capture.
-3. Connect `IPICO Dashboard`.
-4. Use `IPICO Connect` while presenting a small number of tags to the reader.
-5. Leave `IPICO Dashboard` connected for another 10-15 seconds.
-6. Note the memory display in IPICO Connect.
 7. Stop capture.
 
 ### 6. Power-off while still connected
@@ -391,30 +412,36 @@ Steps:
 
 If time is limited, start with these:
 
-1. `download-with-records.pcapng` — resolves the download data format and
-   used-memory mapping questions
-2. `trigger-single-press.pcapng` — confirms `0x2c` semantics
-3. `trigger-hold-release.pcapng` — checks for hold/release events
-4. `clock-sync-normal.pcapng` — helps decode `0x4c`
-5. `extstatus-after-reads.pcapng` — shows `0x4b` with nonzero records
-6. `power-off-while-connected.pcapng` — isolates shutdown behavior while the
+1. `download-small-known-count.pcapng` — best shot at mapping `0x4b`
+   extent/progress counters to a known number of stored reads
+2. `post-download-status-no-new-reads.pcapng` +
+   `download-same-buffer-again.pcapng` — tests whether byte 12 means
+   "undownloaded records present"
+3. `trigger-single-press.pcapng` — confirms `0x2c` semantics
+4. `trigger-hold-release.pcapng` — checks for hold/release events
+5. `clock-sync-normal.pcapng` — helps decode `0x4c`
+6. `fsls-one-tag-enter-exit.pcapng` — settles real FSLS behavior on the wire
+7. `power-off-while-connected.pcapng` — isolates shutdown behavior while the
    socket is still open
 
 Then, if things are going smoothly:
 
-7. `fsls-set-mode.pcapng` + `fsls-one-tag-enter-exit.pcapng`
-8. `clock-sync-host-plus-2m.pcapng`
-9. Remaining trigger captures
+8. `fsls-set-mode.pcapng`
+9. `clock-sync-host-plus-2m.pcapng`
+10. Remaining trigger captures
 
 ## No Longer Needed
 
 These were previously planned but are now covered:
 
+- `download-with-records.pcapng` — covered by `downloadreads.pcapng`
 - `connect-after-power-cycle.pcapng` — covered by `turnon-con-dis.pcapng`
 - `extstatus-empty.pcapng` — we have many empty-state `0x4b` polls across
   multiple captures
 - `extstatus-after-reconnect.pcapng` — `turnon-con-dis.pcapng` and
   `con-dis.pcapng` together cover this
+- `extstatus-after-reads.pcapng` — covered by `con-dis-w-4k-reads.pcapng` and
+  `downloadreads.pcapng`
 
 Still useful if shutdown behavior matters:
 
