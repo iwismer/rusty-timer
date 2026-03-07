@@ -3,7 +3,7 @@
 use ipico_core::control::{self, Command, ControlError, ControlFrame};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 
 struct PendingRequest {
@@ -256,6 +256,107 @@ pub struct ReaderInfo {
     pub read_mode_timeout: Option<u8>,
 }
 
+/// Events emitted by [`DownloadTracker`] for SSE consumers.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DownloadEvent {
+    Downloading {
+        progress: u32,
+        total: u32,
+        reads_received: u32,
+    },
+    Complete {
+        reads_received: u32,
+    },
+    Error {
+        message: String,
+    },
+    Idle,
+}
+
+/// The current phase of a stored-read download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadState {
+    Idle,
+    Downloading,
+    Complete,
+    Error(String),
+}
+
+/// Tracks progress of a stored-read download and broadcasts events to SSE
+/// subscribers.
+#[derive(Debug)]
+pub struct DownloadTracker {
+    pub state: DownloadState,
+    pub reads_received: u32,
+    pub stored_data_extent: u32,
+    pub download_progress: u32,
+    event_tx: broadcast::Sender<DownloadEvent>,
+}
+
+impl DownloadTracker {
+    pub fn new() -> Self {
+        let (event_tx, _) = broadcast::channel(64);
+        Self {
+            state: DownloadState::Idle,
+            reads_received: 0,
+            stored_data_extent: 0,
+            download_progress: 0,
+            event_tx,
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<DownloadEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub fn record_read(&mut self) {
+        if self.state != DownloadState::Downloading {
+            return;
+        }
+        self.reads_received += 1;
+        let _ = self.event_tx.send(DownloadEvent::Downloading {
+            progress: self.download_progress,
+            total: self.stored_data_extent,
+            reads_received: self.reads_received,
+        });
+    }
+
+    pub fn update_progress(&mut self, progress: u32, extent: u32) {
+        if self.state != DownloadState::Downloading {
+            return;
+        }
+        self.download_progress = progress;
+        self.stored_data_extent = extent;
+    }
+
+    pub fn start(&mut self, stored_data_extent: u32) {
+        self.state = DownloadState::Downloading;
+        self.reads_received = 0;
+        self.download_progress = 0;
+        self.stored_data_extent = stored_data_extent;
+    }
+
+    pub fn complete(&mut self) {
+        self.state = DownloadState::Complete;
+        let _ = self.event_tx.send(DownloadEvent::Complete {
+            reads_received: self.reads_received,
+        });
+    }
+
+    pub fn fail(&mut self, msg: String) {
+        self.state = DownloadState::Error(msg.clone());
+        let _ = self.event_tx.send(DownloadEvent::Error { message: msg });
+    }
+
+    pub fn reset(&mut self) {
+        self.state = DownloadState::Idle;
+        self.reads_received = 0;
+        self.stored_data_extent = 0;
+        self.download_progress = 0;
+    }
+}
+
 /// Run the initial connection sequence: statistics, banner, ext status, config3, clock.
 pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
     let mut ri = ReaderInfo::default();
@@ -506,5 +607,76 @@ mod tests {
         task.await
             .expect("task join")
             .expect("set_recording result");
+    }
+
+    #[tokio::test]
+    async fn download_tracker_lifecycle() {
+        let mut tracker = DownloadTracker::new();
+        let mut rx = tracker.subscribe();
+
+        tracker.start(100);
+        assert_eq!(tracker.state, DownloadState::Downloading);
+        assert_eq!(tracker.stored_data_extent, 100);
+
+        tracker.record_read();
+        tracker.record_read();
+        assert_eq!(tracker.reads_received, 2);
+
+        let ev = rx.try_recv().expect("first read event");
+        assert!(matches!(
+            ev,
+            DownloadEvent::Downloading {
+                reads_received: 1,
+                ..
+            }
+        ));
+        let ev = rx.try_recv().expect("second read event");
+        assert!(matches!(
+            ev,
+            DownloadEvent::Downloading {
+                reads_received: 2,
+                ..
+            }
+        ));
+
+        tracker.update_progress(50, 100);
+        assert_eq!(tracker.download_progress, 50);
+
+        tracker.complete();
+        assert_eq!(tracker.state, DownloadState::Complete);
+        let ev = rx.try_recv().expect("complete event");
+        assert!(matches!(ev, DownloadEvent::Complete { reads_received: 2 }));
+
+        tracker.reset();
+        assert_eq!(tracker.state, DownloadState::Idle);
+        assert_eq!(tracker.reads_received, 0);
+        assert_eq!(tracker.download_progress, 0);
+        assert_eq!(tracker.stored_data_extent, 0);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_record_read_ignored_when_idle() {
+        let mut tracker = DownloadTracker::new();
+        let mut rx = tracker.subscribe();
+
+        tracker.record_read();
+        assert_eq!(tracker.reads_received, 0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn download_tracker_error_sends_event() {
+        let mut tracker = DownloadTracker::new();
+        let mut rx = tracker.subscribe();
+
+        tracker.start(50);
+        tracker.fail("connection lost".to_string());
+        assert_eq!(
+            tracker.state,
+            DownloadState::Error("connection lost".to_string())
+        );
+
+        let ev = rx.try_recv().expect("error event");
+        assert!(matches!(ev, DownloadEvent::Error { message } if message == "connection lost"));
     }
 }
