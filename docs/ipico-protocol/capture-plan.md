@@ -8,8 +8,6 @@ It is based on the current gaps in
 
 - `IPICO Dashboard` is the control-plane tool
 - `IPICO Connect` is the live-read path into the timing software
-- `docs/ipico-protocol/captures/con-dis.pcapng` already covers a clean
-  connect/disconnect that was not immediately after reader startup
 
 The safest approach is:
 
@@ -17,6 +15,22 @@ The safest approach is:
 - Prefer `IPICO Connect` for tag-read and timing captures
 - Prefer read-only or obviously reversible actions first
 - Keep one meaningful action per capture file
+
+## Completed Captures
+
+These have already been collected and analyzed:
+
+| File | What it covers |
+| --- | --- |
+| `connect.pcapng` | Full TCP bootstrap, status polling, filter writes, clock set, read-mode changes |
+| `con-dis.pcapng` | Full bootstrap, steady-state polling, disconnect |
+| `settime.pcapng` | Full bootstrap, single clock set + verify |
+| `delete-records.pcapng` | Full bootstrap, record-clear sequence via `0x4b` |
+| `guntime.pcapng` | Mid-stream trigger-button / gun-time event |
+| `read4tags.pcapng` | Mid-stream `aa` tag reports plus concurrent polling traffic |
+| `captures/download-events.pcapng` | Download-events workflow via `0x4b` sub-commands (memory was empty) |
+| `captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 |
+| `captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap after fresh boot but does not isolate power-off |
 
 ## Software Roles
 
@@ -52,9 +66,44 @@ Use `IPICO Connect` for:
 
 ## Recommended Capture Set
 
-These are the captures worth trying tomorrow, in the safest order.
+Ordered by priority — highest-value gaps first.
 
-### 1. Trigger-button captures
+### 1. Download events with stored records
+
+Why:
+
+- The download-events capture had an empty memory (0k/126kb), so we never saw
+  the actual download data format
+- This is the single biggest remaining gap in the `0x4b` sub-command
+  documentation
+- Also resolves whether byte 1, byte 11, or an offset between them maps to the
+  UI's used-memory value
+
+Suggested files:
+
+- `download-with-records.pcapng`
+
+App:
+
+- `IPICO Connect`
+
+Steps:
+
+1. Turn on recording (or confirm it is already on).
+2. Present a few tags to the reader so some records are stored.
+3. Note the memory usage shown in IPICO Connect (e.g., "3k/126kb").
+4. Start capture.
+5. Click the "Download Events" button.
+6. Wait for the download to complete and a few poll cycles.
+7. Stop capture.
+
+Important:
+
+- Write down the exact memory display before and after the download.
+- Compare both byte 1 and byte 11 of the `0x4b` status with the displayed KB
+  value.
+
+### 2. Trigger-button captures
 
 Why:
 
@@ -81,11 +130,6 @@ Steps for `trigger-single-press.pcapng`:
 5. Wait 5-10 seconds.
 6. Stop capture.
 
-Separate the capture:
-
-- Stop after the single press and the following poll traffic.
-- Start a new file for the next trigger pattern.
-
 Steps for `trigger-hold-release.pcapng`:
 
 1. Start a new capture.
@@ -94,10 +138,6 @@ Steps for `trigger-hold-release.pcapng`:
 4. Wait 5-10 seconds.
 5. Stop capture.
 
-Separate the capture:
-
-- Do not combine this with the single-press case.
-
 Steps for `trigger-double-press.pcapng`:
 
 1. Start a new capture.
@@ -105,10 +145,6 @@ Steps for `trigger-double-press.pcapng`:
 3. Press the trigger twice quickly.
 4. Wait 5-10 seconds.
 5. Stop capture.
-
-Separate the capture:
-
-- Keep this as its own file.
 
 Steps for `trigger-while-reading.pcapng`:
 
@@ -120,11 +156,7 @@ Steps for `trigger-while-reading.pcapng`:
 5. Wait for the reads to finish and for a few more polls.
 6. Stop capture.
 
-Separate the capture:
-
-- Keep this separate from the no-tag trigger captures.
-
-### 2. Clock-sync captures
+### 3. Clock-sync captures
 
 Why:
 
@@ -145,7 +177,6 @@ Suggested files:
 
 - `clock-sync-normal.pcapng`
 - `clock-sync-host-plus-2m.pcapng`
-- `clock-sync-before-midnight.pcapng` (optional)
 
 App:
 
@@ -160,10 +191,6 @@ Steps for `clock-sync-normal.pcapng`:
 5. Wait for the immediate response and 2-3 poll cycles.
 6. Stop capture.
 
-Separate the capture:
-
-- One file for the normal sync only.
-
 Steps for `clock-sync-host-plus-2m.pcapng`:
 
 1. Disable automatic time sync on the computer.
@@ -175,118 +202,11 @@ Steps for `clock-sync-host-plus-2m.pcapng`:
 7. Stop capture.
 8. Restore the computer clock.
 
-Separate the capture:
-
-- Do not combine this with the normal-sync file.
-
-Steps for `clock-sync-before-midnight.pcapng`:
-
-1. Disable automatic time sync on the computer.
-2. Set the computer clock to just before midnight.
-3. Start a new capture.
-4. Connect `IPICO Dashboard`.
-5. Click the clock-sync action once.
-6. Wait for the read-back and a few polls.
-7. Stop capture.
-8. Restore the computer clock.
-
-Separate the capture:
-
-- Keep the date-rollover case in its own file.
-
 Risk note:
 
 - Do not start with huge time jumps or far-future dates.
 
-### 3. Post-boot connect/disconnect capture
-
-Why:
-
-- `con-dis.pcapng` already gives a clean connect/disconnect
-- What is still missing is the same flow immediately after reader startup
-
-Suggested file:
-
-- `connect-after-power-cycle.pcapng`
-
-App:
-
-- `IPICO Dashboard`
-
-Steps:
-
-1. Close both IPICO apps.
-2. Start packet capture.
-3. Power-cycle the reader.
-4. Wait for the reader to come back on the network.
-5. Open `IPICO Dashboard` and connect to the reader.
-6. Do nothing else.
-7. Let it poll briefly.
-8. Disconnect.
-9. Stop capture.
-
-Separate the capture:
-
-- Do not add any clock changes, trigger presses, or reads to this file.
-
-### 4. `0x4b` extended-status captures
-
-Why:
-
-- `0x4b` is the reader's extended-status query
-- On the wire it is the host sending `ab00ff4bc2`
-- You do not need to craft it manually; Dashboard already polls it
-
-Suggested files:
-
-- `extstatus-empty.pcapng`
-- `extstatus-after-reads.pcapng`
-- `extstatus-after-reconnect.pcapng`
-
-App:
-
-- `IPICO Dashboard`
-- `IPICO Connect` only so live reads are happening between Dashboard polls
-
-Steps for `extstatus-empty.pcapng`:
-
-1. Make sure no tags are being actively read.
-2. Start capture.
-3. Connect `IPICO Dashboard`.
-4. Let it poll for 10-15 seconds.
-5. Stop capture.
-
-Separate the capture:
-
-- This file should contain only the baseline empty-state polling.
-
-Steps for `extstatus-after-reads.pcapng`:
-
-1. Start a new capture.
-2. Connect `IPICO Dashboard`.
-3. Use `IPICO Connect` while presenting a small number of tags to the reader.
-4. Leave `IPICO Dashboard` connected for another 10-15 seconds.
-5. Stop capture.
-
-Separate the capture:
-
-- This file should contain the transition from "reads just happened" into
-  normal polling.
-
-Steps for `extstatus-after-reconnect.pcapng`:
-
-1. Without power-cycling the reader, start a new capture.
-2. Connect `IPICO Dashboard`.
-3. Let it poll briefly.
-4. Disconnect and reconnect Dashboard once.
-5. Let it poll again.
-6. Stop capture.
-
-Separate the capture:
-
-- Keep reconnect behavior separate from the post-boot connect file.
-
-### 5. FSLS on a real reader
+### 4. FSLS on a real reader
 
 Why:
 
@@ -310,11 +230,6 @@ Steps for `fsls-set-mode.pcapng`:
 4. Wait for the setting to be applied and verified.
 5. Stop capture.
 
-Separate the capture:
-
-- Stop once the mode change is complete.
-- Start a new file for the read behavior itself.
-
 Steps for `fsls-one-tag-enter-exit.pcapng`:
 
 1. Start a new capture with the reader already in FSLS mode.
@@ -325,11 +240,66 @@ Steps for `fsls-one-tag-enter-exit.pcapng`:
 6. Wait longer than the configured FSLS timeout.
 7. Stop capture.
 
-Separate the capture:
+### 5. Extended-status with stored records
 
-- Keep this file focused on one tag and one clean enter/leave cycle.
+Why:
 
-### 6. Tag-format / TTO captures
+- We have many `0x4b` status responses but always with empty or just-cleared
+  memory
+- Seeing status with varying record counts helps decode bytes 1-3
+
+Suggested files:
+
+- `extstatus-after-reads.pcapng`
+
+App:
+
+- `IPICO Dashboard`
+- `IPICO Connect` so live reads are happening between Dashboard polls
+
+Steps:
+
+1. Make sure recording is on.
+2. Start a new capture.
+3. Connect `IPICO Dashboard`.
+4. Use `IPICO Connect` while presenting a small number of tags to the reader.
+5. Leave `IPICO Dashboard` connected for another 10-15 seconds.
+6. Note the memory display in IPICO Connect.
+7. Stop capture.
+
+### 6. Power-off while still connected
+
+Why:
+
+- `turnon-con-dis.pcapng` proves the normal bootstrap after a fresh power-on
+- It does not prove what happens when power is cut while a control session is
+  still active
+
+Suggested files:
+
+- `power-off-while-connected.pcapng`
+
+App:
+
+- `IPICO Dashboard` or `IPICO Connect`
+
+Steps:
+
+1. Start capture.
+2. Connect the app to the reader.
+3. Wait for steady polling.
+4. Do not click disconnect.
+5. Remove power from the reader.
+6. Leave the capture running for 10-15 seconds.
+7. Stop capture.
+
+Important:
+
+- This is only useful if the TCP session is still open when power is cut.
+- Write down whether the app reports timeout, connection reset, or a clean
+  close.
+
+### 7. Tag-format / TTO captures
 
 Why:
 
@@ -352,11 +322,6 @@ Steps for `tag-format-enable-tto.pcapng`:
 4. Wait for the setting write and any verification queries.
 5. Stop capture.
 
-Separate the capture:
-
-- One file per format change.
-- Do not combine multiple format toggles in one file.
-
 Steps for `tag-format-tto-one-tag.pcapng`:
 
 1. Start a new capture with the new format already active.
@@ -364,11 +329,7 @@ Steps for `tag-format-tto-one-tag.pcapng`:
 3. Wait for the resulting traffic to settle.
 4. Stop capture.
 
-Separate the capture:
-
-- Keep the format-change capture separate from the resulting tag-traffic capture.
-
-### 7. Filter-query and reject-pattern captures
+### 8. Filter-query and reject-pattern captures
 
 Why:
 
@@ -392,10 +353,6 @@ Steps for `filter-query-only.pcapng`:
 4. Wait for the replies.
 5. Stop capture.
 
-Separate the capture:
-
-- Keep query-only traffic separate from any writes.
-
 Steps for `filter-write-no-save.pcapng`:
 
 1. Only do this if the UI makes it easy to restore a known-open filter.
@@ -405,12 +362,7 @@ Steps for `filter-write-no-save.pcapng`:
 5. If possible, restore the original filter before stopping.
 6. Stop capture.
 
-Separate the capture:
-
-- One file per write action.
-- Do not use save-to-EEPROM.
-
-### 8. Feature-specific captures
+### 9. Feature-specific captures
 
 Why:
 
@@ -435,25 +387,39 @@ Steps:
 4. Wait for the response.
 5. Stop capture.
 
-Separate the capture:
+## Priority Order
 
-- One feature per file.
+If time is limited, start with these:
 
-## Tomorrow's Best First Pass
-
-If time is limited, start with these five:
-
-1. `trigger-single-press.pcapng`
-2. `trigger-hold-release.pcapng`
-3. `clock-sync-normal.pcapng`
-4. `clock-sync-host-plus-2m.pcapng`
-5. `connect-after-power-cycle.pcapng`
+1. `download-with-records.pcapng` — resolves the download data format and
+   used-memory mapping questions
+2. `trigger-single-press.pcapng` — confirms `0x2c` semantics
+3. `trigger-hold-release.pcapng` — checks for hold/release events
+4. `clock-sync-normal.pcapng` — helps decode `0x4c`
+5. `extstatus-after-reads.pcapng` — shows `0x4b` with nonzero records
+6. `power-off-while-connected.pcapng` — isolates shutdown behavior while the
+   socket is still open
 
 Then, if things are going smoothly:
 
-6. `extstatus-empty.pcapng`
-7. `extstatus-after-reads.pcapng`
-8. `extstatus-after-reconnect.pcapng`
+7. `fsls-set-mode.pcapng` + `fsls-one-tag-enter-exit.pcapng`
+8. `clock-sync-host-plus-2m.pcapng`
+9. Remaining trigger captures
+
+## No Longer Needed
+
+These were previously planned but are now covered:
+
+- `connect-after-power-cycle.pcapng` — covered by `turnon-con-dis.pcapng`
+- `extstatus-empty.pcapng` — we have many empty-state `0x4b` polls across
+  multiple captures
+- `extstatus-after-reconnect.pcapng` — `turnon-con-dis.pcapng` and
+  `con-dis.pcapng` together cover this
+
+Still useful if shutdown behavior matters:
+
+- `power-off-while-connected.pcapng` — `turnon-con-dis.pcapng` disconnected
+  before power was cut, so it did not isolate power-off behavior
 
 ## If We Need To Use Our Software
 

@@ -6,7 +6,7 @@ protocol as of March 6, 2026. It covers:
 - The ASCII-hex control and tag protocol observed on TCP port `10000`
 - The legacy serial specification in
   `docs/IPICO-Reader-Serial-Protocol-100-20071120.pdf`
-- The packet captures under `docs/*.pcapng`
+- The packet captures under `docs/ipico-protocol/captures/*.pcapng`
 - The local decoder in `scripts/parse_pcap.py`
 - The local Rust implementation in `crates/ipico-core/src/control.rs`
 
@@ -24,12 +24,15 @@ open questions.
 
 ## Sources
 
-- `docs/connect.pcapng`
-- `docs/con-dis.pcapng`
-- `docs/settime.pcapng`
-- `docs/delete-records.pcapng`
-- `docs/guntime.pcapng`
-- `docs/read4tags.pcapng`
+- `docs/ipico-protocol/captures/connect.pcapng`
+- `docs/ipico-protocol/captures/con-dis.pcapng`
+- `docs/ipico-protocol/captures/settime.pcapng`
+- `docs/ipico-protocol/captures/delete-records.pcapng`
+- `docs/ipico-protocol/captures/guntime.pcapng`
+- `docs/ipico-protocol/captures/read4tags.pcapng`
+- `docs/ipico-protocol/captures/download-events.pcapng`
+- `docs/ipico-protocol/captures/record-on-off.pcapng`
+- `docs/ipico-protocol/captures/turnon-con-dis.pcapng`
 - `docs/IPICO-Reader-Serial-Protocol-100-20071120.pdf`
 - `scripts/parse_pcap.py`
 
@@ -50,12 +53,15 @@ variants in the captures are therefore later-firmware extensions.
 
 | Capture | What it shows |
 | --- | --- |
-| `docs/connect.pcapng` | Full TCP bootstrap, status polling, filter writes, clock set, read-mode changes |
-| `docs/con-dis.pcapng` | Full bootstrap, steady-state polling, disconnect |
-| `docs/settime.pcapng` | Full bootstrap, single clock set + verify |
-| `docs/delete-records.pcapng` | Full bootstrap, record-clear sequence via `0x4b` |
-| `docs/guntime.pcapng` | Mid-stream trigger-button / gun-time event during a live session |
-| `docs/read4tags.pcapng` | Mid-stream `aa` tag reports plus concurrent polling traffic |
+| `docs/ipico-protocol/captures/connect.pcapng` | Full TCP bootstrap, status polling, filter writes, clock set, read-mode changes |
+| `docs/ipico-protocol/captures/con-dis.pcapng` | Full bootstrap, steady-state polling, disconnect |
+| `docs/ipico-protocol/captures/settime.pcapng` | Full bootstrap, single clock set + verify |
+| `docs/ipico-protocol/captures/delete-records.pcapng` | Full bootstrap, record-clear sequence via `0x4b` |
+| `docs/ipico-protocol/captures/guntime.pcapng` | Mid-stream trigger-button / gun-time event during a live session |
+| `docs/ipico-protocol/captures/read4tags.pcapng` | Mid-stream `aa` tag reports plus concurrent polling traffic |
+| `docs/ipico-protocol/captures/download-events.pcapng` | Download-events workflow via `0x4b` sub-commands; memory was empty so no records streamed |
+| `docs/ipico-protocol/captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 mode changes |
+| `docs/ipico-protocol/captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap sequence after fresh boot |
 
 ## Protocol Families
 
@@ -543,7 +549,7 @@ Notes:
 
 `Capture`
 
-Observed only in `docs/guntime.pcapng`:
+Observed only in `docs/ipico-protocol/captures/guntime.pcapng`:
 
 ```text
 ab000a2c260306052004151b2782ae\r\n
@@ -643,15 +649,17 @@ Notes:
 - `Spec`: available in controller firmware 8.1 and higher
 - `Capture`: observed repeatedly during the TCP bootstrap
 
-### 0x4b - extended status / clear-records channel
+### 0x4b - extended status / record management channel
 
 `Capture`
 
 This command is not present in the 2007 PDF. It is a later-firmware command on
-this reader and it serves two roles:
+this reader and it serves multiple roles:
 
 - Query current extended status
-- Accept small write payloads used during record-clear flows
+- Toggle recording on/off
+- Download stored events from internal memory
+- Clear stored records
 
 #### Query form
 
@@ -672,35 +680,157 @@ Observed payload layout:
 
 | Byte | Meaning | Confidence |
 | --- | --- | --- |
-| 0 | Reader type / subtype | Inference |
-| 1 | Decoder version / subtype | Inference |
+| 0 | Recorder/access state byte | Capture |
+| 1 | Unknown recorder/memory byte; changes with stored-data state | Capture |
 | 2..3 | Unique tag count, big-endian | Inference |
 | 4..7 | Always zero in these captures | Capture |
 | 8..9 | Hardware identifier (`0x5905`) | Inference |
 | 10 | Hardware config (`0x8f`) | Inference |
-| 11 | Stored-record page count | Inference |
+| 11 | Stored-record page count or raw used-page counter | Inference |
 | 12 | Optional flags byte | Inference |
+
+Byte 0 recording/download state values:
+
+| Value | Meaning | Source |
+| --- | --- | --- |
+| `0x00` | Recording disabled / idle-off state | Inference from record-on-off and clear-records captures |
+| `0x01` | Recording-enabled idle state | Inference from record-on-off capture |
+| `0x03` | Download/access mode entered by IPICO Connect | Inference from download-events capture |
 
 Observed states:
 
-- Before clear: `010b012f0000000059058f0c00`
-- After clear: `000000000000000059058f0100`
+- Recording off: `000000000000000059058f0100`
+- Recording on, empty memory: `010000000000000059058f0100`
+- Downloading: `030000000000000059058f0100`
+- Before record clear: `010b012f0000000059058f0c00`
+- After record clear: `000000000000000059058f0100`
 
 What changed after clearing records:
 
-- Bytes 0..1 changed from `010b` to `0000`
+- Byte 0 changed from `01` to `00` (recording state reset)
+- Byte 1 changed from `0b` to `00`
 - Unique tag count changed from `0x012f` to `0x0000`
 - Stored-record pages changed from `0x0c` to `0x01`
 - Optional flags byte remained present when the 13-byte form was used
 
-#### Write form used during record clear
+#### Internal memory usage hypothesis
 
-Observed host writes:
+`Inference`
+
+During capture collection, IPICO Connect reported internal memory as
+`0k/126kb` in the empty-state workflows. On the wire, the empty state was
+`010000000000000059058f0100`, while the pre-clear state with stored data was
+`010b012f0000000059058f0c00`.
+
+That is enough to say byte 1 and byte 11 are related to stored-data usage:
+
+- Empty state: byte 1 = `0x00`, byte 11 = `0x01`
+- Pre-clear state: byte 1 = `0x0b`, byte 11 = `0x0c`
+
+It is not enough to prove whether the UI's used-memory value comes from byte 1,
+byte 11, or an offset such as `byte11 - 1`. The total capacity of 126kb is also
+not obviously encoded in the status bytes.
+
+#### Observed sub-command roles for writes
+
+`Capture + Inference`
+
+The first byte of the `0x4b` write payload behaves like a sub-command selector
+in the observed flows:
+
+| Sub-cmd | Payload | Meaning | Source |
+| --- | --- | --- | --- |
+| `0x00` | `[state]` | Recording-state write: `0x00`=off, `0x01`=on | Inference from record-on-off |
+| `0x01` | `[state]` | Access/download state write: `0x00`=stop, `0x01`=start | Inference from download-events |
+| `0x02` | (none) | Preparatory step in download workflow | Capture |
+| `0x07` | `[byte1, byte2?]` | Download-workflow parameter block / cleanup | Inference from download-events |
+| `0xd0` | (none) | Trigger record clear | Capture |
+
+#### Record on/off workflow
+
+`Capture`
+
+Observed in `docs/ipico-protocol/captures/record-on-off.pcapng`. In this
+capture, IPICO Connect toggles recording with `0x4b`, then changes CONFIG3:
+
+Record OFF:
 
 ```text
-ab00024b000018\r\n   # [0x00, 0x00]
-ab00024b010019\r\n   # [0x01, 0x00]
-ab00014bd0eb\r\n     # [0xd0]
+C->R  ab00024b000018        # 0x4b sub-cmd 0x00, state=0x00 (recording off)
+R->C  ab000c4b00...         # byte 0 = 0x00
+C->R  ab00030900050758      # CONFIG3 set mode=0x00 (raw), timeout=5, mask=0x07
+R->C  ab00000929            # ACK
+C->R  ab00ff0995            # CONFIG3 query
+R->C  ab0002090005f0        # confirmed: raw mode, timeout 5
+```
+
+Record ON:
+
+```text
+C->R  ab00024b000119        # 0x4b sub-cmd 0x00, state=0x01 (recording on)
+R->C  ab000c4b01...         # byte 0 = 0x01
+C->R  ab0003090305075b      # CONFIG3 set mode=0x03 (event), timeout=5, mask=0x07
+R->C  ab00000929            # ACK
+C->R  ab00ff0995            # CONFIG3 query
+R->C  ab0002090305f3        # confirmed: event mode, timeout 5
+```
+
+Notes:
+
+- In this observed workflow, record-on is followed by event mode (CONFIG3 `0x03`)
+- In this observed workflow, record-off is followed by raw mode (CONFIG3 `0x00`)
+- The CONFIG3 change is sent by the host software, not triggered by the reader
+- This means the reader's read mode and recording state are controlled
+  independently, but IPICO Connect keeps them in sync
+
+#### Download events workflow
+
+`Capture`
+
+Observed in `docs/ipico-protocol/captures/download-events.pcapng`. The reader's
+internal memory was reported empty in IPICO Connect during capture collection,
+so no record payload appeared on the wire:
+
+```text
+C->R  ab00014b02b9          # sub-cmd 0x02: init download
+R->C  ab000c4b01...         # status, byte 0 = 0x01
+
+C->R  ab00034b07010586      # sub-cmd 0x07: configure download [0x01, 0x05]
+R->C  ab000c4b01...         # status unchanged
+
+C->R  ab00024b01011a        # sub-cmd 0x01: start download [0x01]
+R->C  ab000c4b03...         # byte 0 → 0x03 (download/access mode)
+
+# No record payload appeared in this empty-memory capture
+
+C->R  ab00024b010019        # sub-cmd 0x01: stop download [0x00]
+R->C  ab000c4b01...         # byte 0 → 0x01 (back to recording)
+
+C->R  ab00024b07001f        # sub-cmd 0x07: cleanup [0x00]
+R->C  ab000c4b01...         # status unchanged
+
+# Normal polling resumes
+```
+
+Notes:
+
+- A capture with stored records is needed to see the actual download data
+  format
+- The download workflow does not change CONFIG3 mode, unlike record on/off
+
+#### Clear-records workflow
+
+`Capture`
+
+Observed in `docs/ipico-protocol/captures/delete-records.pcapng`:
+
+```text
+C->R  ab00024b000018        # sub-cmd 0x00: [0x00] (set recording off)
+C->R  ab00024b010019        # sub-cmd 0x01: [0x00]
+C->R  ab00014bd0eb          # sub-cmd 0xd0: trigger clear
+R->C  90 progress frames    # pages 0x00..0x59
+C->R  ab00ff4bc2            # query to confirm
+R->C  cleared status        # byte 11 = 0x01, tag count = 0
 ```
 
 After the `0xd0` trigger, the reader emits a progress stream of `0x4b` frames:
@@ -721,20 +851,11 @@ That is:
 
 Pages `0x00..0x59` were observed, so 90 progress frames were emitted.
 
-Interpretation:
-
-- `Capture`: `0x4b` is the control surface used by the management software to
-  clear onboard records
-- `Inference`: byte 11 in the query response is the stored-page count because it
-  tracks the clear operation
-- `Unknown`: the exact meaning of bytes 0, 1, 8, 9, 10, and 12 is not fully
-  documented yet
-
 ### 0x4c - unsolicited post-settime status
 
 `Capture`
 
-Seen once, immediately after a successful `0x01` write in `docs/connect.pcapng`:
+Seen once, immediately after a successful `0x01` write in `docs/ipico-protocol/captures/connect.pcapng`:
 
 ```text
 ab00094c01555202a8555201f459\r\n
@@ -790,8 +911,8 @@ So, on this reader:
 `Capture`
 
 Across the full-session captures (`connect`, `con-dis`, `settime`,
-`delete-records`), the host performs roughly this sequence after opening TCP
-port `10000`:
+`delete-records`, `turnon-con-dis`), the host performs roughly this sequence
+after opening TCP port `10000`:
 
 1. `0x02` get date/time
 2. `0x0a` get statistics
@@ -803,6 +924,8 @@ port `10000`:
 
 The exact ordering of repeated `0x37`, `0x0a`, and follow-up queries varies
 slightly by workflow, but those commands are the recurring bootstrap pieces.
+
+The `turnon-con-dis` capture confirms this is identical after a fresh power-on.
 
 ### Polling loop
 
@@ -829,7 +952,7 @@ While polling is active, the reader can also emit unsolicited traffic:
 
 `Capture`
 
-Observed in `docs/settime.pcapng`:
+Observed in `docs/ipico-protocol/captures/settime.pcapng`:
 
 1. Host sends `0x01`
 2. Reader ACKs
@@ -841,7 +964,7 @@ Observed in `docs/settime.pcapng`:
 
 `Capture`
 
-Observed in `docs/connect.pcapng`:
+Observed in `docs/ipico-protocol/captures/connect.pcapng`:
 
 1. Host sends `0x09` set raw mode (`0x00`)
 2. Reader ACKs
@@ -852,19 +975,49 @@ Observed in `docs/connect.pcapng`:
 7. Host queries `0x09`
 8. Reader returns `0305`
 
+### Record on/off workflow
+
+`Capture`
+
+Observed in `docs/ipico-protocol/captures/record-on-off.pcapng`:
+
+1. Host sends `0x4b [00, state]` to toggle recording (0=off, 1=on)
+2. Reader confirms via status byte 0 changing
+3. Host sends `0x09` CONFIG3 to set read mode (raw for off, event for on)
+4. Host queries `0x09` to verify
+
+See the `0x4b` command reference for full frame details.
+
+### Download events workflow
+
+`Capture`
+
+Observed in `docs/ipico-protocol/captures/download-events.pcapng`:
+
+1. Host sends `0x4b [02]` to init download
+2. Host sends `0x4b [07, 01, 05]` to configure download
+3. Host sends `0x4b [01, 01]` to start download (status byte 0 → `0x03`)
+4. No record payload appeared in this empty-memory capture
+5. Host sends `0x4b [01, 00]` to stop download (status byte 0 → `0x01`)
+6. Host sends `0x4b [07, 00]` to clean up
+7. Normal polling resumes
+
+See the `0x4b` command reference for full frame details.
+
 ### Clear-records workflow
 
 `Capture`
 
-Observed in `docs/delete-records.pcapng`:
+Observed in `docs/ipico-protocol/captures/delete-records.pcapng`:
 
-1. Host queries `0x4b`
-2. Host writes `0x4b [00 00]`
-3. Host writes `0x4b [01 00]`
-4. Host writes `0x4b [d0]`
-5. Reader emits 90 page-progress frames from `0x00` to `0x59`
-6. Host queries `0x4b` again and sees cleared counters
-7. Host toggles CONFIG3 during the process, including an Event-mode step
+1. Host sends `0x4b [00, 00]` to set recording off
+2. Host sends `0x4b [01, 00]`
+3. Host sends `0x4b [d0]` to trigger clear
+4. Reader emits 90 page-progress frames from `0x00` to `0x59`
+5. Host queries `0x4b` again and sees cleared counters
+6. Host toggles CONFIG3 during the process, including an Event-mode step
+
+See the `0x4b` command reference for full frame details.
 
 ## PDF-Documented Host Commands Not Seen In These Captures
 
@@ -969,12 +1122,39 @@ the host-facing TCP wire protocol in this repo and is not expanded here.
 
 - What exactly does `0xe0` initialize?
 - What is the exact schema of the `0x4c` payload?
-- In `0x4b`, what do bytes 0, 1, 8, 9, 10, and 12 mean exactly?
+- In `0x4b`, what do bytes 1, 8, 9, 10, and 12 mean exactly? Byte 0 now appears
+  to encode recorder/access state.
+- Where does the 126kb total memory capacity come from? It is not obviously
+  encoded in the `0x4b` status bytes. It may be hardcoded in IPICO Connect per
+  reader model.
+- What is the page-to-KB ratio for internal memory, and does the UI use byte 1,
+  byte 11, or an offset between them? The empty and pre-clear captures show the
+  pairings `0x00/0x01` and `0x0b/0x0c`, but the KB mapping is still unproven.
 - What does the constant `0x59` represent in the record-clear progress frames?
+  It also appears as byte 8 of the status response — possibly total page count?
+- What data format does the download-events flow produce when records exist?
+  The empty-memory capture showed no streamed data.
+- What is the purpose of `0x4b` sub-command `0x07` parameters (`[01, 05]` to
+  configure, `[00]` to clean up)?
 - What is the purpose of the large NUL-byte burst sent during bootstrap?
 - Does any real reader firmware in this product line ever emit literal
   `FS` / `LS` tag suffixes, or is that only a local convention adopted by this
   repo?
+
+## Power-On And Power-Off Behavior
+
+`Capture`
+
+Observed in `docs/ipico-protocol/captures/turnon-con-dis.pcapng`:
+
+- After a fresh power-on, the first IPICO control session uses the same
+  bootstrap command sequence as the other full-session captures.
+- This capture also confirms the fixed 1024-byte NUL preamble before `0xe0`.
+- The user-driven disconnect ends with normal TCP teardown; no application-layer
+  disconnect command was observed.
+- This file does not isolate power-off behavior, because the reader is
+  disconnected before power is cut. No additional IPICO control traffic was seen
+  after disconnect.
 
 ## Practical Guidance For Future Work
 
