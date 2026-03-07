@@ -7,8 +7,48 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 
 struct PendingRequest {
-    instruction: u8,
+    kind: PendingRequestKind,
     reply_tx: oneshot::Sender<Result<ControlFrame, ControlError>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingRequestKind {
+    AnyInstruction(u8),
+    ExtendedStatusWrite,
+    ExtendedStatusQuery,
+    Config3Write,
+    Config3Query,
+}
+
+impl PendingRequestKind {
+    fn for_command(cmd: &Command) -> Self {
+        match cmd {
+            Command::SetExtendedStatus { .. } => Self::ExtendedStatusWrite,
+            Command::GetExtendedStatus => Self::ExtendedStatusQuery,
+            Command::SetConfig3 { .. } => Self::Config3Write,
+            Command::GetConfig3 => Self::Config3Query,
+            _ => Self::AnyInstruction(cmd.instruction()),
+        }
+    }
+
+    fn matches(self, frame: &ControlFrame) -> bool {
+        match self {
+            Self::AnyInstruction(instruction) => frame.instruction == instruction,
+            Self::ExtendedStatusWrite => {
+                frame.instruction == control::INSTR_EXT_STATUS
+                    && (frame.data.is_empty() || frame.data.len() >= 12)
+            }
+            Self::ExtendedStatusQuery => {
+                frame.instruction == control::INSTR_EXT_STATUS && frame.data.len() >= 12
+            }
+            Self::Config3Write => {
+                frame.instruction == control::INSTR_CONFIG3 && frame.data.is_empty()
+            }
+            Self::Config3Query => {
+                frame.instruction == control::INSTR_CONFIG3 && frame.data.len() >= 2
+            }
+        }
+    }
 }
 
 pub struct ControlClient {
@@ -45,15 +85,12 @@ impl ControlClient {
 
     async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
         let frame = control::encode_command(cmd, 0x00);
-        let instruction = cmd.instruction();
+        let kind = PendingRequestKind::for_command(cmd);
 
         let (reply_tx, reply_rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
-            *pending = Some(PendingRequest {
-                instruction,
-                reply_tx,
-            });
+            *pending = Some(PendingRequest { kind, reply_tx });
         }
 
         self.cmd_tx
@@ -259,7 +296,7 @@ impl ControlResponseSink {
         let mut pending = self.pending.lock().await;
         if let Some(req) = pending.take() {
             match &result {
-                Ok(frame) if frame.instruction == req.instruction => {
+                Ok(frame) if req.kind.matches(frame) => {
                     let _ = req.reply_tx.send(result);
                     return true;
                 }
@@ -624,6 +661,33 @@ mod tests {
             .await
             .expect("clear task join")
             .expect("clear task result");
+    }
+
+    #[tokio::test]
+    async fn clear_records_progress_frame_does_not_satisfy_pending_request() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let request = tokio::spawn(async move {
+            client
+                .send_inner(&Command::SetExtendedStatus { data: vec![0xd0] })
+                .await
+        });
+
+        let cmd = cmd_rx.recv().await.expect("clear trigger command");
+        assert_eq!(
+            std::str::from_utf8(&cmd).expect("clear trigger utf8"),
+            "ab00014bd0eb\r\n"
+        );
+
+        let consumed = sink.feed(b"ab00034bd05959c9").await;
+        assert!(!consumed, "progress frame should be treated as unsolicited");
+
+        let still_pending = timeout(Duration::from_millis(50), request).await;
+        assert!(
+            still_pending.is_err(),
+            "request should still be pending after progress frame"
+        );
     }
 
     #[tokio::test]
