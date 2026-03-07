@@ -1724,8 +1724,14 @@ async fn estimate_one_way_latency(
 ///
 /// Minimizes clock drift by:
 /// 1. Probing RTT to estimate one-way network latency
-/// 2. Waiting until just before the next second boundary (offset by the one-way latency)
-/// 3. Sending SET_DATE_TIME timed so the command arrives at the reader on the second boundary
+/// 2. Reading the reader's clock to learn its centisecond phase
+/// 3. Choosing the SET_DATE_TIME second value that minimizes drift, accounting
+///    for the fact that SET_DATE_TIME cannot set the sub-second (centisecond)
+///    counter — the protocol spec says "Resolution is 1 second"
+///
+/// The reader's centisecond counter free-runs through SET_DATE_TIME. The best we
+/// can do is round the second value so that (set_second + reader_cs) ≈ wall_clock.
+/// This gives |drift| ≤ 500ms worst case, ~250ms average.
 async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
@@ -1741,19 +1747,45 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     // Step 1: estimate one-way latency
     let one_way = estimate_one_way_latency(&client).await;
 
-    // Step 2: compute when to send so the command arrives at the next second boundary
-    let now = chrono::Local::now();
-    let nanos_into_second = now.nanosecond() % 1_000_000_000;
-    let nanos_until_next_sec = 1_000_000_000u64.saturating_sub(nanos_into_second as u64);
-    let send_ahead = std::time::Duration::from_nanos(nanos_until_next_sec).saturating_sub(one_way);
+    // Step 2: read the reader's clock to learn its centisecond phase
+    let dt = match client.get_date_time().await {
+        Ok(dt) => dt,
+        Err(e) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{{\"error\":\"failed to read reader clock: {}\"}}", e),
+            );
+        }
+    };
+    let wall_now = chrono::Local::now();
 
-    // The target time the reader should be set to (the next whole second)
-    let target = now + chrono::Duration::nanoseconds(nanos_until_next_sec as i64);
+    // The reader sampled its clock ~one_way ago. The SET_DATE_TIME we're about
+    // to send will arrive ~one_way from now. So from sample to arrival ≈ 2*one_way.
+    // Reader centisecond at arrival: (cs*10 + 2*one_way_ms) mod 1000
+    let cs = dt.centisecond as f64;
+    let reader_cs_at_arrival_ms = (cs * 10.0 + one_way.as_secs_f64() * 2000.0) % 1000.0;
+    let reader_frac = reader_cs_at_arrival_ms / 1000.0; // 0.0 .. 1.0
 
-    // Step 3: sleep until the optimal send moment
-    if !send_ahead.is_zero() {
-        tokio::time::sleep(send_ahead).await;
-    }
+    // Wall clock at the moment the command arrives
+    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or(chrono::Duration::zero());
+    let arrival_wall = wall_now + arrival_offset;
+    let wall_frac = arrival_wall.nanosecond() as f64 / 1_000_000_000.0;
+
+    // Step 3: choose the second value that minimizes drift.
+    // After SET_DATE_TIME, reader shows: S.reader_frac
+    // Actual wall time at that moment:   wall_second.wall_frac
+    // Drift = (S + reader_frac) - (wall_second + wall_frac)
+    // We pick S = wall_second, then adjust ±1s if the sub-second offset is > 500ms.
+    let offset = reader_frac - wall_frac;
+    let target = if offset > 0.5 {
+        // Reader cs is >500ms ahead of wall frac — set second 1s earlier
+        arrival_wall - chrono::Duration::seconds(1)
+    } else if offset < -0.5 {
+        // Reader cs is >500ms behind wall frac — set second 1s later
+        arrival_wall + chrono::Duration::seconds(1)
+    } else {
+        arrival_wall
+    };
 
     let year = (target.year() % 100) as u8;
     let month = target.month() as u8;
@@ -1799,10 +1831,12 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
             }
 
             state.logger.log(format!(
-                "reader {} clock synced to {} (one-way latency estimate: {:.1}ms)",
+                "reader {} clock synced to {} (one-way latency: {:.1}ms, cs phase: {:.0}, offset: {:.0}ms)",
                 ip,
                 reader_iso,
-                one_way.as_secs_f64() * 1000.0
+                one_way.as_secs_f64() * 1000.0,
+                cs,
+                offset * 1000.0,
             ));
             let drift_json = match drift_ms {
                 Some(d) => format!("{}", d),
