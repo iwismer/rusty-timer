@@ -1825,7 +1825,13 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     let Some(client) = client else {
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
-    let mut info = crate::reader_control::ReaderInfo::default();
+    let mut info = {
+        let ss = state.subsystem.lock().await;
+        ss.readers
+            .get(&ip)
+            .and_then(|r| r.reader_info.clone())
+            .unwrap_or_default()
+    };
     crate::reader_control::run_status_poll(&client, &mut info).await;
     {
         let mut ss = state.subsystem.lock().await;
@@ -2634,6 +2640,95 @@ mod tests {
         assert_eq!(body["restart_needed"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn refresh_reader_preserves_static_reader_info_fields() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    fw_version: Some("15.8".to_owned()),
+                    banner: Some("ARM9 Controller".to_owned()),
+                    hw_code: Some(0x8f),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let ext_status_cmd = cmd_rx.recv().await.expect("ext status command");
+            assert_eq!(
+                std::str::from_utf8(&ext_status_cmd).expect("ext status command utf8"),
+                "ab00ff4bc2\r\n"
+            );
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            let config3_cmd = cmd_rx.recv().await.expect("config3 command");
+            assert_eq!(
+                std::str::from_utf8(&config3_cmd).expect("config3 command utf8"),
+                "ab00ff0995\r\n"
+            );
+            assert!(control_sink.feed(b"ab0002090305f3").await);
+
+            let date_time_cmd = cmd_rx.recv().await.expect("date/time command");
+            assert_eq!(
+                std::str::from_utf8(&date_time_cmd).expect("date/time command utf8"),
+                "ab00000222\r\n"
+            );
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let refresh = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/refresh",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST refresh");
+        assert_eq!(refresh.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+        let body: serde_json::Value = status.json().await.expect("status json");
+
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["fw_version"], "15.8");
+        assert_eq!(info["banner"], "ARM9 Controller");
+        assert_eq!(info["hw_code"], 143);
     }
 
     #[tokio::test]
