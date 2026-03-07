@@ -105,6 +105,7 @@ impl ControlClient {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_date_time(
         &self,
         year: u8,
