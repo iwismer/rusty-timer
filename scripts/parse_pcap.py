@@ -30,7 +30,7 @@ INSTRUCTION_NAMES = {
     0x02: "GET_DATE_TIME",
     0x09: "CONFIG3",
     0x0A: "GET_STATISTICS",
-    0x2C: "CONNECTED",
+    0x2C: "GUN_TIME",
     0x37: "PRINT_BANNER",
     0x4B: "EXT_STATUS",
     0xE0: "UNKNOWN_INIT",
@@ -555,7 +555,7 @@ def render_flow(reader_ip, reader_port, client_ip, client_port, c2r_segs, r2c_se
     r2c_idx = 0
 
     # Check if there are unsolicited R->C frames before first C->R command
-    # (e.g., the CONNECTED notification)
+    # (e.g., the gun-time notification)
     if r2c_parsed and c2r_parsed:
         # Show any R->C frames that appear to be unsolicited (before commands)
         # Heuristic: if the first R->C instruction doesn't match any C->R instruction

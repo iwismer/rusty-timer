@@ -1,19 +1,40 @@
 # IPICO Reader Protocol Reference
 
-This document consolidates what this repository knows about the IPICO reader
-protocol as of March 7, 2026. It covers:
+> Last reviewed: 2026-03-07
+
+This document consolidates what this repository currently knows about the IPICO
+reader protocol. It covers:
 
 - The ASCII-hex control and tag protocol observed on TCP port `10000`
 - The legacy serial specification in
-  `docs/IPICO-Reader-Serial-Protocol-100-20071120.pdf`
-- The packet captures under `docs/ipico-protocol/captures/*.pcapng`
-- The exported download artifact `docs/ipico-protocol/captures/testreads`
-- The local decoder in `scripts/parse_pcap.py`
-- The local Rust implementation in `crates/ipico-core/src/control.rs`
+  [`IPICO-Reader-Serial-Protocol-100-20071120.pdf`](./IPICO-Reader-Serial-Protocol-100-20071120.pdf)
+- The packet captures under [`captures/`](./captures/)
+- The exported download artifact [`captures/testreads`](./captures/testreads)
+- The local decoder in [`scripts/parse_pcap.py`](../../scripts/parse_pcap.py)
+- The local Rust implementation in
+  [`crates/ipico-core/src/control.rs`](../../crates/ipico-core/src/control.rs)
 
 The goal is not to flatten every source into one confidence level. This file
 tries to keep confirmed wire behavior separate from spec-only material and from
 open questions.
+
+## Quick Navigation
+
+- [Evidence Levels](#evidence-levels)
+- [Sources](#sources)
+- [Reader Under Test](#reader-under-test)
+- [Capture Inventory](#capture-inventory)
+- [Protocol Families](#protocol-families)
+- [Transport and Framing](#transport-and-framing)
+- [Startup Banner](#startup-banner)
+- [Tag Report Frames (`aa`)](#tag-report-frames-aa)
+- [Control Command Reference](#control-command-reference)
+- [Observed Session Behavior](#observed-session-behavior)
+- [Appendix: PDF-Documented Host Commands Not Seen In These Captures](#appendix-pdf-documented-host-commands-not-seen-in-these-captures)
+- [Known Mismatches Between the 2007 PDF and the 2013 Reader Captures](#known-mismatches-between-the-2007-pdf-and-the-2013-reader-captures)
+- [Open Questions](#open-questions)
+- [Power-On and Power-Off Behavior](#power-on-and-power-off-behavior)
+- [Practical Guidance for Future Work](#practical-guidance-for-future-work)
 
 ## Evidence Levels
 
@@ -25,22 +46,22 @@ open questions.
 
 ## Sources
 
-- `docs/ipico-protocol/captures/connect.pcapng`
-- `docs/ipico-protocol/captures/con-dis.pcapng`
-- `docs/ipico-protocol/captures/settime.pcapng`
-- `docs/ipico-protocol/captures/delete-records.pcapng`
-- `docs/ipico-protocol/captures/guntime.pcapng`
-- `docs/ipico-protocol/captures/read4tags.pcapng`
-- `docs/ipico-protocol/captures/con-dis-w-4k-reads.pcapng`
-- `docs/ipico-protocol/captures/download-events.pcapng`
-- `docs/ipico-protocol/captures/downloadreads.pcapng`
-- `docs/ipico-protocol/captures/direct-fslsreads-con-dis.pcapng`
-- `docs/ipico-protocol/captures/direct-raw-reads-con-dis.pcapng`
-- `docs/ipico-protocol/captures/record-on-off.pcapng`
-- `docs/ipico-protocol/captures/testreads`
-- `docs/ipico-protocol/captures/turnon-con-dis.pcapng`
-- `docs/IPICO-Reader-Serial-Protocol-100-20071120.pdf`
-- `scripts/parse_pcap.py`
+- [`captures/connect.pcapng`](./captures/connect.pcapng)
+- [`captures/con-dis.pcapng`](./captures/con-dis.pcapng)
+- [`captures/settime.pcapng`](./captures/settime.pcapng)
+- [`captures/delete-records.pcapng`](./captures/delete-records.pcapng)
+- [`captures/guntime.pcapng`](./captures/guntime.pcapng)
+- [`captures/read4tags.pcapng`](./captures/read4tags.pcapng)
+- [`captures/con-dis-w-4k-reads.pcapng`](./captures/con-dis-w-4k-reads.pcapng)
+- [`captures/download-events.pcapng`](./captures/download-events.pcapng)
+- [`captures/downloadreads.pcapng`](./captures/downloadreads.pcapng)
+- [`captures/direct-fslsreads-con-dis.pcapng`](./captures/direct-fslsreads-con-dis.pcapng)
+- [`captures/direct-raw-reads-con-dis.pcapng`](./captures/direct-raw-reads-con-dis.pcapng)
+- [`captures/record-on-off.pcapng`](./captures/record-on-off.pcapng)
+- [`captures/testreads`](./captures/testreads)
+- [`captures/turnon-con-dis.pcapng`](./captures/turnon-con-dis.pcapng)
+- [`IPICO-Reader-Serial-Protocol-100-20071120.pdf`](./IPICO-Reader-Serial-Protocol-100-20071120.pdf)
+- [`scripts/parse_pcap.py`](../../scripts/parse_pcap.py)
 
 ## Reader Under Test
 
@@ -99,7 +120,7 @@ one concrete ASCII layout.
 The reader can emit plain text startup/banner lines. Over TCP we observed these
 when command `0x37` is sent.
 
-## Transport And Framing
+## Transport and Framing
 
 ### Transport
 
@@ -1079,7 +1100,14 @@ Observed in `docs/ipico-protocol/captures/delete-records.pcapng`:
 
 See the `0x4b` command reference for full frame details.
 
-## PDF-Documented Host Commands Not Seen In These Captures
+## Appendix: PDF-Documented Host Commands Not Seen In These Captures
+
+> These commands come from the 2007 serial PDF only. They are useful
+> family-level background, but they are not validated on the 2013 ARM9 TCP
+> reader
+> captured in this repo. Do not assume a command is supported on this reader
+> unless a capture, test artifact, or implementation reference in this repo
+> confirms it.
 
 The 2007 PDF defines many additional host-facing instructions. They are part of
 what we know about the broader IPICO protocol family, even though they were not
@@ -1167,7 +1195,7 @@ The PDF also contains a separate decoder-side instruction set accessed via I2C.
 That material is relevant to the broader IPICO platform, but it was not seen on
 the host-facing TCP wire protocol in this repo and is not expanded here.
 
-## Known Mismatches Between The 2007 PDF And The 2013 Reader Captures
+## Known Mismatches Between the 2007 PDF and the 2013 Reader Captures
 
 - `0x4b`, `0x4c`, `0xe0`, and `0xe2` do not appear in the 2007 PDF
 - `0x2c` is not in the PDF summary, but it is present on the wire as the
@@ -1203,7 +1231,7 @@ the host-facing TCP wire protocol in this repo and is not expanded here.
   `FS` / `LS` tag suffixes, or is that only a local convention adopted by this
   repo?
 
-## Power-On And Power-Off Behavior
+## Power-On and Power-Off Behavior
 
 `Capture`
 
@@ -1218,7 +1246,7 @@ Observed in `docs/ipico-protocol/captures/turnon-con-dis.pcapng`:
   disconnected before power is cut. No additional IPICO control traffic was seen
   after disconnect.
 
-## Practical Guidance For Future Work
+## Practical Guidance for Future Work
 
 - When implementing against this reader model, trust capture-confirmed behavior
   before the 2007 PDF when they disagree

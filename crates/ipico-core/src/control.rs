@@ -1,7 +1,8 @@
 //! IPICO reader TCP control protocol encoding/decoding.
 //!
 //! Pure functions — no async, no I/O. All frame encoding/decoding for the
-//! `ab`-prefixed control protocol described in `docs/ipico-control-protocol.md`.
+//! `ab`-prefixed control protocol described in
+//! `docs/ipico-protocol/ipico-control-protocol.md`.
 
 use std::fmt;
 
