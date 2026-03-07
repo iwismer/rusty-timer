@@ -1299,10 +1299,8 @@ async fn post_admin_update_port(
     if !check_admin_intent(&headers, ADMIN_UPDATE_PORT_INTENT) {
         return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
     }
-    if let Some(port) = body.local_port_override {
-        if port == 0 {
-            return (StatusCode::BAD_REQUEST, "port must be 1-65535").into_response();
-        }
+    if let Some(0) = body.local_port_override {
+        return (StatusCode::BAD_REQUEST, "port must be 1-65535").into_response();
     }
     let db = state.db.lock().await;
     match db.update_subscription_port(
