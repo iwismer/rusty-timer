@@ -95,6 +95,6 @@ export function computeTickingLastSeen(
 ): number | null {
   if (baseSecs == null) return null;
   if (receivedAt == null) return baseSecs;
-  const elapsedSecs = Math.floor((now - receivedAt) / 1000);
+  const elapsedSecs = Math.max(0, Math.floor((now - receivedAt) / 1000));
   return baseSecs + elapsedSecs;
 }

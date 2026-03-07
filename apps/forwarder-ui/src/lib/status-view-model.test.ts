@@ -151,4 +151,8 @@ describe("computeTickingLastSeen", () => {
   it("handles zero base", () => {
     expect(computeTickingLastSeen(0, 10000, 11500)).toBe(1);
   });
+
+  it("clamps elapsed to zero when now is before receivedAt", () => {
+    expect(computeTickingLastSeen(2, 10000, 9500)).toBe(2);
+  });
 });
