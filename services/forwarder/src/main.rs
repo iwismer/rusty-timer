@@ -217,8 +217,8 @@ async fn run_reader(
                 .update_reader_info(&poll_stream_key, reader_info.clone())
                 .await;
 
-            // Transition to 30s polling
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            // Transition to 10s polling
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
             interval.tick().await; // skip first immediate tick
             let mut info = reader_info;
             loop {

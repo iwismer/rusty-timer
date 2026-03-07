@@ -16,6 +16,7 @@
     readerBadgeState,
     readerConnectionSummary,
     formatClockDrift,
+    formatReadMode,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
 
@@ -40,6 +41,9 @@
   let controlFeedback = $state<
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
   >({});
+  let localClockStr = $state("");
+  let readerInfoReceivedAt = $state<Record<string, number>>({});
+  let clockTickNow = $state(Date.now());
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -55,9 +59,11 @@
     try {
       status = await api.getStatus();
       if (status) {
+        const now = Date.now();
         for (const r of status.readers) {
           if (r.reader_info) {
             readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
+            readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
           }
         }
       }
@@ -277,7 +283,17 @@
     }
   }
 
+  let clockInterval: ReturnType<typeof setInterval>;
+
+  function updateLocalClock() {
+    const now = new Date();
+    localClockStr = now.toLocaleTimeString([], { hour12: false });
+    clockTickNow = Date.now();
+  }
+
   onMount(() => {
+    updateLocalClock();
+    clockInterval = setInterval(updateLocalClock, 1000);
     loadAll();
     initSSE({
       onStatusChanged: (data) => {
@@ -307,6 +323,7 @@
           ...readerInfoMap,
           [ip]: { ...readerInfoMap[ip], ...info },
         };
+        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
       },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {
@@ -330,7 +347,10 @@
     });
   });
 
-  onDestroy(() => destroySSE());
+  onDestroy(() => {
+    clearInterval(clockInterval);
+    destroySSE();
+  });
 </script>
 
 <main class="max-w-[900px] mx-auto px-6 py-6">
@@ -629,6 +649,19 @@
                           <span class="font-mono ml-2"
                             >{info?.reader_clock ?? "\u2014"}</span
                           >
+                          {#if readerInfoReceivedAt[reader.ip]}
+                            <span class="text-xs text-text-muted ml-1"
+                              >({Math.round(
+                                (clockTickNow -
+                                  readerInfoReceivedAt[reader.ip]) /
+                                  1000,
+                              )}s ago)</span
+                            >
+                          {/if}
+                        </div>
+                        <div>
+                          <span class="text-text-muted">Local Clock:</span>
+                          <span class="font-mono ml-2">{localClockStr}</span>
                         </div>
                         <div>
                           <span class="text-text-muted">Clock Drift:</span>
@@ -639,7 +672,7 @@
                         <div>
                           <span class="text-text-muted">Read Mode:</span>
                           <span class="font-mono ml-2"
-                            >{info?.read_mode ?? "\u2014"}</span
+                            >{formatReadMode(info?.read_mode)}</span
                           >
                         </div>
                         <div>

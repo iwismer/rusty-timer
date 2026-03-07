@@ -29,6 +29,13 @@ export function readerConnectionSummary(readers: ReaderStatus[]): {
   };
 }
 
+export function formatReadMode(mode: string | null | undefined): string {
+  if (mode == null) return "\u2014";
+  if (mode === "fsls") return "FS/LS";
+  if (mode === "raw") return "Raw";
+  return mode;
+}
+
 export function formatClockDrift(ms: number | null | undefined): string {
   if (ms == null) return "\u2014";
   const abs = Math.abs(ms);
