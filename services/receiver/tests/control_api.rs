@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use receiver::Db;
-use receiver::control_api::{AppState, build_router};
+use receiver::control_api::{AppState, ConnectionState, build_router};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -32,16 +32,6 @@ async fn get_json(app: axum::Router, path: &str) -> (StatusCode, Value) {
 async fn put_json(app: axum::Router, path: &str, body: Value) -> StatusCode {
     let req = Request::builder()
         .method(Method::PUT)
-        .uri(path)
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
-    app.oneshot(req).await.unwrap().status()
-}
-
-async fn post_json(app: axum::Router, path: &str, body: Value) -> StatusCode {
-    let req = Request::builder()
-        .method(Method::POST)
         .uri(path)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
