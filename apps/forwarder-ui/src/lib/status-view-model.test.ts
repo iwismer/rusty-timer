@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatLastSeen,
   readerBadgeState,
+  readerBorderStatus,
   readerConnectionSummary,
   formatClockDrift,
   formatReadMode,
@@ -118,5 +119,13 @@ describe("computeDownloadPercent", () => {
         100,
       ),
     ).toBe(100);
+  });
+});
+
+describe("readerBorderStatus", () => {
+  it("maps reader state to card border status", () => {
+    expect(readerBorderStatus("connected")).toBe("ok");
+    expect(readerBorderStatus("connecting")).toBe("warn");
+    expect(readerBorderStatus("disconnected")).toBe("err");
   });
 });
