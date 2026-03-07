@@ -11,6 +11,7 @@ export interface ReaderInfo {
   clock_drift_ms?: number | null;
   read_mode?: string | null;
   read_mode_timeout?: number | null;
+  recording?: boolean | null;
 }
 
 export interface ReaderStatus {
@@ -211,4 +212,14 @@ export async function refreshReader(ip: string): Promise<ReaderInfo> {
 
 export async function clearReaderRecords(ip: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/v1/readers/${ip}/clear-records`, { method: "POST" });
+}
+
+export async function setRecording(
+  ip: string,
+  enabled: boolean,
+): Promise<{ recording: boolean }> {
+  return apiFetch(`/api/v1/readers/${ip}/recording`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
 }

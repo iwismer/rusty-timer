@@ -304,6 +304,34 @@
     }
   }
 
+  async function handleToggleRecording(ip: string) {
+    const info = readerInfoMap[ip];
+    const currentlyRecording = info?.recording === true;
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.setRecording(ip, !currentlyRecording);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], recording: result.recording },
+      };
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: {
+          kind: "ok",
+          message: result.recording ? "Recording started" : "Recording stopped",
+        },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Toggle recording failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
   let clockInterval: ReturnType<typeof setInterval>;
 
   function updateLocalClock() {
@@ -751,6 +779,20 @@
                           }}
                           disabled={controlBusy[reader.ip] ||
                             reader.state !== "connected"}>Refresh</button
+                        >
+                        <button
+                          class={info?.recording
+                            ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                            : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleToggleRecording(reader.ip);
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}
+                          >{info?.recording
+                            ? "Stop Recording"
+                            : "Start Recording"}</button
                         >
                         <button
                           class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
