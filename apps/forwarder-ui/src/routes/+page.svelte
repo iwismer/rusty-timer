@@ -202,6 +202,10 @@
     expandedReader = expandedReader === ip ? null : ip;
   }
 
+  function readerDetailsId(ip: string): string {
+    return `reader-details-${ip.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  }
+
   async function handleSyncClock(ip: string) {
     controlBusy = { ...controlBusy, [ip]: true };
     controlFeedback = { ...controlFeedback, [ip]: undefined };
@@ -470,12 +474,26 @@
             </thead>
             <tbody>
               {#each status.readers as reader}
-                <tr
-                  class="border-b border-border last:border-b-0 cursor-pointer hover:bg-surface-1"
-                  onclick={() => toggleReaderExpand(reader.ip)}
-                >
-                  <td class="px-4 py-2.5 font-mono text-text-primary">
-                    {reader.ip}
+                <tr class="border-b border-border last:border-b-0">
+                  <td class="px-4 py-2.5 text-text-primary">
+                    <div class="flex items-center gap-2">
+                      <button
+                        class="inline-flex min-w-20 items-center justify-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                        onclick={() => toggleReaderExpand(reader.ip)}
+                        aria-expanded={expandedReader === reader.ip}
+                        aria-controls={readerDetailsId(reader.ip)}
+                        aria-label={expandedReader === reader.ip
+                          ? "Hide details"
+                          : "Show details"}
+                      >
+                        <span
+                          class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
+                          >▾</span
+                        >
+                        <span>Details</span>
+                      </button>
+                      <span class="font-mono">{reader.ip}</span>
+                    </div>
                   </td>
                   <td class="px-4 py-2.5">
                     <StatusBadge
@@ -572,7 +590,10 @@
                 </tr>
                 {#if expandedReader === reader.ip}
                   {@const info = readerInfoMap[reader.ip]}
-                  <tr class="border-b border-border bg-surface-0">
+                  <tr
+                    id={readerDetailsId(reader.ip)}
+                    class="border-b border-border bg-surface-0"
+                  >
                     <td colspan="8" class="px-6 py-4">
                       <div
                         class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4"
