@@ -23,8 +23,8 @@ export const logsStore = writable<string[]>([]);
 
 export function pushLog(entry: string): void {
   logsStore.update((entries) => {
-    const next = [...entries, entry.trim()];
-    return next.length <= 500 ? next : next.slice(next.length - 500);
+    const next = [entry.trim(), ...entries];
+    return next.length <= 500 ? next : next.slice(0, 500);
   });
 }
 

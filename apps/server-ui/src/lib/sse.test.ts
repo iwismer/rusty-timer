@@ -533,8 +533,8 @@ describe("sse", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(get(logsStore)).toEqual([
-      "14:59:59 [INFO] snapshot entry",
       "15:00:00 [INFO] live entry",
+      "14:59:59 [INFO] snapshot entry",
     ]);
   });
 });

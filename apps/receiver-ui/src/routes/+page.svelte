@@ -874,7 +874,7 @@
       },
       onLogEntry: (entry) => {
         if (logs) {
-          logs = { entries: [...logs.entries, entry] };
+          logs = { entries: [entry, ...logs.entries] };
         } else {
           logs = { entries: [entry] };
         }

@@ -139,8 +139,8 @@ describe("stores", () => {
 
     const logs = get(logsStore);
     expect(logs).toHaveLength(500);
-    expect(logs[0]).toContain("msg-10");
-    expect(logs[logs.length - 1]).toContain("msg-509");
+    expect(logs[0]).toContain("msg-509");
+    expect(logs[logs.length - 1]).toContain("msg-10");
   });
 
   it("tracks when races have been loaded", () => {
