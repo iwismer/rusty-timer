@@ -1676,6 +1676,199 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Reader control API handlers
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/readers/{ip}/info
+async fn reader_info_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let ss = state.subsystem.lock().await;
+    match ss.readers.get(&ip) {
+        Some(r) => match &r.reader_info {
+            Some(info) => json_response(
+                StatusCode::OK,
+                serde_json::to_string(info).unwrap_or_else(|_| "{}".to_owned()),
+            ),
+            None => json_response(StatusCode::OK, "{}".to_owned()),
+        },
+        None => text_response(StatusCode::NOT_FOUND, "unknown reader"),
+    }
+}
+
+/// POST /api/v1/readers/{ip}/sync-clock
+async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+
+    let now = chrono::Local::now();
+    use chrono::Datelike;
+    use chrono::Timelike;
+    let year = (now.year() % 100) as u8;
+    let month = now.month() as u8;
+    let day = now.day() as u8;
+    let dow = now.weekday().number_from_monday() as u8;
+    let hour = now.hour() as u8;
+    let minute = now.minute() as u8;
+    let second = now.second() as u8;
+
+    if let Err(e) = client
+        .set_date_time(year, month, day, dow, hour, minute, second)
+        .await
+    {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        );
+    }
+
+    match client.get_date_time().await {
+        Ok(dt) => {
+            let reader_iso = dt.to_iso_string();
+            state
+                .logger
+                .log(format!("reader {} clock synced to {}", ip, reader_iso));
+            json_response(
+                StatusCode::OK,
+                format!("{{\"reader_clock\":\"{}\"}}", reader_iso),
+            )
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"set ok but verify failed: {}\"}}", e),
+        ),
+    }
+}
+
+/// GET /api/v1/readers/{ip}/read-mode
+async fn get_read_mode_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    match client.get_config3().await {
+        Ok((mode, timeout)) => json_response(
+            StatusCode::OK,
+            format!("{{\"mode\":\"{}\",\"timeout\":{}}}", mode.as_str(), timeout),
+        ),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SetReadModeBody {
+    mode: String,
+    #[serde(default = "default_timeout")]
+    timeout: u8,
+}
+fn default_timeout() -> u8 {
+    5
+}
+
+/// PUT /api/v1/readers/{ip}/read-mode
+async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+    axum::Json(body): axum::Json<SetReadModeBody>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    let mode = match body.mode.as_str() {
+        "raw" => ipico_core::control::ReadMode::Raw,
+        "event" => ipico_core::control::ReadMode::Event,
+        "fsls" => ipico_core::control::ReadMode::FirstLastSeen,
+        _ => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":\"unknown mode: {}\"}}", body.mode),
+            );
+        }
+    };
+    match client.set_config3(mode, body.timeout).await {
+        Ok(()) => {
+            state
+                .logger
+                .log(format!("reader {} read mode set to {}", ip, mode));
+            json_response(
+                StatusCode::OK,
+                format!("{{\"mode\":\"{}\"}}", mode.as_str()),
+            )
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        ),
+    }
+}
+
+/// POST /api/v1/readers/{ip}/refresh
+async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    let mut info = crate::reader_control::ReaderInfo::default();
+    crate::reader_control::run_status_poll(&client, &mut info).await;
+    {
+        let mut ss = state.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(&ip) {
+            r.reader_info = Some(info.clone());
+        }
+    }
+    let _ = state
+        .ui_tx
+        .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+            ip: ip.clone(),
+            info: info.clone(),
+        });
+    json_response(
+        StatusCode::OK,
+        serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_owned()),
+    )
+}
+
+/// POST /api/v1/readers/{ip}/clear-records
+async fn clear_records_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    state
+        .logger
+        .log(format!("reader {} clearing onboard records...", ip));
+    match client.clear_records().await {
+        Ok(()) => {
+            state.logger.log(format!("reader {} records cleared", ip));
+            json_response(StatusCode::OK, "{\"ok\":true}".to_owned())
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"{}\"}}", e),
+        ),
+    }
+}
+
 fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
@@ -1742,6 +1935,23 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route("/api/v1/status", get(status_json_handler::<J>))
         .route("/api/v1/logs", get(logs_handler::<J>))
         .route("/api/v1/events", get(events_handler::<J>))
+        .route("/api/v1/readers/{ip}/info", get(reader_info_handler::<J>))
+        .route(
+            "/api/v1/readers/{ip}/sync-clock",
+            post(sync_clock_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/read-mode",
+            get(get_read_mode_handler::<J>).put(set_read_mode_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/refresh",
+            post(refresh_handler_reader::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/clear-records",
+            post(clear_records_handler::<J>),
+        )
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
