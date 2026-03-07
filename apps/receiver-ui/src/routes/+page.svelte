@@ -1151,8 +1151,7 @@
                     <span
                       class="text-sm font-medium text-text-primary truncate"
                     >
-                      {stream.display_alias ??
-                        `${stream.forwarder_id} / ${stream.reader_ip}`}
+                      {stream.display_alias ?? stream.forwarder_id}
                     </span>
                     {#if stream.online !== undefined}
                       <StatusBadge
@@ -1162,7 +1161,7 @@
                     {/if}
                   </div>
                   <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
-                    {stream.forwarder_id} / {stream.reader_ip}
+                    {stream.reader_ip}
                   </p>
                   {#if stream.local_port !== null}
                     <p class="text-xs font-mono text-text-muted mt-0.5 m-0">
