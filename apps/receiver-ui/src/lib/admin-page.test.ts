@@ -26,6 +26,7 @@ const apiMocks = vi.hoisted(() => ({
   }),
   getSubscriptions: vi.fn().mockResolvedValue({ subscriptions: [] }),
   resetStreamCursor: vi.fn().mockResolvedValue(undefined),
+  updateLocalPort: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("$lib/api", () => apiMocks);
@@ -157,5 +158,30 @@ describe("receiver admin page", () => {
     await waitFor(() => {
       expect(finishButton).not.toBeDisabled();
     });
+  });
+
+  it("rejects malformed port strings and does not call update api", async () => {
+    apiMocks.getSubscriptions.mockResolvedValueOnce({
+      subscriptions: [
+        {
+          forwarder_id: "f1",
+          reader_ip: "10.0.0.1:10000",
+          local_port_override: null,
+        },
+      ],
+    });
+
+    render(Page);
+
+    const input = await screen.findByPlaceholderText("default");
+    await fireEvent.input(input, { target: { value: "9000abc" } });
+
+    const saveButton = await screen.findByRole("button", { name: "Save" });
+    await fireEvent.click(saveButton);
+
+    expect(
+      await screen.findByText("Port must be 1-65535 or empty to clear."),
+    ).toBeInTheDocument();
+    expect(apiMocks.updateLocalPort).not.toHaveBeenCalled();
   });
 });

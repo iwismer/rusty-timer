@@ -1258,6 +1258,7 @@ async fn post_admin_reset_profile(
             drop(db);
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
+            *state.update_mode.write().await = rt_updater::UpdateMode::default();
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -1284,6 +1285,7 @@ async fn post_admin_factory_reset(
             drop(db);
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
+            *state.update_mode.write().await = rt_updater::UpdateMode::default();
             state.emit_streams_snapshot().await;
             StatusCode::NO_CONTENT.into_response()
         }

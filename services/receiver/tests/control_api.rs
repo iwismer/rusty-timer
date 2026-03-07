@@ -799,6 +799,32 @@ async fn admin_reset_profile_clears_credentials() {
 }
 
 #[tokio::test]
+async fn admin_reset_profile_resets_runtime_update_mode_to_default() {
+    let (app, state) = setup_with_state();
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok","update_mode":"disabled"}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::Disabled
+    ));
+
+    let (status, _) =
+        post_empty_with_intent(app, "/api/v1/admin/profile/reset", "reset-profile").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::CheckAndDownload
+    ));
+}
+
+#[tokio::test]
 async fn admin_factory_reset_clears_everything() {
     let (app, state) = setup_with_state();
     {
@@ -816,6 +842,32 @@ async fn admin_factory_reset_clears_everything() {
     let (_, profile) = get_json(app, "/api/v1/profile").await;
     assert_eq!(profile["server_url"], "");
     assert_eq!(profile["token"], "");
+}
+
+#[tokio::test]
+async fn admin_factory_reset_resets_runtime_update_mode_to_default() {
+    let (app, state) = setup_with_state();
+    assert_eq!(
+        put_json(
+            app.clone(),
+            "/api/v1/profile",
+            json!({"server_url":"wss://s.com","token":"tok","update_mode":"disabled"}),
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::Disabled
+    ));
+
+    let (status, _) =
+        post_empty_with_intent(app, "/api/v1/admin/factory-reset", "factory-reset").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(matches!(
+        *state.update_mode.read().await,
+        rt_updater::UpdateMode::CheckAndDownload
+    ));
 }
 
 #[tokio::test]

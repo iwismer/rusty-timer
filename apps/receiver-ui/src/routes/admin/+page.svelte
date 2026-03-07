@@ -144,14 +144,19 @@
   async function handleSavePort(sub: api.SubscriptionItem) {
     const key = streamKey(sub);
     const raw = portEdits.get(key) ?? "";
-    const portValue = raw.trim() === "" ? null : parseInt(raw, 10);
-
-    if (
-      portValue !== null &&
-      (isNaN(portValue) || portValue < 1 || portValue > 65535)
-    ) {
-      setFeedback("Port must be 1-65535 or empty to clear.", false);
-      return;
+    const trimmed = raw.trim();
+    let portValue: number | null = null;
+    if (trimmed !== "") {
+      if (!/^\d+$/.test(trimmed)) {
+        setFeedback("Port must be 1-65535 or empty to clear.", false);
+        return;
+      }
+      const parsed = Number(trimmed);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+        setFeedback("Port must be 1-65535 or empty to clear.", false);
+        return;
+      }
+      portValue = parsed;
     }
 
     const actionKey = `port-${key}`;
