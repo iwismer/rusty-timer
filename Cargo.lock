@@ -1579,6 +1579,9 @@ dependencies = [
 [[package]]
 name = "ipico-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "ipnet"
