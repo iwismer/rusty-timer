@@ -33,6 +33,16 @@
   let checkingUpdate = $state(false);
   let checkMessage = $state<string | null>(null);
   let saving = $state(false);
+  let savedServerUrl = $state("");
+  let savedToken = $state("");
+  let savedUpdateMode = $state("check-and-download");
+  let savedReceiverId = $state("");
+  let configDirty = $derived(
+    editServerUrl !== savedServerUrl ||
+      editToken !== savedToken ||
+      editUpdateMode !== savedUpdateMode ||
+      editReceiverId !== savedReceiverId,
+  );
   let connectBusy = $state(false);
   let updateVersion = $state<string | null>(null);
   let updateStatus = $state<"available" | "downloaded" | null>(null);
@@ -509,6 +519,10 @@
         editToken = p.token;
         editUpdateMode = p.update_mode || "check-and-download";
         editReceiverId = p.receiver_id;
+        savedServerUrl = p.server_url;
+        savedToken = p.token;
+        savedUpdateMode = p.update_mode || "check-and-download";
+        savedReceiverId = p.receiver_id;
       }
       const us = await api.getUpdateStatus().catch(() => null);
       if (
@@ -697,13 +711,18 @@
 
   async function saveProfile() {
     saving = true;
+    const payload = {
+      server_url: editServerUrl,
+      token: editToken,
+      update_mode: editUpdateMode,
+      receiver_id: editReceiverId,
+    };
     try {
-      await api.putProfile({
-        server_url: editServerUrl,
-        token: editToken,
-        update_mode: editUpdateMode,
-        receiver_id: editReceiverId,
-      });
+      await api.putProfile(payload);
+      savedServerUrl = payload.server_url;
+      savedToken = payload.token;
+      savedUpdateMode = payload.update_mode;
+      savedReceiverId = payload.receiver_id;
     } catch (e) {
       error = String(e);
     } finally {
@@ -1011,7 +1030,7 @@
             data-testid="save-config-btn"
             class={btnPrimary}
             onclick={saveProfile}
-            disabled={saving}
+            disabled={!configDirty || saving}
           >
             {saving ? "Saving..." : "Save"}
           </button>

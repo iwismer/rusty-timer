@@ -133,6 +133,49 @@ describe("receiver page mode controls", () => {
     });
   });
 
+  it("keeps save enabled when config changes during in-flight save", async () => {
+    const putProfileDeferred = deferred<void>();
+    apiMocks.getProfile.mockResolvedValueOnce({
+      server_url: "wss://s.com",
+      token: "tok",
+      update_mode: "check-and-download",
+      receiver_id: "recv-original",
+    });
+    apiMocks.putProfile.mockImplementationOnce(
+      () => putProfileDeferred.promise,
+    );
+
+    render(Page);
+
+    const receiverIdInput = (await screen.findByTestId(
+      "receiver-id-input",
+    )) as HTMLInputElement;
+    await waitFor(() => {
+      expect(receiverIdInput.value).toBe("recv-original");
+    });
+
+    await fireEvent.input(receiverIdInput, { target: { value: "recv-first" } });
+
+    const saveBtn = await screen.findByTestId("save-config-btn");
+    await fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(saveBtn).toBeDisabled();
+    });
+
+    await fireEvent.input(receiverIdInput, {
+      target: { value: "recv-second" },
+    });
+    putProfileDeferred.resolve();
+
+    await waitFor(() => {
+      expect(apiMocks.putProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ receiver_id: "recv-first" }),
+      );
+      expect(saveBtn).toBeEnabled();
+    });
+  });
+
   it("loadAll fetches mode and hydrates race state", async () => {
     apiMocks.getMode.mockResolvedValueOnce({ mode: "race", race_id: "race-1" });
 
