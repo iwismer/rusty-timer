@@ -4,6 +4,7 @@ use ipico_core::control::{self, Command, ControlError, ControlFrame};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tracing::{info, warn};
 
 struct PendingRequest {
     instruction: u8,
@@ -218,6 +219,105 @@ impl ControlResponseSink {
             if !trimmed.is_empty() {
                 self.banner_buf.lock().await.push(trimmed.to_owned());
             }
+        }
+    }
+}
+
+/// Reader info gathered on connect and refreshed by polling.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReaderInfo {
+    pub banner: Option<String>,
+    pub fw_version: Option<String>,
+    pub hw_code: Option<u8>,
+    pub reader_id: Option<u8>,
+    pub config3: Option<u8>,
+    pub unique_tag_count: Option<u16>,
+    pub stored_record_pages: Option<u8>,
+    pub reader_clock: Option<String>,
+    pub clock_drift_ms: Option<i64>,
+    pub read_mode: Option<String>,
+    pub read_mode_timeout: Option<u8>,
+}
+
+/// Run the initial connection sequence: statistics, banner, ext status, config3, clock.
+pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
+    let mut ri = ReaderInfo::default();
+
+    match client.get_statistics().await {
+        Ok(stats) => {
+            ri.fw_version = Some(stats.fw_version_string());
+            ri.hw_code = Some(stats.hw_code);
+            ri.reader_id = Some(stats.reader_id);
+            ri.config3 = Some(stats.config3);
+            info!(fw = %stats.fw_version_string(), hw = stats.hw_code, "reader statistics");
+        }
+        Err(e) => warn!("get_statistics failed: {}", e),
+    }
+
+    match client.print_banner().await {
+        Ok(banner) if !banner.is_empty() => {
+            info!(banner = %banner, "reader banner");
+            ri.banner = Some(banner);
+        }
+        Ok(_) => {}
+        Err(e) => warn!("print_banner failed: {}", e),
+    }
+
+    match client.get_extended_status().await {
+        Ok(ext) => {
+            ri.unique_tag_count = Some(ext.unique_tag_count);
+            ri.stored_record_pages = Some(ext.stored_record_pages);
+            info!(
+                unique_tags = ext.unique_tag_count,
+                stored_pages = ext.stored_record_pages,
+                "reader extended status"
+            );
+        }
+        Err(e) => warn!("get_extended_status failed: {}", e),
+    }
+
+    match client.get_config3().await {
+        Ok((mode, timeout)) => {
+            ri.read_mode = Some(mode.as_str().to_owned());
+            ri.read_mode_timeout = Some(timeout);
+        }
+        Err(e) => warn!("get_config3 failed: {}", e),
+    }
+
+    poll_clock(client, &mut ri).await;
+
+    ri
+}
+
+/// Poll clock and extended status, updating info in place.
+pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
+    if let Ok(ext) = client.get_extended_status().await {
+        info.unique_tag_count = Some(ext.unique_tag_count);
+        info.stored_record_pages = Some(ext.stored_record_pages);
+    }
+
+    if let Ok((mode, timeout)) = client.get_config3().await {
+        info.read_mode = Some(mode.as_str().to_owned());
+        info.read_mode_timeout = Some(timeout);
+    }
+
+    poll_clock(client, info).await;
+}
+
+async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) {
+    if let Ok(dt) = client.get_date_time().await {
+        let reader_iso = dt.to_iso_string();
+        info.reader_clock = Some(reader_iso.clone());
+
+        let now = chrono::Local::now();
+        if let Ok(reader_naive) =
+            chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
+        {
+            let system_naive = now.naive_local();
+            let drift = system_naive
+                .signed_duration_since(reader_naive)
+                .num_milliseconds();
+            info.clock_drift_ms = Some(drift);
         }
     }
 }

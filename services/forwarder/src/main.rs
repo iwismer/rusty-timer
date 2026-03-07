@@ -182,7 +182,7 @@ async fn run_reader(
         // Set up control channels
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let (control_client, control_sink) = forwarder::reader_control::ControlClient::new(cmd_tx);
-        let _control_client = Arc::new(control_client);
+        let control_client = Arc::new(control_client);
 
         // Writer task: drains command channel to TCP socket
         let mut writer = write_half;
@@ -190,6 +190,37 @@ async fn run_reader(
             while let Some(frame) = cmd_rx.recv().await {
                 if writer.write_all(&frame).await.is_err() {
                     break;
+                }
+            }
+        });
+
+        // Spawn connect sequence + 30s status polling task.
+        // This runs concurrently with the read loop so that control
+        // responses arriving on the socket can be demuxed to the sink.
+        let poll_client = control_client.clone();
+        let mut poll_shutdown = shutdown_rx.clone();
+        let poll_logger = logger.clone();
+        let poll_reader_ip = reader_ip.clone();
+        let poll_handle = tokio::spawn(async move {
+            // Run initial connection sequence
+            let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
+            poll_logger.log(format!(
+                "reader {} identified: fw={}, tags={}",
+                poll_reader_ip,
+                reader_info.fw_version.as_deref().unwrap_or("?"),
+                reader_info.unique_tag_count.unwrap_or(0),
+            ));
+
+            // Transition to 30s polling
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.tick().await; // skip first immediate tick
+            let mut info = reader_info;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
+                    }
+                    _ = poll_shutdown.changed() => break,
                 }
             }
         });
@@ -340,6 +371,7 @@ async fn run_reader(
         }
 
         writer_handle.abort();
+        poll_handle.abort();
 
         // Reconnect with backoff
         let delay = Duration::from_secs(backoff_secs);
@@ -1734,7 +1766,11 @@ mod tests {
             .write_all(b"aa400000000123450a2a01123018455927a7FS\n")
             .await
             .expect("write fsls read");
-        drop(reader_stream);
+        // Graceful shutdown: the forwarder's connect sequence sends control
+        // commands to the socket; if we drop with unread data the OS may
+        // RST and discard our buffered writes. Shut down the write half
+        // first so the reader sees EOF cleanly.
+        let _ = reader_stream.shutdown().await;
 
         let mut events = Vec::new();
         for _ in 0..50 {
