@@ -7,7 +7,7 @@ It is based on the current gaps in
 `docs/ipico-protocol/ipico-control-protocol.md`, plus the extra context that:
 
 - `IPICO Dashboard` is the control-plane tool
-- `IPICO Connect` is the read/timing tool
+- `IPICO Connect` is the live-read path into the timing software
 - `docs/ipico-protocol/captures/con-dis.pcapng` already covers a clean
   connect/disconnect that was not immediately after reader startup
 
@@ -31,10 +31,11 @@ Use `IPICO Dashboard` for:
 
 Use `IPICO Connect` for:
 
-- generating real tag reads
+- receiving live tag reads from the reader
+- passing those reads along to the timing software
 - timing behavior
 - FSLS behavior, if it respects the current reader mode
-- any capture where active reads need to happen while Dashboard is still polling
+- any capture where live reads need to happen while Dashboard is still polling
 
 ## General Capture Rules
 
@@ -113,7 +114,8 @@ Steps for `trigger-while-reading.pcapng`:
 
 1. Start a new capture.
 2. Connect `IPICO Dashboard`.
-3. Use `IPICO Connect` to create active tag reads.
+3. Use `IPICO Connect` while presenting tags to the reader so live reads are
+   flowing.
 4. While reads are happening, press the trigger once.
 5. Wait for the reads to finish and for a few more polls.
 6. Stop capture.
@@ -244,7 +246,7 @@ Suggested files:
 App:
 
 - `IPICO Dashboard`
-- `IPICO Connect` only for generating reads between Dashboard polls
+- `IPICO Connect` only so live reads are happening between Dashboard polls
 
 Steps for `extstatus-empty.pcapng`:
 
@@ -262,7 +264,7 @@ Steps for `extstatus-after-reads.pcapng`:
 
 1. Start a new capture.
 2. Connect `IPICO Dashboard`.
-3. Use `IPICO Connect` to generate a small number of real reads.
+3. Use `IPICO Connect` while presenting a small number of tags to the reader.
 4. Leave `IPICO Dashboard` connected for another 10-15 seconds.
 5. Stop capture.
 
@@ -298,7 +300,7 @@ Suggested files:
 App:
 
 - `IPICO Dashboard` to set the mode
-- `IPICO Connect` or normal reader operation to generate reads
+- `IPICO Connect` or the normal timing setup while real reads are happening
 
 Steps for `fsls-set-mode.pcapng`:
 
