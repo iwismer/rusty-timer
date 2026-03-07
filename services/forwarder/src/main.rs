@@ -176,16 +176,19 @@ async fn run_reader(
             .update_reader_state(&stream_key, ReaderConnectionState::Connecting)
             .await;
 
-        let stream = match TcpStream::connect(&target_addr).await {
-            Ok(s) => {
-                logger.log(format!("reader {} connected", reader_ip));
-                backoff_secs = 1; // reset backoff on successful connect
-                status
-                    .update_reader_state(&stream_key, ReaderConnectionState::Connected)
-                    .await;
-                s
-            }
-            Err(e) => {
+        let stream = match tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(&target_addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            other => {
+                let e = match other {
+                    Ok(Err(e)) => e.to_string(),
+                    Err(_) => "connect timeout (5s)".to_string(),
+                    _ => unreachable!(),
+                };
                 logger.log_at(
                     UiLogLevel::Warn,
                     format!(
@@ -212,6 +215,11 @@ async fn run_reader(
                 continue;
             }
         };
+        logger.log(format!("reader {} connected", reader_ip));
+        backoff_secs = 1;
+        status
+            .update_reader_state(&stream_key, ReaderConnectionState::Connected)
+            .await;
 
         // Initialize stream state in journal on first connect
         {

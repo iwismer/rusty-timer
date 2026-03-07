@@ -721,7 +721,7 @@
                   label={reader.state}
                   state={readerBadgeState(reader.state)}
                 />
-                {#if reader.state === "disconnected"}
+                {#if reader.state !== "connected"}
                   <button
                     class="ml-2 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     onclick={() => handleReconnect(reader.ip)}
