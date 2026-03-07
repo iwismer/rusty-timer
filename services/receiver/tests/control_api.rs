@@ -782,6 +782,27 @@ async fn admin_purge_subscriptions_deletes_all() {
 }
 
 #[tokio::test]
+async fn admin_purge_subscriptions_requests_reconnect_when_connected() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+    }
+    state.set_connection_state(ConnectionState::Connected).await;
+
+    let (status, _) = post_empty_with_intent(
+        app.clone(),
+        "/api/v1/admin/subscriptions/purge",
+        "purge-subscriptions",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, runtime_status) = get_json(app, "/api/v1/status").await;
+    assert_eq!(runtime_status["connection_state"], "connecting");
+}
+
+#[tokio::test]
 async fn admin_reset_profile_clears_credentials() {
     let (app, state) = setup_with_state();
     {
@@ -796,6 +817,24 @@ async fn admin_reset_profile_clears_credentials() {
     let (_, profile) = get_json(app, "/api/v1/profile").await;
     assert_eq!(profile["server_url"], "");
     assert_eq!(profile["token"], "");
+}
+
+#[tokio::test]
+async fn admin_reset_profile_disconnects_when_connected() {
+    let (app, state) = setup_with_state();
+    {
+        let db = state.db.lock().await;
+        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+    }
+    state.set_connection_state(ConnectionState::Connected).await;
+
+    let (status, _) =
+        post_empty_with_intent(app.clone(), "/api/v1/admin/profile/reset", "reset-profile").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, runtime_status) = get_json(app, "/api/v1/status").await;
+    assert_eq!(runtime_status["connection_state"], "disconnecting");
 }
 
 #[tokio::test]

@@ -1238,7 +1238,26 @@ async fn post_admin_purge_subscriptions(
     match db.delete_all_subscriptions() {
         Ok(count) => {
             drop(db);
+            let conn_for_status = state.connection_state.read().await.clone();
+            let db = state.db.lock().await;
+            let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
+            let receiver_id = state.receiver_id.read().await.clone();
+            let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
+                connection_state: conn_for_status,
+                streams_count,
+                receiver_id,
+            });
+            drop(db);
             state.emit_streams_snapshot().await;
+            let conn_for_reconnect = state.connection_state.read().await.clone();
+            if matches!(
+                conn_for_reconnect,
+                ConnectionState::Connected
+                    | ConnectionState::Connecting
+                    | ConnectionState::Disconnected
+            ) {
+                state.request_connect().await;
+            }
             Json(serde_json::json!({ "deleted": count })).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -1252,6 +1271,13 @@ async fn post_admin_reset_profile(
     if !check_admin_intent(&headers, ADMIN_RESET_PROFILE_INTENT) {
         return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
     }
+    let current = state.connection_state.read().await.clone();
+    if current != ConnectionState::Disconnected {
+        state
+            .set_connection_state(ConnectionState::Disconnecting)
+            .await;
+        let _ = state.shutdown_tx.send(true);
+    }
     let db = state.db.lock().await;
     match db.reset_profile() {
         Ok(()) => {
@@ -1259,6 +1285,7 @@ async fn post_admin_reset_profile(
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
             *state.update_mode.write().await = rt_updater::UpdateMode::default();
+            state.emit_streams_snapshot().await;
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
