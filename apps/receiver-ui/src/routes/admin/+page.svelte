@@ -227,6 +227,7 @@
   {:else if loadError}
     <p class="text-sm text-status-err">{loadError}</p>
   {:else}
+    <div class="space-y-6">
     <!-- Cursor Reset -->
     <Card title="Cursor Reset" borderStatus="warn">
       <p class="text-sm text-text-muted m-0 mb-4">
@@ -502,5 +503,6 @@
         </button>
       {/if}
     </Card>
+    </div>
   {/if}
 </main>
