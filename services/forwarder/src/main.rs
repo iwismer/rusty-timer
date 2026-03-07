@@ -128,6 +128,20 @@ fn download_progress_advanced_or_started(
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadStallOutcome {
+    CompleteEmpty,
+    FailStalled,
+}
+
+fn stall_outcome_for_download(saw_download_activity: bool) -> DownloadStallOutcome {
+    if saw_download_activity {
+        DownloadStallOutcome::FailStalled
+    } else {
+        DownloadStallOutcome::CompleteEmpty
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
@@ -257,6 +271,7 @@ async fn run_reader(
             let mut last_download_reads = 0u32;
             let mut last_progress_time = tokio::time::Instant::now();
             let mut was_downloading = false;
+            let mut saw_download_activity = false;
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -264,18 +279,32 @@ async fn run_reader(
                         poll_status.update_reader_info(&poll_stream_key, info.clone()).await;
 
                         // Check download progress
-                        {
-                            let mut dt = poll_download_tracker.lock().await;
-                            if dt.state == forwarder::reader_control::DownloadState::Downloading
-                                && let Ok(ext) = poll_client.get_extended_status().await
-                            {
+                        let is_downloading = {
+                            let dt = poll_download_tracker.lock().await;
+                            dt.state == forwarder::reader_control::DownloadState::Downloading
+                        };
+
+                        if is_downloading {
+                            if let Ok(ext) = poll_client.get_extended_status().await {
                                 let progress = ext.download_progress;
                                 let extent = ext.stored_data_extent;
+
+                                let mut dt = poll_download_tracker.lock().await;
+                                if dt.state != forwarder::reader_control::DownloadState::Downloading {
+                                    was_downloading = false;
+                                    continue;
+                                }
+
                                 dt.update_progress(progress, extent);
 
-                                // Safety timeout: no progress for 30 seconds
+                                // Safety timeout: no progress for 30 seconds.
+                                // If we have never observed any activity, treat this as an
+                                // empty download and complete cleanly.
                                 let current_progress = progress;
                                 let current_reads = dt.reads_received;
+                                if current_progress > 0 || current_reads > 0 {
+                                    saw_download_activity = true;
+                                }
                                 if !download_progress_advanced_or_started(
                                     &mut was_downloading,
                                     &mut last_download_progress,
@@ -285,10 +314,19 @@ async fn run_reader(
                                     current_reads,
                                 ) && last_progress_time.elapsed() > Duration::from_secs(30) {
                                     drop(dt);
-                                    let _ = poll_client.stop_download().await;
+                                    let stop_result = poll_client.stop_download().await;
                                     let mut dt = poll_download_tracker.lock().await;
-                                    dt.fail("download stalled: no progress for 30 seconds".to_owned());
+                                    match stop_result {
+                                        Err(e) => dt.fail(format!("stop_download failed: {}", e)),
+                                        Ok(()) => match stall_outcome_for_download(saw_download_activity) {
+                                            DownloadStallOutcome::CompleteEmpty => dt.complete(),
+                                            DownloadStallOutcome::FailStalled => {
+                                                dt.fail("download stalled: no progress for 30 seconds".to_owned())
+                                            }
+                                        },
+                                    }
                                     was_downloading = false;
+                                    saw_download_activity = false;
                                     continue;
                                 }
 
@@ -302,10 +340,14 @@ async fn run_reader(
                                         dt.complete();
                                     }
                                     was_downloading = false;
+                                    saw_download_activity = false;
                                 }
                             } else {
                                 was_downloading = false;
                             }
+                        } else {
+                            was_downloading = false;
+                            saw_download_activity = false;
                         }
                     }
                     _ = poll_shutdown.changed() => break,
@@ -1731,6 +1773,22 @@ mod tests {
         assert!(changed);
         assert_eq!(last_download_progress, 11);
         assert_eq!(last_download_reads, 20);
+    }
+
+    #[test]
+    fn stalled_download_without_progress_is_treated_as_empty_completion() {
+        assert_eq!(
+            stall_outcome_for_download(false),
+            DownloadStallOutcome::CompleteEmpty
+        );
+    }
+
+    #[test]
+    fn stalled_download_after_progress_is_treated_as_error() {
+        assert_eq!(
+            stall_outcome_for_download(true),
+            DownloadStallOutcome::FailStalled
+        );
     }
 
     #[test]
