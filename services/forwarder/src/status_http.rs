@@ -1795,7 +1795,10 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
         _ => {
             return json_response(
                 StatusCode::BAD_REQUEST,
-                format!("{{\"error\":\"unknown mode: {}\"}}", body.mode),
+                serde_json::json!({
+                    "error": format!("unknown mode: {}", body.mode)
+                })
+                .to_string(),
             );
         }
     };
@@ -2729,6 +2732,47 @@ mod tests {
         assert_eq!(info["fw_version"], "15.8");
         assert_eq!(info["banner"], "ARM9 Controller");
         assert_eq!(info["hw_code"], 143);
+    }
+
+    #[tokio::test]
+    async fn set_read_mode_invalid_mode_returns_valid_json_error() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let (control_client, _control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/read-mode",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"bad\"mode"}"#)
+            .send()
+            .await
+            .expect("PUT read-mode");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body: serde_json::Value = resp.json().await.expect("json error response");
+        assert_eq!(body["error"], "unknown mode: bad\"mode");
     }
 
     #[tokio::test]
