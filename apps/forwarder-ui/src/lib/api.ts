@@ -183,7 +183,7 @@ export async function getReaderInfo(ip: string): Promise<ReaderInfo> {
 
 export async function syncReaderClock(
   ip: string,
-): Promise<{ reader_clock: string }> {
+): Promise<{ reader_clock: string; clock_drift_ms: number | null }> {
   return apiFetch(`/api/v1/readers/${ip}/sync-clock`, { method: "POST" });
 }
 

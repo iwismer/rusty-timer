@@ -222,7 +222,7 @@
         [ip]: {
           ...readerInfoMap[ip],
           reader_clock: result.reader_clock,
-          clock_drift_ms: 0,
+          clock_drift_ms: result.clock_drift_ms,
         },
       };
       readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
