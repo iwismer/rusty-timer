@@ -657,10 +657,6 @@
                             selected={info?.read_mode === "raw"}>Raw</option
                           >
                           <option
-                            value="event"
-                            selected={info?.read_mode === "event"}>Event</option
-                          >
-                          <option
                             value="fsls"
                             selected={info?.read_mode === "fsls"}
                             >First/Last Seen</option
