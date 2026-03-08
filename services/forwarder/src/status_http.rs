@@ -1915,7 +1915,7 @@ fn compute_sync_timing(
     let mut target_boundary = target_boundary_initial;
     let mut ideal_send = target_boundary - arrival_offset - sync_delay;
     if ideal_send < wall_now {
-        target_boundary = target_boundary + chrono::Duration::seconds(1);
+        target_boundary += chrono::Duration::seconds(1);
         ideal_send = target_boundary - arrival_offset - sync_delay;
     }
     let pre_set_wait = ideal_send
