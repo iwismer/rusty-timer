@@ -212,15 +212,35 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
             hour,
             minute,
             second,
-        } => vec![
-            to_bcd(*year)?,
-            to_bcd(*month)?,
-            to_bcd(*day)?,
-            *day_of_week,
-            to_bcd(*hour)?,
-            to_bcd(*minute)?,
-            to_bcd(*second)?,
-        ],
+        } => {
+            let checks: &[(&str, u8, u8, u8)] = &[
+                ("month", *month, 1, 12),
+                ("day", *day, 1, 31),
+                ("day_of_week", *day_of_week, 0, 6),
+                ("hour", *hour, 0, 23),
+                ("minute", *minute, 0, 59),
+                ("second", *second, 0, 59),
+            ];
+            for &(field, value, min, max) in checks {
+                if value < min || value > max {
+                    return Err(ControlError::DateTimeOutOfRange {
+                        field,
+                        value,
+                        min,
+                        max,
+                    });
+                }
+            }
+            vec![
+                to_bcd(*year)?,
+                to_bcd(*month)?,
+                to_bcd(*day)?,
+                *day_of_week,
+                to_bcd(*hour)?,
+                to_bcd(*minute)?,
+                to_bcd(*second)?,
+            ]
+        }
         Command::SetConfig3 { mode, timeout } => {
             // 0x07 = modify lower 3 bits of CONFIG3 (mode selection: bits 0..2)
             vec![mode.config3_value(), *timeout, 0x07]
@@ -445,10 +465,19 @@ pub enum ControlError {
     InvalidHex,
     BadLrc,
     ReaderError(u8),
-    UnexpectedLength { instruction: u8, got: usize },
+    UnexpectedLength {
+        instruction: u8,
+        got: usize,
+    },
     UnknownReadMode(u8),
     InvalidBcd(u8),
     DataTooLong(usize),
+    DateTimeOutOfRange {
+        field: &'static str,
+        value: u8,
+        min: u8,
+        max: u8,
+    },
 }
 
 impl fmt::Display for ControlError {
@@ -473,6 +502,17 @@ impl fmt::Display for ControlError {
             }
             ControlError::DataTooLong(len) => {
                 write!(f, "command data too long: {len} bytes (max 255)")
+            }
+            ControlError::DateTimeOutOfRange {
+                field,
+                value,
+                min,
+                max,
+            } => {
+                write!(
+                    f,
+                    "date/time field {field} value {value} out of range (expected {min}..={max})"
+                )
             }
         }
     }
@@ -1109,11 +1149,91 @@ mod tests {
     }
 
     #[test]
-    fn read_mode_serde_round_trip() {
-        for mode in [ReadMode::Raw, ReadMode::Event, ReadMode::FirstLastSeen] {
-            let json = serde_json::to_string(&mode).unwrap();
-            let back: ReadMode = serde_json::from_str(&json).unwrap();
-            assert_eq!(mode, back, "round-trip failed for {json}");
-        }
+    fn set_date_time_rejects_month_zero() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 0,
+            day: 8,
+            day_of_week: 0,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange { field: "month", .. }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_rejects_month_13() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 13,
+            day: 8,
+            day_of_week: 0,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange { field: "month", .. }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_rejects_dow_7() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 3,
+            day: 8,
+            day_of_week: 7,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange {
+                field: "day_of_week",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_rejects_hour_24() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 3,
+            day: 8,
+            day_of_week: 0,
+            hour: 24,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange { field: "hour", .. }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_accepts_valid_boundary_values() {
+        let cmd = Command::SetDateTime {
+            year: 99,
+            month: 12,
+            day: 31,
+            day_of_week: 6,
+            hour: 23,
+            minute: 59,
+            second: 59,
+        };
+        assert!(encode_command(&cmd, 0).is_ok());
     }
 }

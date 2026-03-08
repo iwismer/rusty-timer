@@ -610,7 +610,13 @@ impl DownloadTracker {
 
     pub fn reset(&mut self) {
         if self.is_active() {
-            let _ = self.event_tx.send(DownloadEvent::Idle);
+            tracing::warn!(
+                current_state = ?self.state,
+                "reset() called during active download — sending error event to subscribers"
+            );
+            let _ = self.event_tx.send(DownloadEvent::Error {
+                message: "download reset (reader disconnected)".to_owned(),
+            });
         }
         self.state = DownloadState::Idle;
         self.reads_received = 0;
@@ -1632,5 +1638,17 @@ mod tests {
         let mut dt = DownloadTracker::new();
         dt.fail("oops".into());
         assert!(matches!(dt.state(), DownloadState::Idle));
+    }
+
+    #[test]
+    fn reset_during_downloading_sends_error_event() {
+        let mut tracker = DownloadTracker::new();
+        let mut rx = tracker.subscribe();
+        tracker.begin_startup();
+        tracker.start(100);
+        tracker.reset();
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DownloadEvent::Error { .. }));
+        assert_eq!(*tracker.state(), DownloadState::Idle);
     }
 }
