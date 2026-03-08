@@ -83,6 +83,11 @@ impl ControlClient {
         (client, sink)
     }
 
+    /// Send a command without acquiring the in-flight lock.
+    ///
+    /// MUST only be called while `in_flight` is held by the caller.
+    /// Used within multi-step sequences (clear_records, start_download,
+    /// stop_download) that hold the lock themselves.
     async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
         let frame = control::encode_command(cmd, 0x00);
         let kind = PendingRequestKind::for_command(cmd);
@@ -108,6 +113,7 @@ impl ControlClient {
         }
     }
 
+    /// Send a single command, serializing with other callers via the in-flight lock.
     async fn send(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
         let _in_flight = self.in_flight.lock().await;
         self.send_inner(cmd).await
@@ -176,7 +182,8 @@ impl ControlClient {
         Ok(buf.join("\n").trim().to_owned())
     }
 
-    /// Send the 3-step clear records sequence + CONFIG3 cycling.
+    /// Execute the full clear-records workflow: 3 erase sub-commands via 0x4b,
+    /// 10s wait, counter reset, then CONFIG3 cycling (Event -> Raw).
     pub async fn clear_records(&self) -> Result<(), ControlError> {
         let _in_flight = self.in_flight.lock().await;
 
