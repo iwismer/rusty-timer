@@ -412,6 +412,17 @@ impl StatusServer {
         &self.reconnect_notifies
     }
 
+    /// Retrieve a clone of the cached reader info for a given reader IP.
+    pub async fn get_reader_info(
+        &self,
+        reader_ip: &str,
+    ) -> Option<crate::reader_control::ReaderInfo> {
+        let ss = self.subsystem.lock().await;
+        ss.readers
+            .get(reader_ip)
+            .and_then(|r| r.reader_info.clone())
+    }
+
     pub async fn update_reader_info(
         &self,
         reader_ip: &str,
@@ -1886,7 +1897,7 @@ async fn estimate_one_way_latency(
 /// returns `(target_boundary, pre_set_wait)` where:
 /// - `target_boundary` is the `DateTime<Local>` whole-second that the rollover should align with
 /// - `pre_set_wait` is how long to sleep before sending SET_DATE_TIME
-fn compute_sync_timing(
+pub fn compute_sync_timing(
     wall_now: chrono::DateTime<chrono::Local>,
     one_way: std::time::Duration,
     sync_delay_ms: u64,
