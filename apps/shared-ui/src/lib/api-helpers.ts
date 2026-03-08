@@ -1,3 +1,13 @@
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
@@ -8,7 +18,8 @@ export async function apiFetch<T>(
   });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(
+    throw new ApiError(
+      resp.status,
       `API ${init?.method ?? "GET"} ${path} -> ${resp.status}: ${text}`,
     );
   }

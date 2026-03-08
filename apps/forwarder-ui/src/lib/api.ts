@@ -1,4 +1,4 @@
-import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
+import { apiFetch, ApiError } from "@rusty-timer/shared-ui/lib/api-helpers";
 
 export interface HardwareInfo {
   fw_version: string;
@@ -261,7 +261,7 @@ export async function startDownloadReads(
       { method: "POST" },
     );
   } catch (err: unknown) {
-    if (err instanceof Error && err.message.includes("-> 409:")) {
+    if (err instanceof ApiError && err.status === 409) {
       throw new Error("Download already in progress");
     }
     throw err;
