@@ -195,4 +195,88 @@ describe("forwarder api client", () => {
       error: "no update available",
     });
   });
+
+  it("getReaderInfo fetches reader info", async () => {
+    const { getReaderInfo } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { banner: "IPICO v4" }));
+    const info = await getReaderInfo("192.168.1.10");
+    expect(info.banner).toBe("IPICO v4");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/info",
+      expect.any(Object),
+    );
+  });
+
+  it("syncReaderClock calls sync-clock endpoint", async () => {
+    const { syncReaderClock } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        reader_clock: "2026-03-07T12:00:00.000",
+        clock_drift_ms: 42,
+      }),
+    );
+    const result = await syncReaderClock("192.168.1.10");
+    expect(result.clock_drift_ms).toBe(42);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/sync-clock",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("getReadMode fetches current read mode", async () => {
+    const { getReadMode } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, { mode: "event", timeout: 5 }),
+    );
+    const result = await getReadMode("192.168.1.10");
+    expect(result.mode).toBe("event");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/read-mode",
+      expect.any(Object),
+    );
+  });
+
+  it("refreshReader posts to refresh endpoint", async () => {
+    const { refreshReader } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { banner: "IPICO v4" }));
+    await refreshReader("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/refresh",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("clearReaderRecords posts to clear-records endpoint", async () => {
+    const { clearReaderRecords } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await clearReaderRecords("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/clear-records",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("setRecording sends enabled flag", async () => {
+    const { setRecording } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { recording: true }));
+    const result = await setRecording("192.168.1.10", true);
+    expect(result.recording).toBe(true);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/recording",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+      }),
+    );
+  });
+
+  it("reconnectReader posts to reconnect endpoint", async () => {
+    const { reconnectReader } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await reconnectReader("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/reconnect",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
 });
