@@ -159,6 +159,7 @@ async fn fail_active_download(
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_reader(
     reader_ip: String,
     reader_port: u16,
@@ -212,7 +213,7 @@ async fn run_reader(
                 );
                 mark_reader_disconnected(&status, &stream_key).await;
                 let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                    reader_ip: reader_ip.clone(),
+                    reader_ip: stream_key.clone(),
                     connected: false,
                 });
                 let delay = Duration::from_secs(backoff_secs);
@@ -239,7 +240,7 @@ async fn run_reader(
             .update_reader_state(&stream_key, ReaderConnectionState::Connected)
             .await;
         let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-            reader_ip: reader_ip.clone(),
+            reader_ip: stream_key.clone(),
             connected: true,
         });
 
@@ -463,7 +464,7 @@ async fn run_reader(
                     .await;
                     mark_reader_disconnected(&status, &stream_key).await;
                     let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: reader_ip.clone(),
+                        reader_ip: stream_key.clone(),
                         connected: false,
                     });
                     break;
@@ -480,7 +481,7 @@ async fn run_reader(
                     .await;
                     mark_reader_disconnected(&status, &stream_key).await;
                     let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: reader_ip.clone(),
+                        reader_ip: stream_key.clone(),
                         connected: false,
                     });
                     break;
@@ -559,7 +560,7 @@ async fn run_reader(
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
                     let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: reader_ip.clone(),
+                        reader_ip: stream_key.clone(),
                         connected: false,
                     });
                     break;
@@ -571,7 +572,7 @@ async fn run_reader(
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
                     let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: reader_ip.clone(),
+                        reader_ip: stream_key.clone(),
                         connected: false,
                     });
                     break;
@@ -583,7 +584,7 @@ async fn run_reader(
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
                     let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: reader_ip.clone(),
+                        reader_ip: stream_key.clone(),
                         connected: false,
                     });
                     break;
