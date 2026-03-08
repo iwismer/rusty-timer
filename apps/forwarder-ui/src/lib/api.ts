@@ -29,7 +29,7 @@ export interface ReaderInfo {
   clock?: ClockInfo | null;
   estimated_stored_reads?: number | null;
   recording?: boolean | null;
-  connect_failures?: number;
+  connect_failures: number;
 }
 
 export interface ReaderStatus {
@@ -216,7 +216,7 @@ export async function setReadMode(
   ip: string,
   mode: "raw" | "event" | "fsls",
   timeout = 5,
-): Promise<{ mode: string }> {
+): Promise<{ mode: Config3Info["mode"] }> {
   return apiFetch(`/api/v1/readers/${ip}/read-mode`, {
     method: "PUT",
     body: JSON.stringify({ mode, timeout }),
