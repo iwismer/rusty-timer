@@ -24,5 +24,12 @@ export async function apiFetch<T>(
     );
   }
   if (resp.status === 204) return undefined as unknown as T;
-  return resp.json();
+  try {
+    return await resp.json();
+  } catch {
+    throw new ApiError(
+      resp.status,
+      `API ${init?.method ?? "GET"} ${path} returned invalid JSON`,
+    );
+  }
 }
