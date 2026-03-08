@@ -213,13 +213,23 @@ pub async fn set_reader_connected(
     stream_id: Uuid,
     connected: bool,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        "UPDATE streams SET reader_connected = $1 WHERE stream_id = $2",
-        connected,
-        stream_id
-    )
-    .execute(pool)
-    .await?;
+    if connected {
+        // Only set connected=true if the stream is online (forwarder WS is up).
+        // This enforces the invariant: !online => !reader_connected.
+        sqlx::query!(
+            "UPDATE streams SET reader_connected = true WHERE stream_id = $1 AND online = true",
+            stream_id
+        )
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query!(
+            "UPDATE streams SET reader_connected = false WHERE stream_id = $1",
+            stream_id
+        )
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 
