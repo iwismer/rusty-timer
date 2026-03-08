@@ -383,20 +383,40 @@ impl ControlResponseSink {
     }
 }
 
+/// Hardware info from GET_STATISTICS (0x0a).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HardwareInfo {
+    pub fw_version: String,
+    pub hw_code: u8,
+    pub reader_id: u8,
+    pub config3: u8,
+}
+
+/// Read mode configuration from CONFIG3 (0x09).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Config3Info {
+    pub mode: String,
+    pub timeout: u8,
+}
+
+/// Reader clock info from GET_DATE_TIME (0x02).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClockInfo {
+    pub reader_clock: String,
+    pub drift_ms: i64,
+}
+
 /// Reader info gathered on connect and refreshed by polling.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ReaderInfo {
     pub banner: Option<String>,
-    pub fw_version: Option<String>,
-    pub hw_code: Option<u8>,
-    pub reader_id: Option<u8>,
-    pub config3: Option<u8>,
+    pub hardware: Option<HardwareInfo>,
+    pub config: Option<Config3Info>,
+    pub clock: Option<ClockInfo>,
     pub estimated_stored_reads: Option<u32>,
     pub recording: Option<bool>,
-    pub reader_clock: Option<String>,
-    pub clock_drift_ms: Option<i64>,
-    pub read_mode: Option<String>,
-    pub read_mode_timeout: Option<u8>,
+    /// Number of connect sequence failures (0 = all succeeded).
+    pub connect_failures: u8,
 }
 
 /// Events emitted by [`DownloadTracker`] for SSE consumers.
@@ -544,16 +564,22 @@ impl DownloadTracker {
 /// Run the initial connection sequence: statistics, banner, ext status, config3, clock.
 pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
     let mut ri = ReaderInfo::default();
+    let mut failures = 0u8;
 
     match client.get_statistics().await {
         Ok(stats) => {
-            ri.fw_version = Some(stats.fw_version_string());
-            ri.hw_code = Some(stats.hw_code);
-            ri.reader_id = Some(stats.reader_id);
-            ri.config3 = Some(stats.config3);
+            ri.hardware = Some(HardwareInfo {
+                fw_version: stats.fw_version_string(),
+                hw_code: stats.hw_code,
+                reader_id: stats.reader_id,
+                config3: stats.config3,
+            });
             info!(fw = %stats.fw_version_string(), hw = stats.hw_code, "reader statistics");
         }
-        Err(e) => warn!("get_statistics failed: {}", e),
+        Err(e) => {
+            warn!("get_statistics failed: {}", e);
+            failures += 1;
+        }
     }
 
     match client.print_banner().await {
@@ -562,7 +588,10 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
             ri.banner = Some(banner);
         }
         Ok(_) => {}
-        Err(e) => warn!("print_banner failed: {}", e),
+        Err(e) => {
+            warn!("print_banner failed: {}", e);
+            failures += 1;
+        }
     }
 
     match client.get_extended_status().await {
@@ -575,18 +604,36 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
                 "reader extended status"
             );
         }
-        Err(e) => warn!("get_extended_status failed: {}", e),
+        Err(e) => {
+            warn!("get_extended_status failed: {}", e);
+            failures += 1;
+        }
     }
 
     match client.get_config3().await {
         Ok((mode, timeout)) => {
-            ri.read_mode = Some(mode.as_str().to_owned());
-            ri.read_mode_timeout = Some(timeout);
+            ri.config = Some(Config3Info {
+                mode: mode.as_str().to_owned(),
+                timeout,
+            });
         }
-        Err(e) => warn!("get_config3 failed: {}", e),
+        Err(e) => {
+            warn!("get_config3 failed: {}", e);
+            failures += 1;
+        }
     }
 
-    poll_clock(client, &mut ri).await;
+    if poll_clock(client, &mut ri).await.is_err() {
+        failures += 1;
+    }
+
+    ri.connect_failures = failures;
+
+    if failures == 5 {
+        tracing::error!(
+            "connect sequence failed for all 5 queries — control protocol may be non-functional"
+        );
+    }
 
     ri
 }
@@ -598,26 +645,33 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
             info.estimated_stored_reads = Some(ext.estimated_stored_reads());
             info.recording = Some(ext.recording_state.is_recording());
         }
-        Err(e) => warn!("status poll: get_extended_status failed: {e}"),
+        Err(e) => {
+            warn!("status poll: get_extended_status failed: {e}");
+            info.estimated_stored_reads = None;
+            info.recording = None;
+        }
     }
 
     match client.get_config3().await {
         Ok((mode, timeout)) => {
-            info.read_mode = Some(mode.as_str().to_owned());
-            info.read_mode_timeout = Some(timeout);
+            info.config = Some(Config3Info {
+                mode: mode.as_str().to_owned(),
+                timeout,
+            });
         }
-        Err(e) => warn!("status poll: get_config3 failed: {e}"),
+        Err(e) => {
+            warn!("status poll: get_config3 failed: {e}");
+            info.config = None;
+        }
     }
 
-    poll_clock(client, info).await;
+    let _ = poll_clock(client, info).await;
 }
 
-async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) {
+async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) -> Result<(), ()> {
     match client.get_date_time().await {
         Ok(dt) => {
             let reader_iso = dt.to_iso_string();
-            info.reader_clock = Some(reader_iso.clone());
-
             let now = chrono::Local::now();
             if let Ok(reader_naive) =
                 chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
@@ -626,13 +680,21 @@ async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) {
                 let drift = system_naive
                     .signed_duration_since(reader_naive)
                     .num_milliseconds();
-                info.clock_drift_ms = Some(drift);
+                info.clock = Some(ClockInfo {
+                    reader_clock: reader_iso,
+                    drift_ms: drift,
+                });
             } else {
                 warn!("status poll: failed to parse reader clock: {reader_iso}");
-                info.clock_drift_ms = None;
+                info.clock = None;
             }
+            Ok(())
         }
-        Err(e) => warn!("status poll: get_date_time failed: {e}"),
+        Err(e) => {
+            warn!("status poll: get_date_time failed: {e}");
+            info.clock = None;
+            Err(())
+        }
     }
 }
 

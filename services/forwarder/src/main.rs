@@ -287,7 +287,11 @@ async fn run_reader(
             poll_logger.log(format!(
                 "reader {} identified: fw={}, stored_reads={}",
                 poll_reader_ip,
-                reader_info.fw_version.as_deref().unwrap_or("?"),
+                reader_info
+                    .hardware
+                    .as_ref()
+                    .map(|h| h.fw_version.as_str())
+                    .unwrap_or("?"),
                 reader_info.estimated_stored_reads.unwrap_or(0),
             ));
             poll_status

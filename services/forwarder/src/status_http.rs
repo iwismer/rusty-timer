@@ -1929,8 +1929,14 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
                 if let Some(r) = ss.readers.get_mut(&ip)
                     && let Some(ref mut info) = r.reader_info
                 {
-                    info.reader_clock = Some(reader_iso.clone());
-                    info.clock_drift_ms = drift_ms;
+                    if let Some(d) = drift_ms {
+                        info.clock = Some(crate::reader_control::ClockInfo {
+                            reader_clock: reader_iso.clone(),
+                            drift_ms: d,
+                        });
+                    } else {
+                        info.clock = None;
+                    }
                 }
             }
 
@@ -3180,9 +3186,13 @@ mod tests {
             .update_reader_info(
                 reader_ip,
                 crate::reader_control::ReaderInfo {
-                    fw_version: Some("15.8".to_owned()),
                     banner: Some("ARM9 Controller".to_owned()),
-                    hw_code: Some(0x8f),
+                    hardware: Some(crate::reader_control::HardwareInfo {
+                        fw_version: "15.8".to_owned(),
+                        hw_code: 0x8f,
+                        reader_id: 0,
+                        config3: 0,
+                    }),
                     ..Default::default()
                 },
             )
@@ -3246,9 +3256,9 @@ mod tests {
         let body: serde_json::Value = status.json().await.expect("status json");
 
         let info = &body["readers"][0]["reader_info"];
-        assert_eq!(info["fw_version"], "15.8");
+        assert_eq!(info["hardware"]["fw_version"], "15.8");
         assert_eq!(info["banner"], "ARM9 Controller");
-        assert_eq!(info["hw_code"], 143);
+        assert_eq!(info["hardware"]["hw_code"], 143);
     }
 
     #[tokio::test]

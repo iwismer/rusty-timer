@@ -69,15 +69,20 @@ mod tests {
         let event = ForwarderUiEvent::ReaderInfoUpdated {
             ip: "192.168.0.155".to_owned(),
             info: crate::reader_control::ReaderInfo {
-                fw_version: Some("15.8".to_owned()),
                 banner: Some("ARM9 Controller".to_owned()),
+                hardware: Some(crate::reader_control::HardwareInfo {
+                    fw_version: "15.8".to_owned(),
+                    hw_code: 0,
+                    reader_id: 0,
+                    config3: 0,
+                }),
                 ..Default::default()
             },
         };
         let json: serde_json::Value = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "reader_info_updated");
         assert_eq!(json["ip"], "192.168.0.155");
-        assert_eq!(json["fw_version"], "15.8");
+        assert_eq!(json["hardware"]["fw_version"], "15.8");
     }
 
     #[test]
