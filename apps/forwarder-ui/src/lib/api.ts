@@ -177,8 +177,7 @@ export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
 }
 
 export async function applyUpdate(): Promise<void> {
-  const resp = await fetch("/update/apply", { method: "POST" });
-  if (resp.status !== 200) throw new Error(`apply update -> ${resp.status}`);
+  await apiFetch<void>("/update/apply", { method: "POST" });
 }
 
 export async function checkForUpdate(): Promise<UpdateStatusResponse> {
@@ -188,12 +187,16 @@ export async function checkForUpdate(): Promise<UpdateStatusResponse> {
 }
 
 export async function downloadUpdate(): Promise<UpdateStatusResponse> {
-  const resp = await fetch("/update/download", { method: "POST" });
-  if (resp.status !== 200 && resp.status !== 409) {
-    const text = await resp.text();
-    throw new Error(`download update -> ${resp.status}: ${text}`);
+  try {
+    return await apiFetch<UpdateStatusResponse>("/update/download", {
+      method: "POST",
+    });
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409) {
+      throw new Error("Download already in progress");
+    }
+    throw e;
   }
-  return (await resp.json()) as UpdateStatusResponse;
 }
 
 export async function getReaderInfo(
