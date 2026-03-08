@@ -12,6 +12,10 @@ export interface Config3Info {
   timeout: number;
 }
 
+export interface TtoState {
+  enabled: boolean;
+}
+
 export interface ClockInfo {
   reader_clock: string;
   drift_ms: number;
@@ -21,6 +25,7 @@ export interface ReaderInfo {
   banner?: string | null;
   hardware?: HardwareInfo | null;
   config?: Config3Info | null;
+  tto_enabled?: boolean | null;
   clock?: ClockInfo | null;
   estimated_stored_reads?: number | null;
   recording?: boolean | null;
@@ -215,6 +220,20 @@ export async function setReadMode(
   return apiFetch(`/api/v1/readers/${ip}/read-mode`, {
     method: "PUT",
     body: JSON.stringify({ mode, timeout }),
+  });
+}
+
+export async function getTtoState(ip: string): Promise<TtoState> {
+  return apiFetch<TtoState>(`/api/v1/readers/${ip}/tto`);
+}
+
+export async function setTtoState(
+  ip: string,
+  enabled: boolean,
+): Promise<TtoState> {
+  return apiFetch<TtoState>(`/api/v1/readers/${ip}/tto`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
   });
 }
 

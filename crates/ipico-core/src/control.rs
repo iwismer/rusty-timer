@@ -12,6 +12,7 @@ pub const INSTR_SET_DATE_TIME: u8 = 0x01;
 pub const INSTR_GET_DATE_TIME: u8 = 0x02;
 pub const INSTR_CONFIG3: u8 = 0x09;
 pub const INSTR_GET_STATISTICS: u8 = 0x0a;
+pub const INSTR_TAG_MESSAGE_FORMAT: u8 = 0x11;
 pub const INSTR_GUN_TIME: u8 = 0x2c;
 pub const INSTR_PRINT_BANNER: u8 = 0x37;
 pub const INSTR_EXT_STATUS: u8 = 0x4b;
@@ -61,6 +62,55 @@ impl fmt::Display for ReadMode {
     }
 }
 
+/// Tag ID message format settings for command `0x11`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagMessageFormat {
+    pub field_mask: u8,
+    pub id_byte_mask: u8,
+    pub ascii_header_1: u8,
+    pub ascii_header_2: u8,
+    pub binary_header_1: u8,
+    pub binary_header_2: u8,
+    pub trailer_1: u8,
+    pub trailer_2: u8,
+    pub separator: Option<u8>,
+}
+
+impl TagMessageFormat {
+    const TTO_BIT: u8 = 0x80;
+
+    pub fn tto_enabled(&self) -> bool {
+        self.field_mask & Self::TTO_BIT != 0
+    }
+
+    pub fn with_tto_enabled(&self, enabled: bool) -> Self {
+        let mut updated = self.clone();
+        if enabled {
+            updated.field_mask |= Self::TTO_BIT;
+        } else {
+            updated.field_mask &= !Self::TTO_BIT;
+        }
+        updated
+    }
+
+    fn encode_data(&self) -> Vec<u8> {
+        let mut data = vec![
+            self.field_mask,
+            self.id_byte_mask,
+            self.ascii_header_1,
+            self.ascii_header_2,
+            self.binary_header_1,
+            self.binary_header_2,
+            self.trailer_1,
+            self.trailer_2,
+        ];
+        if let Some(separator) = self.separator {
+            data.push(separator);
+        }
+        data
+    }
+}
+
 // ── Command ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +136,10 @@ pub enum Command {
     GetConfig3,
     /// Set CONFIG3 read mode and timeout (instruction 0x09).
     SetConfig3 { mode: ReadMode, timeout: u8 },
+    /// Query tag ID message format (instruction 0x11 with length 0xff).
+    GetTagMessageFormat,
+    /// Set tag ID message format (instruction 0x11).
+    SetTagMessageFormat { format: TagMessageFormat },
     /// Request the reader's ASCII banner text (instruction 0x37).
     /// Response arrives as plain text lines followed by an ACK frame.
     PrintBanner,
@@ -115,6 +169,8 @@ impl Command {
             Command::GetExtendedStatus => INSTR_EXT_STATUS,
             Command::GetConfig3 => INSTR_CONFIG3,
             Command::SetConfig3 { .. } => INSTR_CONFIG3,
+            Command::GetTagMessageFormat => INSTR_TAG_MESSAGE_FORMAT,
+            Command::SetTagMessageFormat { .. } => INSTR_TAG_MESSAGE_FORMAT,
             Command::PrintBanner => INSTR_PRINT_BANNER,
             Command::InitE0 => INSTR_UNKNOWN_E0,
             Command::SetRecordingState { .. }
@@ -154,6 +210,7 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
             // 0x07 = modify lower 3 bits of CONFIG3 (mode selection: bits 0..2)
             vec![mode.config3_value(), *timeout, 0x07]
         }
+        Command::SetTagMessageFormat { format } => format.encode_data(),
         Command::SetRecordingState { on } => vec![0x00, if *on { 0x01 } else { 0x00 }],
         Command::SetAccessMode { on } => vec![0x01, if *on { 0x01 } else { 0x00 }],
         Command::InitDownload => vec![0x02],
@@ -166,7 +223,7 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
     // Length byte: 0xff signals a read/query request (IPICO protocol convention);
     // for write commands, it's the actual data payload length.
     let length: u8 = match cmd {
-        Command::GetExtendedStatus | Command::GetConfig3 => 0xff,
+        Command::GetExtendedStatus | Command::GetConfig3 | Command::GetTagMessageFormat => 0xff,
         _ => {
             assert!(
                 data.len() <= 255,
@@ -558,6 +615,28 @@ pub fn decode_config3(frame: &ControlFrame) -> Result<(ReadMode, u8), ControlErr
     Ok((mode, frame.data()[1]))
 }
 
+/// Decode tag ID message format response (`0x11`).
+pub fn decode_tag_message_format(frame: &ControlFrame) -> Result<TagMessageFormat, ControlError> {
+    if !(8..=9).contains(&frame.data().len()) {
+        return Err(ControlError::UnexpectedLength {
+            instruction: frame.instruction(),
+            got: frame.data().len(),
+        });
+    }
+
+    Ok(TagMessageFormat {
+        field_mask: frame.data()[0],
+        id_byte_mask: frame.data()[1],
+        ascii_header_1: frame.data()[2],
+        ascii_header_2: frame.data()[3],
+        binary_header_1: frame.data()[4],
+        binary_header_2: frame.data()[5],
+        trailer_1: frame.data()[6],
+        trailer_2: frame.data()[7],
+        separator: frame.data().get(8).copied(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +723,15 @@ mod tests {
     fn encode_get_config3() {
         let frame = encode_command(&Command::GetConfig3, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00ff0995\r\n");
+    }
+
+    #[test]
+    fn encode_get_tag_message_format() {
+        let frame = encode_command(&Command::GetTagMessageFormat, 0x00).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&frame).unwrap(),
+            format!("ab00ff11{:02x}\r\n", lrc(b"00ff11"))
+        );
     }
 
     #[test]
@@ -819,6 +907,50 @@ mod tests {
         let (mode, timeout) = decode_config3(&frame).unwrap();
         assert_eq!(mode, ReadMode::Raw);
         assert_eq!(timeout, 5);
+    }
+
+    #[test]
+    fn parse_tag_message_format_response() {
+        let body = "0008117ffc6161aa000d0a";
+        let frame_hex = format!("ab{}{:02x}", body, lrc(body.as_bytes()));
+        let frame = parse_response(frame_hex.as_bytes()).unwrap();
+        let format = decode_tag_message_format(&frame).unwrap();
+        assert_eq!(format.field_mask, 0x7f);
+        assert_eq!(format.id_byte_mask, 0xfc);
+        assert_eq!(format.ascii_header_1, 0x61);
+        assert_eq!(format.ascii_header_2, 0x61);
+        assert_eq!(format.binary_header_1, 0xaa);
+        assert_eq!(format.binary_header_2, 0x00);
+        assert_eq!(format.trailer_1, 0x0d);
+        assert_eq!(format.trailer_2, 0x0a);
+        assert_eq!(format.separator, None);
+        assert!(!format.tto_enabled());
+    }
+
+    #[test]
+    fn tag_message_format_toggle_tto_only_changes_bit_7() {
+        let format = TagMessageFormat {
+            field_mask: 0x7f,
+            id_byte_mask: 0xfc,
+            ascii_header_1: 0x61,
+            ascii_header_2: 0x61,
+            binary_header_1: 0xaa,
+            binary_header_2: 0x00,
+            trailer_1: 0x0d,
+            trailer_2: 0x0a,
+            separator: None,
+        };
+        let updated = format.with_tto_enabled(true);
+        assert_eq!(updated.field_mask, 0xff);
+        assert_eq!(updated.id_byte_mask, format.id_byte_mask);
+        assert_eq!(updated.ascii_header_1, format.ascii_header_1);
+        assert_eq!(updated.ascii_header_2, format.ascii_header_2);
+        assert_eq!(updated.binary_header_1, format.binary_header_1);
+        assert_eq!(updated.binary_header_2, format.binary_header_2);
+        assert_eq!(updated.trailer_1, format.trailer_1);
+        assert_eq!(updated.trailer_2, format.trailer_2);
+        assert_eq!(updated.separator, format.separator);
+        assert!(updated.tto_enabled());
     }
 
     #[test]

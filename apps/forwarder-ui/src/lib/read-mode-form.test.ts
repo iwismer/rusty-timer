@@ -16,7 +16,8 @@ describe("read mode form helpers", () => {
     ]);
   });
 
-  it("shows timeout input only for fsls", () => {
+  it("shows timeout input for event and fsls", () => {
+    expect(shouldShowTimeoutInput("event")).toBe(true);
     expect(shouldShowTimeoutInput("fsls")).toBe(true);
     expect(shouldShowTimeoutInput("raw")).toBe(false);
     expect(shouldShowTimeoutInput(undefined)).toBe(false);

@@ -38,6 +38,18 @@ export function formatReadMode(mode: string | null | undefined): string {
   return mode;
 }
 
+export function formatTtoState(enabled: boolean | null | undefined): string {
+  if (enabled == null) return "\u2014";
+  return enabled ? "Enabled" : "Disabled";
+}
+
+export function readerControlDisabled(
+  state: ReaderStatus["state"],
+  busy: boolean | null | undefined,
+): boolean {
+  return Boolean(busy) || state !== "connected";
+}
+
 export function formatClockDrift(ms: number | null | undefined): string {
   if (ms == null) return "\u2014";
   const abs = Math.abs(ms);

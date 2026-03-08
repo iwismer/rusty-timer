@@ -115,6 +115,16 @@ impl TryFrom<&str> for ReadType {
     }
 }
 
+/// Optional TTO metadata appended before the LRC when tag-format bit 7 is set.
+#[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Copy, Clone)]
+pub struct TtoInfo {
+    pub index: u8,
+    pub page: u8,
+    pub tamper: bool,
+    pub first_seen: bool,
+    pub last_seen: bool,
+}
+
 // ---------------------------------------------------------------------------
 // ChipRead
 // ---------------------------------------------------------------------------
@@ -125,6 +135,7 @@ pub struct ChipRead {
     pub tag_id: String,
     pub timestamp: Timestamp,
     pub read_type: ReadType,
+    pub tto: Option<TtoInfo>,
 }
 
 #[allow(dead_code)]
@@ -146,15 +157,30 @@ impl TryFrom<&str> for ChipRead {
             .split_whitespace()
             .next()
             .ok_or("Empty chip read")?;
-        if !(chip_read.len() == 36 || chip_read.len() == 38) {
+        let (core_len, suffix_len, has_tto) = match chip_read.len() {
+            36 => (36, 0, false),
+            38 => (36, 2, false),
+            42 => (42, 0, true),
+            44 => (42, 2, true),
+            _ => {
+                return Err("Invalid read length");
+            }
+        };
+
+        let lrc_start = core_len - 2;
+        let checksum_input_end = lrc_start;
+        if chip_read.len() != core_len + suffix_len {
             return Err("Invalid read length");
         }
-        let checksum = chip_read[2..34].bytes().map(|b| b as u32).sum::<u32>() as u8;
-        if format!("{:02x}", checksum) != chip_read[34..36] {
+        let checksum = chip_read[2..checksum_input_end]
+            .bytes()
+            .map(|b| b as u32)
+            .sum::<u32>() as u8;
+        if format!("{:02x}", checksum) != chip_read[lrc_start..core_len] {
             return Err("Checksum doesn't match");
         }
-        let read_type = if chip_read.len() == 38 {
-            match &chip_read[36..38] {
+        let mut read_type = if suffix_len == 2 {
+            match &chip_read[core_len..core_len + 2] {
                 "FS" | "LS" => ReadType::FSLS,
                 _ => return Err("Invalid read suffix"),
             }
@@ -164,6 +190,33 @@ impl TryFrom<&str> for ChipRead {
         if &chip_read[..2] != "aa" {
             return Err("Invalid read prefix");
         }
+        let tto = if has_tto {
+            let index = match u8::from_str_radix(&chip_read[34..36], 16) {
+                Err(_) => return Err("Invalid Chip Read"),
+                Ok(index) => index,
+            };
+            let page = match u8::from_str_radix(&chip_read[36..38], 16) {
+                Err(_) => return Err("Invalid Chip Read"),
+                Ok(page) => page,
+            };
+            let raw_tamper = match u8::from_str_radix(&chip_read[38..40], 16) {
+                Err(_) => return Err("Invalid Chip Read"),
+                Ok(raw_tamper) => raw_tamper,
+            };
+            let info = TtoInfo {
+                index,
+                page,
+                tamper: raw_tamper == 0xff || (raw_tamper & 0x01) != 0,
+                first_seen: raw_tamper != 0xff && (raw_tamper & 0x80) != 0,
+                last_seen: raw_tamper != 0xff && (raw_tamper & 0x40) != 0,
+            };
+            if info.first_seen || info.last_seen {
+                read_type = ReadType::FSLS;
+            }
+            Some(info)
+        } else {
+            None
+        };
         let tag_id = chip_read[4..16].to_owned();
         let read_year = match chip_read[20..22].parse::<u16>() {
             Err(_) => return Err("Invalid Chip Read"),
@@ -211,6 +264,7 @@ impl TryFrom<&str> for ChipRead {
             tag_id,
             timestamp: read_time,
             read_type,
+            tto,
         })
     }
 }
@@ -241,6 +295,12 @@ mod tests {
         read
     }
 
+    fn raw_read_with_tto_and_checksum(tto_hex: &str) -> String {
+        let body = format!("400000000123450a2a01123018455927{}", tto_hex);
+        let checksum = body.bytes().map(|b| b as u32).sum::<u32>() as u8;
+        format!("aa{}{:02x}", body, checksum)
+    }
+
     #[test]
     fn simple_chip() {
         let read = ChipRead::try_from("aa400000000123450a2a01123018455927a7");
@@ -250,7 +310,8 @@ mod tests {
             ChipRead {
                 tag_id: "000000012345".to_owned(),
                 timestamp: Timestamp::new(1, 12, 30, 18, 45, 59, 390),
-                read_type: ReadType::RAW
+                read_type: ReadType::RAW,
+                tto: None,
             }
         );
     }
@@ -339,6 +400,40 @@ mod tests {
         let result = ChipRead::try_from("   ");
         assert!(result.is_err());
         assert_eq!(result.err().unwrap(), "Empty chip read");
+    }
+
+    #[test]
+    fn tto_enabled_read_parses_and_exposes_flags() {
+        let read = ChipRead::try_from(raw_read_with_tto_and_checksum("120080").as_str()).unwrap();
+        assert_eq!(read.tag_id, "000000012345");
+        assert_eq!(read.timestamp, Timestamp::new(1, 12, 30, 18, 45, 59, 390));
+        assert_eq!(read.read_type, ReadType::FSLS);
+        assert_eq!(
+            read.tto,
+            Some(TtoInfo {
+                index: 0x12,
+                page: 0x00,
+                tamper: false,
+                first_seen: true,
+                last_seen: false,
+            })
+        );
+    }
+
+    #[test]
+    fn tto_tamper_ff_sets_only_tamper_flag() {
+        let read = ChipRead::try_from(raw_read_with_tto_and_checksum("1200ff").as_str()).unwrap();
+        assert_eq!(read.read_type, ReadType::RAW);
+        assert_eq!(
+            read.tto,
+            Some(TtoInfo {
+                index: 0x12,
+                page: 0x00,
+                tamper: true,
+                first_seen: false,
+                last_seen: false,
+            })
+        );
     }
 
     #[test]

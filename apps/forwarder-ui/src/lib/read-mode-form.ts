@@ -11,7 +11,7 @@ export const READ_MODE_OPTIONS = [
 export function shouldShowTimeoutInput(
   mode: string | null | undefined,
 ): boolean {
-  return mode === "fsls";
+  return mode === "event" || mode === "fsls";
 }
 
 export function initialTimeoutDraft(

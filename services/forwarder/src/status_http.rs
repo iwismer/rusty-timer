@@ -20,6 +20,8 @@
 //! - `POST /api/v1/readers/{ip}/sync-clock`  — synchronize reader clock
 //! - `GET /api/v1/readers/{ip}/read-mode`    — current read mode and timeout
 //! - `PUT /api/v1/readers/{ip}/read-mode`    — set read mode and timeout
+//! - `GET /api/v1/readers/{ip}/tto`          — current TTO reporting state
+//! - `PUT /api/v1/readers/{ip}/tto`          — enable or disable TTO bytes in tag reports
 //! - `POST /api/v1/readers/{ip}/refresh`     — refresh reader info (re-poll)
 //! - `PUT /api/v1/readers/{ip}/recording`    — toggle recording on/off
 //! - `POST /api/v1/readers/{ip}/clear-records` — erase stored records
@@ -1971,6 +1973,25 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
+    state: &AppState<J>,
+    ip: &str,
+    info: crate::reader_control::ReaderInfo,
+) {
+    {
+        let mut ss = state.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(ip) {
+            r.reader_info = Some(info.clone());
+        }
+    }
+    let _ = state
+        .ui_tx
+        .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+            ip: ip.to_owned(),
+            info,
+        });
+}
+
 /// GET /api/v1/readers/{ip}/read-mode
 async fn get_read_mode_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
@@ -2007,6 +2028,11 @@ struct SetReadModeBody {
 }
 fn default_timeout() -> u8 {
     5
+}
+
+#[derive(serde::Deserialize)]
+struct SetTtoBody {
+    enabled: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -2062,6 +2088,97 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+/// GET /api/v1/readers/{ip}/tto
+async fn get_tto_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+) -> Response {
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+    match client.get_tag_message_format().await {
+        Ok(format) => json_response(
+            StatusCode::OK,
+            serde_json::json!({"enabled": format.tto_enabled()}).to_string(),
+        ),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": e.to_string()}).to_string(),
+        ),
+    }
+}
+
+/// PUT /api/v1/readers/{ip}/tto
+async fn set_tto_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    Path(ip): Path<String>,
+    axum::Json(body): axum::Json<SetTtoBody>,
+) -> Response {
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
+    let Some(client) = client else {
+        return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
+    };
+
+    let current = match client.get_tag_message_format().await {
+        Ok(format) => format,
+        Err(e) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"error": e.to_string()}).to_string(),
+            );
+        }
+    };
+    let updated = current.with_tto_enabled(body.enabled);
+    if let Err(e) = client.set_tag_message_format(updated).await {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": e.to_string()}).to_string(),
+        );
+    }
+
+    match client.get_tag_message_format().await {
+        Ok(format) => {
+            let enabled = format.tto_enabled();
+            let mut info = {
+                let ss = state.subsystem.lock().await;
+                ss.readers
+                    .get(&ip)
+                    .and_then(|r| r.reader_info.clone())
+                    .unwrap_or_default()
+            };
+            info.tto_enabled = Some(enabled);
+            update_cached_reader_info(&state, &ip, info).await;
+            let label = if enabled { "enabled" } else { "disabled" };
+            state
+                .logger
+                .log(format!("reader {} TTO reporting {}", ip, label));
+            json_response(
+                StatusCode::OK,
+                serde_json::json!({"enabled": enabled}).to_string(),
+            )
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": format!("set ok but verify failed: {}", e)}).to_string(),
+        ),
+    }
+}
+
 /// POST /api/v1/readers/{ip}/refresh
 async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
@@ -2086,18 +2203,7 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
             .unwrap_or_default()
     };
     crate::reader_control::run_status_poll(&client, &mut info).await;
-    {
-        let mut ss = state.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(&ip) {
-            r.reader_info = Some(info.clone());
-        }
-    }
-    let _ = state
-        .ui_tx
-        .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-            ip: ip.clone(),
-            info: info.clone(),
-        });
+    update_cached_reader_info(&state, &ip, info.clone()).await;
     json_response(
         StatusCode::OK,
         serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_owned()),
@@ -2167,18 +2273,7 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
                     .unwrap_or_default()
             };
             crate::reader_control::run_status_poll(&client, &mut info).await;
-            {
-                let mut ss = state.subsystem.lock().await;
-                if let Some(r) = ss.readers.get_mut(&ip) {
-                    r.reader_info = Some(info.clone());
-                }
-            }
-            let _ = state
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-                    ip: ip.clone(),
-                    info: info.clone(),
-                });
+            update_cached_reader_info(&state, &ip, info.clone()).await;
             let recording = info.recording.unwrap_or(false);
             json_response(
                 StatusCode::OK,
@@ -2467,6 +2562,10 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
         .route(
             "/api/v1/readers/{ip}/read-mode",
             get(get_read_mode_handler::<J>).put(set_read_mode_handler::<J>),
+        )
+        .route(
+            "/api/v1/readers/{ip}/tto",
+            get(get_tto_handler::<J>).put(set_tto_handler::<J>),
         )
         .route(
             "/api/v1/readers/{ip}/refresh",
@@ -3053,6 +3152,7 @@ fn schedule_process_restart() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ipico_core::control::{self, Command, TagMessageFormat};
     use rt_updater::workflow::{Checker, run_check, run_download};
     use std::future::Future;
     use std::pin::Pin;
@@ -3081,6 +3181,35 @@ mod tests {
             let result = self.download_result.clone();
             Box::pin(async move { result })
         }
+    }
+
+    fn ack_for(instruction: u8) -> String {
+        let body = format!("0000{instruction:02x}");
+        let lrc = control::lrc(body.as_bytes());
+        format!("ab{body}{lrc:02x}")
+    }
+
+    fn tag_message_format_response(format: &TagMessageFormat) -> String {
+        let mut data = vec![
+            format.field_mask,
+            format.id_byte_mask,
+            format.ascii_header_1,
+            format.ascii_header_2,
+            format.binary_header_1,
+            format.binary_header_2,
+            format.trailer_1,
+            format.trailer_2,
+        ];
+        if let Some(separator) = format.separator {
+            data.push(separator);
+        }
+
+        let mut body = format!("00{:02x}11", data.len());
+        for byte in data {
+            body.push_str(&format!("{byte:02x}"));
+        }
+        let lrc = control::lrc(body.as_bytes());
+        format!("ab{body}{lrc:02x}")
     }
 
     #[tokio::test]
@@ -3234,6 +3363,27 @@ mod tests {
             );
             assert!(control_sink.feed(b"ab0002090305f3").await);
 
+            let tag_format_cmd = cmd_rx.recv().await.expect("tag format command");
+            let expected_tag_format = control::encode_command(&Command::GetTagMessageFormat, 0x00)
+                .expect("encode tag format query");
+            assert_eq!(tag_format_cmd, expected_tag_format);
+            let tag_format = TagMessageFormat {
+                field_mask: 0x7f,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
             let date_time_cmd = cmd_rx.recv().await.expect("date/time command");
             assert_eq!(
                 std::str::from_utf8(&date_time_cmd).expect("date/time command utf8"),
@@ -3268,6 +3418,266 @@ mod tests {
         assert_eq!(info["hardware"]["fw_version"], "15.8");
         assert_eq!(info["banner"], "ARM9 Controller");
         assert_eq!(info["hardware"]["hw_code"], 143);
+        assert_eq!(info["tto_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn get_tto_returns_enabled_false_when_tag_format_bit_7_is_clear() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let current_format = TagMessageFormat {
+            field_mask: 0x7f,
+            id_byte_mask: 0xfc,
+            ascii_header_1: 0x61,
+            ascii_header_2: 0x61,
+            binary_header_1: 0xaa,
+            binary_header_2: 0x00,
+            trailer_1: 0x0d,
+            trailer_2: 0x0a,
+            separator: None,
+        };
+
+        let feeder = tokio::spawn(async move {
+            let query_cmd = cmd_rx.recv().await.expect("tag format query");
+            let expected =
+                control::encode_command(&Command::GetTagMessageFormat, 0x00).expect("encode query");
+            assert_eq!(query_cmd, expected);
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&current_format).as_bytes())
+                    .await
+            );
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "http://{}/api/v1/readers/{}/tto",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("GET tto");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("tto json");
+        assert_eq!(body["enabled"], false);
+
+        feeder.await.expect("response feeder task");
+    }
+
+    #[tokio::test]
+    async fn put_tto_queries_current_format_rewrites_bit_7_and_returns_new_state() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let current_format = TagMessageFormat {
+            field_mask: 0x7f,
+            id_byte_mask: 0xfc,
+            ascii_header_1: 0x61,
+            ascii_header_2: 0x61,
+            binary_header_1: 0xaa,
+            binary_header_2: 0x00,
+            trailer_1: 0x0d,
+            trailer_2: 0x0a,
+            separator: None,
+        };
+        let updated_format = current_format.with_tto_enabled(true);
+
+        let feeder = tokio::spawn(async move {
+            let first_query = cmd_rx.recv().await.expect("first tag format query");
+            let expected_query =
+                control::encode_command(&Command::GetTagMessageFormat, 0x00).expect("encode query");
+            assert_eq!(first_query, expected_query);
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&current_format).as_bytes())
+                    .await
+            );
+
+            let set_cmd = cmd_rx.recv().await.expect("set tag format");
+            let expected_set = control::encode_command(
+                &Command::SetTagMessageFormat {
+                    format: updated_format.clone(),
+                },
+                0x00,
+            )
+            .expect("encode set");
+            assert_eq!(set_cmd, expected_set);
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_TAG_MESSAGE_FORMAT).as_bytes())
+                    .await
+            );
+
+            let second_query = cmd_rx.recv().await.expect("second tag format query");
+            assert_eq!(second_query, expected_query);
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&updated_format).as_bytes())
+                    .await
+            );
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/tto",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("PUT tto");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("tto json");
+        assert_eq!(body["enabled"], true);
+
+        feeder.await.expect("response feeder task");
+    }
+
+    #[tokio::test]
+    async fn put_tto_preserves_existing_tag_format_fields() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let current_format = TagMessageFormat {
+            field_mask: 0x13,
+            id_byte_mask: 0xa5,
+            ascii_header_1: 0x23,
+            ascii_header_2: 0x24,
+            binary_header_1: 0xbb,
+            binary_header_2: 0x01,
+            trailer_1: 0x0a,
+            trailer_2: 0x0d,
+            separator: Some(0x2c),
+        };
+        let updated_format = current_format.with_tto_enabled(true);
+
+        let feeder = tokio::spawn(async move {
+            let expected_query =
+                control::encode_command(&Command::GetTagMessageFormat, 0x00).expect("encode query");
+            let first_query = cmd_rx.recv().await.expect("first query");
+            assert_eq!(first_query, expected_query);
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&current_format).as_bytes())
+                    .await
+            );
+
+            let set_cmd = cmd_rx.recv().await.expect("set tag format");
+            let expected_set = control::encode_command(
+                &Command::SetTagMessageFormat {
+                    format: updated_format.clone(),
+                },
+                0x00,
+            )
+            .expect("encode set");
+            assert_eq!(set_cmd, expected_set);
+            assert_ne!(updated_format.field_mask, current_format.field_mask);
+            assert_eq!(updated_format.id_byte_mask, current_format.id_byte_mask);
+            assert_eq!(updated_format.ascii_header_1, current_format.ascii_header_1);
+            assert_eq!(updated_format.ascii_header_2, current_format.ascii_header_2);
+            assert_eq!(
+                updated_format.binary_header_1,
+                current_format.binary_header_1
+            );
+            assert_eq!(
+                updated_format.binary_header_2,
+                current_format.binary_header_2
+            );
+            assert_eq!(updated_format.trailer_1, current_format.trailer_1);
+            assert_eq!(updated_format.trailer_2, current_format.trailer_2);
+            assert_eq!(updated_format.separator, current_format.separator);
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_TAG_MESSAGE_FORMAT).as_bytes())
+                    .await
+            );
+
+            let second_query = cmd_rx.recv().await.expect("second query");
+            assert_eq!(second_query, expected_query);
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&updated_format).as_bytes())
+                    .await
+            );
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/tto",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("PUT tto");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
     }
 
     #[tokio::test]

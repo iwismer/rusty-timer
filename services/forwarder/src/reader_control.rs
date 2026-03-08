@@ -50,6 +50,8 @@ enum PendingRequestKind {
     ExtendedStatusQuery,
     Config3Write,
     Config3Query,
+    TagMessageFormatWrite,
+    TagMessageFormatQuery,
 }
 
 impl PendingRequestKind {
@@ -64,6 +66,8 @@ impl PendingRequestKind {
             Command::GetExtendedStatus => Self::ExtendedStatusQuery,
             Command::SetConfig3 { .. } => Self::Config3Write,
             Command::GetConfig3 => Self::Config3Query,
+            Command::SetTagMessageFormat { .. } => Self::TagMessageFormatWrite,
+            Command::GetTagMessageFormat => Self::TagMessageFormatQuery,
             _ => Self::AnyInstruction(cmd.instruction()),
         }
     }
@@ -88,6 +92,13 @@ impl PendingRequestKind {
             }
             Self::Config3Query => {
                 frame.instruction() == control::INSTR_CONFIG3 && frame.data().len() >= 2
+            }
+            Self::TagMessageFormatWrite => {
+                frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT && frame.data().is_empty()
+            }
+            Self::TagMessageFormatQuery => {
+                frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT
+                    && (8..=9).contains(&frame.data().len())
             }
         }
     }
@@ -206,12 +217,27 @@ impl ControlClient {
         Ok(control::decode_config3(&frame)?)
     }
 
+    pub async fn get_tag_message_format(
+        &self,
+    ) -> Result<control::TagMessageFormat, ControlClientError> {
+        let frame = self.send(&Command::GetTagMessageFormat).await?;
+        Ok(control::decode_tag_message_format(&frame)?)
+    }
+
     pub async fn set_config3(
         &self,
         mode: control::ReadMode,
         timeout: u8,
     ) -> Result<(), ControlClientError> {
         let _frame = self.send(&Command::SetConfig3 { mode, timeout }).await?;
+        Ok(())
+    }
+
+    pub async fn set_tag_message_format(
+        &self,
+        format: control::TagMessageFormat,
+    ) -> Result<(), ControlClientError> {
+        let _frame = self.send(&Command::SetTagMessageFormat { format }).await?;
         Ok(())
     }
 
@@ -417,6 +443,7 @@ pub struct ReaderInfo {
     pub banner: Option<String>,
     pub hardware: Option<HardwareInfo>,
     pub config: Option<Config3Info>,
+    pub tto_enabled: Option<bool>,
     pub clock: Option<ClockInfo>,
     pub estimated_stored_reads: Option<u32>,
     pub recording: Option<bool>,
@@ -586,7 +613,7 @@ impl DownloadTracker {
     }
 }
 
-/// Run the initial connection sequence: statistics, banner, ext status, config3, clock.
+/// Run the initial connection sequence: statistics, banner, ext status, config3, tag format, clock.
 pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
     let mut ri = ReaderInfo::default();
     let mut failures = 0u8;
@@ -648,22 +675,26 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
         }
     }
 
+    if poll_tag_message_format(client, &mut ri).await.is_err() {
+        failures += 1;
+    }
+
     if poll_clock(client, &mut ri).await.is_err() {
         failures += 1;
     }
 
     ri.connect_failures = failures;
 
-    if failures == 5 {
+    if failures == 6 {
         tracing::error!(
-            "connect sequence failed for all 5 queries — control protocol may be non-functional"
+            "connect sequence failed for all 6 queries — control protocol may be non-functional"
         );
     }
 
     ri
 }
 
-/// Poll extended status, CONFIG3 (read mode), and clock, updating info in place.
+/// Poll extended status, CONFIG3 (read mode), tag format, and clock, updating info in place.
 pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
     match client.get_extended_status().await {
         Ok(ext) => {
@@ -690,7 +721,22 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
         }
     }
 
+    let _ = poll_tag_message_format(client, info).await;
     let _ = poll_clock(client, info).await;
+}
+
+async fn poll_tag_message_format(client: &ControlClient, info: &mut ReaderInfo) -> Result<(), ()> {
+    match client.get_tag_message_format().await {
+        Ok(format) => {
+            info.tto_enabled = Some(format.tto_enabled());
+            Ok(())
+        }
+        Err(e) => {
+            warn!("get_tag_message_format failed: {e}");
+            info.tto_enabled = None;
+            Err(())
+        }
+    }
 }
 
 async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) -> Result<(), ()> {
@@ -1256,6 +1302,24 @@ mod tests {
         let frame = ControlFrame::new(0, control::INSTR_CONFIG3, vec![0x03, 0x05]);
         assert!(!PendingRequestKind::Config3Write.matches(&frame));
         assert!(PendingRequestKind::Config3Query.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_tag_message_format_write_matches_empty_ack() {
+        let frame = ControlFrame::new(0, control::INSTR_TAG_MESSAGE_FORMAT, vec![]);
+        assert!(PendingRequestKind::TagMessageFormatWrite.matches(&frame));
+        assert!(!PendingRequestKind::TagMessageFormatQuery.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_tag_message_format_query_matches_data_response() {
+        let frame = ControlFrame::new(
+            0,
+            control::INSTR_TAG_MESSAGE_FORMAT,
+            vec![0x7f, 0xfc, 0x61, 0x61, 0xaa, 0x00, 0x0d, 0x0a],
+        );
+        assert!(!PendingRequestKind::TagMessageFormatWrite.matches(&frame));
+        assert!(PendingRequestKind::TagMessageFormatQuery.matches(&frame));
     }
 
     #[test]

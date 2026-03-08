@@ -5,6 +5,8 @@ import {
   readerConnectionSummary,
   formatClockDrift,
   formatReadMode,
+  formatTtoState,
+  readerControlDisabled,
   computeDownloadPercent,
   computeTickingLastSeen,
 } from "./status-view-model";
@@ -125,6 +127,29 @@ describe("computeDownloadPercent", () => {
 describe("formatReadMode — event", () => {
   it("capitalizes event mode", () => {
     expect(formatReadMode("event")).toBe("Event");
+  });
+});
+
+describe("formatTtoState", () => {
+  it("renders enabled, disabled, and unknown states", () => {
+    expect(formatTtoState(true)).toBe("Enabled");
+    expect(formatTtoState(false)).toBe("Disabled");
+    expect(formatTtoState(null)).toBe("\u2014");
+  });
+});
+
+describe("readerControlDisabled", () => {
+  it("disables controls while busy", () => {
+    expect(readerControlDisabled("connected", true)).toBe(true);
+  });
+
+  it("disables controls while disconnected", () => {
+    expect(readerControlDisabled("disconnected", false)).toBe(true);
+    expect(readerControlDisabled("connecting", false)).toBe(true);
+  });
+
+  it("keeps controls enabled when connected and idle", () => {
+    expect(readerControlDisabled("connected", false)).toBe(false);
   });
 });
 

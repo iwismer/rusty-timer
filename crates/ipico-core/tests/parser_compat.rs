@@ -7,7 +7,7 @@
 
 use std::convert::TryFrom;
 
-use ipico_core::read::{ChipRead, ReadType, Timestamp};
+use ipico_core::read::{ChipRead, ReadType, Timestamp, TtoInfo};
 
 // ---------------------------------------------------------------------------
 // Helper: load non-empty lines from a fixture file
@@ -20,6 +20,12 @@ fn fixture_lines(name: &str) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect()
+}
+
+fn raw_read_with_tto_and_checksum(tto_hex: &str) -> String {
+    let body = format!("400000000123450a2a01123018455927{}", tto_hex);
+    let checksum: u8 = body.bytes().map(|b| b as u32).sum::<u32>() as u8;
+    format!("aa{}{:02x}", body, checksum)
 }
 
 // ===========================================================================
@@ -122,6 +128,25 @@ fn fsls_fixture_line_1_is_ls() {
     assert_eq!(read.tag_id, "000000012345");
     assert_eq!(read.read_type, ReadType::FSLS);
     assert_eq!(read.timestamp, Timestamp::new(1, 12, 30, 18, 46, 0, 0));
+}
+
+#[test]
+fn tto_enabled_ascii_frame_parses_without_breaking_legacy_fields() {
+    let read = ChipRead::try_from(raw_read_with_tto_and_checksum("120080").as_str()).unwrap();
+
+    assert_eq!(read.tag_id, "000000012345");
+    assert_eq!(read.timestamp, Timestamp::new(1, 12, 30, 18, 45, 59, 390));
+    assert_eq!(read.read_type, ReadType::FSLS);
+    assert_eq!(
+        read.tto,
+        Some(TtoInfo {
+            index: 0x12,
+            page: 0x00,
+            tamper: false,
+            first_seen: true,
+            last_seen: false,
+        })
+    );
 }
 
 // ===========================================================================

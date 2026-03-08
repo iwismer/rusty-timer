@@ -17,6 +17,8 @@
     readerConnectionSummary,
     formatClockDrift,
     formatReadMode,
+    formatTtoState,
+    readerControlDisabled,
     computeDownloadPercent,
     computeTickingLastSeen,
   } from "$lib/status-view-model";
@@ -259,7 +261,7 @@
     info: api.ReaderInfo | undefined,
   ) {
     readModeDrafts = { ...readModeDrafts, [ip]: mode };
-    if (mode === "fsls" && readModeTimeoutDrafts[ip] == null) {
+    if (shouldShowTimeoutInput(mode) && readModeTimeoutDrafts[ip] == null) {
       readModeTimeoutDrafts = {
         ...readModeTimeoutDrafts,
         [ip]: initialTimeoutDraft(info?.config?.timeout),
@@ -336,10 +338,9 @@
         ...controlFeedback,
         [ip]: {
           kind: "ok",
-          message:
-            result.mode === "fsls"
-              ? `Mode set to ${formatReadMode(result.mode)} (${timeout}s)`
-              : `Mode set to ${formatReadMode(result.mode)}`,
+          message: shouldShowTimeoutInput(result.mode)
+            ? `Mode set to ${formatReadMode(result.mode)} (${timeout}s)`
+            : `Mode set to ${formatReadMode(result.mode)}`,
         },
       };
     } catch (e) {
@@ -433,6 +434,36 @@
       controlFeedback = {
         ...controlFeedback,
         [ip]: { kind: "err", message: `Toggle recording failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleToggleTto(ip: string) {
+    const info = readerInfoMap[ip];
+    const currentlyEnabled = info?.tto_enabled === true;
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.setTtoState(ip, !currentlyEnabled);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], tto_enabled: result.enabled },
+      };
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: {
+          kind: "ok",
+          message: result.enabled
+            ? "TTO reporting enabled"
+            : "TTO reporting disabled",
+        },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `TTO toggle failed: ${e}` },
       };
     } finally {
       controlBusy = { ...controlBusy, [ip]: false };
@@ -966,6 +997,31 @@
                           disabled={controlBusy[reader.ip] ||
                             reader.state !== "connected"}>Apply</button
                         >
+                      </span>
+                    </div>
+                    <div class="col-span-2">
+                      <span class="text-text-muted">TTO Bytes:</span>
+                      <span
+                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
+                      >
+                        <span
+                          class="px-2 py-0.5 text-xs rounded-full bg-surface-0 text-text-secondary border border-border"
+                        >
+                          {formatTtoState(info?.tto_enabled)}
+                        </span>
+                        <button
+                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleToggleTto(reader.ip);
+                          }}
+                          disabled={readerControlDisabled(
+                            reader.state,
+                            controlBusy[reader.ip],
+                          )}
+                        >
+                          {info?.tto_enabled ? "Disable TTO" : "Enable TTO"}
+                        </button>
                       </span>
                     </div>
                   </div>

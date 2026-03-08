@@ -236,6 +236,33 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("getTtoState fetches current tto state", async () => {
+    const { getTtoState } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { enabled: true }));
+    const result = await getTtoState("192.168.1.10");
+    expect(result.enabled).toBe(true);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/tto",
+      expect.any(Object),
+    );
+  });
+
+  it("setTtoState sends enabled flag", async () => {
+    const { setTtoState } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { enabled: false }));
+
+    const result = await setTtoState("192.168.1.10", false);
+
+    expect(result.enabled).toBe(false);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/tto",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+  });
+
   it("refreshReader posts to refresh endpoint", async () => {
     const { refreshReader } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(200, { banner: "IPICO v4" }));
