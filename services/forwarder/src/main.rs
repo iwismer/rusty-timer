@@ -1499,11 +1499,58 @@ async fn run_uplink(
 
         // Main uplink loop: periodically send new events and wait for acks
         let flush_interval = Duration::from_millis(cfg.uplink.batch_flush_ms);
+        let mut ui_rx = ui_tx.subscribe();
 
         'uplink: loop {
             if *shutdown_rx.borrow() {
                 info!("uplink task stopping (shutdown)");
                 return;
+            }
+
+            // Drain UI events and forward reader state changes upstream
+            loop {
+                match ui_rx.try_recv() {
+                    Ok(ForwarderUiEvent::ReaderUpdated { ip, state, .. }) => {
+                        let state_str = match state {
+                            forwarder::ui_events::ReaderConnectionState::Connected => "connected",
+                            forwarder::ui_events::ReaderConnectionState::Connecting => "connecting",
+                            forwarder::ui_events::ReaderConnectionState::Disconnected => {
+                                "disconnected"
+                            }
+                        };
+                        let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
+                            reader_ip: ip.clone(),
+                            state: state_str.to_owned(),
+                            reader_info: None,
+                        });
+                        if let Err(e) = session.send_message(&msg).await {
+                            warn!(error = %e, reader_ip = %ip, "failed to send ReaderInfoUpdate upstream");
+                            break 'uplink;
+                        }
+                    }
+                    Ok(ForwarderUiEvent::ReaderInfoUpdated { ip, info }) => {
+                        let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
+                            reader_ip: ip.clone(),
+                            state: "connected".to_owned(),
+                            reader_info: Some(to_protocol_reader_info(&info)),
+                        });
+                        if let Err(e) = session.send_message(&msg).await {
+                            warn!(error = %e, reader_ip = %ip, "failed to send ReaderInfoUpdate upstream");
+                            break 'uplink;
+                        }
+                    }
+                    Ok(_) => {
+                        // Ignore other UI events (StatusChanged, LogEntry, etc.)
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                        warn!(
+                            skipped = n,
+                            "ui_rx lagged; some reader updates were not forwarded"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break 'uplink,
+                }
             }
 
             // Wait for flush interval, shutdown, or incoming config messages
