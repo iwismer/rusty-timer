@@ -1,4 +1,5 @@
 import type { ReaderStatus } from "./api";
+import type { DownloadProgressEvent } from "./download-progress";
 
 export function formatLastSeen(secs: number | null): string {
   if (secs === null) return "never";
@@ -46,35 +47,24 @@ export function formatClockDrift(ms: number | null | undefined): string {
 }
 
 export function computeDownloadPercent(
-  download:
-    | {
-        state?: "downloading" | "complete" | "error" | "idle";
-        progress?: number;
-        total?: number;
-        reads_received?: number;
-      }
-    | null
-    | undefined,
+  download: DownloadProgressEvent | null | undefined,
   estimatedReads: number | null | undefined,
 ): number {
   if (!download) return 0;
+  if (download.state !== "downloading")
+    return download.state === "complete" ? 100 : 0;
 
-  if (
-    estimatedReads != null &&
-    estimatedReads > 0 &&
-    typeof download.reads_received === "number"
-  ) {
+  if (estimatedReads != null && estimatedReads > 0) {
     return Math.min(
       100,
       Math.max(0, Math.round((download.reads_received / estimatedReads) * 100)),
     );
   }
 
-  if (typeof download.total === "number" && download.total > 0) {
-    const progress = download.progress ?? 0;
+  if (download.total > 0) {
     return Math.min(
       100,
-      Math.max(0, Math.round((progress / download.total) * 100)),
+      Math.max(0, Math.round((download.progress / download.total) * 100)),
     );
   }
 

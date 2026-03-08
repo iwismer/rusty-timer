@@ -124,15 +124,17 @@ describe("subscribeDownloadProgress", () => {
   it("handles malformed JSON without crashing", async () => {
     const { subscribeDownloadProgress } = await import("./download-progress");
     const onEvent = vi.fn();
+    const onError = vi.fn();
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    subscribeDownloadProgress("192.168.1.10:7000", onEvent);
+    subscribeDownloadProgress("192.168.1.10:7000", onEvent, onError);
 
     const es = MockEventSource.lastInstance!;
     es.onmessage!({ data: "not valid json{{{" });
 
     expect(onEvent).not.toHaveBeenCalled();
     expect(consoleSpy).toHaveBeenCalled();
-    expect(es.closed).toBe(false);
+    expect(onError).toHaveBeenCalled();
+    expect(es.closed).toBe(true);
     consoleSpy.mockRestore();
   });
 

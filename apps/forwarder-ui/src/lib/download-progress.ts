@@ -1,12 +1,15 @@
 // apps/forwarder-ui/src/lib/download-progress.ts
 
-export interface DownloadProgressEvent {
-  state: "downloading" | "complete" | "error" | "idle";
-  progress?: number;
-  total?: number;
-  reads_received?: number;
-  message?: string;
-}
+export type DownloadProgressEvent =
+  | {
+      state: "downloading";
+      progress: number;
+      total: number;
+      reads_received: number;
+    }
+  | { state: "complete"; reads_received: number }
+  | { state: "error"; message: string }
+  | { state: "idle" };
 
 export interface DownloadProgressHandle {
   close(): void;
@@ -28,10 +31,13 @@ export function subscribeDownloadProgress(
       }
     } catch (err) {
       console.error("Failed to parse download progress event:", err, msg.data);
+      onError?.();
+      es.close();
     }
   };
 
-  es.onerror = () => {
+  es.onerror = (evt) => {
+    console.error("Download progress SSE error:", evt);
     onError?.();
     es.close();
   };

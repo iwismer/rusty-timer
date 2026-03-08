@@ -1025,7 +1025,9 @@
                         ></div>
                       </div>
                       <span class="text-xs font-mono whitespace-nowrap">
-                        {dl?.reads_received ?? 0} reads &middot; {percent}%
+                        {dl?.state === "downloading" || dl?.state === "complete"
+                          ? dl.reads_received
+                          : 0} reads &middot; {percent}%
                       </span>
                     </div>
                   {/if}
