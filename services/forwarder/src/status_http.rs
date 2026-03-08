@@ -1879,6 +1879,53 @@ async fn estimate_one_way_latency(
     Ok((median_rtt / 2, rtts.len()))
 }
 
+/// Compute the target second boundary and pre-SET wait duration for clock sync.
+///
+/// Given the current wall time, one-way latency estimate, and the fixed sync delay,
+/// returns `(target_boundary, pre_set_wait)` where:
+/// - `target_boundary` is the `DateTime<Local>` whole-second that the rollover should align with
+/// - `pre_set_wait` is how long to sleep before sending SET_DATE_TIME
+fn compute_sync_timing(
+    wall_now: chrono::DateTime<chrono::Local>,
+    one_way: std::time::Duration,
+    sync_delay_ms: u64,
+) -> (chrono::DateTime<chrono::Local>, std::time::Duration) {
+    use chrono::Timelike;
+
+    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or_else(|_| {
+        tracing::warn!(
+            one_way_ms = one_way.as_millis(),
+            "one-way latency exceeds chrono Duration range, falling back to zero"
+        );
+        chrono::Duration::zero()
+    });
+    let sync_delay = chrono::Duration::milliseconds(sync_delay_ms as i64);
+    let wall_at_rollover_if_now = wall_now + arrival_offset + sync_delay;
+    let rollover_frac = wall_at_rollover_if_now.nanosecond() as f64 / 1_000_000_000.0;
+
+    let target = if rollover_frac >= 0.5 {
+        wall_at_rollover_if_now + chrono::Duration::seconds(1)
+    } else {
+        wall_at_rollover_if_now
+    };
+    let target_boundary_initial = target
+        .with_nanosecond(0)
+        .expect("nanosecond 0 is always valid");
+
+    let mut target_boundary = target_boundary_initial;
+    let mut ideal_send = target_boundary - arrival_offset - sync_delay;
+    if ideal_send < wall_now {
+        target_boundary = target_boundary + chrono::Duration::seconds(1);
+        ideal_send = target_boundary - arrival_offset - sync_delay;
+    }
+    let pre_set_wait = ideal_send
+        .signed_duration_since(wall_now)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO);
+
+    (target_boundary, pre_set_wait)
+}
+
 /// POST /api/v1/readers/{ip}/sync-clock
 ///
 /// Minimizes clock drift by:
@@ -1927,39 +1974,7 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     };
 
     let wall_now = chrono::Local::now();
-
-    // Step 2: compute when the rollover would happen if we sent SET right now.
-    // SET arrives ~one_way from now, then the reader takes SYNC_DELAY_MS to
-    // apply the new second (cs resets to ~52, rolls to 0 at ~480-500ms).
-    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or(chrono::Duration::zero());
-    let sync_delay = chrono::Duration::milliseconds(SYNC_DELAY_MS as i64);
-    let wall_at_rollover_if_now = wall_now + arrival_offset + sync_delay;
-    let rollover_frac = wall_at_rollover_if_now.nanosecond() as f64 / 1_000_000_000.0;
-
-    // Pick target second S = round(wall_at_rollover), then delay the SET so
-    // that the rollover aligns with exactly S.000 instead of S ± 500ms.
-    let target = if rollover_frac >= 0.5 {
-        wall_at_rollover_if_now + chrono::Duration::seconds(1)
-    } else {
-        wall_at_rollover_if_now
-    };
-    // Truncate to the exact second boundary S.000
-    let target_boundary = target.with_nanosecond(0).unwrap_or(target);
-
-    // Step 3: compute ideal send time so rollover lands on S.000.
-    // ideal_send + one_way + sync_delay = S.000
-    // ideal_send = S.000 - one_way - sync_delay
-    // If ideal_send is already past, bump target to the next second.
-    let mut target_boundary = target_boundary;
-    let mut ideal_send = target_boundary - arrival_offset - sync_delay;
-    if ideal_send < wall_now {
-        target_boundary += chrono::Duration::seconds(1);
-        ideal_send = target_boundary - arrival_offset - sync_delay;
-    }
-    let pre_set_wait = ideal_send
-        .signed_duration_since(wall_now)
-        .to_std()
-        .unwrap_or(std::time::Duration::ZERO);
+    let (target_boundary, pre_set_wait) = compute_sync_timing(wall_now, one_way, SYNC_DELAY_MS);
     if !pre_set_wait.is_zero() {
         tokio::time::sleep(pre_set_wait).await;
     }
@@ -5998,5 +6013,74 @@ target = "192.168.1.100:10000"
             .await
             .unwrap();
         assert_eq!(resp.status(), 503);
+    }
+
+    #[test]
+    fn sync_timing_rollover_frac_above_half_rounds_up() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.200, one_way=50ms, sync=500ms → rollover_if_now=.750, frac=0.75 → rounds UP
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(200_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(50);
+        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 1);
+        assert_eq!(target.nanosecond(), 0);
+        assert!(wait < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sync_timing_rollover_frac_below_half_stays_same_second() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.800, one_way=50ms, sync=500ms → rollover_if_now=1.350, frac=0.35 → truncates to 1.000
+        // ideal_send=1.000-0.050-0.500=0.450 < 0.800 → BUMP → target=2.000
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(800_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(50);
+        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 2);
+        assert_eq!(target.nanosecond(), 0);
+    }
+
+    #[test]
+    fn sync_timing_ideal_send_past_bumps_target() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.500, one_way=1ms, sync=500ms → rollover_if_now=1.001, frac=0.001 → target=1.000
+        // ideal_send=1.000-0.001-0.500=0.499 < 0.500 → BUMP → target=2.000
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(500_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(1);
+        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 2);
+        assert_eq!(target.nanosecond(), 0);
+        assert!(wait > std::time::Duration::from_millis(900));
+        assert!(wait < std::time::Duration::from_millis(1100));
+    }
+
+    #[test]
+    fn sync_timing_zero_latency() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.300, one_way=0, sync=500ms → rollover_if_now=.800, frac=0.8 → rounds UP
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(300_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::ZERO;
+        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 1);
+        assert_eq!(target.nanosecond(), 0);
     }
 }
