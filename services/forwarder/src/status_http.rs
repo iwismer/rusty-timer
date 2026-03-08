@@ -2350,11 +2350,12 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
                     .and_then(|r| r.reader_info.clone())
                     .unwrap_or_default()
             };
+            // Set recording/stored_reads from the set_recording response as a baseline.
+            // If run_status_poll's get_extended_status succeeds, it overwrites with fresher values.
+            // If it fails, these values from the confirmed set_recording response persist.
             info.recording = Some(ext.recording_state.is_recording());
             info.estimated_stored_reads = Some(ext.estimated_stored_reads());
             crate::reader_control::run_status_poll(&client, &mut info).await;
-            info.recording = Some(ext.recording_state.is_recording());
-            info.estimated_stored_reads = Some(ext.estimated_stored_reads());
             update_cached_reader_info(&state, &ip, info.clone()).await;
             let recording = info.recording.unwrap_or(false);
             json_response(
