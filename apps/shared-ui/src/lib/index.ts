@@ -15,3 +15,5 @@ export type {
   ConfigSaveResult,
   ConfigActionResult,
 } from "../lib/config-types";
+export * from "../lib/reader-view-model";
+export * from "../lib/read-mode-form";
