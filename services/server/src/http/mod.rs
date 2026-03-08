@@ -8,6 +8,7 @@ pub mod forwarder_races;
 pub mod logs;
 pub mod metrics;
 pub mod races;
+pub mod reader_control;
 pub mod reads;
 pub mod response;
 pub mod sse;

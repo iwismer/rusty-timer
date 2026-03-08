@@ -1,0 +1,305 @@
+use super::response::{gateway_timeout, json_error, not_found};
+use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use rt_protocol::{ReaderControlAction, ReaderControlResponse};
+use serde::Deserialize;
+use std::time::Duration;
+
+const READER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn send_reader_control(
+    state: &AppState,
+    forwarder_id: &str,
+    reader_ip: &str,
+    action: ReaderControlAction,
+) -> Result<ReaderControlResponse, axum::response::Response> {
+    let senders = state.forwarder_command_senders.read().await;
+    let tx = match senders.get(forwarder_id) {
+        Some(tx) => tx.clone(),
+        None => return Err(not_found("forwarder not connected")),
+    };
+    drop(senders);
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let cmd = ForwarderCommand::ReaderControl {
+        request_id,
+        reader_ip: reader_ip.to_owned(),
+        action,
+        reply: reply_tx,
+    };
+
+    match tokio::time::timeout(READER_CONTROL_TIMEOUT, tx.send(cmd)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            return Err(not_found("forwarder disconnected"));
+        }
+        Err(_) => {
+            return Err(gateway_timeout("forwarder command queue is saturated"));
+        }
+    }
+
+    match tokio::time::timeout(READER_CONTROL_TIMEOUT, reply_rx).await {
+        Ok(Ok(ForwarderProxyReply::Response(resp))) => Ok(resp),
+        Ok(Ok(ForwarderProxyReply::Timeout)) => {
+            Err(gateway_timeout("forwarder did not respond within timeout"))
+        }
+        Ok(Err(_)) => Err(json_error(
+            StatusCode::BAD_GATEWAY,
+            "FORWARDER_DISCONNECTED",
+            "forwarder disconnected before replying",
+        )),
+        Err(_) => Err(gateway_timeout("forwarder did not respond within timeout")),
+    }
+}
+
+fn reader_control_response_to_http(resp: ReaderControlResponse) -> axum::response::Response {
+    if resp.success {
+        Json(serde_json::json!({
+            "ok": true,
+            "error": serde_json::Value::Null,
+            "reader_info": resp.reader_info,
+        }))
+        .into_response()
+    } else {
+        json_error(
+            StatusCode::BAD_GATEWAY,
+            "READER_CONTROL_ERROR",
+            resp.error
+                .unwrap_or_else(|| "reader control action failed".to_owned()),
+        )
+    }
+}
+
+/// Send a fire-and-forget command to a reader (sends command, returns 202 immediately).
+async fn send_fire_and_forget(
+    state: &AppState,
+    forwarder_id: &str,
+    reader_ip: &str,
+    action: ReaderControlAction,
+) -> axum::response::Response {
+    let senders = state.forwarder_command_senders.read().await;
+    let tx = match senders.get(forwarder_id) {
+        Some(tx) => tx.clone(),
+        None => return not_found("forwarder not connected"),
+    };
+    drop(senders);
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+    let cmd = ForwarderCommand::ReaderControl {
+        request_id,
+        reader_ip: reader_ip.to_owned(),
+        action,
+        reply: reply_tx,
+    };
+
+    match tokio::time::timeout(READER_CONTROL_TIMEOUT, tx.send(cmd)).await {
+        Ok(Ok(())) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "ok": true })),
+        )
+            .into_response(),
+        Ok(Err(_)) => not_found("forwarder disconnected"),
+        Err(_) => gateway_timeout("forwarder command queue is saturated"),
+    }
+}
+
+pub async fn get_reader_info(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::GetInfo,
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+pub async fn sync_clock(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::SyncClock,
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetReadModeBody {
+    pub mode: String,
+    pub timeout: u8,
+}
+
+pub async fn set_read_mode(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+    Json(body): Json<SetReadModeBody>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::SetReadMode {
+            mode: body.mode,
+            timeout: body.timeout,
+        },
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetTtoBody {
+    pub enabled: bool,
+}
+
+pub async fn set_tto(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+    Json(body): Json<SetTtoBody>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::SetTto {
+            enabled: body.enabled,
+        },
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetRecordingBody {
+    pub enabled: bool,
+}
+
+pub async fn set_recording(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+    Json(body): Json<SetRecordingBody>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::SetRecording {
+            enabled: body.enabled,
+        },
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+pub async fn clear_records(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+) -> impl IntoResponse {
+    send_fire_and_forget(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::ClearRecords,
+    )
+    .await
+}
+
+pub async fn start_download(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+) -> impl IntoResponse {
+    send_fire_and_forget(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::StartDownload,
+    )
+    .await
+}
+
+pub async fn stop_download(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::StopDownload,
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+pub async fn refresh(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::Refresh,
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+pub async fn reconnect(
+    State(state): State<AppState>,
+    Path((forwarder_id, reader_ip)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match send_reader_control(
+        &state,
+        &forwarder_id,
+        &reader_ip,
+        ReaderControlAction::Reconnect,
+    )
+    .await
+    {
+        Ok(resp) => reader_control_response_to_http(resp),
+        Err(e) => e,
+    }
+}
+
+pub async fn get_all_reader_states(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = state.reader_states.read().await;
+    let states: Vec<_> = cache.values().cloned().collect();
+    Json(serde_json::json!({ "reader_states": states }))
+}
