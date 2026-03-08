@@ -17,6 +17,7 @@ type StreamUpdatedEvent = {
   stream_id: string;
   stream_epoch?: number;
   online?: boolean;
+  reader_connected?: boolean;
   display_alias?: string | null;
   forwarder_display_name?: string | null;
 };
