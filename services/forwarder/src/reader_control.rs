@@ -505,36 +505,48 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
     ri
 }
 
-/// Poll clock and extended status, updating info in place.
+/// Poll extended status, CONFIG3 (read mode), and clock, updating info in place.
 pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
-    if let Ok(ext) = client.get_extended_status().await {
-        info.estimated_stored_reads = Some(ext.estimated_stored_reads());
-        info.recording = Some(ext.recording_state == 0x01);
+    match client.get_extended_status().await {
+        Ok(ext) => {
+            info.estimated_stored_reads = Some(ext.estimated_stored_reads());
+            info.recording = Some(ext.recording_state == 0x01);
+        }
+        Err(e) => warn!("status poll: get_extended_status failed: {e}"),
     }
 
-    if let Ok((mode, timeout)) = client.get_config3().await {
-        info.read_mode = Some(mode.as_str().to_owned());
-        info.read_mode_timeout = Some(timeout);
+    match client.get_config3().await {
+        Ok((mode, timeout)) => {
+            info.read_mode = Some(mode.as_str().to_owned());
+            info.read_mode_timeout = Some(timeout);
+        }
+        Err(e) => warn!("status poll: get_config3 failed: {e}"),
     }
 
     poll_clock(client, info).await;
 }
 
 async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) {
-    if let Ok(dt) = client.get_date_time().await {
-        let reader_iso = dt.to_iso_string();
-        info.reader_clock = Some(reader_iso.clone());
+    match client.get_date_time().await {
+        Ok(dt) => {
+            let reader_iso = dt.to_iso_string();
+            info.reader_clock = Some(reader_iso.clone());
 
-        let now = chrono::Local::now();
-        if let Ok(reader_naive) =
-            chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
-        {
-            let system_naive = now.naive_local();
-            let drift = system_naive
-                .signed_duration_since(reader_naive)
-                .num_milliseconds();
-            info.clock_drift_ms = Some(drift);
+            let now = chrono::Local::now();
+            if let Ok(reader_naive) =
+                chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
+            {
+                let system_naive = now.naive_local();
+                let drift = system_naive
+                    .signed_duration_since(reader_naive)
+                    .num_milliseconds();
+                info.clock_drift_ms = Some(drift);
+            } else {
+                warn!("status poll: failed to parse reader clock: {reader_iso}");
+                info.clock_drift_ms = None;
+            }
         }
+        Err(e) => warn!("status poll: get_date_time failed: {e}"),
     }
 }
 
