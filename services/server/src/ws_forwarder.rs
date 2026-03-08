@@ -456,7 +456,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 }
                             }
                             Ok(WsMessage::ReaderInfoUpdate(update)) => {
-                                let key = format!("{}:{}", device_id, update.reader_ip);
+                                let key = crate::state::reader_cache_key(&device_id, &update.reader_ip);
                                 let cached = CachedReaderState {
                                     forwarder_id: device_id.clone(),
                                     reader_ip: update.reader_ip.clone(),
@@ -474,12 +474,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Ok(WsMessage::ReaderDownloadProgress(progress)) => {
                                 let _ = state.dashboard_tx.send(DashboardEvent::ReaderDownloadProgress {
                                     forwarder_id: device_id.clone(),
-                                    reader_ip: progress.reader_ip,
-                                    state: progress.state,
-                                    reads_received: progress.reads_received,
-                                    progress: progress.progress,
-                                    total: progress.total,
-                                    error: progress.error,
+                                    progress,
                                 });
                             }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
@@ -551,16 +546,37 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             reader_ip,
                             action,
                         });
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if let Err(e) = socket.send(Message::Text(json.into())).await {
-                                warn!(error = %e, "failed to send reader control request");
-                                let _ = reply.send(ForwarderProxyReply::Timeout);
-                            } else {
-                                pending_reader_controls.insert(request_id, (Instant::now(), reply));
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                    warn!(error = %e, "failed to send reader control request");
+                                    let _ = reply.send(ForwarderProxyReply::Timeout);
+                                } else {
+                                    pending_reader_controls.insert(request_id, (Instant::now(), reply));
+                                }
                             }
-                        } else {
-                            warn!(device_id = %device_id, "failed to serialize reader control request");
-                            let _ = reply.send(ForwarderProxyReply::Timeout);
+                            Err(e) => {
+                                let err_msg = format!("failed to serialize reader control request: {}", e);
+                                error!(device_id = %device_id, error = %e, "failed to serialize reader control request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(err_msg));
+                            }
+                        }
+                    }
+                    ForwarderCommand::ReaderControlFireAndForget { reader_ip, action } => {
+                        let msg = WsMessage::ReaderControlRequest(rt_protocol::ReaderControlRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            reader_ip,
+                            action,
+                        });
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                    warn!(error = %e, "failed to send fire-and-forget reader control");
+                                }
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize fire-and-forget reader control request");
+                            }
                         }
                     }
                 }

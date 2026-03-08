@@ -14,6 +14,7 @@ use crate::{
 pub enum ForwarderProxyReply<T> {
     Response(T),
     Timeout,
+    InternalError(String),
 }
 
 pub enum ForwarderCommand {
@@ -38,6 +39,15 @@ pub enum ForwarderCommand {
         action: rt_protocol::ReaderControlAction,
         reply: oneshot::Sender<ForwarderProxyReply<rt_protocol::ReaderControlResponse>>,
     },
+    ReaderControlFireAndForget {
+        reader_ip: String,
+        action: rt_protocol::ReaderControlAction,
+    },
+}
+
+/// Composite cache key for reader state entries.
+pub fn reader_cache_key(forwarder_id: &str, reader_ip: &str) -> String {
+    format!("{}:{}", forwarder_id, reader_ip)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -394,5 +404,18 @@ mod tests {
             .await;
 
         assert!(state.has_active_receiver_session_for_race(race_id).await);
+    }
+
+    #[test]
+    fn reader_cache_key_combines_forwarder_and_reader_ip() {
+        assert_eq!(
+            reader_cache_key("fwd-1", "10.0.0.1:10000"),
+            "fwd-1:10.0.0.1:10000"
+        );
+    }
+
+    #[test]
+    fn reader_cache_key_handles_empty_parts() {
+        assert_eq!(reader_cache_key("", ""), ":");
     }
 }

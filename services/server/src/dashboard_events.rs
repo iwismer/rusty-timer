@@ -72,15 +72,37 @@ pub enum DashboardEvent {
     },
     ReaderDownloadProgress {
         forwarder_id: String,
-        reader_ip: String,
-        state: rt_protocol::DownloadState,
-        reads_received: u32,
-        progress: u64,
-        total: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
+        #[serde(flatten)]
+        progress: rt_protocol::ReaderDownloadProgress,
     },
     LogEntry {
         entry: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_download_progress_serializes_with_flattened_fields() {
+        let event = DashboardEvent::ReaderDownloadProgress {
+            forwarder_id: "fwd-1".to_owned(),
+            progress: rt_protocol::ReaderDownloadProgress {
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                state: rt_protocol::DownloadState::Downloading,
+                reads_received: 42,
+                progress: 50,
+                total: 100,
+                error: None,
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "reader_download_progress");
+        assert_eq!(json["forwarder_id"], "fwd-1");
+        assert_eq!(json["reader_ip"], "10.0.0.1:10000");
+        assert_eq!(json["reads_received"], 42);
+        assert_eq!(json["progress"], 50);
+        assert_eq!(json["total"], 100);
+    }
 }
