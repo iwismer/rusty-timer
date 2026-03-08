@@ -497,6 +497,9 @@ impl StatusServer {
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
+            if state == ReaderConnectionState::Disconnected {
+                r.reader_info = None;
+            }
             r.state = state;
             let _ = self
                 .ui_tx

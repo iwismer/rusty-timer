@@ -1968,6 +1968,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_clears_reader_info() {
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        status
+            .init_readers(&[("10.0.0.42".to_owned(), 10042)])
+            .await;
+        status
+            .update_reader_state("10.0.0.42", ReaderConnectionState::Connected)
+            .await;
+
+        // Populate reader_info
+        use forwarder::reader_control::ReaderInfo;
+        status
+            .update_reader_info(
+                "10.0.0.42",
+                ReaderInfo {
+                    banner: Some("IPICO V2".to_owned()),
+                    hardware: None,
+                    config: None,
+                    tto_enabled: None,
+                    clock: None,
+                    estimated_stored_reads: None,
+                    recording: None,
+                    connect_failures: 0,
+                },
+            )
+            .await;
+
+        // Disconnect should clear reader_info
+        mark_reader_disconnected(&status, "10.0.0.42").await;
+
+        let body = http_get_body(status.local_addr(), "/api/v1/status").await;
+        assert!(
+            !body.contains("IPICO V2"),
+            "reader_info should be cleared after disconnect, got: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn run_reader_updates_status_for_ip_port_stream_key() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
