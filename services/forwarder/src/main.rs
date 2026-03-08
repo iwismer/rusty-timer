@@ -273,7 +273,7 @@ async fn run_reader(
             }
         });
 
-        // Spawn connect sequence + 30s status polling task.
+        // Spawn connect sequence + 10s status polling task.
         // This runs concurrently with the read loop so that control
         // responses arriving on the socket can be demuxed to the sink.
         let poll_client = control_client.clone();
