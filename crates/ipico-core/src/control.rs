@@ -21,12 +21,18 @@ pub const INSTR_UNKNOWN_E0: u8 = 0xe0;
 
 // ── ReadMode ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadMode {
     Raw,
     Event,
     FirstLastSeen,
+}
+
+impl serde::Serialize for ReadMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
 impl ReadMode {
