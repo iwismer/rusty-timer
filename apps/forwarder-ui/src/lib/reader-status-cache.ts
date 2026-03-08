@@ -59,6 +59,24 @@ export function rebuildReaderCachesFromStatus(
   return next;
 }
 
+export function clearReaderInfoForIp(
+  previous: ReaderStatusCaches,
+  ip: string,
+): ReaderStatusCaches {
+  const { [ip]: _, ...readerInfoMap } = previous.readerInfoMap;
+  const { [ip]: _a, ...readerInfoReceivedAt } = previous.readerInfoReceivedAt;
+  const { [ip]: _b, ...readerClockBaseTs } = previous.readerClockBaseTs;
+  const { [ip]: _c, ...readerClockBaseLocal } = previous.readerClockBaseLocal;
+  return {
+    readerInfoMap,
+    readerInfoReceivedAt,
+    readerClockBaseTs,
+    readerClockBaseLocal,
+    lastReadBase: previous.lastReadBase,
+    lastReadReceivedAt: previous.lastReadReceivedAt,
+  };
+}
+
 export function applyReaderInfoUpdate(
   status: ForwarderStatus | null,
   previous: ReaderStatusCaches,

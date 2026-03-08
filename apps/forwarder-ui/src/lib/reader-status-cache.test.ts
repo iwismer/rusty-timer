@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ForwarderStatus, ReaderInfo } from "./api";
 import {
   applyReaderInfoUpdate,
+  clearReaderInfoForIp,
   rebuildReaderCachesFromStatus,
 } from "./reader-status-cache";
 
@@ -131,5 +132,48 @@ describe("applyReaderInfoUpdate", () => {
     );
 
     expect(result).toEqual(previous);
+  });
+});
+
+describe("clearReaderInfoForIp", () => {
+  it("removes all reader-info caches for the given IP", () => {
+    const previous = {
+      readerInfoMap: { "10.0.0.42": makeInfo() },
+      readerInfoReceivedAt: { "10.0.0.42": 111 },
+      readerClockBaseTs: { "10.0.0.42": 222 },
+      readerClockBaseLocal: { "10.0.0.42": 333 },
+      lastReadBase: { "10.0.0.42": 5 },
+      lastReadReceivedAt: { "10.0.0.42": 444 },
+    };
+    const result = clearReaderInfoForIp(previous, "10.0.0.42");
+
+    expect(result.readerInfoMap).toEqual({});
+    expect(result.readerInfoReceivedAt).toEqual({});
+    expect(result.readerClockBaseTs).toEqual({});
+    expect(result.readerClockBaseLocal).toEqual({});
+    expect(result.lastReadBase).toEqual({ "10.0.0.42": 5 });
+    expect(result.lastReadReceivedAt).toEqual({ "10.0.0.42": 444 });
+  });
+
+  it("preserves other readers' caches", () => {
+    const previous = {
+      readerInfoMap: {
+        "10.0.0.42": makeInfo(),
+        "10.0.0.99": makeInfo({ banner: "other" }),
+      },
+      readerInfoReceivedAt: { "10.0.0.42": 111, "10.0.0.99": 222 },
+      readerClockBaseTs: { "10.0.0.42": 333, "10.0.0.99": 444 },
+      readerClockBaseLocal: { "10.0.0.42": 555, "10.0.0.99": 666 },
+      lastReadBase: {},
+      lastReadReceivedAt: {},
+    };
+    const result = clearReaderInfoForIp(previous, "10.0.0.42");
+
+    expect(result.readerInfoMap).toEqual({
+      "10.0.0.99": makeInfo({ banner: "other" }),
+    });
+    expect(result.readerInfoReceivedAt).toEqual({ "10.0.0.99": 222 });
+    expect(result.readerClockBaseTs).toEqual({ "10.0.0.99": 444 });
+    expect(result.readerClockBaseLocal).toEqual({ "10.0.0.99": 666 });
   });
 });

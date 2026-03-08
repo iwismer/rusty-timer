@@ -37,6 +37,7 @@
   } from "$lib/download-progress";
   import {
     applyReaderInfoUpdate,
+    clearReaderInfoForIp,
     rebuildReaderCachesFromStatus,
   } from "$lib/reader-status-cache";
 
@@ -624,14 +625,21 @@
             [reader.ip]: Date.now(),
           };
           if (reader.state === "disconnected") {
-            const { [reader.ip]: _, ...restInfo } = readerInfoMap;
-            readerInfoMap = restInfo;
-            const { [reader.ip]: _a, ...restClockBase } = readerClockBaseTs;
-            readerClockBaseTs = restClockBase;
-            const { [reader.ip]: _b, ...restClockLocal } = readerClockBaseLocal;
-            readerClockBaseLocal = restClockLocal;
-            const { [reader.ip]: _c, ...restReceivedAt } = readerInfoReceivedAt;
-            readerInfoReceivedAt = restReceivedAt;
+            const cleared = clearReaderInfoForIp(
+              {
+                readerInfoMap,
+                readerInfoReceivedAt,
+                readerClockBaseTs,
+                readerClockBaseLocal,
+                lastReadBase,
+                lastReadReceivedAt,
+              },
+              reader.ip,
+            );
+            readerInfoMap = cleared.readerInfoMap;
+            readerInfoReceivedAt = cleared.readerInfoReceivedAt;
+            readerClockBaseTs = cleared.readerClockBaseTs;
+            readerClockBaseLocal = cleared.readerClockBaseLocal;
           }
         }
       },
