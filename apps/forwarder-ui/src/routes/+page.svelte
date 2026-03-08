@@ -22,6 +22,7 @@
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
   import {
+    READ_MODE_OPTIONS,
     initialTimeoutDraft,
     resolveTimeoutSeconds,
     shouldShowTimeoutInput,
@@ -907,8 +908,9 @@
                           disabled={controlBusy[reader.ip] ||
                             reader.state !== "connected"}
                         >
-                          <option value="raw">Raw</option>
-                          <option value="fsls">First/Last Seen</option>
+                          {#each READ_MODE_OPTIONS as option}
+                            <option value={option.value}>{option.label}</option>
+                          {/each}
                         </select>
                         {#if shouldShowTimeoutInput(readModeDraftValue(reader.ip, info))}
                           <label

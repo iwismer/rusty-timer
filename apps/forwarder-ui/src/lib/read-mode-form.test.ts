@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  READ_MODE_OPTIONS,
   initialTimeoutDraft,
   resolveTimeoutSeconds,
   shouldShowTimeoutInput,
 } from "./read-mode-form";
 
 describe("read mode form helpers", () => {
+  it("includes raw, event, and fsls read mode options", () => {
+    expect(READ_MODE_OPTIONS).toEqual([
+      { value: "raw", label: "Raw" },
+      { value: "event", label: "Event" },
+      { value: "fsls", label: "First/Last Seen" },
+    ]);
+  });
+
   it("shows timeout input only for fsls", () => {
     expect(shouldShowTimeoutInput("fsls")).toBe(true);
     expect(shouldShowTimeoutInput("raw")).toBe(false);

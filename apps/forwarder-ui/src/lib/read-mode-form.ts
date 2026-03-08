@@ -2,6 +2,12 @@ const DEFAULT_TIMEOUT_SECONDS = 5;
 const MIN_TIMEOUT_SECONDS = 1;
 const MAX_TIMEOUT_SECONDS = 255;
 
+export const READ_MODE_OPTIONS = [
+  { value: "raw", label: "Raw" },
+  { value: "event", label: "Event" },
+  { value: "fsls", label: "First/Last Seen" },
+] as const;
+
 export function shouldShowTimeoutInput(
   mode: string | null | undefined,
 ): boolean {

@@ -15,6 +15,7 @@ struct PendingRequest {
 enum PendingRequestKind {
     AnyInstruction(u8),
     ExtendedStatusWrite,
+    DownloadStopWrite,
     ExtendedStatusQuery,
     Config3Write,
     Config3Query,
@@ -37,6 +38,10 @@ impl PendingRequestKind {
             Self::ExtendedStatusWrite => {
                 frame.instruction == control::INSTR_EXT_STATUS
                     && (frame.data.is_empty() || frame.data.len() >= 12)
+            }
+            Self::DownloadStopWrite => {
+                frame.instruction == control::INSTR_EXT_STATUS
+                    && (frame.data.is_empty() || (frame.data.len() >= 12 && frame.data[0] != 0x03))
             }
             Self::ExtendedStatusQuery => {
                 frame.instruction == control::INSTR_EXT_STATUS && frame.data.len() >= 12
@@ -94,8 +99,16 @@ impl ControlClient {
     /// Used within multi-step sequences (clear_records, start_download,
     /// stop_download) that hold the lock themselves.
     async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
+        self.send_inner_with_kind(cmd, PendingRequestKind::for_command(cmd))
+            .await
+    }
+
+    async fn send_inner_with_kind(
+        &self,
+        cmd: &Command,
+        kind: PendingRequestKind,
+    ) -> Result<ControlFrame, ControlError> {
         let frame = control::encode_command(cmd, 0x00);
-        let kind = PendingRequestKind::for_command(cmd);
 
         let (reply_tx, reply_rx) = oneshot::channel();
         {
@@ -292,16 +305,22 @@ impl ControlClient {
 
         // Step 1: stop download (sub-cmd 0x01, state=0x00)
         let _ = self
-            .send_inner(&Command::SetExtendedStatus {
-                data: vec![0x01, 0x00],
-            })
+            .send_inner_with_kind(
+                &Command::SetExtendedStatus {
+                    data: vec![0x01, 0x00],
+                },
+                PendingRequestKind::DownloadStopWrite,
+            )
             .await?;
 
         // Step 2: cleanup (sub-cmd 0x07, param 0x00)
         let _ = self
-            .send_inner(&Command::SetExtendedStatus {
-                data: vec![0x07, 0x00],
-            })
+            .send_inner_with_kind(
+                &Command::SetExtendedStatus {
+                    data: vec![0x07, 0x00],
+                },
+                PendingRequestKind::DownloadStopWrite,
+            )
             .await?;
 
         Ok(())
@@ -945,6 +964,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_download_ignores_unsolicited_downloading_status_before_stop_reply() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move { client.stop_download().await });
+
+        let status_reply = |byte0: u8| -> String {
+            let data_hex = format!("{:02x}0204f60204f60059058f0300", byte0);
+            let body = format!("000d4b{}", data_hex);
+            let lrc = control::lrc(body.as_bytes());
+            format!("ab{}{:02x}", body, lrc)
+        };
+
+        let step1 = cmd_rx.recv().await.expect("stop step 1");
+        assert_eq!(
+            std::str::from_utf8(&step1).expect("step 1 utf8"),
+            "ab00024b010019\r\n"
+        );
+
+        let consumed = sink.feed(status_reply(0x03).as_bytes()).await;
+        assert!(
+            !consumed,
+            "still-downloading status should be treated as unsolicited"
+        );
+
+        let maybe_step2 = timeout(Duration::from_millis(50), cmd_rx.recv()).await;
+        assert!(
+            maybe_step2.is_err(),
+            "cleanup step should not be sent before the stop response is received"
+        );
+
+        assert!(sink.feed(status_reply(0x00).as_bytes()).await);
+
+        let step2 = cmd_rx.recv().await.expect("stop step 2");
+        assert_eq!(
+            std::str::from_utf8(&step2).expect("step 2 utf8"),
+            "ab00024b07001f\r\n"
+        );
+
+        assert!(sink.feed(status_reply(0x00).as_bytes()).await);
+
+        task.await
+            .expect("task join")
+            .expect("stop_download result");
+    }
+
+    #[tokio::test]
     async fn feed_with_no_pending_request_returns_false() {
         let (cmd_tx, _cmd_rx) = mpsc::channel::<Vec<u8>>(8);
         let (_client, sink) = ControlClient::new(cmd_tx);
@@ -1051,6 +1117,26 @@ mod tests {
         };
         assert!(PendingRequestKind::ExtendedStatusWrite.matches(&frame));
         assert!(PendingRequestKind::ExtendedStatusQuery.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_download_stop_write_rejects_downloading_status() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_EXT_STATUS,
+            data: vec![0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        assert!(!PendingRequestKind::DownloadStopWrite.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_download_stop_write_accepts_stopped_status() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_EXT_STATUS,
+            data: vec![0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        assert!(PendingRequestKind::DownloadStopWrite.matches(&frame));
     }
 
     #[test]
