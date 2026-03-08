@@ -2007,15 +2007,26 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
         Ok(dt) => {
             let reader_iso = dt.to_iso_string();
             let verify_now = chrono::Local::now();
-            let drift_ms =
-                chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
-                    .ok()
-                    .map(|reader_naive| {
-                        verify_now
-                            .naive_local()
-                            .signed_duration_since(reader_naive)
-                            .num_milliseconds()
-                    });
+            let drift_ms = match chrono::NaiveDateTime::parse_from_str(
+                &reader_iso,
+                "%Y-%m-%dT%H:%M:%S%.3f",
+            ) {
+                Ok(reader_naive) => Some(
+                    verify_now
+                        .naive_local()
+                        .signed_duration_since(reader_naive)
+                        .num_milliseconds(),
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        reader_ip = %ip,
+                        reader_clock = %reader_iso,
+                        error = %e,
+                        "clock sync verification: failed to parse reader timestamp for drift calculation"
+                    );
+                    None
+                }
+            };
 
             // Update stored reader_info and broadcast so SSE subscribers see the new clock
             {
@@ -2071,6 +2082,7 @@ async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
             }
             r.reader_info = Some(info.clone());
         } else {
+            tracing::warn!(reader_ip = %ip, "update_cached_reader_info: reader not found in status map, skipping broadcast");
             return;
         }
     }
