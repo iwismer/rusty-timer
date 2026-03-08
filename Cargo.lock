@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "forwarder"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "async-stream",
  "axum",
