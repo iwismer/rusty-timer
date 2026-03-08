@@ -285,6 +285,15 @@ async fn run_reader(
         let poll_handle = tokio::spawn(async move {
             // Run initial connection sequence
             let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
+            if reader_info.connect_failures == 6 {
+                poll_logger.log_at(
+                    rt_ui_log::UiLogLevel::Error,
+                    format!(
+                        "Reader {}: control protocol non-functional — all 6 connect queries failed",
+                        poll_reader_ip,
+                    ),
+                );
+            }
             poll_logger.log(format!(
                 "reader {} identified: fw={}, stored_reads={}",
                 poll_reader_ip,

@@ -274,8 +274,8 @@ impl ControlClient {
         Ok(buf.join("\n").trim().to_owned())
     }
 
-    /// Execute the full clear-records workflow: 3 erase sub-commands via 0x4b,
-    /// 10s wait, counter reset, then CONFIG3 cycling (Event -> Raw).
+    /// Execute the full clear-records workflow: disable recording and access,
+    /// trigger EEPROM erase via 0x4b, 10s wait, counter reset, then CONFIG3 cycling (Event -> Raw).
     pub async fn clear_records(&self) -> Result<(), ControlClientError> {
         let _in_flight = self.in_flight.lock().await;
 
@@ -720,8 +720,12 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
         }
     }
 
-    let _ = poll_tag_message_format(client, info).await;
-    let _ = poll_clock(client, info).await;
+    if let Err(()) = poll_tag_message_format(client, info).await {
+        info.tto_enabled = None;
+    }
+    if let Err(()) = poll_clock(client, info).await {
+        info.clock = None;
+    }
 }
 
 async fn poll_tag_message_format(client: &ControlClient, info: &mut ReaderInfo) -> Result<(), ()> {
