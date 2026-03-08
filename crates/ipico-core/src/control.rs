@@ -823,4 +823,35 @@ mod tests {
             assert_eq!(frame.instruction, cmd.instruction());
         }
     }
+
+    #[test]
+    fn parse_response_invalid_header() {
+        let err = parse_response(b"cd000002ff").unwrap_err();
+        assert_eq!(err, ControlError::InvalidHeader);
+    }
+
+    #[test]
+    fn parse_response_odd_length_data_hex() {
+        // Frame: ab + header(6 chars: RR LL II) + 1 data char + 2 LRC chars = 11 total
+        // That's: ab + "000102" + "0" + "XX" = 13 chars total
+        let body = "0001020";
+        let lrc_val = lrc(body.as_bytes());
+        let frame = format!("ab{body}{lrc_val:02x}");
+        let result = parse_response(frame.as_bytes());
+        assert!(
+            result.is_err(),
+            "odd-length data hex should fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn encode_command_with_non_zero_reader_id() {
+        let frame = encode_command(&Command::GetDateTime, 0x05).unwrap();
+        let s = std::str::from_utf8(&frame).unwrap();
+        assert!(s.starts_with("ab05"), "expected reader_id 0x05, got: {s}");
+        // Verify round-trip parse
+        let parsed = parse_response(&frame[..frame.len() - 2]).unwrap();
+        assert_eq!(parsed.reader_id, 0x05);
+        assert_eq!(parsed.instruction, INSTR_GET_DATE_TIME);
+    }
 }
