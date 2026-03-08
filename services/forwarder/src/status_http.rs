@@ -2153,7 +2153,7 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     // Check current state and prepare
     {
         let mut dt = tracker.lock().await;
-        match &dt.state {
+        match dt.state() {
             crate::reader_control::DownloadState::Starting
             | crate::reader_control::DownloadState::Downloading => {
                 return json_response(
@@ -2219,13 +2219,13 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
     // Lock tracker, capture initial state if terminal, and subscribe
     let (initial_event, mut rx) = {
         let dt = tracker.lock().await;
-        let initial = match &dt.state {
+        let initial = match dt.state() {
             crate::reader_control::DownloadState::Idle => {
                 Some(crate::reader_control::DownloadEvent::Idle)
             }
             crate::reader_control::DownloadState::Complete => {
                 Some(crate::reader_control::DownloadEvent::Complete {
-                    reads_received: dt.reads_received,
+                    reads_received: dt.reads_received(),
                 })
             }
             crate::reader_control::DownloadState::Error(msg) => {

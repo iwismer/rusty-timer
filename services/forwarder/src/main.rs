@@ -150,11 +150,7 @@ async fn fail_active_download(
     message: String,
 ) {
     let mut dt = tracker.lock().await;
-    if matches!(
-        dt.state,
-        forwarder::reader_control::DownloadState::Starting
-            | forwarder::reader_control::DownloadState::Downloading
-    ) {
+    if dt.is_active() {
         dt.fail(message);
     }
 }
@@ -316,7 +312,7 @@ async fn run_reader(
                         // Check download progress
                         let is_downloading = {
                             let dt = poll_download_tracker.lock().await;
-                            dt.state == forwarder::reader_control::DownloadState::Downloading
+                            dt.is_downloading()
                         };
 
                         if is_downloading {
@@ -326,9 +322,7 @@ async fn run_reader(
                                     let extent = ext.stored_data_extent;
 
                                     let mut dt = poll_download_tracker.lock().await;
-                                    if dt.state
-                                        != forwarder::reader_control::DownloadState::Downloading
-                                    {
+                                    if !dt.is_downloading() {
                                         was_downloading = false;
                                         continue;
                                     }
@@ -339,7 +333,7 @@ async fn run_reader(
                                     // If we have never observed any activity, treat this as an
                                     // empty download and complete cleanly.
                                     let current_progress = progress;
-                                    let current_reads = dt.reads_received;
+                                    let current_reads = dt.reads_received();
                                     if current_progress > 0 || current_reads > 0 {
                                         saw_download_activity = true;
                                     }
@@ -1882,7 +1876,7 @@ mod tests {
 
         let dt = tracker.lock().await;
         assert!(matches!(
-            &dt.state,
+            dt.state(),
             forwarder::reader_control::DownloadState::Error(message)
                 if message == "connection lost"
         ));

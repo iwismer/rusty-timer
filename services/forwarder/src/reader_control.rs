@@ -372,10 +372,10 @@ pub enum DownloadState {
 /// subscribers.
 #[derive(Debug)]
 pub struct DownloadTracker {
-    pub state: DownloadState,
-    pub reads_received: u32,
-    pub stored_data_extent: u32,
-    pub download_progress: u32,
+    state: DownloadState,
+    reads_received: u32,
+    stored_data_extent: u32,
+    download_progress: u32,
     event_tx: broadcast::Sender<DownloadEvent>,
 }
 
@@ -452,6 +452,33 @@ impl DownloadTracker {
         self.reads_received = 0;
         self.stored_data_extent = 0;
         self.download_progress = 0;
+    }
+
+    pub fn state(&self) -> &DownloadState {
+        &self.state
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.state,
+            DownloadState::Starting | DownloadState::Downloading
+        )
+    }
+
+    pub fn is_downloading(&self) -> bool {
+        self.state == DownloadState::Downloading
+    }
+
+    pub fn reads_received(&self) -> u32 {
+        self.reads_received
+    }
+
+    pub fn stored_data_extent(&self) -> u32 {
+        self.stored_data_extent
+    }
+
+    pub fn download_progress(&self) -> u32 {
+        self.download_progress
     }
 }
 
@@ -750,12 +777,12 @@ mod tests {
         let mut rx = tracker.subscribe();
 
         tracker.start(100);
-        assert_eq!(tracker.state, DownloadState::Downloading);
-        assert_eq!(tracker.stored_data_extent, 100);
+        assert_eq!(*tracker.state(), DownloadState::Downloading);
+        assert_eq!(tracker.stored_data_extent(), 100);
 
         tracker.record_read();
         tracker.record_read();
-        assert_eq!(tracker.reads_received, 2);
+        assert_eq!(tracker.reads_received(), 2);
 
         let ev = rx.try_recv().expect("first read event");
         assert!(matches!(
@@ -775,18 +802,18 @@ mod tests {
         ));
 
         tracker.update_progress(50, 100);
-        assert_eq!(tracker.download_progress, 50);
+        assert_eq!(tracker.download_progress(), 50);
 
         tracker.complete();
-        assert_eq!(tracker.state, DownloadState::Complete);
+        assert_eq!(*tracker.state(), DownloadState::Complete);
         let ev = rx.try_recv().expect("complete event");
         assert!(matches!(ev, DownloadEvent::Complete { reads_received: 2 }));
 
         tracker.reset();
-        assert_eq!(tracker.state, DownloadState::Idle);
-        assert_eq!(tracker.reads_received, 0);
-        assert_eq!(tracker.download_progress, 0);
-        assert_eq!(tracker.stored_data_extent, 0);
+        assert_eq!(*tracker.state(), DownloadState::Idle);
+        assert_eq!(tracker.reads_received(), 0);
+        assert_eq!(tracker.download_progress(), 0);
+        assert_eq!(tracker.stored_data_extent(), 0);
     }
 
     #[tokio::test]
@@ -795,7 +822,7 @@ mod tests {
         let mut rx = tracker.subscribe();
 
         tracker.record_read();
-        assert_eq!(tracker.reads_received, 0);
+        assert_eq!(tracker.reads_received(), 0);
         assert!(rx.try_recv().is_err());
     }
 
@@ -807,7 +834,7 @@ mod tests {
         tracker.start(50);
         tracker.fail("connection lost".to_string());
         assert_eq!(
-            tracker.state,
+            *tracker.state(),
             DownloadState::Error("connection lost".to_string())
         );
 
