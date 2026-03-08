@@ -120,7 +120,7 @@ impl Command {
 
 /// Encode a command into an `ab`-prefixed wire frame (including `\r\n` terminator).
 /// `reader_id` is the target reader ID byte (typically 0x00 for broadcast).
-pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
+pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlError> {
     let data: Vec<u8> = match cmd {
         Command::SetDateTime {
             year,
@@ -131,13 +131,13 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
             minute,
             second,
         } => vec![
-            to_bcd(*year),
-            to_bcd(*month),
-            to_bcd(*day),
+            to_bcd(*year)?,
+            to_bcd(*month)?,
+            to_bcd(*day)?,
             *day_of_week,
-            to_bcd(*hour),
-            to_bcd(*minute),
-            to_bcd(*second),
+            to_bcd(*hour)?,
+            to_bcd(*minute)?,
+            to_bcd(*second)?,
         ],
         Command::SetConfig3 { mode, timeout } => {
             // 0x07 = modify lower 3 bits of CONFIG3 (mode selection: bits 0..2)
@@ -180,18 +180,25 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
     frame.extend_from_slice(hex_body.as_bytes());
     frame.extend_from_slice(format!("{checksum:02x}").as_bytes());
     frame.extend_from_slice(b"\r\n");
-    frame
+    Ok(frame)
 }
 
 /// BCD encode: decimal value to BCD byte (e.g., 25 -> 0x25).
-pub fn to_bcd(val: u8) -> u8 {
-    assert!(val <= 99, "BCD value out of range: {val}");
-    ((val / 10) << 4) | (val % 10)
+pub fn to_bcd(val: u8) -> Result<u8, ControlError> {
+    if val > 99 {
+        return Err(ControlError::InvalidBcd(val));
+    }
+    Ok(((val / 10) << 4) | (val % 10))
 }
 
 /// BCD decode: BCD byte to decimal value (e.g., 0x25 -> 25).
-pub fn from_bcd(val: u8) -> u8 {
-    (val >> 4) * 10 + (val & 0x0f)
+pub fn from_bcd(val: u8) -> Result<u8, ControlError> {
+    let hi = val >> 4;
+    let lo = val & 0x0f;
+    if hi > 9 || lo > 9 {
+        return Err(ControlError::InvalidBcd(val));
+    }
+    Ok(hi * 10 + lo)
 }
 
 /// Compute LRC checksum over ASCII hex chars.
@@ -299,6 +306,7 @@ pub enum ControlError {
     ReaderError(u8),
     UnexpectedLength { instruction: u8, got: usize },
     UnknownReadMode(u8),
+    InvalidBcd(u8),
     Timeout,
     ChannelClosed,
 }
@@ -319,6 +327,9 @@ impl fmt::Display for ControlError {
             }
             ControlError::UnknownReadMode(byte) => {
                 write!(f, "unknown read mode byte 0x{byte:02x}")
+            }
+            ControlError::InvalidBcd(byte) => {
+                write!(f, "invalid BCD byte 0x{byte:02x}")
             }
             ControlError::Timeout => write!(f, "reader response timeout"),
             ControlError::ChannelClosed => write!(f, "control channel closed (connection lost)"),
@@ -395,13 +406,13 @@ pub fn decode_date_time(frame: &ControlFrame) -> Result<ReaderDateTime, ControlE
         });
     }
     Ok(ReaderDateTime {
-        year: from_bcd(frame.data[0]),
-        month: from_bcd(frame.data[1]),
-        day: from_bcd(frame.data[2]),
+        year: from_bcd(frame.data[0])?,
+        month: from_bcd(frame.data[1])?,
+        day: from_bcd(frame.data[2])?,
         day_of_week: frame.data[3],
-        hour: from_bcd(frame.data[4]),
-        minute: from_bcd(frame.data[5]),
-        second: from_bcd(frame.data[6]),
+        hour: from_bcd(frame.data[4])?,
+        minute: from_bcd(frame.data[5])?,
+        second: from_bcd(frame.data[6])?,
         centisecond: frame.data[7], // plain hex, NOT BCD
         config: frame.data[8],
     })
@@ -493,27 +504,27 @@ mod tests {
     #[test]
     fn bcd_round_trip() {
         for val in 0..=99u8 {
-            assert_eq!(from_bcd(to_bcd(val)), val);
+            assert_eq!(from_bcd(to_bcd(val).unwrap()).unwrap(), val);
         }
     }
 
     #[test]
     fn to_bcd_known_values() {
-        assert_eq!(to_bcd(0), 0x00);
-        assert_eq!(to_bcd(9), 0x09);
-        assert_eq!(to_bcd(10), 0x10);
-        assert_eq!(to_bcd(26), 0x26);
-        assert_eq!(to_bcd(59), 0x59);
-        assert_eq!(to_bcd(99), 0x99);
+        assert_eq!(to_bcd(0).unwrap(), 0x00);
+        assert_eq!(to_bcd(9).unwrap(), 0x09);
+        assert_eq!(to_bcd(10).unwrap(), 0x10);
+        assert_eq!(to_bcd(26).unwrap(), 0x26);
+        assert_eq!(to_bcd(59).unwrap(), 0x59);
+        assert_eq!(to_bcd(99).unwrap(), 0x99);
     }
 
     #[test]
     fn from_bcd_known_values() {
-        assert_eq!(from_bcd(0x00), 0);
-        assert_eq!(from_bcd(0x18), 18);
-        assert_eq!(from_bcd(0x26), 26);
-        assert_eq!(from_bcd(0x55), 55);
-        assert_eq!(from_bcd(0x99), 99);
+        assert_eq!(from_bcd(0x00).unwrap(), 0);
+        assert_eq!(from_bcd(0x18).unwrap(), 18);
+        assert_eq!(from_bcd(0x26).unwrap(), 26);
+        assert_eq!(from_bcd(0x55).unwrap(), 55);
+        assert_eq!(from_bcd(0x99).unwrap(), 99);
     }
 
     #[test]
@@ -536,31 +547,31 @@ mod tests {
 
     #[test]
     fn encode_get_date_time() {
-        let frame = encode_command(&Command::GetDateTime, 0x00);
+        let frame = encode_command(&Command::GetDateTime, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00000222\r\n");
     }
 
     #[test]
     fn encode_get_statistics() {
-        let frame = encode_command(&Command::GetStatistics, 0x00);
+        let frame = encode_command(&Command::GetStatistics, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00000a51\r\n");
     }
 
     #[test]
     fn encode_print_banner() {
-        let frame = encode_command(&Command::PrintBanner, 0x00);
+        let frame = encode_command(&Command::PrintBanner, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab0000372a\r\n");
     }
 
     #[test]
     fn encode_get_extended_status() {
-        let frame = encode_command(&Command::GetExtendedStatus, 0x00);
+        let frame = encode_command(&Command::GetExtendedStatus, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00ff4bc2\r\n");
     }
 
     #[test]
     fn encode_get_config3() {
-        let frame = encode_command(&Command::GetConfig3, 0x00);
+        let frame = encode_command(&Command::GetConfig3, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00ff0995\r\n");
     }
 
@@ -572,7 +583,8 @@ mod tests {
                 timeout: 5,
             },
             0x00,
-        );
+        )
+        .unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab0003090305075b\r\n");
     }
 
@@ -584,7 +596,8 @@ mod tests {
                 timeout: 5,
             },
             0x00,
-        );
+        )
+        .unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00030900050758\r\n");
     }
 
@@ -601,7 +614,8 @@ mod tests {
                 second: 50,
             },
             0x00,
-        );
+        )
+        .unwrap();
         assert_eq!(
             std::str::from_utf8(&frame).unwrap(),
             "ab00070126030605185550f6\r\n"
@@ -610,7 +624,7 @@ mod tests {
 
     #[test]
     fn encode_init_e0() {
-        let frame = encode_command(&Command::InitE0, 0x00);
+        let frame = encode_command(&Command::InitE0, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab0000e055\r\n");
     }
 
@@ -621,7 +635,8 @@ mod tests {
                 data: vec![0x00, 0x00],
             },
             0x00,
-        );
+        )
+        .unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00024b000018\r\n");
     }
 
@@ -632,13 +647,14 @@ mod tests {
                 data: vec![0x01, 0x00],
             },
             0x00,
-        );
+        )
+        .unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00024b010019\r\n");
     }
 
     #[test]
     fn encode_set_ext_status_clear_trigger() {
-        let frame = encode_command(&Command::SetExtendedStatus { data: vec![0xd0] }, 0x00);
+        let frame = encode_command(&Command::SetExtendedStatus { data: vec![0xd0] }, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00014bd0eb\r\n");
     }
 
@@ -768,7 +784,8 @@ mod tests {
                 timeout: 5,
             },
             0x00,
-        );
+        )
+        .unwrap();
         // data = [0x05, 0x05, 0x07], hex body = "00030905050700"
         // Verify by running the test - the LRC will be computed correctly by encode_command
         let s = std::str::from_utf8(&frame).unwrap();
@@ -778,8 +795,16 @@ mod tests {
 
     #[test]
     fn to_bcd_rejects_values_above_99() {
-        let result = std::panic::catch_unwind(|| to_bcd(100));
-        assert!(result.is_err(), "to_bcd(100) should panic");
+        for val in [100, 128, 255] {
+            assert_eq!(to_bcd(val).unwrap_err(), ControlError::InvalidBcd(val));
+        }
+    }
+
+    #[test]
+    fn from_bcd_rejects_invalid_nibbles() {
+        for val in [0xAF, 0xFA, 0xFF, 0xA0] {
+            assert_eq!(from_bcd(val).unwrap_err(), ControlError::InvalidBcd(val));
+        }
     }
 
     #[test]
@@ -792,7 +817,7 @@ mod tests {
             Command::GetConfig3,
             Command::InitE0,
         ] {
-            let encoded = encode_command(&cmd, 0x00);
+            let encoded = encode_command(&cmd, 0x00).unwrap();
             let line = &encoded[..encoded.len() - 2]; // strip \r\n
             let frame = parse_response(line).unwrap();
             assert_eq!(frame.instruction, cmd.instruction());

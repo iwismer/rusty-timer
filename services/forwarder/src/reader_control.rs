@@ -108,7 +108,7 @@ impl ControlClient {
         cmd: &Command,
         kind: PendingRequestKind,
     ) -> Result<ControlFrame, ControlError> {
-        let frame = control::encode_command(cmd, 0x00);
+        let frame = control::encode_command(cmd, 0x00)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         {
