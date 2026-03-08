@@ -1,7 +1,7 @@
 import type { ReaderStatus } from "./api";
 import type { DownloadProgressEvent } from "./download-progress";
 
-export function formatLastSeen(secs: number | null): string {
+export function formatLastRead(secs: number | null): string {
   if (secs === null) return "never";
   if (secs < 60) return `${secs}s ago`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
@@ -91,7 +91,7 @@ export function computeDownloadPercent(
   return 0;
 }
 
-export function computeTickingLastSeen(
+export function computeTickingLastRead(
   baseSecs: number | null,
   receivedAt: number | null,
   now: number,
