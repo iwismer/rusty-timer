@@ -816,22 +816,24 @@ async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) -> Result<(),
         Ok(dt) => {
             let reader_iso = dt.to_iso_string();
             let now = chrono::Local::now();
-            if let Ok(reader_naive) =
-                chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
-            {
-                let system_naive = now.naive_local();
-                let drift = system_naive
-                    .signed_duration_since(reader_naive)
-                    .num_milliseconds();
-                info.clock = Some(ClockInfo {
-                    reader_clock: reader_iso,
-                    drift_ms: drift,
-                });
-            } else {
-                warn!("status poll: failed to parse reader clock: {reader_iso}");
-                info.clock = None;
+            match chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f") {
+                Ok(reader_naive) => {
+                    let system_naive = now.naive_local();
+                    let drift = system_naive
+                        .signed_duration_since(reader_naive)
+                        .num_milliseconds();
+                    info.clock = Some(ClockInfo {
+                        reader_clock: reader_iso,
+                        drift_ms: drift,
+                    });
+                    Ok(())
+                }
+                Err(_) => {
+                    warn!("status poll: failed to parse reader clock: {reader_iso}");
+                    info.clock = None;
+                    Err(())
+                }
             }
-            Ok(())
         }
         Err(e) => {
             warn!("status poll: get_date_time failed: {e}");
