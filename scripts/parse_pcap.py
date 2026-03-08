@@ -298,30 +298,30 @@ def try_parse_aa_at(text, pos):
     """
     if pos + 36 > len(text) or text[pos : pos + 2] != "aa":
         return None
-    frame_specs = [
-        # TTO-enabled layout: 3 extra bytes (index/page/status) before the LRC.
-        (42, 40),
-        (36, 34),
-    ]
-    for frame_len, checksum_pos in frame_specs:
+
+    def checksum_matches(frame_len, checksum_pos):
         if pos + frame_len > len(text):
-            continue
+            return False
         try:
             expected = int(text[pos + checksum_pos : pos + checksum_pos + 2], 16)
             actual = sum(text[pos + 2 : pos + checksum_pos].encode("ascii")) & 0xFF
-            if expected == actual:
-                return text[pos : pos + frame_len], pos + frame_len
+            return expected == actual
         except ValueError:
-            continue
+            return False
 
-    if pos + 38 <= len(text) and text[pos + 36 : pos + 38] in ("FS", "LS"):
-        try:
-            expected = int(text[pos + 34 : pos + 36], 16)
-            actual = sum(text[pos + 2 : pos + 34].encode("ascii")) & 0xFF
-            if expected == actual:
-                return text[pos : pos + 38], pos + 38
-        except ValueError:
-            return None
+    # TTO-enabled layout: 3 extra bytes (index/page/status) before the LRC.
+    if checksum_matches(42, 40):
+        return text[pos : pos + 42], pos + 42
+
+    if (
+        pos + 38 <= len(text)
+        and text[pos + 36 : pos + 38] in ("FS", "LS")
+        and checksum_matches(38, 34)
+    ):
+        return text[pos : pos + 38], pos + 38
+
+    if checksum_matches(36, 34):
+        return text[pos : pos + 36], pos + 36
 
     return None
 
@@ -398,12 +398,15 @@ def decode_aa(frame):
     actual = sum(frame[2:checksum_start].encode("ascii")) & 0xFF
     d["checksum_ok"] = expected == actual
 
+    d["suffix"] = None
+    d["read_type"] = "RAW"
+
+    if d["tto"] and (int(d["tto"]["status"], 16) & 0xC0):
+        d["read_type"] = "FSLS"
+
     if len(frame) == 38:
         d["suffix"] = frame[36:38]
         d["read_type"] = "FSLS"
-    else:
-        d["suffix"] = None
-        d["read_type"] = "RAW"
 
     return d
 

@@ -24,6 +24,29 @@ class ProcessFileFlowTests(unittest.TestCase):
         self.assertEqual(output.count("TAG  reader=00"), 16)
         self.assertIn("aa00058000120e38000e26030713560136b0", output)
 
+    def test_try_parse_aa_at_preserves_legacy_fsls_suffix(self) -> None:
+        frame = "aa00058000120e38000e26030713560136b0FS"
+
+        parsed = parse_pcap.try_parse_aa_at(frame, 0)
+
+        self.assertEqual(parsed, (frame, 38))
+
+        decoded = parse_pcap.decode_aa(frame)
+
+        self.assertEqual(decoded["read_type"], "FSLS")
+        self.assertEqual(decoded["suffix"], "FS")
+
+    def test_decode_aa_marks_tto_first_last_reads_as_fsls(self) -> None:
+        frame = "aa00058000123b3200012603081222022f060080cd"
+
+        decoded = parse_pcap.decode_aa(frame)
+
+        self.assertEqual(
+            decoded["tto"],
+            {"index": "06", "page": "00", "status": "80"},
+        )
+        self.assertEqual(decoded["read_type"], "FSLS")
+
     def test_process_file_decodes_tto_enabled_reads(self) -> None:
         capture = CAPTURES_DIR / "fsls-event-tto.pcapng"
 
@@ -35,7 +58,7 @@ class ProcessFileFlowTests(unittest.TestCase):
 
         self.assertIn(
             "TAG  reader=00 tag=058000123b32 time=2026-03-08T12:22:02.470 "
-            "type=RAW tto=index=06 page=00 status=80",
+            "type=FSLS tto=index=06 page=00 status=80",
             output,
         )
         self.assertIn("aa00058000123b3200012603081222022f060080cd", output)
