@@ -268,7 +268,8 @@ async fn run_reader(
         let mut writer = write_half;
         let writer_handle = tokio::spawn(async move {
             while let Some(frame) = cmd_rx.recv().await {
-                if writer.write_all(&frame).await.is_err() {
+                if let Err(e) = writer.write_all(&frame).await {
+                    warn!("control write failed: {e}");
                     break;
                 }
             }
