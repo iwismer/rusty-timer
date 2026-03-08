@@ -448,7 +448,11 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             }
                             Ok(WsMessage::ReaderControlResponse(resp)) => {
                                 if let Some((_, reply)) = pending_reader_controls.remove(&resp.request_id) {
-                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
+                                    if reply.send(ForwarderProxyReply::Response(resp)).is_err() {
+                                        warn!(device_id = %device_id, "reader control reply dropped (HTTP handler already timed out)");
+                                    }
+                                } else {
+                                    warn!(device_id = %device_id, request_id = %resp.request_id, "reader control response for unknown request_id");
                                 }
                             }
                             Ok(WsMessage::ReaderInfoUpdate(update)) => {
@@ -547,12 +551,16 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             reader_ip,
                             action,
                         });
-                        let json = serde_json::to_string(&msg).unwrap();
-                        if let Err(e) = socket.send(Message::Text(json.into())).await {
-                            warn!(error = %e, "failed to send reader control request");
-                            let _ = reply.send(ForwarderProxyReply::Timeout);
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                warn!(error = %e, "failed to send reader control request");
+                                let _ = reply.send(ForwarderProxyReply::Timeout);
+                            } else {
+                                pending_reader_controls.insert(request_id, (Instant::now(), reply));
+                            }
                         } else {
-                            pending_reader_controls.insert(request_id, (Instant::now(), reply));
+                            warn!(device_id = %device_id, "failed to serialize reader control request");
+                            let _ = reply.send(ForwarderProxyReply::Timeout);
                         }
                     }
                 }
