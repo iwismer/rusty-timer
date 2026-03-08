@@ -359,7 +359,10 @@ impl StatusServer {
     }
 
     pub fn deregister_download_tracker(&self, reader_ip: &str) {
-        self.download_trackers.write().unwrap().remove(reader_ip);
+        self.download_trackers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(reader_ip);
     }
 
     pub fn register_reconnect_notify(&self, reader_ip: &str, notify: Arc<Notify>) {
@@ -370,7 +373,10 @@ impl StatusServer {
     }
 
     pub fn deregister_reconnect_notify(&self, reader_ip: &str) {
-        self.reconnect_notifies.write().unwrap().remove(reader_ip);
+        self.reconnect_notifies
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(reader_ip);
     }
 
     pub fn reconnect_notifies(&self) -> &Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>> {
@@ -406,7 +412,10 @@ impl StatusServer {
     }
 
     pub fn deregister_control_client(&self, reader_ip: &str) {
-        self.control_clients.write().unwrap().remove(reader_ip);
+        self.control_clients
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(reader_ip);
     }
 
     /// Pre-populate all configured reader IPs as Disconnected.
@@ -1786,7 +1795,7 @@ async fn estimate_one_way_latency(
         }
     }
     if rtts.is_empty() {
-        // Fallback: assume 20ms one-way if all probes failed
+        tracing::warn!("all RTT probes failed, falling back to 20ms one-way latency estimate");
         return std::time::Duration::from_millis(20);
     }
     rtts.sort();
@@ -1811,7 +1820,14 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(client) = client else {
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
@@ -1935,7 +1951,14 @@ async fn get_read_mode_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(client) = client else {
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
@@ -1972,7 +1995,14 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
     Path(ip): Path<String>,
     axum::Json(body): axum::Json<SetReadModeBody>,
 ) -> Response {
-    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(client) = client else {
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
@@ -2012,7 +2042,14 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(client) = client else {
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
@@ -2047,7 +2084,14 @@ async fn clear_records_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(client) = client else {
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
@@ -2072,7 +2116,14 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
     Path(ip): Path<String>,
     axum::Json(body): axum::Json<SetRecordingBody>,
 ) -> Response {
-    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(client) = client else {
         return text_response(StatusCode::SERVICE_UNAVAILABLE, "reader not connected");
     };
@@ -2118,7 +2169,14 @@ async fn reconnect_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let notify = { state.reconnect_notifies.read().unwrap().get(&ip).cloned() };
+    let notify = {
+        state
+            .reconnect_notifies
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     match notify {
         Some(n) => {
             n.notify_one();
@@ -2135,14 +2193,28 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let client = { state.control_clients.read().unwrap().get(&ip).cloned() };
+    let client = {
+        state
+            .control_clients
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(client) = client else {
         return json_response(
             StatusCode::NOT_FOUND,
             r#"{"error":"reader not connected"}"#.to_string(),
         );
     };
-    let tracker = { state.download_trackers.read().unwrap().get(&ip).cloned() };
+    let tracker = {
+        state
+            .download_trackers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(tracker) = tracker else {
         return json_response(
             StatusCode::NOT_FOUND,
@@ -2208,7 +2280,14 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
-    let tracker = { state.download_trackers.read().unwrap().get(&ip).cloned() };
+    let tracker = {
+        state
+            .download_trackers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&ip)
+            .cloned()
+    };
     let Some(tracker) = tracker else {
         return json_response(
             StatusCode::NOT_FOUND,
@@ -2243,7 +2322,8 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
     let stream = async_stream::stream! {
         // If there's an initial terminal event, yield it and close
         if let Some(evt) = initial_event {
-            let json = serde_json::to_string(&evt).unwrap_or_default();
+            let json = serde_json::to_string(&evt)
+                .unwrap_or_else(|e| format!(r#"{{"state":"error","message":"serialize: {e}"}}"#));
             yield Ok::<_, Infallible>(SseEvent::default().data(json));
             return;
         }
@@ -2257,7 +2337,8 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
                         crate::reader_control::DownloadEvent::Complete { .. }
                             | crate::reader_control::DownloadEvent::Error { .. }
                     );
-                    let json = serde_json::to_string(&evt).unwrap_or_default();
+                    let json = serde_json::to_string(&evt)
+                        .unwrap_or_else(|e| format!(r#"{{"state":"error","message":"serialize: {e}"}}"#));
                     yield Ok::<_, Infallible>(SseEvent::default().data(json));
                     if is_terminal {
                         return;

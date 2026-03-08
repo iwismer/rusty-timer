@@ -101,11 +101,18 @@ impl ControlClient {
         self.cmd_tx
             .send(frame)
             .await
-            .map_err(|_| ControlError::Timeout)?;
+            .map_err(|_| ControlError::ChannelClosed)?;
 
         match tokio::time::timeout(self.timeout, reply_rx).await {
             Ok(Ok(result)) => result,
-            _ => {
+            Ok(Err(_)) => {
+                // oneshot sender dropped — control response sink is gone (connection lost)
+                let mut pending = self.pending.lock().await;
+                *pending = None;
+                Err(ControlError::ChannelClosed)
+            }
+            Err(_) => {
+                // tokio timeout elapsed — reader did not respond in time
                 let mut pending = self.pending.lock().await;
                 *pending = None;
                 Err(ControlError::Timeout)
@@ -927,5 +934,92 @@ mod tests {
         task.await
             .expect("task join")
             .expect("stop_download result");
+    }
+
+    #[tokio::test]
+    async fn feed_with_no_pending_request_returns_false() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (_client, sink) = ControlClient::new(cmd_tx);
+
+        // Feed a valid frame when nothing is pending
+        let consumed = sink.feed(b"ab000902260306051855443727cf").await;
+        assert!(
+            !consumed,
+            "feed should return false when no request is pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_with_mismatched_instruction_requeues_pending() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        // Start a GetDateTime request
+        let task = tokio::spawn(async move { client.get_date_time().await });
+        let _cmd = cmd_rx.recv().await.expect("command sent");
+
+        // Feed a frame with a different instruction (0x4c unsolicited status)
+        let status_body = "00014c01";
+        let lrc_val = control::lrc(status_body.as_bytes());
+        let frame = format!("ab{status_body}{lrc_val:02x}");
+        let consumed = sink.feed(frame.as_bytes()).await;
+        assert!(
+            !consumed,
+            "mismatched instruction should not consume the pending request"
+        );
+
+        // The original request should still be pending — verify by feeding the correct response
+        let consumed = sink.feed(b"ab000902260306051855443727cf").await;
+        assert!(consumed, "correct response should now be consumed");
+
+        let dt = task
+            .await
+            .expect("task join")
+            .expect("get_date_time result");
+        assert_eq!(dt.year, 26);
+    }
+
+    #[tokio::test]
+    async fn send_inner_timeout_returns_timeout_and_clears_pending() {
+        tokio::time::pause();
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, _sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move {
+            // Acquire in_flight as send_inner requires
+            let _guard = client.in_flight.lock().await;
+            client.send_inner(&Command::GetDateTime).await
+        });
+
+        // Consume the command so the channel doesn't block
+        let _cmd = cmd_rx.recv().await.expect("command sent");
+
+        // Advance time past the 2s timeout without feeding a response
+        tokio::time::advance(Duration::from_secs(3)).await;
+
+        let result = task.await.expect("task join");
+        assert!(
+            matches!(result, Err(ControlError::Timeout)),
+            "expected Timeout, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_returns_channel_closed_when_sink_dropped() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        // Drop the sink so the oneshot sender will be dropped when pending is cleared
+        drop(sink);
+
+        // Drop the cmd_rx so cmd_tx.send() fails immediately
+        drop(_cmd_rx);
+
+        let result = client.get_date_time().await;
+        assert!(
+            matches!(result, Err(ControlError::ChannelClosed)),
+            "expected ChannelClosed, got {result:?}"
+        );
     }
 }

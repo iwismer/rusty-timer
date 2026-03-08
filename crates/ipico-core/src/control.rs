@@ -128,7 +128,7 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
             to_bcd(*second),
         ],
         Command::SetConfig3 { mode, timeout } => {
-            // 0x07 = enable all three antenna ports (bitmask: ports 1+2+3)
+            // 0x07 = modify lower 3 bits of CONFIG3 (mode selection: bits 0..2)
             vec![mode.config3_value(), *timeout, 0x07]
         }
         Command::SetExtendedStatus { data } => data.clone(),
@@ -200,7 +200,7 @@ pub struct ReaderDateTime {
     pub year: u8, // 2-digit
     pub month: u8,
     pub day: u8,
-    pub day_of_week: u8, // 1-7, Mon=1
+    pub day_of_week: u8, // 0-6, Mon=1, Sun=0
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
@@ -281,6 +281,7 @@ pub enum ControlError {
     UnexpectedLength { instruction: u8, got: usize },
     UnknownReadMode(u8),
     Timeout,
+    ChannelClosed,
 }
 
 impl fmt::Display for ControlError {
@@ -301,6 +302,7 @@ impl fmt::Display for ControlError {
                 write!(f, "unknown read mode byte 0x{byte:02x}")
             }
             ControlError::Timeout => write!(f, "reader response timeout"),
+            ControlError::ChannelClosed => write!(f, "control channel closed (connection lost)"),
         }
     }
 }
