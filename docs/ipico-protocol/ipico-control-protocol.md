@@ -96,6 +96,7 @@ variants in the captures are therefore later-firmware extensions.
 | `docs/ipico-protocol/captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 mode changes |
 | `docs/ipico-protocol/captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap sequence after fresh boot |
 | `docs/ipico-protocol/captures/setclock.pcapng` | Five consecutive SET_DATE_TIME attempts via the forwarder; confirms SET takes effect at next cs rollover, not immediately |
+| `docs/ipico-protocol/captures/tto-enable.pcapng` | Two TTO-enable attempts via `0x11` query; reader returns 10-byte format response (`LL=0a`) instead of the 8-byte form seen in earlier captures |
 
 ## Protocol Families
 
@@ -320,7 +321,7 @@ usually `0001` and once `0002`. This is much stronger than the earlier
 
 ### Configurability via `0x11`
 
-`Spec`
+`Spec + Capture`
 
 Command `0x11` configures the tag report format. The captures in this repo
 match the standard ASCII format described by the PDF:
@@ -334,6 +335,25 @@ match the standard ASCII format described by the PDF:
 - LRC included
 - Tag CRC bytes omitted from the tag ID field
 - No TTO bytes included in the captured sessions
+
+The 2007 spec (section 7.15) defines parameters 0-8 (up to 9 bytes), where
+parameter 8 (separator) was added in firmware version 6.4.
+
+### `0x11` query response length varies by firmware
+
+`Capture`
+
+The `0x11` query (`LL=ff`) returns the current format in the same parameter
+layout as the set command. The response length varies by firmware:
+
+- `Capture`: earlier captures show 8 data bytes (`LL=08`):
+  `7f fc 61 61 aa 00 0d 0a` (no separator)
+- `Capture`: `tto-enable.pcapng` shows 10 data bytes (`LL=0a`):
+  `7f fc 61 61 aa 00 0d 0a 00 00` — the first 9 match parameters 0-8 from the
+  spec (separator = `0x00`), and the 10th byte (`0x00`) is an undocumented
+  extension from this 2013 ARM9 firmware (v1.4)
+
+Consumers should accept 8 or more data bytes and ignore any beyond the 9th
 
 ### First/Last-seen reporting
 

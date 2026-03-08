@@ -97,8 +97,7 @@ impl PendingRequestKind {
                 frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT && frame.data().is_empty()
             }
             Self::TagMessageFormatQuery => {
-                frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT
-                    && (8..=9).contains(&frame.data().len())
+                frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT && frame.data().len() >= 8
             }
         }
     }
@@ -1317,6 +1316,17 @@ mod tests {
             0,
             control::INSTR_TAG_MESSAGE_FORMAT,
             vec![0x7f, 0xfc, 0x61, 0x61, 0xaa, 0x00, 0x0d, 0x0a],
+        );
+        assert!(!PendingRequestKind::TagMessageFormatWrite.matches(&frame));
+        assert!(PendingRequestKind::TagMessageFormatQuery.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_tag_message_format_query_matches_10_byte_response() {
+        let frame = ControlFrame::new(
+            0,
+            control::INSTR_TAG_MESSAGE_FORMAT,
+            vec![0x7f, 0xfc, 0x61, 0x61, 0xaa, 0x00, 0x0d, 0x0a, 0x00, 0x00],
         );
         assert!(!PendingRequestKind::TagMessageFormatWrite.matches(&frame));
         assert!(PendingRequestKind::TagMessageFormatQuery.matches(&frame));

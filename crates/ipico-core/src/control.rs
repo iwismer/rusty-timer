@@ -617,7 +617,7 @@ pub fn decode_config3(frame: &ControlFrame) -> Result<(ReadMode, u8), ControlErr
 
 /// Decode tag ID message format response (`0x11`).
 pub fn decode_tag_message_format(frame: &ControlFrame) -> Result<TagMessageFormat, ControlError> {
-    if !(8..=9).contains(&frame.data().len()) {
+    if frame.data().len() < 8 {
         return Err(ControlError::UnexpectedLength {
             instruction: frame.instruction(),
             got: frame.data().len(),
@@ -924,6 +924,25 @@ mod tests {
         assert_eq!(format.trailer_1, 0x0d);
         assert_eq!(format.trailer_2, 0x0a);
         assert_eq!(format.separator, None);
+        assert!(!format.tto_enabled());
+    }
+
+    #[test]
+    fn parse_tag_message_format_10_byte_response() {
+        // Some firmware returns 10 data bytes; extra bytes beyond 8/9 are ignored.
+        let body = "000a117ffc6161aa000d0a0000";
+        let frame_hex = format!("ab{}{:02x}", body, lrc(body.as_bytes()));
+        let frame = parse_response(frame_hex.as_bytes()).unwrap();
+        let format = decode_tag_message_format(&frame).unwrap();
+        assert_eq!(format.field_mask, 0x7f);
+        assert_eq!(format.id_byte_mask, 0xfc);
+        assert_eq!(format.ascii_header_1, 0x61);
+        assert_eq!(format.ascii_header_2, 0x61);
+        assert_eq!(format.binary_header_1, 0xaa);
+        assert_eq!(format.binary_header_2, 0x00);
+        assert_eq!(format.trailer_1, 0x0d);
+        assert_eq!(format.trailer_2, 0x0a);
+        assert_eq!(format.separator, Some(0x00));
         assert!(!format.tto_enabled());
     }
 
