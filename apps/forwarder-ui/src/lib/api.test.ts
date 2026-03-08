@@ -198,11 +198,18 @@ describe("forwarder api client", () => {
     const { getReaderInfo } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(200, { banner: "IPICO v4" }));
     const info = await getReaderInfo("192.168.1.10");
-    expect(info.banner).toBe("IPICO v4");
+    expect(info?.banner).toBe("IPICO v4");
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/readers/192.168.1.10/info",
       expect.any(Object),
     );
+  });
+
+  it("getReaderInfo returns undefined on 204", async () => {
+    const { getReaderInfo } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(204, null));
+    const info = await getReaderInfo("192.168.1.10");
+    expect(info).toBeUndefined();
   });
 
   it("syncReaderClock calls sync-clock endpoint", async () => {

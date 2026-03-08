@@ -371,13 +371,15 @@
     controlBusy = { ...controlBusy, [ip]: true };
     try {
       const info = await api.refreshReader(ip);
-      readerInfoMap = {
-        ...readerInfoMap,
-        [ip]: { ...readerInfoMap[ip], ...info },
-      };
-      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-      if (info.clock?.reader_clock)
-        storeReaderClockBase(ip, info.clock.reader_clock);
+      if (info) {
+        readerInfoMap = {
+          ...readerInfoMap,
+          [ip]: { ...readerInfoMap[ip], ...info },
+        };
+        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+        if (info.clock?.reader_clock)
+          storeReaderClockBase(ip, info.clock.reader_clock);
+      }
     } catch (e) {
       controlFeedback = {
         ...controlFeedback,

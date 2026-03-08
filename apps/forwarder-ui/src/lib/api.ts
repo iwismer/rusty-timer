@@ -196,8 +196,10 @@ export async function downloadUpdate(): Promise<UpdateStatusResponse> {
   return (await resp.json()) as UpdateStatusResponse;
 }
 
-export async function getReaderInfo(ip: string): Promise<ReaderInfo> {
-  return apiFetch<ReaderInfo>(`/api/v1/readers/${ip}/info`);
+export async function getReaderInfo(
+  ip: string,
+): Promise<ReaderInfo | undefined> {
+  return apiFetch<ReaderInfo | undefined>(`/api/v1/readers/${ip}/info`);
 }
 
 export async function syncReaderClock(

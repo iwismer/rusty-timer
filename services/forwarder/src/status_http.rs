@@ -1838,7 +1838,7 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
                     )
                 }
             },
-            None => json_response(StatusCode::OK, "{}".to_owned()),
+            None => StatusCode::NO_CONTENT.into_response(),
         },
         None => text_response(StatusCode::NOT_FOUND, "unknown reader"),
     }
