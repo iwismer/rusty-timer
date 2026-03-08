@@ -66,14 +66,14 @@ pub enum DashboardEvent {
     ReaderInfoUpdated {
         forwarder_id: String,
         reader_ip: String,
-        state: String,
+        state: rt_protocol::ReaderConnectionState,
         #[serde(skip_serializing_if = "Option::is_none")]
         reader_info: Option<rt_protocol::ReaderInfo>,
     },
     ReaderDownloadProgress {
         forwarder_id: String,
         reader_ip: String,
-        state: String,
+        state: rt_protocol::DownloadState,
         reads_received: u32,
         progress: u64,
         total: u64,

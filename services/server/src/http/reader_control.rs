@@ -161,7 +161,7 @@ pub async fn sync_clock(
 
 #[derive(Deserialize)]
 pub struct SetReadModeBody {
-    pub mode: String,
+    pub mode: rt_protocol::ReadMode,
     pub timeout: u8,
 }
 

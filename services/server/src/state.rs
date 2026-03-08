@@ -44,7 +44,7 @@ pub enum ForwarderCommand {
 pub struct CachedReaderState {
     pub forwarder_id: String,
     pub reader_ip: String,
-    pub state: String,
+    pub state: rt_protocol::ReaderConnectionState,
     pub reader_info: Option<rt_protocol::ReaderInfo>,
 }
 

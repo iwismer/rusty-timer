@@ -742,7 +742,13 @@ fn to_protocol_reader_info(
             reader_id: Some(format!("0x{:02X}", h.reader_id)),
         }),
         config: info.config.as_ref().map(|c| rt_protocol::Config3Info {
-            mode: c.mode.as_str().to_owned(),
+            mode: match c.mode {
+                ipico_core::control::ReadMode::Raw => rt_protocol::ReadMode::Raw,
+                ipico_core::control::ReadMode::Event => rt_protocol::ReadMode::Event,
+                ipico_core::control::ReadMode::FirstLastSeen => {
+                    rt_protocol::ReadMode::FirstLastSeen
+                }
+            },
             timeout: c.timeout,
         }),
         tto_enabled: info.tto_enabled,
@@ -835,20 +841,11 @@ async fn handle_reader_control_message(
         }
 
         ReaderControlAction::SetReadMode { mode, timeout } => {
-            let read_mode = match mode.as_str() {
-                "raw" => ipico_core::control::ReadMode::Raw,
-                "event" => ipico_core::control::ReadMode::Event,
-                "fsls" => ipico_core::control::ReadMode::FirstLastSeen,
-                other => {
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: false,
-                            error: Some(format!("unknown mode: {}", other)),
-                            reader_info: None,
-                        });
-                    return session.send_message(&response).await;
+            let read_mode = match mode {
+                rt_protocol::ReadMode::Raw => ipico_core::control::ReadMode::Raw,
+                rt_protocol::ReadMode::Event => ipico_core::control::ReadMode::Event,
+                rt_protocol::ReadMode::FirstLastSeen => {
+                    ipico_core::control::ReadMode::FirstLastSeen
                 }
             };
             match client.set_config3(read_mode, timeout).await {
@@ -1511,16 +1508,20 @@ async fn run_uplink(
             loop {
                 match ui_rx.try_recv() {
                     Ok(ForwarderUiEvent::ReaderUpdated { ip, state, .. }) => {
-                        let state_str = match state {
-                            forwarder::ui_events::ReaderConnectionState::Connected => "connected",
-                            forwarder::ui_events::ReaderConnectionState::Connecting => "connecting",
+                        let proto_state = match state {
+                            forwarder::ui_events::ReaderConnectionState::Connected => {
+                                rt_protocol::ReaderConnectionState::Connected
+                            }
+                            forwarder::ui_events::ReaderConnectionState::Connecting => {
+                                rt_protocol::ReaderConnectionState::Connecting
+                            }
                             forwarder::ui_events::ReaderConnectionState::Disconnected => {
-                                "disconnected"
+                                rt_protocol::ReaderConnectionState::Disconnected
                             }
                         };
                         let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
                             reader_ip: ip.clone(),
-                            state: state_str.to_owned(),
+                            state: proto_state,
                             reader_info: None,
                         });
                         if let Err(e) = session.send_message(&msg).await {
@@ -1531,7 +1532,7 @@ async fn run_uplink(
                     Ok(ForwarderUiEvent::ReaderInfoUpdated { ip, info }) => {
                         let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
                             reader_ip: ip.clone(),
-                            state: "connected".to_owned(),
+                            state: rt_protocol::ReaderConnectionState::Connected,
                             reader_info: Some(to_protocol_reader_info(&info)),
                         });
                         if let Err(e) = session.send_message(&msg).await {

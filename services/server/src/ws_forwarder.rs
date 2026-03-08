@@ -590,7 +590,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 let _ = state.dashboard_tx.send(DashboardEvent::ReaderInfoUpdated {
                     forwarder_id: device_id.clone(),
                     reader_ip: cached.reader_ip,
-                    state: "disconnected".into(),
+                    state: rt_protocol::ReaderConnectionState::Disconnected,
                     reader_info: None,
                 });
             }

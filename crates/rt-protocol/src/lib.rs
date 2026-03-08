@@ -303,6 +303,36 @@ pub struct RestartResponse {
 // Reader control types (server <-> forwarder)
 // ---------------------------------------------------------------------------
 
+/// IPICO reader read mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadMode {
+    #[serde(rename = "raw")]
+    Raw,
+    #[serde(rename = "event")]
+    Event,
+    #[serde(rename = "fsls")]
+    FirstLastSeen,
+}
+
+/// Reader connection state as reported by the forwarder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderConnectionState {
+    Connected,
+    Connecting,
+    Disconnected,
+}
+
+/// State of a reader download operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    Downloading,
+    Complete,
+    Error,
+    Idle,
+}
+
 /// Hardware identity information reported by the reader.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareInfo {
@@ -314,7 +344,7 @@ pub struct HardwareInfo {
 /// Reader CONFIG3 settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config3Info {
-    pub mode: String,
+    pub mode: ReadMode,
     pub timeout: u8,
 }
 
@@ -352,7 +382,7 @@ pub struct ReaderInfo {
 pub enum ReaderControlAction {
     GetInfo,
     SyncClock,
-    SetReadMode { mode: String, timeout: u8 },
+    SetReadMode { mode: ReadMode, timeout: u8 },
     SetTto { enabled: bool },
     SetRecording { enabled: bool },
     ClearRecords,
@@ -386,7 +416,7 @@ pub struct ReaderControlResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReaderInfoUpdate {
     pub reader_ip: String,
-    pub state: String,
+    pub state: ReaderConnectionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader_info: Option<ReaderInfo>,
 }
@@ -395,7 +425,7 @@ pub struct ReaderInfoUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReaderDownloadProgress {
     pub reader_ip: String,
-    pub state: String,
+    pub state: DownloadState,
     pub reads_received: u32,
     pub progress: u64,
     pub total: u64,
@@ -511,7 +541,7 @@ mod tests {
             request_id: "abc".into(),
             reader_ip: "192.168.0.1:10000".into(),
             action: ReaderControlAction::SetReadMode {
-                mode: "event".into(),
+                mode: ReadMode::Event,
                 timeout: 5,
             },
         });
@@ -535,7 +565,7 @@ mod tests {
                     reader_id: Some("READER01".into()),
                 }),
                 config: Some(Config3Info {
-                    mode: "event".into(),
+                    mode: ReadMode::Event,
                     timeout: 5,
                 }),
                 tto_enabled: Some(false),
@@ -557,7 +587,7 @@ mod tests {
     fn reader_info_update_round_trip() {
         let msg = WsMessage::ReaderInfoUpdate(ReaderInfoUpdate {
             reader_ip: "192.168.0.1:10000".into(),
-            state: "connected".into(),
+            state: ReaderConnectionState::Connected,
             reader_info: None,
         });
         let json = serde_json::to_string(&msg).unwrap();
@@ -569,7 +599,7 @@ mod tests {
     fn reader_download_progress_round_trip() {
         let msg = WsMessage::ReaderDownloadProgress(ReaderDownloadProgress {
             reader_ip: "192.168.0.1:10000".into(),
-            state: "downloading".into(),
+            state: DownloadState::Downloading,
             reads_received: 50,
             progress: 1024,
             total: 2048,
