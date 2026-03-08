@@ -128,13 +128,15 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
             to_bcd(*second),
         ],
         Command::SetConfig3 { mode, timeout } => {
+            // 0x07 = enable all three antenna ports (bitmask: ports 1+2+3)
             vec![mode.config3_value(), *timeout, 0x07]
         }
         Command::SetExtendedStatus { data } => data.clone(),
         _ => vec![],
     };
 
-    // Length byte: 0xff for query-mode commands, otherwise data length
+    // Length byte: 0xff signals a read/query request (IPICO protocol convention);
+    // for write commands, it's the actual data payload length.
     let length: u8 = match cmd {
         Command::GetExtendedStatus | Command::GetConfig3 => 0xff,
         _ => data.len() as u8,
