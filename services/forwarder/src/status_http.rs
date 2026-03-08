@@ -1850,6 +1850,7 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
 
 /// Estimate one-way network latency to a reader by measuring RTT of GET_DATE_TIME probes.
 /// Returns (median one-way latency, successful probe count) from 3 probes.
+/// With an even number of successful probes, takes the upper-middle value (conservative estimate).
 async fn estimate_one_way_latency(
     client: &crate::reader_control::ControlClient,
 ) -> Result<(std::time::Duration, usize), String> {
@@ -1930,7 +1931,7 @@ fn compute_sync_timing(
 ///
 /// Minimizes clock drift by:
 /// 1. Probing RTT to estimate one-way network latency
-/// 2. Choosing the SET_DATE_TIME second value that minimizes drift
+/// 2. Rounding the projected rollover time to the nearest whole-second boundary
 /// 3. Delaying the SET command so the rollover aligns with the target second
 ///
 /// SET_DATE_TIME resets the centisecond counter to ~52 (520ms) and applies the
@@ -2578,7 +2579,7 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
         // If there's an initial terminal event, yield it and close
         if let Some(evt) = initial_event {
             let json = serde_json::to_string(&evt)
-                .unwrap_or_else(|e| format!(r#"{{"state":"error","message":"serialize: {e}"}}"#));
+                .unwrap_or_else(|e| serde_json::json!({"state": "error", "message": format!("serialize: {e}")}).to_string());
             yield Ok::<_, Infallible>(SseEvent::default().data(json));
             return;
         }
@@ -2604,7 +2605,7 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
                             | crate::reader_control::DownloadEvent::Error { .. }
                     );
                     let json = serde_json::to_string(&evt)
-                        .unwrap_or_else(|e| format!(r#"{{"state":"error","message":"serialize: {e}"}}"#));
+                        .unwrap_or_else(|e| serde_json::json!({"state": "error", "message": format!("serialize: {e}")}).to_string());
                     yield Ok::<_, Infallible>(SseEvent::default().data(json));
                     if is_terminal {
                         return;

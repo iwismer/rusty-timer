@@ -443,9 +443,9 @@ def decode_ab(frame):
 
 
 def decode_ab_datetime(data_hex):
-    """Decode GET_DATE_TIME response data (9 bytes = 18 hex chars).
+    """Decode GET_DATE_TIME response data (first 8 data bytes = 16 hex chars).
 
-    Format: YY MM DD WW HH MM SS CC XX
+    Format: YY MM DD WW HH MM SS CC  (9th byte XX config ignored)
     """
     if len(data_hex) < 16:
         return data_hex
