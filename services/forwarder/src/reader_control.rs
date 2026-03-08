@@ -546,6 +546,11 @@ impl DownloadTracker {
         }
         self.download_progress = progress;
         self.stored_data_extent = extent;
+        let _ = self.event_tx.send(DownloadEvent::Downloading {
+            progress: self.download_progress,
+            total: self.stored_data_extent,
+            reads_received: self.reads_received,
+        });
     }
 
     pub fn begin_startup(&mut self) {
@@ -1017,6 +1022,15 @@ mod tests {
 
         tracker.update_progress(50, 100);
         assert_eq!(tracker.download_progress(), 50);
+        let ev = rx.try_recv().expect("progress event");
+        assert!(matches!(
+            ev,
+            DownloadEvent::Downloading {
+                progress: 50,
+                total: 100,
+                reads_received: 2,
+            }
+        ));
 
         tracker.complete();
         assert_eq!(*tracker.state(), DownloadState::Complete);

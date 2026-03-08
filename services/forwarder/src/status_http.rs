@@ -1950,21 +1950,20 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
                             .num_milliseconds()
                     });
 
-            // Update stored reader_info so SSE subscribers see the new clock
+            // Update stored reader_info and broadcast so SSE subscribers see the new clock
             {
-                let mut ss = state.subsystem.lock().await;
-                if let Some(r) = ss.readers.get_mut(&ip)
-                    && let Some(ref mut info) = r.reader_info
-                {
-                    if let Some(d) = drift_ms {
-                        info.clock = Some(crate::reader_control::ClockInfo {
-                            reader_clock: reader_iso.clone(),
-                            drift_ms: d,
-                        });
-                    } else {
-                        info.clock = None;
-                    }
-                }
+                let mut info = {
+                    let ss = state.subsystem.lock().await;
+                    ss.readers
+                        .get(&ip)
+                        .and_then(|r| r.reader_info.clone())
+                        .unwrap_or_default()
+                };
+                info.clock = drift_ms.map(|d| crate::reader_control::ClockInfo {
+                    reader_clock: reader_iso.clone(),
+                    drift_ms: d,
+                });
+                update_cached_reader_info(&state, &ip, info).await;
             }
 
             state.logger.log(format!(
@@ -2086,19 +2085,38 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
             );
         }
     };
-    match client.set_config3(mode, body.timeout).await {
-        Ok(()) => {
+    if let Err(e) = client.set_config3(mode, body.timeout).await {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": e.to_string()}).to_string(),
+        );
+    }
+
+    match client.get_config3().await {
+        Ok((verified_mode, timeout)) => {
+            let mut info = {
+                let ss = state.subsystem.lock().await;
+                ss.readers
+                    .get(&ip)
+                    .and_then(|r| r.reader_info.clone())
+                    .unwrap_or_default()
+            };
+            info.config = Some(crate::reader_control::Config3Info {
+                mode: verified_mode,
+                timeout,
+            });
+            update_cached_reader_info(&state, &ip, info).await;
             state
                 .logger
-                .log(format!("reader {} read mode set to {}", ip, mode));
+                .log(format!("reader {} read mode set to {}", ip, verified_mode));
             json_response(
                 StatusCode::OK,
-                serde_json::json!({"mode": mode.as_str()}).to_string(),
+                serde_json::json!({"mode": verified_mode.as_str()}).to_string(),
             )
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
+            serde_json::json!({"error": format!("set ok but verify failed: {}", e)}).to_string(),
         ),
     }
 }
