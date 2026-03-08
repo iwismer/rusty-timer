@@ -3802,6 +3802,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_clock_succeeds_with_partial_rtt_probe_failure() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let expected_date_time =
+                control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
+            let valid_response = b"ab000902260306051855443727cf";
+
+            // Probe 1: valid response
+            let cmd = cmd_rx.recv().await.expect("probe 1 command");
+            assert_eq!(cmd, expected_date_time);
+            assert!(control_sink.feed(valid_response).await);
+
+            // Probe 2: malformed response → parse error consumed by pending request
+            let cmd = cmd_rx.recv().await.expect("probe 2 command");
+            assert_eq!(cmd, expected_date_time);
+            assert!(control_sink.feed(b"ab0001").await);
+
+            // Probe 3: valid response
+            let cmd = cmd_rx.recv().await.expect("probe 3 command");
+            assert_eq!(cmd, expected_date_time);
+            assert!(control_sink.feed(valid_response).await);
+
+            // SET_DATE_TIME
+            let set_cmd = cmd_rx.recv().await.expect("set date/time command");
+            let set_text = std::str::from_utf8(&set_cmd).expect("set date/time utf8");
+            assert!(
+                set_text.starts_with("ab000701"),
+                "unexpected set_date_time frame: {set_text}"
+            );
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_SET_DATE_TIME).as_bytes())
+                    .await
+            );
+
+            // Verify GET_DATE_TIME
+            let verify_cmd = cmd_rx.recv().await.expect("verify date/time command");
+            assert_eq!(verify_cmd, expected_date_time);
+            assert!(control_sink.feed(valid_response).await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+    }
+
+    #[tokio::test]
     async fn sync_clock_returns_503_when_no_control_client() {
         let reader_ip = "192.168.1.99";
         let server = StatusServer::start(
