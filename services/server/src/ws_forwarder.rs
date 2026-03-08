@@ -11,7 +11,7 @@ use crate::{
         },
         races::lookup_stream_chip_participant,
     },
-    state::{AppState, ForwarderCommand, ForwarderProxyReply},
+    state::{AppState, CachedReaderState, ForwarderCommand, ForwarderProxyReply},
     ws_common::{
         extract_token_from_headers, recv_text_with_timeout, send_heartbeat, send_ws_error,
     },
@@ -320,11 +320,19 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
             tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::RestartResponse>>,
         ),
     > = HashMap::new();
+    let mut pending_reader_controls: HashMap<
+        String,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::ReaderControlResponse>>,
+        ),
+    > = HashMap::new();
 
     loop {
         expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
         expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
         expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
+        expire_pending_requests(&mut pending_reader_controls, FORWARDER_COMMAND_TIMEOUT);
 
         tokio::select! {
             msg = tokio::time::timeout(SESSION_TIMEOUT, socket.recv()) => {
@@ -438,6 +446,38 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     let _ = reply.send(ForwarderProxyReply::Response(resp));
                                 }
                             }
+                            Ok(WsMessage::ReaderControlResponse(resp)) => {
+                                if let Some((_, reply)) = pending_reader_controls.remove(&resp.request_id) {
+                                    let _ = reply.send(ForwarderProxyReply::Response(resp));
+                                }
+                            }
+                            Ok(WsMessage::ReaderInfoUpdate(update)) => {
+                                let key = format!("{}:{}", device_id, update.reader_ip);
+                                let cached = CachedReaderState {
+                                    forwarder_id: device_id.clone(),
+                                    reader_ip: update.reader_ip.clone(),
+                                    state: update.state.clone(),
+                                    reader_info: update.reader_info.clone(),
+                                };
+                                state.reader_states.write().await.insert(key, cached);
+                                let _ = state.dashboard_tx.send(DashboardEvent::ReaderInfoUpdated {
+                                    forwarder_id: device_id.clone(),
+                                    reader_ip: update.reader_ip,
+                                    state: update.state,
+                                    reader_info: update.reader_info,
+                                });
+                            }
+                            Ok(WsMessage::ReaderDownloadProgress(progress)) => {
+                                let _ = state.dashboard_tx.send(DashboardEvent::ReaderDownloadProgress {
+                                    forwarder_id: device_id.clone(),
+                                    reader_ip: progress.reader_ip,
+                                    state: progress.state,
+                                    reads_received: progress.reads_received,
+                                    progress: progress.progress,
+                                    total: progress.total,
+                                    error: progress.error,
+                                });
+                            }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
                             Err(e) => { send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await; break; }
                         }
@@ -453,6 +493,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
                 expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
                 expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
+                expire_pending_requests(&mut pending_reader_controls, FORWARDER_COMMAND_TIMEOUT);
                 if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
             }
             Some(cmd) = cmd_rx.recv() => {
@@ -500,9 +541,19 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         }
                         pending_restarts.insert(request_id, (Instant::now(), reply));
                     }
-                    ForwarderCommand::ReaderControl { reply, .. } => {
-                        // TODO: Task 3 will implement reader control proxying
-                        let _ = reply.send(crate::state::ForwarderProxyReply::Timeout);
+                    ForwarderCommand::ReaderControl { request_id, reader_ip, action, reply } => {
+                        let msg = WsMessage::ReaderControlRequest(rt_protocol::ReaderControlRequest {
+                            request_id: request_id.clone(),
+                            reader_ip,
+                            action,
+                        });
+                        let json = serde_json::to_string(&msg).unwrap();
+                        if let Err(e) = socket.send(Message::Text(json.into())).await {
+                            warn!(error = %e, "failed to send reader control request");
+                            let _ = reply.send(ForwarderProxyReply::Timeout);
+                        } else {
+                            pending_reader_controls.insert(request_id, (Instant::now(), reply));
+                        }
                     }
                 }
             }
@@ -518,6 +569,24 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
             display_alias: None,
             forwarder_display_name: None,
         });
+    }
+    {
+        let mut cache = state.reader_states.write().await;
+        let keys_to_remove: Vec<String> = cache
+            .keys()
+            .filter(|k| k.starts_with(&format!("{}:", device_id)))
+            .cloned()
+            .collect();
+        for key in &keys_to_remove {
+            if let Some(cached) = cache.remove(key) {
+                let _ = state.dashboard_tx.send(DashboardEvent::ReaderInfoUpdated {
+                    forwarder_id: device_id.clone(),
+                    reader_ip: cached.reader_ip,
+                    state: "disconnected".into(),
+                    reader_info: None,
+                });
+            }
+        }
     }
     {
         let mut senders = state.forwarder_command_senders.write().await;
