@@ -72,8 +72,8 @@ export function clearReaderInfoForIp(
     readerInfoReceivedAt,
     readerClockBaseTs,
     readerClockBaseLocal,
-    lastReadBase: previous.lastReadBase,
-    lastReadReceivedAt: previous.lastReadReceivedAt,
+    lastSeenBase: previous.lastSeenBase,
+    lastSeenReceivedAt: previous.lastSeenReceivedAt,
   };
 }
 
@@ -103,8 +103,8 @@ export function applyReaderInfoUpdate(
     },
     readerClockBaseTs: { ...previous.readerClockBaseTs },
     readerClockBaseLocal: { ...previous.readerClockBaseLocal },
-    lastReadBase: previous.lastReadBase,
-    lastReadReceivedAt: previous.lastReadReceivedAt,
+    lastSeenBase: previous.lastSeenBase,
+    lastSeenReceivedAt: previous.lastSeenReceivedAt,
   };
 
   const readerClock = info.clock?.reader_clock;

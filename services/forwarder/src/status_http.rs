@@ -4016,6 +4016,9 @@ mod tests {
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
         server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
             .update_reader_info(
                 reader_ip,
                 crate::reader_control::ReaderInfo {
@@ -4156,6 +4159,9 @@ mod tests {
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
         server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
             .update_reader_info(
                 reader_ip,
                 crate::reader_control::ReaderInfo {
@@ -4281,6 +4287,9 @@ mod tests {
         .expect("start status server");
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
         server
             .update_reader_info(
                 reader_ip,
@@ -5713,6 +5722,9 @@ target = "192.168.1.100:10000"
         .expect("start status server");
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
         // Pre-populate with cached values we expect to be preserved
         server
             .update_reader_info(

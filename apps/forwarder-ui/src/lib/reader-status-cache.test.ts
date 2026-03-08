@@ -10,6 +10,7 @@ function makeInfo(overrides: Partial<ReaderInfo> = {}): ReaderInfo {
   return {
     banner: "IPICO V2",
     clock: { reader_clock: "2026-03-08 12:34:56", drift_ms: 0 },
+    connect_failures: 0,
     ...overrides,
   };
 }
@@ -107,7 +108,7 @@ describe("rebuildReaderCachesFromStatus", () => {
           state: "connected",
           reads_session: 10,
           reads_total: 20,
-          last_read_secs: 5,
+          last_seen_secs: 5,
           local_port: 10001,
           reader_info: info,
         },
@@ -116,7 +117,7 @@ describe("rebuildReaderCachesFromStatus", () => {
           state: "disconnected",
           reads_session: 0,
           reads_total: 0,
-          last_read_secs: null,
+          last_seen_secs: null,
           local_port: 10002,
           reader_info: null,
         },
@@ -126,8 +127,8 @@ describe("rebuildReaderCachesFromStatus", () => {
         readerInfoReceivedAt: { "10.0.0.2": 111 },
         readerClockBaseTs: { "10.0.0.2": 222 },
         readerClockBaseLocal: { "10.0.0.2": 333 },
-        lastReadBase: {},
-        lastReadReceivedAt: {},
+        lastSeenBase: {},
+        lastSeenReceivedAt: {},
       },
       now,
     );
@@ -139,9 +140,9 @@ describe("rebuildReaderCachesFromStatus", () => {
     expect(result.readerInfoMap["10.0.0.2"]).toBeUndefined();
     expect(result.readerInfoReceivedAt["10.0.0.2"]).toBeUndefined();
     expect(result.readerClockBaseTs["10.0.0.2"]).toBeUndefined();
-    // Both have lastReadBase
-    expect(result.lastReadBase["10.0.0.1"]).toBe(5);
-    expect(result.lastReadBase["10.0.0.2"]).toBeNull();
+    // Both have lastSeenBase
+    expect(result.lastSeenBase["10.0.0.1"]).toBe(5);
+    expect(result.lastSeenBase["10.0.0.2"]).toBeNull();
   });
 });
 
@@ -153,8 +154,8 @@ describe("applyReaderInfoUpdate", () => {
       readerInfoReceivedAt: {},
       readerClockBaseTs: {},
       readerClockBaseLocal: {},
-      lastReadBase: {},
-      lastReadReceivedAt: {},
+      lastSeenBase: {},
+      lastSeenReceivedAt: {},
     };
 
     const result = applyReaderInfoUpdate(
@@ -164,7 +165,7 @@ describe("applyReaderInfoUpdate", () => {
           state: "disconnected",
           reads_session: 1,
           reads_total: 2,
-          last_read_secs: 3,
+          last_seen_secs: 3,
           local_port: 10042,
           reader_info: null,
         },
@@ -174,6 +175,7 @@ describe("applyReaderInfoUpdate", () => {
         ip: "10.0.0.42",
         banner: "late-info",
         clock: { reader_clock: "2026-03-08 12:34:56", drift_ms: 0 },
+        connect_failures: 0,
       },
       now,
     );
@@ -188,8 +190,8 @@ describe("applyReaderInfoUpdate", () => {
       readerInfoReceivedAt: {},
       readerClockBaseTs: {},
       readerClockBaseLocal: {},
-      lastReadBase: {},
-      lastReadReceivedAt: {},
+      lastSeenBase: {},
+      lastSeenReceivedAt: {},
     };
 
     const result = applyReaderInfoUpdate(
@@ -199,6 +201,7 @@ describe("applyReaderInfoUpdate", () => {
         ip: "10.0.0.42",
         banner: "IPICO V2",
         clock: { reader_clock: "2026-03-08 12:34:56", drift_ms: 0 },
+        connect_failures: 0,
       },
       now,
     );
@@ -217,8 +220,8 @@ describe("applyReaderInfoUpdate", () => {
       readerInfoReceivedAt: { "10.0.0.42": 100 },
       readerClockBaseTs: {},
       readerClockBaseLocal: {},
-      lastReadBase: {},
-      lastReadReceivedAt: {},
+      lastSeenBase: {},
+      lastSeenReceivedAt: {},
     };
 
     const result = applyReaderInfoUpdate(
@@ -228,7 +231,7 @@ describe("applyReaderInfoUpdate", () => {
           state: "connected",
           reads_session: 0,
           reads_total: 0,
-          last_read_secs: 0,
+          last_seen_secs: 0,
           local_port: 10042,
           reader_info: null,
         },
@@ -238,6 +241,7 @@ describe("applyReaderInfoUpdate", () => {
         ip: "10.0.0.42",
         banner: "updated",
         clock: { reader_clock: "2026-03-08 14:00:00", drift_ms: 5 },
+        connect_failures: 0,
       },
       now,
     );
@@ -256,8 +260,8 @@ describe("clearReaderInfoForIp", () => {
       readerInfoReceivedAt: { "10.0.0.42": 111 },
       readerClockBaseTs: { "10.0.0.42": 222 },
       readerClockBaseLocal: { "10.0.0.42": 333 },
-      lastReadBase: { "10.0.0.42": 5 },
-      lastReadReceivedAt: { "10.0.0.42": 444 },
+      lastSeenBase: { "10.0.0.42": 5 },
+      lastSeenReceivedAt: { "10.0.0.42": 444 },
     };
     const result = clearReaderInfoForIp(previous, "10.0.0.42");
 
@@ -265,8 +269,8 @@ describe("clearReaderInfoForIp", () => {
     expect(result.readerInfoReceivedAt).toEqual({});
     expect(result.readerClockBaseTs).toEqual({});
     expect(result.readerClockBaseLocal).toEqual({});
-    expect(result.lastReadBase).toEqual({ "10.0.0.42": 5 });
-    expect(result.lastReadReceivedAt).toEqual({ "10.0.0.42": 444 });
+    expect(result.lastSeenBase).toEqual({ "10.0.0.42": 5 });
+    expect(result.lastSeenReceivedAt).toEqual({ "10.0.0.42": 444 });
   });
 
   it("preserves other readers' caches", () => {
@@ -278,8 +282,8 @@ describe("clearReaderInfoForIp", () => {
       readerInfoReceivedAt: { "10.0.0.42": 111, "10.0.0.99": 222 },
       readerClockBaseTs: { "10.0.0.42": 333, "10.0.0.99": 444 },
       readerClockBaseLocal: { "10.0.0.42": 555, "10.0.0.99": 666 },
-      lastReadBase: {},
-      lastReadReceivedAt: {},
+      lastSeenBase: {},
+      lastSeenReceivedAt: {},
     };
     const result = clearReaderInfoForIp(previous, "10.0.0.42");
 
