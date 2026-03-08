@@ -1799,16 +1799,17 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
 }
 
 /// Estimate one-way network latency to a reader by measuring RTT of GET_DATE_TIME probes.
-/// Returns the median one-way latency (RTT/2) from 3 probes.
+/// Returns (median one-way latency, successful probe count) from 3 probes.
 async fn estimate_one_way_latency(
     client: &crate::reader_control::ControlClient,
-) -> Result<std::time::Duration, String> {
+) -> Result<(std::time::Duration, usize), String> {
     const PROBES: usize = 3;
     let mut rtts = Vec::with_capacity(PROBES);
-    for _ in 0..PROBES {
+    for i in 0..PROBES {
         let start = std::time::Instant::now();
-        if client.get_date_time().await.is_ok() {
-            rtts.push(start.elapsed());
+        match client.get_date_time().await {
+            Ok(_) => rtts.push(start.elapsed()),
+            Err(e) => tracing::warn!(probe = i + 1, error = %e, "RTT probe failed"),
         }
     }
     if rtts.is_empty() {
@@ -1816,9 +1817,16 @@ async fn estimate_one_way_latency(
             "all RTT probes failed; cannot estimate network latency for clock sync".to_string(),
         );
     }
+    if rtts.len() < PROBES {
+        tracing::warn!(
+            successful = rtts.len(),
+            total = PROBES,
+            "clock sync latency estimate based on fewer probes than requested"
+        );
+    }
     rtts.sort();
     let median_rtt = rtts[rtts.len() / 2];
-    Ok(median_rtt / 2)
+    Ok((median_rtt / 2, rtts.len()))
 }
 
 /// POST /api/v1/readers/{ip}/sync-clock
@@ -1854,8 +1862,8 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     use chrono::Timelike;
 
     // Step 1: estimate one-way latency
-    let one_way = match estimate_one_way_latency(&client).await {
-        Ok(d) => d,
+    let (one_way, _probes) = match estimate_one_way_latency(&client).await {
+        Ok(pair) => pair,
         Err(msg) => {
             return json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
