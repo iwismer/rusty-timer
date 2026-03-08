@@ -1883,14 +1883,14 @@ async fn estimate_one_way_latency(
 ///
 /// Minimizes clock drift by:
 /// 1. Probing RTT to estimate one-way network latency
-/// 2. Choosing the SET_DATE_TIME second value that minimizes drift, accounting
-///    for the reader's fixed sync delay after receiving the command.
+/// 2. Choosing the SET_DATE_TIME second value that minimizes drift
+/// 3. Delaying the SET command so the rollover aligns with the target second
 ///
 /// SET_DATE_TIME resets the centisecond counter to ~52 (520ms) and applies the
 /// new second value when cs next rolls over from 99 → 0, which takes ~480ms.
-/// The reader's unsolicited 0x4c frame confirms a 500ms sync delay. We use
-/// SYNC_DELAY_MS = 500 to predict when the new second S.000 will take effect,
-/// then pick S = round(wall_at_rollover) so |drift| ≤ 500ms worst case.
+/// The reader's unsolicited 0x4c frame confirms a 500ms sync delay. We compute
+/// the ideal send time so that: send_time + one_way + SYNC_DELAY = S.000,
+/// reducing drift from ±500ms (pure rounding) to ±~30ms (RTT estimation error).
 async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
@@ -1928,28 +1928,49 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
 
     let wall_now = chrono::Local::now();
 
-    // Step 2: predict when the new second will take effect.
-    // The SET command arrives ~one_way from now. The reader then takes
-    // SYNC_DELAY_MS to apply the new second (cs resets to ~52, rolls to 0).
+    // Step 2: compute when the rollover would happen if we sent SET right now.
+    // SET arrives ~one_way from now, then the reader takes SYNC_DELAY_MS to
+    // apply the new second (cs resets to ~52, rolls to 0 at ~480-500ms).
     let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or(chrono::Duration::zero());
     let sync_delay = chrono::Duration::milliseconds(SYNC_DELAY_MS as i64);
-    let wall_at_rollover = wall_now + arrival_offset + sync_delay;
-    let rollover_frac = wall_at_rollover.nanosecond() as f64 / 1_000_000_000.0;
+    let wall_at_rollover_if_now = wall_now + arrival_offset + sync_delay;
+    let rollover_frac = wall_at_rollover_if_now.nanosecond() as f64 / 1_000_000_000.0;
 
-    // Pick S = round(wall_at_rollover) so that |S.000 - wall_at_rollover| ≤ 500ms
+    // Pick target second S = round(wall_at_rollover), then delay the SET so
+    // that the rollover aligns with exactly S.000 instead of S ± 500ms.
     let target = if rollover_frac >= 0.5 {
-        wall_at_rollover + chrono::Duration::seconds(1)
+        wall_at_rollover_if_now + chrono::Duration::seconds(1)
     } else {
-        wall_at_rollover
+        wall_at_rollover_if_now
     };
+    // Truncate to the exact second boundary S.000
+    let target_boundary = target.with_nanosecond(0).unwrap_or(target);
 
-    let year = (target.year() % 100) as u8;
-    let month = target.month() as u8;
-    let day = target.day() as u8;
-    let dow = target.weekday().num_days_from_sunday() as u8;
-    let hour = target.hour() as u8;
-    let minute = target.minute() as u8;
-    let second = target.second() as u8;
+    // Step 3: compute ideal send time so rollover lands on S.000.
+    // ideal_send + one_way + sync_delay = S.000
+    // ideal_send = S.000 - one_way - sync_delay
+    // If ideal_send is already past, bump target to the next second.
+    let mut target_boundary = target_boundary;
+    let mut ideal_send = target_boundary - arrival_offset - sync_delay;
+    if ideal_send < wall_now {
+        target_boundary = target_boundary + chrono::Duration::seconds(1);
+        ideal_send = target_boundary - arrival_offset - sync_delay;
+    }
+    let pre_set_wait = ideal_send
+        .signed_duration_since(wall_now)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO);
+    if !pre_set_wait.is_zero() {
+        tokio::time::sleep(pre_set_wait).await;
+    }
+
+    let year = (target_boundary.year() % 100) as u8;
+    let month = target_boundary.month() as u8;
+    let day = target_boundary.day() as u8;
+    let dow = target_boundary.weekday().num_days_from_sunday() as u8;
+    let hour = target_boundary.hour() as u8;
+    let minute = target_boundary.minute() as u8;
+    let second = target_boundary.second() as u8;
 
     if let Err(e) = client
         .set_date_time(year, month, day, dow, hour, minute, second)
@@ -1998,10 +2019,11 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
             }
 
             state.logger.log(format!(
-                "reader {} clock synced to {} (one-way latency: {:.1}ms, sync delay: {}ms)",
+                "reader {} clock synced to {} (one-way latency: {:.1}ms, pre-set wait: {:.0}ms, sync delay: {}ms)",
                 ip,
                 reader_iso,
                 one_way.as_secs_f64() * 1000.0,
+                pre_set_wait.as_secs_f64() * 1000.0,
                 SYNC_DELAY_MS,
             ));
             json_response(
