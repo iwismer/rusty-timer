@@ -841,6 +841,7 @@ async fn run_uplink(
             };
 
         // Send initial reader status burst
+        let mut burst_ok = true;
         {
             let ss = subsystem.lock().await;
             for (ip, reader) in ss.readers() {
@@ -850,17 +851,30 @@ async fn run_uplink(
                     connected,
                 });
                 if session.send_message(&update).await.is_err() {
-                    continue; // will reconnect
+                    burst_ok = false;
+                    break;
                 }
             }
         }
 
+        if !burst_ok {
+            status.set_uplink_connected(false).await;
+            continue; // reconnect via outer loop
+        }
+
         // Drain any reader status updates that arrived during connect/burst
+        let mut drain_ok = true;
         while let Ok(update) = reader_status_rx.try_recv() {
             let msg = WsMessage::ReaderStatusUpdate(update);
             if session.send_message(&msg).await.is_err() {
+                drain_ok = false;
                 break;
             }
+        }
+
+        if !drain_ok {
+            status.set_uplink_connected(false).await;
+            continue; // reconnect via outer loop
         }
 
         // Replay unacked events from journal
