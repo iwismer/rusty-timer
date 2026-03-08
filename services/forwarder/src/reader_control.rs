@@ -425,7 +425,7 @@ pub struct HardwareInfo {
 /// Read mode configuration from CONFIG3 (0x09).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Config3Info {
-    pub mode: String,
+    pub mode: ipico_core::control::ReadMode,
     pub timeout: u8,
 }
 
@@ -669,10 +669,7 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
 
     match client.get_config3().await {
         Ok((mode, timeout)) => {
-            ri.config = Some(Config3Info {
-                mode: mode.as_str().to_owned(),
-                timeout,
-            });
+            ri.config = Some(Config3Info { mode, timeout });
         }
         Err(e) => {
             warn!("get_config3 failed: {}", e);
@@ -715,10 +712,7 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
 
     match client.get_config3().await {
         Ok((mode, timeout)) => {
-            info.config = Some(Config3Info {
-                mode: mode.as_str().to_owned(),
-                timeout,
-            });
+            info.config = Some(Config3Info { mode, timeout });
         }
         Err(e) => {
             warn!("status poll: get_config3 failed: {e}");
