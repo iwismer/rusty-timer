@@ -1,4 +1,4 @@
-//! Local status HTTP server for Task 8.
+//! Local status and control HTTP server for the forwarder service.
 //!
 //! Provides:
 //! - `GET /healthz`       — always 200 OK (process is running)
@@ -6,22 +6,34 @@
 //! - `GET /api/v1/status`  — current forwarder state as JSON
 //! - `POST /api/v1/streams/{reader_ip}/reset-epoch`
 //!   — bump stream epoch; 200 on success, 404 if unknown
+//! - `PUT /api/v1/streams/{reader_ip}/current-epoch/name`
+//!   — set epoch name for a reader stream
 //! - `GET /api/v1/config` — current config as JSON
 //! - `POST /api/v1/config/{section}` — update a config section
+//!   (general, server, auth, journal, uplink, status_http, control, update, readers)
 //! - `POST /api/v1/restart` — trigger graceful restart; 404 if config editing not enabled;
 //!   501 on non-Unix platforms
 //! - `POST /api/v1/control/restart-service` — trigger graceful service restart
 //! - `POST /api/v1/control/restart-device` — trigger host reboot (gated by config)
 //! - `POST /api/v1/control/shutdown-device` — trigger host shutdown (gated by config)
-//! - `GET /update/status`    — current rt-updater status as JSON
-//! - `POST /update/apply`    — apply a staged update
-//! - `POST /update/check`    — check for updates (respects update mode)
-//! - `POST /update/download`  — download an available update (mode-independent)
+//! - `GET /api/v1/readers/{ip}/info`         — reader control info (firmware, clock, etc.)
+//! - `POST /api/v1/readers/{ip}/sync-clock`  — synchronize reader clock
+//! - `GET /api/v1/readers/{ip}/read-mode`    — current read mode and timeout
+//! - `PUT /api/v1/readers/{ip}/read-mode`    — set read mode and timeout
+//! - `POST /api/v1/readers/{ip}/refresh`     — refresh reader info (re-poll)
+//! - `PUT /api/v1/readers/{ip}/recording`    — toggle recording on/off
+//! - `POST /api/v1/readers/{ip}/clear-records` — erase stored records
 //! - `POST /api/v1/readers/{ip}/download-reads`
 //!   — trigger stored-read download from reader; 202 on success, 409 if already running
 //! - `GET /api/v1/readers/{ip}/download-reads/progress`
 //!   — SSE stream of download progress events
 //! - `POST /api/v1/readers/{ip}/reconnect` — trigger immediate reader reconnect (cancels backoff)
+//! - `GET /api/v1/logs`   — recent log entries as JSON
+//! - `GET /api/v1/events` — SSE stream of all UI events
+//! - `GET /update/status`    — current rt-updater status as JSON
+//! - `POST /update/apply`    — apply a staged update
+//! - `POST /update/check`    — check for updates (respects update mode)
+//! - `POST /update/download`  — download an available update (mode-independent)
 //! - All other routes fall back to the embedded SvelteKit UI
 //!
 //! # Readiness contract
@@ -354,7 +366,7 @@ impl StatusServer {
     ) {
         self.download_trackers
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(reader_ip.to_owned(), tracker);
     }
 
@@ -368,7 +380,7 @@ impl StatusServer {
     pub fn register_reconnect_notify(&self, reader_ip: &str, notify: Arc<Notify>) {
         self.reconnect_notifies
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(reader_ip.to_owned(), notify);
     }
 
@@ -407,7 +419,7 @@ impl StatusServer {
     ) {
         self.control_clients
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(reader_ip.to_owned(), client);
     }
 
@@ -562,7 +574,7 @@ impl StatusServer {
         let app = build_router(state);
         tokio::spawn(async move {
             if let Err(err) = axum::serve(listener, app).await {
-                eprintln!("status HTTP server error: {}", err);
+                tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
 
@@ -614,7 +626,7 @@ impl StatusServer {
         let app = build_router(state);
         tokio::spawn(async move {
             if let Err(err) = axum::serve(listener, app).await {
-                eprintln!("status HTTP server error: {}", err);
+                tracing::error!(error = %err, "status HTTP server fatal error");
             }
         });
 
@@ -1746,7 +1758,10 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
-                Err(_) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to serialize SSE event");
+                    None
+                }
             }
         }
         Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
@@ -1879,7 +1894,7 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     let year = (target.year() % 100) as u8;
     let month = target.month() as u8;
     let day = target.day() as u8;
-    let dow = target.weekday().number_from_monday() as u8;
+    let dow = target.weekday().num_days_from_sunday() as u8;
     let hour = target.hour() as u8;
     let minute = target.minute() as u8;
     let second = target.second() as u8;
@@ -2189,6 +2204,7 @@ async fn reconnect_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+/// POST /api/v1/readers/{ip}/download-reads
 async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
@@ -2254,6 +2270,7 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
 
     // Spawn background task to initiate the download
     let bg_tracker = tracker.clone();
+    let bg_ip = ip.clone();
     tokio::spawn(async move {
         match client.start_download().await {
             Ok(ext) => {
@@ -2261,6 +2278,7 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
                 dt.start(ext.stored_data_extent);
             }
             Err(e) => {
+                tracing::warn!(reader_ip = %bg_ip, error = %e, "download start failed");
                 let mut dt = bg_tracker.lock().await;
                 dt.fail(format!("{}", e));
             }
@@ -2775,7 +2793,8 @@ async fn update_check_handler<J: JournalAccess + Send + 'static>(
     let workflow_state =
         ForwarderWorkflowAdapter::new(state.subsystem.clone(), state.ui_tx.clone());
     let status = run_check(&workflow_state, &checker, update_mode).await;
-    let body = serde_json::to_string(&status).unwrap_or_default();
+    let body = serde_json::to_string(&status)
+        .unwrap_or_else(|_| r#"{"status":"failed","error":"serialization error"}"#.to_owned());
     json_response(StatusCode::OK, body)
 }
 
