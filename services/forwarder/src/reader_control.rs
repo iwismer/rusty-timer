@@ -451,7 +451,7 @@ pub struct Config3Info {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClockInfo {
     pub reader_clock: String,
-    /// Reader clock drift in milliseconds. Positive = reader is ahead of local time, negative = behind.
+    /// Clock drift in milliseconds (system − reader). Positive = reader is behind local time, negative = ahead.
     pub drift_ms: i64,
 }
 
