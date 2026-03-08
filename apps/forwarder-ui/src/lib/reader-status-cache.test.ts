@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ForwarderStatus, ReaderInfo } from "./api";
-import { rebuildReaderCachesFromStatus } from "./reader-status-cache";
+import {
+  applyReaderInfoUpdate,
+  rebuildReaderCachesFromStatus,
+} from "./reader-status-cache";
 
 function makeInfo(overrides: Partial<ReaderInfo> = {}): ReaderInfo {
   return {
@@ -91,5 +94,42 @@ describe("rebuildReaderCachesFromStatus", () => {
     expect(result.readerClockBaseLocal).toEqual({ "10.0.0.99": now });
     expect(result.lastSeenBase).toEqual({ "10.0.0.99": 7 });
     expect(result.lastSeenReceivedAt).toEqual({ "10.0.0.99": now });
+  });
+});
+
+describe("applyReaderInfoUpdate", () => {
+  it("ignores late reader info updates for disconnected readers", () => {
+    const now = 1234567890;
+    const previous = {
+      readerInfoMap: {},
+      readerInfoReceivedAt: {},
+      readerClockBaseTs: {},
+      readerClockBaseLocal: {},
+      lastReadBase: {},
+      lastReadReceivedAt: {},
+    };
+
+    const result = applyReaderInfoUpdate(
+      makeStatus([
+        {
+          ip: "10.0.0.42",
+          state: "disconnected",
+          reads_session: 1,
+          reads_total: 2,
+          last_read_secs: 3,
+          local_port: 10042,
+          reader_info: null,
+        },
+      ]),
+      previous,
+      {
+        ip: "10.0.0.42",
+        banner: "late-info",
+        clock: { reader_clock: "2026-03-08 12:34:56", drift_ms: 0 },
+      },
+      now,
+    );
+
+    expect(result).toEqual(previous);
   });
 });

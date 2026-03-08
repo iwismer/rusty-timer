@@ -35,7 +35,10 @@
     type DownloadProgressEvent,
     type DownloadProgressHandle,
   } from "$lib/download-progress";
-  import { rebuildReaderCachesFromStatus } from "$lib/reader-status-cache";
+  import {
+    applyReaderInfoUpdate,
+    rebuildReaderCachesFromStatus,
+  } from "$lib/reader-status-cache";
 
   let status = $state<ForwarderStatus | null>(null);
   let error = $state<string | null>(null);
@@ -636,14 +639,23 @@
         logs = pushLogEntry(logs, entry);
       },
       onReaderInfoUpdated: (data) => {
-        const { ip, ...info } = data;
-        readerInfoMap = {
-          ...readerInfoMap,
-          [ip]: { ...readerInfoMap[ip], ...info },
-        };
-        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-        if (info.clock?.reader_clock)
-          storeReaderClockBase(ip, info.clock.reader_clock);
+        const next = applyReaderInfoUpdate(
+          status,
+          {
+            readerInfoMap,
+            readerInfoReceivedAt,
+            readerClockBaseTs,
+            readerClockBaseLocal,
+            lastReadBase,
+            lastReadReceivedAt,
+          },
+          data,
+          Date.now(),
+        );
+        readerInfoMap = next.readerInfoMap;
+        readerInfoReceivedAt = next.readerInfoReceivedAt;
+        readerClockBaseTs = next.readerClockBaseTs;
+        readerClockBaseLocal = next.readerClockBaseLocal;
       },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {

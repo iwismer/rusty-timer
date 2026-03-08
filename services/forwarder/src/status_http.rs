@@ -2027,7 +2027,12 @@ async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
     {
         let mut ss = state.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(ip) {
+            if r.state == ReaderConnectionState::Disconnected {
+                return;
+            }
             r.reader_info = Some(info.clone());
+        } else {
+            return;
         }
     }
     let _ = state
@@ -3640,6 +3645,72 @@ mod tests {
                 },
             )
             .await;
+
+        let client = reqwest::Client::new();
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let reader = &body["readers"][0];
+        assert_eq!(reader["state"], "disconnected");
+        assert!(reader["reader_info"].is_null());
+    }
+
+    #[tokio::test]
+    async fn disconnect_ignores_late_cached_reader_info_updates() {
+        let reader_ip = "192.168.1.11";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10011)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    banner: Some("connected-info".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
+            .await;
+
+        let state = AppState {
+            subsystem: server.subsystem.clone(),
+            journal: Arc::new(Mutex::new(NoJournal)),
+            version: Arc::new("0.2.0".to_owned()),
+            config_state: None,
+            restart_signal: None,
+            logger: server.logger.clone(),
+            ui_tx: server.ui_tx.clone(),
+            control_clients: server.control_clients.clone(),
+            download_trackers: server.download_trackers.clone(),
+            reconnect_notifies: server.reconnect_notifies.clone(),
+        };
+        update_cached_reader_info(
+            &state,
+            reader_ip,
+            crate::reader_control::ReaderInfo {
+                banner: Some("late-info".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let client = reqwest::Client::new();
         let status = client

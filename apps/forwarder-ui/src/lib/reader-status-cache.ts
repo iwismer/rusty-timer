@@ -9,6 +9,8 @@ export type ReaderStatusCaches = {
   lastSeenReceivedAt: Record<string, number>;
 };
 
+export type ReaderInfoUpdate = { ip: string } & ReaderInfo;
+
 function parseReaderClock(iso: string): number {
   const normalized = iso.replace(" ", "T");
   const withZ = normalized.endsWith("Z") ? normalized : normalized + "Z";
@@ -54,5 +56,51 @@ export function rebuildReaderCachesFromStatus(
     next.readerClockBaseLocal[reader.ip] = now;
   }
 
+  return next;
+}
+
+export function applyReaderInfoUpdate(
+  status: ForwarderStatus | null,
+  previous: ReaderStatusCaches,
+  update: ReaderInfoUpdate,
+  now: number,
+): ReaderStatusCaches {
+  const reader = status?.readers.find(
+    (candidate) => candidate.ip === update.ip,
+  );
+  if (reader?.state === "disconnected") {
+    return previous;
+  }
+
+  const next: ReaderStatusCaches = {
+    readerInfoMap: {
+      ...previous.readerInfoMap,
+      [update.ip]: {
+        ...previous.readerInfoMap[update.ip],
+        ...update,
+      },
+    },
+    readerInfoReceivedAt: {
+      ...previous.readerInfoReceivedAt,
+      [update.ip]: now,
+    },
+    readerClockBaseTs: { ...previous.readerClockBaseTs },
+    readerClockBaseLocal: { ...previous.readerClockBaseLocal },
+    lastReadBase: previous.lastReadBase,
+    lastReadReceivedAt: previous.lastReadReceivedAt,
+  };
+
+  const readerClock = update.clock?.reader_clock;
+  if (!readerClock) {
+    return next;
+  }
+
+  const ts = parseReaderClock(readerClock);
+  if (Number.isNaN(ts)) {
+    return next;
+  }
+
+  next.readerClockBaseTs[update.ip] = ts;
+  next.readerClockBaseLocal[update.ip] = now;
   return next;
 }
