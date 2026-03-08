@@ -555,4 +555,96 @@ describe("sse", () => {
       "14:59:59 [INFO] snapshot entry",
     ]);
   });
+
+  it("resync populates readerStatesStore from API response", async () => {
+    const { readerStatesStore } = await import("./stores");
+
+    mockFetch.mockImplementation((input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/v1/streams")) {
+        return Promise.resolve(makeResponse({ streams: [] }));
+      }
+      if (url.includes("/api/v1/races")) {
+        return Promise.resolve(makeResponse({ races: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-races")) {
+        return Promise.resolve(makeResponse({ assignments: [] }));
+      }
+      if (url.includes("/api/v1/logs")) {
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(
+          makeResponse({
+            reader_states: [
+              {
+                forwarder_id: "fwd-1",
+                reader_ip: "10.0.0.1:10000",
+                state: "connected",
+                reader_info: null,
+              },
+            ],
+          }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
+    });
+
+    const { initSSE } = await import("./sse");
+    initSSE();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const states = get(readerStatesStore);
+    expect(states["fwd-1:10.0.0.1:10000"]).toBeDefined();
+    expect(states["fwd-1:10.0.0.1:10000"].state).toBe("connected");
+  });
+
+  it("handles reader_info_updated by setting in store", async () => {
+    const { readerStatesStore } = await import("./stores");
+    const { initSSE } = await import("./sse");
+    initSSE();
+    const es = MockEventSource.instances[0];
+
+    es.emit(
+      "reader_info_updated",
+      JSON.stringify({
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        state: "connected",
+        reader_info: { connect_failures: 0 },
+      }),
+    );
+
+    const states = get(readerStatesStore);
+    expect(states["fwd-1:10.0.0.1:10000"]).toEqual({
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      state: "connected",
+      reader_info: { connect_failures: 0 },
+    });
+  });
+
+  it("handles reader_download_progress by setting in store", async () => {
+    const { downloadProgressStore } = await import("./stores");
+    const { initSSE } = await import("./sse");
+    initSSE();
+    const es = MockEventSource.instances[0];
+
+    es.emit(
+      "reader_download_progress",
+      JSON.stringify({
+        forwarder_id: "fwd-2",
+        reader_ip: "10.0.0.2:10000",
+        state: "downloading",
+        reads_received: 50,
+        progress: 1024,
+        total: 2048,
+      }),
+    );
+
+    const progress = get(downloadProgressStore);
+    expect(progress["fwd-2:10.0.0.2:10000"]).toBeDefined();
+    expect(progress["fwd-2:10.0.0.2:10000"].state).toBe("downloading");
+    expect(progress["fwd-2:10.0.0.2:10000"].progress).toBe(1024);
+  });
 });
