@@ -1797,7 +1797,10 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
         Some(r) => match &r.reader_info {
             Some(info) => json_response(
                 StatusCode::OK,
-                serde_json::to_string(info).unwrap_or_else(|_| "{}".to_owned()),
+                serde_json::to_string(info).unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "failed to serialize reader info");
+                    "{}".to_owned()
+                }),
             ),
             None => json_response(StatusCode::OK, "{}".to_owned()),
         },
@@ -2236,7 +2239,10 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     update_cached_reader_info(&state, &ip, info.clone()).await;
     json_response(
         StatusCode::OK,
-        serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_owned()),
+        serde_json::to_string(&info).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to serialize reader info");
+            "{}".to_owned()
+        }),
     )
 }
 
