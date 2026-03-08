@@ -3,6 +3,9 @@
 //! Pure functions — no async, no I/O. All frame encoding/decoding for the
 //! `ab`-prefixed control protocol described in
 //! `docs/ipico-protocol/ipico-control-protocol.md`.
+//!
+//! Note: `ControlError` includes `Timeout` and `ChannelClosed` variants used
+//! by the async control client in the forwarder service.
 
 use std::fmt;
 
@@ -65,7 +68,10 @@ impl fmt::Display for ReadMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Query the reader's current date/time (instruction 0x02).
     GetDateTime,
+    /// Set the reader's date/time (instruction 0x01). All fields are BCD-encoded
+    /// except day_of_week which is plain: Mon=1..Sat=6, Sun=0.
     SetDateTime {
         year: u8,
         month: u8,
@@ -75,18 +81,23 @@ pub enum Command {
         minute: u8,
         second: u8,
     },
+    /// Query the reader's statistics/firmware info (instruction 0x0a).
     GetStatistics,
+    /// Query the 0x4b extended status register (recording, storage, hardware).
     GetExtendedStatus,
+    /// Query CONFIG3 (read mode + timeout) (instruction 0x09 with length 0xff).
     GetConfig3,
-    SetConfig3 {
-        mode: ReadMode,
-        timeout: u8,
-    },
+    /// Set CONFIG3 read mode and timeout (instruction 0x09).
+    SetConfig3 { mode: ReadMode, timeout: u8 },
+    /// Request the reader's ASCII banner text (instruction 0x37).
+    /// Response arrives as plain text lines followed by an ACK frame.
     PrintBanner,
+    /// Undocumented 0xe0 initialization probe sent during connection setup.
     InitE0,
-    SetExtendedStatus {
-        data: Vec<u8>,
-    },
+    /// Write to the 0x4b extended-status register. The first byte of `data`
+    /// selects the sub-command (e.g., 0x00/0x01 for erase setup, 0xd0 for
+    /// erase trigger, 0x02/0x07 for download control).
+    SetExtendedStatus { data: Vec<u8> },
 }
 
 impl Command {
@@ -107,8 +118,9 @@ impl Command {
 
 // ── Frame encoding ──────────────────────────────────────────────────────────
 
+/// Encode a command into an `ab`-prefixed wire frame (including `\r\n` terminator).
+/// `reader_id` is the target reader ID byte (typically 0x00 for broadcast).
 pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
-    // Build data payload bytes
     let data: Vec<u8> = match cmd {
         Command::SetDateTime {
             year,
@@ -139,7 +151,14 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
     // for write commands, it's the actual data payload length.
     let length: u8 = match cmd {
         Command::GetExtendedStatus | Command::GetConfig3 => 0xff,
-        _ => data.len() as u8,
+        _ => {
+            assert!(
+                data.len() <= 255,
+                "command data too long: {} bytes",
+                data.len()
+            );
+            data.len() as u8
+        }
     };
 
     let instr = cmd.instruction();
@@ -156,7 +175,6 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
     // Compute LRC over the hex body
     let checksum = lrc(hex_body.as_bytes());
 
-    // Assemble full frame
     let mut frame = Vec::new();
     frame.extend_from_slice(b"ab");
     frame.extend_from_slice(hex_body.as_bytes());
@@ -167,7 +185,7 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
 
 /// BCD encode: decimal value to BCD byte (e.g., 25 -> 0x25).
 pub fn to_bcd(val: u8) -> u8 {
-    debug_assert!(val <= 99, "BCD value out of range: {val}");
+    assert!(val <= 99, "BCD value out of range: {val}");
     ((val / 10) << 4) | (val % 10)
 }
 
@@ -251,6 +269,7 @@ impl ReaderStatistics {
 /// Decoded 0x4b extended status response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExtendedStatus {
+    /// Recorder/access state: 0x00 = recording off, 0x01 = recording on, 0x03 = download mode.
     pub recording_state: u8,
     /// 24-bit big-endian stored-data extent (bytes 1-3).
     pub stored_data_extent: u32,
@@ -317,6 +336,7 @@ fn parse_hex_byte(s: &str) -> Result<u8, ControlError> {
 }
 
 /// Parse an `ab`-prefixed response line (without trailing \r\n) into a ControlFrame.
+/// Returns `ControlError::ReaderError` if the instruction byte is >= 0xf0.
 pub fn parse_response(line: &[u8]) -> Result<ControlFrame, ControlError> {
     let s = std::str::from_utf8(line).map_err(|_| ControlError::InvalidHex)?;
 
@@ -738,6 +758,28 @@ mod tests {
         assert_eq!(dt.centisecond, 0x1b);
         assert_eq!(dt.to_iso_string(), "2026-03-06T20:04:15.270");
         assert_eq!(frame.data[9], 0x82); // extra unknown byte
+    }
+
+    #[test]
+    fn encode_set_config3_fsls() {
+        let frame = encode_command(
+            &Command::SetConfig3 {
+                mode: ReadMode::FirstLastSeen,
+                timeout: 5,
+            },
+            0x00,
+        );
+        // data = [0x05, 0x05, 0x07], hex body = "00030905050700"
+        // Verify by running the test - the LRC will be computed correctly by encode_command
+        let s = std::str::from_utf8(&frame).unwrap();
+        assert!(s.starts_with("ab000309050507"));
+        assert!(s.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn to_bcd_rejects_values_above_99() {
+        let result = std::panic::catch_unwind(|| to_bcd(100));
+        assert!(result.is_err(), "to_bcd(100) should panic");
     }
 
     #[test]
