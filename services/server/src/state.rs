@@ -1,4 +1,5 @@
 use rt_protocol::{ConfigGetResponse, ConfigSetResponse, EpochResetCommand, RestartResponse};
+use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +32,23 @@ pub enum ForwarderCommand {
         request_id: String,
         reply: oneshot::Sender<ForwarderProxyReply<RestartResponse>>,
     },
+    ReaderControl {
+        request_id: String,
+        reader_ip: String,
+        action: rt_protocol::ReaderControlAction,
+        reply: oneshot::Sender<ForwarderProxyReply<rt_protocol::ReaderControlResponse>>,
+    },
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CachedReaderState {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub state: String,
+    pub reader_info: Option<rt_protocol::ReaderInfo>,
+}
+
+pub type ReaderStateCache = Arc<RwLock<HashMap<String, CachedReaderState>>>;
 
 pub type StreamBroadcast = broadcast::Sender<rt_protocol::ReadEvent>;
 pub type BroadcastRegistry = Arc<RwLock<HashMap<Uuid, StreamBroadcast>>>;
@@ -71,6 +88,7 @@ pub struct AppState {
     pub announcer_runtime: AnnouncerRuntimeState,
     pub dashboard_tx: broadcast::Sender<DashboardEvent>,
     pub announcer_tx: broadcast::Sender<AnnouncerEvent>,
+    pub reader_states: ReaderStateCache,
     pub logger: Arc<rt_ui_log::UiLogger<DashboardEvent>>,
 }
 
@@ -90,6 +108,7 @@ impl AppState {
             forwarder_command_senders: Arc::new(RwLock::new(HashMap::new())),
             active_receiver_sessions: Arc::new(RwLock::new(HashMap::new())),
             announcer_runtime: Arc::new(RwLock::new(AnnouncerRuntime::new())),
+            reader_states: Arc::new(RwLock::new(HashMap::new())),
             dashboard_tx,
             announcer_tx,
             logger,

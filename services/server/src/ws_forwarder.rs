@@ -500,6 +500,10 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         }
                         pending_restarts.insert(request_id, (Instant::now(), reply));
                     }
+                    ForwarderCommand::ReaderControl { reply, .. } => {
+                        // TODO: Task 3 will implement reader control proxying
+                        let _ = reply.send(crate::state::ForwarderProxyReply::Timeout);
+                    }
                 }
             }
         }

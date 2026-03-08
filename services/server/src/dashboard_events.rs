@@ -63,6 +63,23 @@ pub enum DashboardEvent {
         forwarder_id: String,
         race_id: Option<Uuid>,
     },
+    ReaderInfoUpdated {
+        forwarder_id: String,
+        reader_ip: String,
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reader_info: Option<rt_protocol::ReaderInfo>,
+    },
+    ReaderDownloadProgress {
+        forwarder_id: String,
+        reader_ip: String,
+        state: String,
+        reads_received: u32,
+        progress: u64,
+        total: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     LogEntry {
         entry: String,
     },
