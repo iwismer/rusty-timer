@@ -1205,7 +1205,7 @@ value takes effect at the next cs rollover (cs wraps 99 → 0), approximately
 
 **Clock-sync algorithm** (implemented in forwarder `sync_clock_handler`):
 
-1. Probe RTT (3× GET_DATE_TIME) to estimate one-way latency
+1. Probe RTT (3× GET_DATE_TIME, tolerating partial failures) to estimate one-way latency via median
 2. Compute `wall_at_rollover = now + one_way + 500ms` (if sent immediately)
 3. Pick target second `S = round(wall_at_rollover)`
 4. Compute `ideal_send = S.000 − one_way − 500ms` so rollover aligns with S

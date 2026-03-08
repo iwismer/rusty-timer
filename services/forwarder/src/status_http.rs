@@ -1938,7 +1938,7 @@ fn compute_sync_timing(
 /// new second value when cs next rolls over from 99 → 0, which takes ~480ms.
 /// The reader's unsolicited 0x4c frame confirms a 500ms sync delay. We compute
 /// the ideal send time so that: send_time + one_way + SYNC_DELAY = S.000,
-/// reducing drift from ±500ms (pure rounding) to ±~30ms (RTT estimation error).
+/// reducing drift from ±500ms (pure rounding) to ~25ms (RTT estimation error).
 async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,

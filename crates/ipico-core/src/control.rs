@@ -132,8 +132,9 @@ impl TagMessageFormat {
 pub enum Command {
     /// Query the reader's current date/time (instruction 0x02).
     GetDateTime,
-    /// Set the reader's date/time (instruction 0x01). All fields are BCD-encoded
-    /// except day_of_week which is plain: Mon=1..Sat=6, Sun=0.
+    /// Set the reader's date/time (instruction 0x01). Fields are plain decimal
+    /// values; BCD encoding is applied during frame serialization in `encode_command`.
+    /// day_of_week is not BCD-encoded on the wire: Mon=1..Sat=6, Sun=0.
     SetDateTime {
         year: u8,
         month: u8,
@@ -242,7 +243,7 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
             ]
         }
         Command::SetConfig3 { mode, timeout } => {
-            // 0x07 = modify lower 3 bits of CONFIG3 (mode selection: bits 0..2)
+            // 0x07 = mask for CONFIG3 bits 0, 1, 2 (mode selection)
             vec![mode.config3_value(), *timeout, 0x07]
         }
         Command::SetTagMessageFormat { format } => format.encode_data(),
@@ -366,7 +367,7 @@ pub struct ReaderDateTime {
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
-    pub centisecond: u8, // 0-99 (plain hex, NOT BCD)
+    pub centisecond: u8, // 0..99, each unit = 10ms. NOT BCD-encoded (unlike other date/time bytes).
     pub config: u8,
 }
 
@@ -600,7 +601,7 @@ pub fn decode_date_time(frame: &ControlFrame) -> Result<ReaderDateTime, ControlE
         hour: from_bcd(frame.data()[4])?,
         minute: from_bcd(frame.data()[5])?,
         second: from_bcd(frame.data()[6])?,
-        centisecond: frame.data()[7], // plain hex, NOT BCD
+        centisecond: frame.data()[7], // NOT BCD-encoded; raw byte value 0..99
         config: frame.data()[8],
     })
 }
