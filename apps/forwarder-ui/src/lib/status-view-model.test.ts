@@ -4,6 +4,7 @@ import {
   readerBadgeState,
   readerConnectionSummary,
   formatClockDrift,
+  driftColorClass,
   formatReadMode,
   formatTtoState,
   readerControlDisabled,
@@ -92,6 +93,31 @@ describe("formatClockDrift", () => {
     expect(formatClockDrift(-200)).toBe("-200ms");
     expect(formatClockDrift(1500)).toBe("+1.5s");
     expect(formatClockDrift(-3200)).toBe("-3.2s");
+  });
+});
+
+describe("driftColorClass", () => {
+  it("returns empty string for null/undefined", () => {
+    expect(driftColorClass(null)).toBe("");
+    expect(driftColorClass(undefined)).toBe("");
+  });
+
+  it("returns green for |drift| < 100ms", () => {
+    expect(driftColorClass(0)).toBe("text-green-500");
+    expect(driftColorClass(99)).toBe("text-green-500");
+    expect(driftColorClass(-50)).toBe("text-green-500");
+  });
+
+  it("returns yellow for 100ms <= |drift| < 500ms", () => {
+    expect(driftColorClass(100)).toBe("text-yellow-500");
+    expect(driftColorClass(499)).toBe("text-yellow-500");
+    expect(driftColorClass(-200)).toBe("text-yellow-500");
+  });
+
+  it("returns red for |drift| >= 500ms", () => {
+    expect(driftColorClass(500)).toBe("text-red-500");
+    expect(driftColorClass(1000)).toBe("text-red-500");
+    expect(driftColorClass(-600)).toBe("text-red-500");
   });
 });
 

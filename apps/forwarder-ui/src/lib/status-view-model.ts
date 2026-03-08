@@ -58,6 +58,14 @@ export function formatClockDrift(ms: number | null | undefined): string {
   return `${sign}${(abs / 1000).toFixed(1)}s`;
 }
 
+export function driftColorClass(ms: number | null | undefined): string {
+  if (ms == null) return "";
+  const abs = Math.abs(ms);
+  if (abs < 100) return "text-green-500";
+  if (abs < 500) return "text-yellow-500";
+  return "text-red-500";
+}
+
 export function computeDownloadPercent(
   download: DownloadProgressEvent | null | undefined,
   estimatedReads: number | null | undefined,
