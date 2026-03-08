@@ -16,6 +16,7 @@
     readerBadgeState,
     readerConnectionSummary,
     formatClockDrift,
+    driftColorClass,
     formatReadMode,
     formatTtoState,
     readerControlDisabled,
@@ -914,8 +915,10 @@
                     </div>
                     <div>
                       <span class="text-text-muted">Clock Drift:</span>
-                      <span class="font-mono ml-2"
-                        >{formatClockDrift(info?.clock?.drift_ms)}</span
+                      <span
+                        class="font-mono ml-2 {driftColorClass(
+                          info?.clock?.drift_ms,
+                        )}">{formatClockDrift(info?.clock?.drift_ms)}</span
                       >
                     </div>
                     <div>
