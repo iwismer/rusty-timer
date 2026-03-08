@@ -245,7 +245,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
     let mut stream_map: HashMap<String, Uuid> = HashMap::new();
     for reader_ip in &hello.reader_ips {
-        if let Ok(sid) = upsert_stream(
+        match upsert_stream(
             &state.pool,
             &device_id,
             reader_ip,
@@ -253,9 +253,19 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         )
         .await
         {
-            stream_map.insert(reader_ip.clone(), sid);
-            let _ = set_stream_online(&state.pool, sid, true).await;
-            state.get_or_create_broadcast(sid).await;
+            Ok(sid) => {
+                stream_map.insert(reader_ip.clone(), sid);
+                let _ = set_stream_online(&state.pool, sid, true).await;
+                state.get_or_create_broadcast(sid).await;
+            }
+            Err(e) => {
+                error!(
+                    device_id = %device_id,
+                    reader_ip = %reader_ip,
+                    error = %e,
+                    "failed to upsert stream"
+                );
+            }
         }
     }
 
