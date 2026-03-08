@@ -251,6 +251,51 @@ describe("applyReaderInfoUpdate", () => {
     expect(result.readerClockBaseTs["10.0.0.42"]).toBeGreaterThan(0);
     expect(result.readerClockBaseLocal["10.0.0.42"]).toBe(now);
   });
+
+  it("preserves existing fields when partial update arrives", () => {
+    const now = 2000;
+    const previous = {
+      readerInfoMap: {
+        "10.0.0.42": makeInfo({
+          banner: "IPICO V2",
+          recording: false,
+        }),
+      },
+      readerInfoReceivedAt: { "10.0.0.42": 1000 },
+      readerClockBaseTs: {},
+      readerClockBaseLocal: {},
+      lastSeenBase: {},
+      lastSeenReceivedAt: {},
+    };
+
+    const result = applyReaderInfoUpdate(
+      makeStatus([
+        {
+          ip: "10.0.0.42",
+          state: "connected",
+          reads_session: 0,
+          reads_total: 0,
+          last_seen_secs: 0,
+          local_port: 10042,
+          reader_info: null,
+        },
+      ]),
+      previous,
+      {
+        ip: "10.0.0.42",
+        recording: true,
+        connect_failures: 0,
+      },
+      now,
+    );
+
+    // recording updated
+    expect(result.readerInfoMap["10.0.0.42"].recording).toBe(true);
+    // banner preserved from previous
+    expect(result.readerInfoMap["10.0.0.42"].banner).toBe("IPICO V2");
+    // receivedAt updated
+    expect(result.readerInfoReceivedAt["10.0.0.42"]).toBe(now);
+  });
 });
 
 describe("clearReaderInfoForIp", () => {
