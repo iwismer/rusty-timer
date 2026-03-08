@@ -306,7 +306,7 @@ async fn run_reader(
                 reader_info.estimated_stored_reads.unwrap_or(0),
             ));
             poll_status
-                .update_reader_info(&poll_stream_key, reader_info.clone())
+                .update_reader_info_unless_disconnected(&poll_stream_key, reader_info.clone())
                 .await;
 
             // Transition to 10s polling
@@ -322,7 +322,9 @@ async fn run_reader(
                 tokio::select! {
                     _ = interval.tick() => {
                         forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
-                        poll_status.update_reader_info(&poll_stream_key, info.clone()).await;
+                        poll_status
+                            .update_reader_info_unless_disconnected(&poll_stream_key, info.clone())
+                            .await;
 
                         // Check download progress
                         let is_downloading = {

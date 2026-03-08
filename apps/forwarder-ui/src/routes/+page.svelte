@@ -35,6 +35,7 @@
     type DownloadProgressEvent,
     type DownloadProgressHandle,
   } from "$lib/download-progress";
+  import { rebuildReaderCachesFromStatus } from "$lib/reader-status-cache";
 
   let status = $state<ForwarderStatus | null>(null);
   let error = $state<string | null>(null);
@@ -84,16 +85,24 @@
       status = await api.getStatus();
       if (status) {
         const now = Date.now();
-        for (const r of status.readers) {
-          lastSeenBase = { ...lastSeenBase, [r.ip]: r.last_seen_secs };
-          lastSeenReceivedAt = { ...lastSeenReceivedAt, [r.ip]: now };
-          if (r.reader_info) {
-            readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
-            readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
-            if (r.reader_info.clock?.reader_clock)
-              storeReaderClockBase(r.ip, r.reader_info.clock.reader_clock);
-          }
-        }
+        const rebuilt = rebuildReaderCachesFromStatus(
+          status,
+          {
+            readerInfoMap,
+            readerInfoReceivedAt,
+            readerClockBaseTs,
+            readerClockBaseLocal,
+            lastSeenBase,
+            lastSeenReceivedAt,
+          },
+          now,
+        );
+        readerInfoMap = rebuilt.readerInfoMap;
+        readerInfoReceivedAt = rebuilt.readerInfoReceivedAt;
+        readerClockBaseTs = rebuilt.readerClockBaseTs;
+        readerClockBaseLocal = rebuilt.readerClockBaseLocal;
+        lastSeenBase = rebuilt.lastSeenBase;
+        lastSeenReceivedAt = rebuilt.lastSeenReceivedAt;
       }
       const [usResult, logsResp] = await Promise.allSettled([
         api.getUpdateStatus(),

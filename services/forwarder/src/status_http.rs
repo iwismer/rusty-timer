@@ -429,6 +429,32 @@ impl StatusServer {
             });
     }
 
+    /// Update reader info only if the reader has not transitioned to Disconnected.
+    ///
+    /// This is used by the background poller so a late poll result cannot restore
+    /// stale info after the read loop has already marked the reader disconnected.
+    pub async fn update_reader_info_unless_disconnected(
+        &self,
+        reader_ip: &str,
+        info: crate::reader_control::ReaderInfo,
+    ) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            if r.state == ReaderConnectionState::Disconnected {
+                return;
+            }
+            r.reader_info = Some(info.clone());
+        } else {
+            return;
+        }
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+                ip: reader_ip.to_owned(),
+                info,
+            });
+    }
+
     pub fn register_control_client(
         &self,
         reader_ip: &str,
@@ -3573,6 +3599,60 @@ mod tests {
         let info = &body["readers"][0]["reader_info"];
         assert_eq!(info["clock"]["reader_clock"], "2026-03-06T18:55:44.550");
         assert!(info["clock"]["drift_ms"].is_number());
+    }
+
+    #[tokio::test]
+    async fn disconnect_ignores_late_reader_info_updates() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    banner: Some("connected-info".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
+            .await;
+
+        server
+            .update_reader_info_unless_disconnected(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    banner: Some("late-info".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let client = reqwest::Client::new();
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let reader = &body["readers"][0];
+        assert_eq!(reader["state"], "disconnected");
+        assert!(reader["reader_info"].is_null());
     }
 
     #[tokio::test]
