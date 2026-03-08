@@ -141,6 +141,24 @@ describe("createSSE", () => {
     expect(onConnection).toHaveBeenCalledWith(false);
   });
 
+  it("does not crash on malformed JSON events", async () => {
+    const { createSSE } = await import("./sse");
+    const handler = vi.fn();
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    createSSE("/api/v1/events", { my_event: handler });
+
+    const es = MockEventSource.lastInstance!;
+    // Emit raw malformed JSON — not via .emit() which stringifies
+    const listeners = (es as any).listeners.get("my_event") ?? [];
+    for (const l of listeners) {
+      l({ data: "not valid json{{{" });
+    }
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
   it("cleans up fallback timer on destroy", async () => {
     const { createSSE } = await import("./sse");
     const onConnection = vi.fn();

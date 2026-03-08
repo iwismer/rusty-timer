@@ -14,7 +14,11 @@ export function createSSE(
 
   for (const [eventName, handler] of Object.entries(handlers)) {
     eventSource.addEventListener(eventName, (e: MessageEvent) => {
-      handler(JSON.parse(e.data));
+      try {
+        handler(JSON.parse(e.data));
+      } catch (err) {
+        console.error(`Failed to parse SSE event "${eventName}":`, err);
+      }
     });
   }
 
