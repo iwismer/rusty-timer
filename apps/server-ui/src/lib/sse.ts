@@ -103,22 +103,30 @@ export function initSSE(): void {
   });
 
   eventSource.addEventListener("reader_info_updated", (e: MessageEvent) => {
-    const data = JSON.parse(e.data);
-    const key = `${data.forwarder_id}:${data.reader_ip}`;
-    setReaderState(key, {
-      forwarder_id: data.forwarder_id,
-      reader_ip: data.reader_ip,
-      state: data.state,
-      reader_info: data.reader_info,
-    });
+    try {
+      const data = JSON.parse(e.data);
+      const key = `${data.forwarder_id}:${data.reader_ip}`;
+      setReaderState(key, {
+        forwarder_id: data.forwarder_id,
+        reader_ip: data.reader_ip,
+        state: data.state,
+        reader_info: data.reader_info,
+      });
+    } catch (err) {
+      console.error("Failed to parse reader_info_updated event:", err);
+    }
   });
 
   eventSource.addEventListener(
     "reader_download_progress",
     (e: MessageEvent) => {
-      const data = JSON.parse(e.data);
-      const key = `${data.forwarder_id}:${data.reader_ip}`;
-      setDownloadProgress(key, data);
+      try {
+        const data = JSON.parse(e.data);
+        const key = `${data.forwarder_id}:${data.reader_ip}`;
+        setDownloadProgress(key, data);
+      } catch (err) {
+        console.error("Failed to parse reader_download_progress event:", err);
+      }
     },
   );
 
