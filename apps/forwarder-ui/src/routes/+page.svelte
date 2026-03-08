@@ -611,6 +611,16 @@
             ...lastSeenReceivedAt,
             [reader.ip]: Date.now(),
           };
+          if (reader.state === "disconnected") {
+            const { [reader.ip]: _, ...restInfo } = readerInfoMap;
+            readerInfoMap = restInfo;
+            const { [reader.ip]: _a, ...restClockBase } = readerClockBaseTs;
+            readerClockBaseTs = restClockBase;
+            const { [reader.ip]: _b, ...restClockLocal } = readerClockBaseLocal;
+            readerClockBaseLocal = restClockLocal;
+            const { [reader.ip]: _c, ...restReceivedAt } = readerInfoReceivedAt;
+            readerInfoReceivedAt = restReceivedAt;
+          }
         }
       },
       onLogEntry: (entry) => {
