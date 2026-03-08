@@ -541,11 +541,13 @@ impl DownloadTracker {
     }
 
     pub fn start(&mut self, stored_data_extent: u32) {
-        debug_assert!(
-            matches!(self.state, DownloadState::Starting),
-            "start() called in {:?} state, expected Starting",
-            self.state,
-        );
+        if !matches!(self.state, DownloadState::Starting) {
+            tracing::warn!(
+                current_state = ?self.state,
+                "start() called in unexpected state, expected Starting — ignoring"
+            );
+            return;
+        }
         self.state = DownloadState::Downloading;
         self.reads_received = 0;
         self.download_progress = 0;
@@ -553,11 +555,13 @@ impl DownloadTracker {
     }
 
     pub fn complete(&mut self) {
-        debug_assert!(
-            matches!(self.state, DownloadState::Downloading),
-            "complete() called in {:?} state, expected Downloading",
-            self.state,
-        );
+        if !matches!(self.state, DownloadState::Downloading) {
+            tracing::warn!(
+                current_state = ?self.state,
+                "complete() called in unexpected state, expected Downloading — ignoring"
+            );
+            return;
+        }
         self.state = DownloadState::Complete;
         let _ = self.event_tx.send(DownloadEvent::Complete {
             reads_received: self.reads_received,
@@ -565,14 +569,16 @@ impl DownloadTracker {
     }
 
     pub fn fail(&mut self, msg: String) {
-        debug_assert!(
-            matches!(
-                self.state,
-                DownloadState::Starting | DownloadState::Downloading
-            ),
-            "fail() called in {:?} state, expected Starting or Downloading",
+        if !matches!(
             self.state,
-        );
+            DownloadState::Starting | DownloadState::Downloading
+        ) {
+            tracing::warn!(
+                current_state = ?self.state,
+                "fail() called in unexpected state, expected Starting or Downloading — ignoring"
+            );
+            return;
+        }
         self.state = DownloadState::Error(msg.clone());
         let _ = self.event_tx.send(DownloadEvent::Error { message: msg });
     }
@@ -1389,5 +1395,26 @@ mod tests {
 
         let ev = rx.try_recv().expect("error event");
         assert!(matches!(ev, DownloadEvent::Error { message } if message == "connection lost"));
+    }
+
+    #[tokio::test]
+    async fn start_from_idle_is_ignored() {
+        let mut dt = DownloadTracker::new();
+        dt.start(100);
+        assert!(matches!(dt.state(), DownloadState::Idle));
+    }
+
+    #[tokio::test]
+    async fn complete_from_idle_is_ignored() {
+        let mut dt = DownloadTracker::new();
+        dt.complete();
+        assert!(matches!(dt.state(), DownloadState::Idle));
+    }
+
+    #[tokio::test]
+    async fn fail_from_idle_is_ignored() {
+        let mut dt = DownloadTracker::new();
+        dt.fail("oops".into());
+        assert!(matches!(dt.state(), DownloadState::Idle));
     }
 }
