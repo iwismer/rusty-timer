@@ -404,9 +404,9 @@ impl ControlResponseSink {
                 Ok(frame) => {
                     // Wrong instruction (unsolicited) — put request back
                     tracing::debug!(
-                        instruction = frame.instruction(),
-                        data_len = frame.data().len(),
-                        "unmatched control frame; putting pending request back"
+                        pending_instruction = ?req.kind,
+                        received_instruction = frame.instruction(),
+                        "control frame not consumed: instruction mismatch"
                     );
                     *pending = Some(req);
                 }
