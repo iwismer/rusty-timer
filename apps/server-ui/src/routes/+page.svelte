@@ -347,7 +347,7 @@
                     </span>
                   {:else}
                     <span data-testid="stream-online-badge">
-                      <StatusBadge label="online" state="ok" />
+                      <StatusBadge label="online" state="warn" />
                     </span>
                     <span data-testid="stream-reader-disconnected-badge">
                       <StatusBadge label="reader disconnected" state="warn" />
