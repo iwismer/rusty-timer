@@ -93,3 +93,10 @@ export function computeTickingLastSeen(
   const elapsedSecs = Math.max(0, Math.floor((now - receivedAt) / 1000));
   return baseSecs + elapsedSecs;
 }
+
+export function computeElapsedSecondsSince(
+  receivedAt: number,
+  now: number,
+): number {
+  return Math.max(0, Math.round((now - receivedAt) / 1000));
+}

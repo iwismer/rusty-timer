@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  computeElapsedSecondsSince,
   formatLastSeen,
   readerBadgeState,
   readerConnectionSummary,
@@ -176,5 +177,15 @@ describe("computeTickingLastSeen", () => {
 
   it("clamps elapsed to zero when now is before receivedAt", () => {
     expect(computeTickingLastSeen(2, 10000, 9500)).toBe(2);
+  });
+});
+
+describe("computeElapsedSecondsSince", () => {
+  it("clamps negative elapsed time to zero", () => {
+    expect(computeElapsedSecondsSince(10_600, 10_000)).toBe(0);
+  });
+
+  it("rounds positive elapsed time to the nearest second", () => {
+    expect(computeElapsedSecondsSince(10_000, 10_600)).toBe(1);
   });
 });

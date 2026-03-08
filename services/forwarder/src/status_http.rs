@@ -1950,21 +1950,20 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
                             .num_milliseconds()
                     });
 
-            // Update stored reader_info so SSE subscribers see the new clock
+            // Update stored reader_info and broadcast so SSE subscribers see the new clock
             {
-                let mut ss = state.subsystem.lock().await;
-                if let Some(r) = ss.readers.get_mut(&ip)
-                    && let Some(ref mut info) = r.reader_info
-                {
-                    if let Some(d) = drift_ms {
-                        info.clock = Some(crate::reader_control::ClockInfo {
-                            reader_clock: reader_iso.clone(),
-                            drift_ms: d,
-                        });
-                    } else {
-                        info.clock = None;
-                    }
-                }
+                let mut info = {
+                    let ss = state.subsystem.lock().await;
+                    ss.readers
+                        .get(&ip)
+                        .and_then(|r| r.reader_info.clone())
+                        .unwrap_or_default()
+                };
+                info.clock = drift_ms.map(|d| crate::reader_control::ClockInfo {
+                    reader_clock: reader_iso.clone(),
+                    drift_ms: d,
+                });
+                update_cached_reader_info(&state, &ip, info).await;
             }
 
             state.logger.log(format!(
@@ -3456,6 +3455,106 @@ mod tests {
         assert_eq!(info["banner"], "ARM9 Controller");
         assert_eq!(info["hardware"]["hw_code"], 143);
         assert_eq!(info["tto_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn sync_clock_emits_reader_info_update_and_populates_missing_cache() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+
+        let mut ui_rx = server.ui_tx.subscribe();
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let expected_date_time =
+                control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
+
+            for _ in 0..4 {
+                let get_cmd = cmd_rx.recv().await.expect("get date/time command");
+                assert_eq!(get_cmd, expected_date_time);
+                assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+            }
+
+            let set_cmd = cmd_rx.recv().await.expect("set date/time command");
+            let set_text = std::str::from_utf8(&set_cmd).expect("set date/time utf8");
+            assert!(
+                set_text.starts_with("ab000701"),
+                "unexpected set_date_time frame: {set_text}"
+            );
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_SET_DATE_TIME).as_bytes())
+                    .await
+            );
+
+            let verify_cmd = cmd_rx.recv().await.expect("verify date/time command");
+            assert_eq!(verify_cmd, expected_date_time);
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match ui_rx.recv().await.expect("ui event") {
+                    crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { ip, info } => {
+                        break (ip, info);
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("reader info update event");
+        assert_eq!(event.0, reader_ip);
+        assert_eq!(
+            event.1.clock.as_ref().expect("clock info").reader_clock,
+            "2026-03-06T18:55:44.550"
+        );
+
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["clock"]["reader_clock"], "2026-03-06T18:55:44.550");
+        assert!(info["clock"]["drift_ms"].is_number());
     }
 
     #[tokio::test]

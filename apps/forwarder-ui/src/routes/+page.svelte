@@ -12,6 +12,7 @@
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
+    computeElapsedSecondsSince,
     formatLastSeen,
     readerBadgeState,
     readerConnectionSummary,
@@ -926,9 +927,9 @@
                       <span class="text-text-muted">Last Refresh:</span>
                       <span class="ml-2"
                         >{#if readerInfoReceivedAt[reader.ip]}{formatLastSeen(
-                            Math.round(
-                              (clockTickNow - readerInfoReceivedAt[reader.ip]) /
-                                1000,
+                            computeElapsedSecondsSince(
+                              readerInfoReceivedAt[reader.ip],
+                              clockTickNow,
                             ),
                           )}{:else}&mdash;{/if}</span
                       >
