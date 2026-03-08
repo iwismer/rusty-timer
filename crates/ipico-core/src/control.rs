@@ -225,11 +225,9 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
     let length: u8 = match cmd {
         Command::GetExtendedStatus | Command::GetConfig3 | Command::GetTagMessageFormat => 0xff,
         _ => {
-            assert!(
-                data.len() <= 255,
-                "command data too long: {} bytes",
-                data.len()
-            );
+            if data.len() > 255 {
+                return Err(ControlError::DataTooLong(data.len()));
+            }
             data.len() as u8
         }
     };
@@ -433,6 +431,7 @@ pub enum ControlError {
     UnexpectedLength { instruction: u8, got: usize },
     UnknownReadMode(u8),
     InvalidBcd(u8),
+    DataTooLong(usize),
 }
 
 impl fmt::Display for ControlError {
@@ -454,6 +453,9 @@ impl fmt::Display for ControlError {
             }
             ControlError::InvalidBcd(byte) => {
                 write!(f, "invalid BCD byte 0x{byte:02x}")
+            }
+            ControlError::DataTooLong(len) => {
+                write!(f, "command data too long: {len} bytes (max 255)")
             }
         }
     }
