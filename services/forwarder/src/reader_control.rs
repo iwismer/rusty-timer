@@ -604,6 +604,9 @@ impl DownloadTracker {
     }
 
     pub fn reset(&mut self) {
+        if self.is_active() {
+            let _ = self.event_tx.send(DownloadEvent::Idle);
+        }
         self.state = DownloadState::Idle;
         self.reads_received = 0;
         self.stored_data_extent = 0;

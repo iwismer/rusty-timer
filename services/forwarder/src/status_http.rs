@@ -67,6 +67,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
+use tracing::Instrument;
 
 // ---------------------------------------------------------------------------
 // Public config
@@ -91,6 +92,20 @@ pub enum ReaderConnectionState {
     Connecting,
     Connected,
     Disconnected,
+}
+
+impl From<&ReaderConnectionState> for crate::ui_events::ReaderConnectionState {
+    fn from(state: &ReaderConnectionState) -> Self {
+        match state {
+            ReaderConnectionState::Connected => crate::ui_events::ReaderConnectionState::Connected,
+            ReaderConnectionState::Connecting => {
+                crate::ui_events::ReaderConnectionState::Connecting
+            }
+            ReaderConnectionState::Disconnected => {
+                crate::ui_events::ReaderConnectionState::Disconnected
+            }
+        }
+    }
 }
 
 /// Per-reader status tracked in memory.
@@ -464,16 +479,11 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.current_epoch_name = name;
-            let state_str = match &r.state {
-                ReaderConnectionState::Connected => "connected",
-                ReaderConnectionState::Connecting => "connecting",
-                ReaderConnectionState::Disconnected => "disconnected",
-            };
             let _ = self
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: state_str.to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
@@ -488,16 +498,11 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.state = state;
-            let state_str = match &r.state {
-                ReaderConnectionState::Connected => "connected",
-                ReaderConnectionState::Connecting => "connecting",
-                ReaderConnectionState::Disconnected => "disconnected",
-            };
             let _ = self
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: state_str.to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
@@ -518,12 +523,7 @@ impl StatusServer {
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: match &r.state {
-                        ReaderConnectionState::Connected => "connected",
-                        ReaderConnectionState::Connecting => "connecting",
-                        ReaderConnectionState::Disconnected => "disconnected",
-                    }
-                    .to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
@@ -2415,19 +2415,22 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     // Spawn background task to initiate the download
     let bg_tracker = tracker.clone();
     let bg_ip = ip.clone();
-    tokio::spawn(async move {
-        match client.start_download().await {
-            Ok(ext) => {
-                let mut dt = bg_tracker.lock().await;
-                dt.start(ext.stored_data_extent);
-            }
-            Err(e) => {
-                tracing::warn!(reader_ip = %bg_ip, error = %e, "download start failed");
-                let mut dt = bg_tracker.lock().await;
-                dt.fail(format!("{}", e));
+    tokio::spawn(
+        async move {
+            match client.start_download().await {
+                Ok(ext) => {
+                    let mut dt = bg_tracker.lock().await;
+                    dt.start(ext.stored_data_extent);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "download start failed");
+                    let mut dt = bg_tracker.lock().await;
+                    dt.fail(format!("{}", e));
+                }
             }
         }
-    });
+        .instrument(tracing::info_span!("download_start", reader_ip = %bg_ip)),
+    );
 
     json_response(
         StatusCode::ACCEPTED,
@@ -2487,9 +2490,20 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
             return;
         }
 
-        // Stream events from the broadcast channel
+        // Stream events from the broadcast channel (5-minute inactivity timeout)
         loop {
-            match rx.recv().await {
+            let recv_result = tokio::select! {
+                result = rx.recv() => result,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                    let timeout_json = serde_json::json!({
+                        "state": "error",
+                        "message": "download progress stream timed out"
+                    }).to_string();
+                    yield Ok::<_, Infallible>(SseEvent::default().data(timeout_json));
+                    return;
+                }
+            };
+            match recv_result {
                 Ok(evt) => {
                     let is_terminal = matches!(
                         evt,
@@ -2822,16 +2836,11 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
         let mut ss = state.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(&reader_ip) {
             r.current_epoch_name = normalized_name;
-            let state_str = match &r.state {
-                ReaderConnectionState::Connected => "connected",
-                ReaderConnectionState::Connecting => "connecting",
-                ReaderConnectionState::Disconnected => "disconnected",
-            };
             let _ = state
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: state_str.to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
                     last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
