@@ -33,6 +33,7 @@ These have already been collected and analyzed:
 | `captures/downloadreads.pcapng` | Dashboard download with stored reads present; shows the records stream back as ordinary `aa` lines |
 | `captures/direct-fslsreads-con-dis.pcapng` | Direct FSLS session; only one `aa` frame was captured and it had no literal `FS` / `LS` suffix |
 | `captures/direct-raw-reads-con-dis.pcapng` | Direct raw session; `aa` traffic only, with the same 36-character layout seen elsewhere |
+| `captures/event-read.pcapng` | Forwarder-backed live read capture while the reader reported event mode (`0305`); shows one initial `aa` report and one delayed timeout-driven resend of the same embedded timestamp |
 | `captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 |
 | `captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap after fresh boot but does not isolate power-off |
 

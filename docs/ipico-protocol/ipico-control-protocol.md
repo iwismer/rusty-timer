@@ -92,6 +92,7 @@ variants in the captures are therefore later-firmware extensions.
 | `docs/ipico-protocol/captures/downloadreads.pcapng` | Stored-read download via `0x4b`; shows 4,102 archived reads streamed as `aa` frames plus periodic progress/status replies |
 | `docs/ipico-protocol/captures/direct-fslsreads-con-dis.pcapng` | Direct read session in FSLS mode; only one `aa` frame was captured and it had no `FS` / `LS` suffix |
 | `docs/ipico-protocol/captures/direct-raw-reads-con-dis.pcapng` | Direct read session in raw mode; `aa` traffic only, with the same 36-character layout seen elsewhere |
+| `docs/ipico-protocol/captures/event-read.pcapng` | Forwarder-backed live read capture while the reader reported event mode (`0305`); shows one initial `aa` frame followed by a delayed resend of the same embedded timestamp about 5.5s later |
 | `docs/ipico-protocol/captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 mode changes |
 | `docs/ipico-protocol/captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap sequence after fresh boot |
 | `docs/ipico-protocol/captures/setclock.pcapng` | Five consecutive SET_DATE_TIME attempts via the forwarder; confirms SET takes effect at next cs rollover, not immediately |
@@ -364,6 +365,36 @@ The new direct-read captures strengthen that warning:
 - `Capture`: `direct-fslsreads-con-dis.pcapng` shows one FSLS-session `aa`
   frame, `aa00058000120e38000e26030713560136b0`, and it also has no literal
   `FS` / `LS` suffix
+
+### Observed timeout-driven resend behavior without TTO bytes
+
+`Capture + Inference`
+
+Two newer captures make the practical behavior clearer:
+
+- `Capture`: `fsls multiple reads.pcapng` queries `0x09` and the reader reports
+  `0505`, then sends one `aa` frame immediately followed by two more
+  byte-for-byte identical `aa` frames about 5.7 seconds later
+- `Capture`: `event-read.pcapng` queries `0x09` and the reader reports `0305`,
+  then sends one `aa` frame immediately followed by one more `aa` frame about
+  5.5 seconds later
+- `Capture`: in `event-read.pcapng`, the delayed resend carries the same
+  embedded read timestamp as the first message (`20:53:42.500`), with only the
+  `IIQQ` field changing from `0001` to `000b`
+
+Observed implication:
+
+- Without TTO bytes enabled, the on-wire `aa` format in these captures does not
+  provide an explicit FS/LS marker
+- On this reader/firmware, both `0305` (event) and `0505` (first/last seen)
+  exhibit timeout-driven follow-up traffic after the initial read
+- The `0505` capture shows more than one delayed follow-up, so consumers should
+  not assume FSLS will produce exactly two messages
+
+This does not prove that event mode is semantically identical to FSLS; it does
+show that the reader's observed TCP behavior is timeout-driven in both modes
+when TTO bytes are absent, which is weaker and more ambiguous than the PDF's
+clean distinction between event and first/last-seen.
 
 ### Stored-read downloads use the same `aa` format
 
@@ -1071,6 +1102,14 @@ Observed in `docs/ipico-protocol/captures/connect.pcapng`:
 6. Reader ACKs
 7. Host queries `0x09`
 8. Reader returns `0305`
+
+Additional observation from `docs/ipico-protocol/captures/event-read.pcapng`:
+
+9. While the reader still reports `0305`, a live tag capture shows one initial
+   `aa` report and then a delayed resend of the same embedded read timestamp
+   about 5.5 seconds later
+10. This observed wire behavior is closer to timeout-driven follow-up traffic
+    than to a strict "entry-only until the tag leaves and re-enters" model
 
 ### Record on/off workflow
 
