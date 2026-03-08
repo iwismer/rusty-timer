@@ -24,7 +24,10 @@ export function subscribeDownloadProgress(
 
   es.onmessage = (msg) => {
     try {
-      const data: DownloadProgressEvent = JSON.parse(msg.data);
+      const data = JSON.parse(msg.data) as DownloadProgressEvent;
+      if (!data || typeof data.state !== "string") {
+        throw new Error("missing state field");
+      }
       onEvent(data);
       if (data.state === "complete" || data.state === "error") {
         es.close();

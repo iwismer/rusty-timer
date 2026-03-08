@@ -80,8 +80,10 @@ describe("formatReadMode", () => {
     expect(formatReadMode(undefined)).toBe("\u2014");
   });
 
-  it("passes through unknown modes", () => {
-    expect(formatReadMode("other")).toBe("other");
+  it("formats all known modes", () => {
+    expect(formatReadMode("fsls")).toBe("FS/LS");
+    expect(formatReadMode("raw")).toBe("Raw");
+    expect(formatReadMode("event")).toBe("Event");
   });
 });
 

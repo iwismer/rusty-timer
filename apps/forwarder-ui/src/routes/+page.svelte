@@ -35,6 +35,11 @@
     type DownloadProgressEvent,
     type DownloadProgressHandle,
   } from "$lib/download-progress";
+  import {
+    applyReaderInfoUpdate,
+    clearReaderInfoForIp,
+    rebuildReaderCachesFromStatus,
+  } from "$lib/reader-status-cache";
 
   let status = $state<ForwarderStatus | null>(null);
   let error = $state<string | null>(null);
@@ -84,16 +89,24 @@
       status = await api.getStatus();
       if (status) {
         const now = Date.now();
-        for (const r of status.readers) {
-          lastSeenBase = { ...lastSeenBase, [r.ip]: r.last_seen_secs };
-          lastSeenReceivedAt = { ...lastSeenReceivedAt, [r.ip]: now };
-          if (r.reader_info) {
-            readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
-            readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
-            if (r.reader_info.clock?.reader_clock)
-              storeReaderClockBase(r.ip, r.reader_info.clock.reader_clock);
-          }
-        }
+        const rebuilt = rebuildReaderCachesFromStatus(
+          status,
+          {
+            readerInfoMap,
+            readerInfoReceivedAt,
+            readerClockBaseTs,
+            readerClockBaseLocal,
+            lastSeenBase,
+            lastSeenReceivedAt,
+          },
+          now,
+        );
+        readerInfoMap = rebuilt.readerInfoMap;
+        readerInfoReceivedAt = rebuilt.readerInfoReceivedAt;
+        readerClockBaseTs = rebuilt.readerClockBaseTs;
+        readerClockBaseLocal = rebuilt.readerClockBaseLocal;
+        lastSeenBase = rebuilt.lastSeenBase;
+        lastSeenReceivedAt = rebuilt.lastSeenReceivedAt;
       }
       const [usResult, logsResp] = await Promise.allSettled([
         api.getUpdateStatus(),
@@ -358,13 +371,15 @@
     controlBusy = { ...controlBusy, [ip]: true };
     try {
       const info = await api.refreshReader(ip);
-      readerInfoMap = {
-        ...readerInfoMap,
-        [ip]: { ...readerInfoMap[ip], ...info },
-      };
-      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-      if (info.clock?.reader_clock)
-        storeReaderClockBase(ip, info.clock.reader_clock);
+      if (info) {
+        readerInfoMap = {
+          ...readerInfoMap,
+          [ip]: { ...readerInfoMap[ip], ...info },
+        };
+        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+        if (info.clock?.reader_clock)
+          storeReaderClockBase(ip, info.clock.reader_clock);
+      }
     } catch (e) {
       controlFeedback = {
         ...controlFeedback,
@@ -611,20 +626,46 @@
             ...lastSeenReceivedAt,
             [reader.ip]: Date.now(),
           };
+          if (reader.state === "disconnected") {
+            const cleared = clearReaderInfoForIp(
+              {
+                readerInfoMap,
+                readerInfoReceivedAt,
+                readerClockBaseTs,
+                readerClockBaseLocal,
+                lastSeenBase,
+                lastSeenReceivedAt,
+              },
+              reader.ip,
+            );
+            readerInfoMap = cleared.readerInfoMap;
+            readerInfoReceivedAt = cleared.readerInfoReceivedAt;
+            readerClockBaseTs = cleared.readerClockBaseTs;
+            readerClockBaseLocal = cleared.readerClockBaseLocal;
+          }
         }
       },
       onLogEntry: (entry) => {
         logs = pushLogEntry(logs, entry);
       },
       onReaderInfoUpdated: (data) => {
-        const { ip, ...info } = data;
-        readerInfoMap = {
-          ...readerInfoMap,
-          [ip]: { ...readerInfoMap[ip], ...info },
-        };
-        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-        if (info.clock?.reader_clock)
-          storeReaderClockBase(ip, info.clock.reader_clock);
+        const next = applyReaderInfoUpdate(
+          status,
+          {
+            readerInfoMap,
+            readerInfoReceivedAt,
+            readerClockBaseTs,
+            readerClockBaseLocal,
+            lastSeenBase,
+            lastSeenReceivedAt,
+          },
+          data,
+          Date.now(),
+        );
+        readerInfoMap = next.readerInfoMap;
+        readerInfoReceivedAt = next.readerInfoReceivedAt;
+        readerClockBaseTs = next.readerClockBaseTs;
+        readerClockBaseLocal = next.readerClockBaseLocal;
       },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {

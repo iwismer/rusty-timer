@@ -1,5 +1,5 @@
 import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
-import type { ReaderStatus, UpdateStatusResponse } from "./api";
+import type { ReaderInfo, ReaderStatus, UpdateStatusResponse } from "./api";
 
 export type ForwarderSseCallbacks = {
   onStatusChanged: (data: {
@@ -25,26 +25,26 @@ export function initSSE(callbacks: ForwarderSseCallbacks): void {
   handle = createSSE(
     "/api/v1/events",
     {
-      status_changed: (data: any) => {
-        callbacks.onStatusChanged({
-          ready: data.ready,
-          uplink_connected: data.uplink_connected,
-          restart_needed: data.restart_needed,
-        });
+      status_changed: (data: {
+        ready: boolean;
+        uplink_connected: boolean;
+        restart_needed: boolean;
+      }) => {
+        callbacks.onStatusChanged(data);
       },
-      reader_updated: (data: any) => {
-        callbacks.onReaderUpdated(data as ReaderStatus);
+      reader_updated: (data: ReaderStatus) => {
+        callbacks.onReaderUpdated(data);
       },
-      log_entry: (data: any) => {
+      log_entry: (data: { entry: string }) => {
         callbacks.onLogEntry(data.entry);
       },
       resync: () => {
         callbacks.onResync();
       },
-      update_status_changed: (data: any) => {
+      update_status_changed: (data: { status: UpdateStatusResponse }) => {
         callbacks.onUpdateStatusChanged(data.status);
       },
-      reader_info_updated: (data: any) => {
+      reader_info_updated: (data: { ip: string } & ReaderInfo) => {
         callbacks.onReaderInfoUpdated(data);
       },
     },

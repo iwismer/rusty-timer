@@ -429,6 +429,40 @@ impl StatusServer {
             });
     }
 
+    /// Update reader info only if the reader has not transitioned to Disconnected.
+    ///
+    /// This is used by the background poller so a late poll result cannot restore
+    /// stale info after the read loop has already marked the reader disconnected.
+    pub async fn update_reader_info_unless_disconnected(
+        &self,
+        reader_ip: &str,
+        info: crate::reader_control::ReaderInfo,
+    ) {
+        let mut ss = self.subsystem.lock().await;
+        if let Some(r) = ss.readers.get_mut(reader_ip) {
+            if r.state == ReaderConnectionState::Disconnected {
+                tracing::debug!(
+                    reader_ip,
+                    "dropping reader info update for disconnected reader"
+                );
+                return;
+            }
+            r.reader_info = Some(info.clone());
+        } else {
+            tracing::debug!(
+                reader_ip,
+                "reader IP not found in map, skipping info update"
+            );
+            return;
+        }
+        let _ = self
+            .ui_tx
+            .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+                ip: reader_ip.to_owned(),
+                info,
+            });
+    }
+
     pub fn register_control_client(
         &self,
         reader_ip: &str,
@@ -497,6 +531,9 @@ impl StatusServer {
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
+            if state == ReaderConnectionState::Disconnected {
+                r.reader_info = None;
+            }
             r.state = state;
             let _ = self
                 .ui_tx
@@ -1795,14 +1832,17 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
     let ss = state.subsystem.lock().await;
     match ss.readers.get(&ip) {
         Some(r) => match &r.reader_info {
-            Some(info) => json_response(
-                StatusCode::OK,
-                serde_json::to_string(info).unwrap_or_else(|e| {
+            Some(info) => match serde_json::to_string(info) {
+                Ok(json) => json_response(StatusCode::OK, json),
+                Err(e) => {
                     tracing::error!(error = %e, "failed to serialize reader info");
-                    "{}".to_owned()
-                }),
-            ),
-            None => json_response(StatusCode::OK, "{}".to_owned()),
+                    json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        r#"{"error":"internal serialization error"}"#.to_owned(),
+                    )
+                }
+            },
+            None => StatusCode::NO_CONTENT.into_response(),
         },
         None => text_response(StatusCode::NOT_FOUND, "unknown reader"),
     }
@@ -1998,7 +2038,16 @@ async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
     {
         let mut ss = state.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(ip) {
+            if r.state == ReaderConnectionState::Disconnected {
+                tracing::debug!(
+                    ip,
+                    "dropping cached reader info update for disconnected reader"
+                );
+                return;
+            }
             r.reader_info = Some(info.clone());
+        } else {
+            return;
         }
     }
     let _ = state
@@ -2237,13 +2286,16 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     };
     crate::reader_control::run_status_poll(&client, &mut info).await;
     update_cached_reader_info(&state, &ip, info.clone()).await;
-    json_response(
-        StatusCode::OK,
-        serde_json::to_string(&info).unwrap_or_else(|e| {
+    match serde_json::to_string(&info) {
+        Ok(json) => json_response(StatusCode::OK, json),
+        Err(e) => {
             tracing::error!(error = %e, "failed to serialize reader info");
-            "{}".to_owned()
-        }),
-    )
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"internal serialization error"}"#.to_owned(),
+            )
+        }
+    }
 }
 
 /// POST /api/v1/readers/{ip}/clear-records
@@ -2299,7 +2351,7 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
         .logger
         .log(format!("reader {} setting recording {}", ip, label));
     match client.set_recording(body.enabled).await {
-        Ok(_ext) => {
+        Ok(ext) => {
             // Refresh full status so SSE subscribers see the new recording state
             let mut info = {
                 let ss = state.subsystem.lock().await;
@@ -2308,6 +2360,11 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
                     .and_then(|r| r.reader_info.clone())
                     .unwrap_or_default()
             };
+            // Set recording/stored_reads from the set_recording response as a baseline.
+            // If run_status_poll's get_extended_status succeeds, it overwrites with fresher values.
+            // If it fails, these values from the confirmed set_recording response persist.
+            info.recording = Some(ext.recording_state.is_recording());
+            info.estimated_stored_reads = Some(ext.estimated_stored_reads());
             crate::reader_control::run_status_poll(&client, &mut info).await;
             update_cached_reader_info(&state, &ip, info.clone()).await;
             let recording = info.recording.unwrap_or(false);
@@ -3372,6 +3429,9 @@ mod tests {
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
         server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
             .update_reader_info(
                 reader_ip,
                 crate::reader_control::ReaderInfo {
@@ -3570,6 +3630,126 @@ mod tests {
         let info = &body["readers"][0]["reader_info"];
         assert_eq!(info["clock"]["reader_clock"], "2026-03-06T18:55:44.550");
         assert!(info["clock"]["drift_ms"].is_number());
+    }
+
+    #[tokio::test]
+    async fn disconnect_ignores_late_reader_info_updates() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    banner: Some("connected-info".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
+            .await;
+
+        server
+            .update_reader_info_unless_disconnected(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    banner: Some("late-info".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let client = reqwest::Client::new();
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let reader = &body["readers"][0];
+        assert_eq!(reader["state"], "disconnected");
+        assert!(reader["reader_info"].is_null());
+    }
+
+    #[tokio::test]
+    async fn disconnect_ignores_late_cached_reader_info_updates() {
+        let reader_ip = "192.168.1.11";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10011)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    banner: Some("connected-info".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Disconnected)
+            .await;
+
+        let state = AppState {
+            subsystem: server.subsystem.clone(),
+            journal: Arc::new(Mutex::new(NoJournal)),
+            version: Arc::new("0.2.0".to_owned()),
+            config_state: None,
+            restart_signal: None,
+            logger: server.logger.clone(),
+            ui_tx: server.ui_tx.clone(),
+            control_clients: server.control_clients.clone(),
+            download_trackers: server.download_trackers.clone(),
+            reconnect_notifies: server.reconnect_notifies.clone(),
+        };
+        update_cached_reader_info(
+            &state,
+            reader_ip,
+            crate::reader_control::ReaderInfo {
+                banner: Some("late-info".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let reader = &body["readers"][0];
+        assert_eq!(reader["state"], "disconnected");
+        assert!(reader["reader_info"].is_null());
     }
 
     #[tokio::test]
@@ -3846,6 +4026,9 @@ mod tests {
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
         server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
             .update_reader_info(
                 reader_ip,
                 crate::reader_control::ReaderInfo {
@@ -3986,6 +4169,9 @@ mod tests {
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
         server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
             .update_reader_info(
                 reader_ip,
                 crate::reader_control::ReaderInfo {
@@ -4111,6 +4297,9 @@ mod tests {
         .expect("start status server");
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
         server
             .update_reader_info(
                 reader_ip,
@@ -4267,6 +4456,162 @@ mod tests {
 
         let body: serde_json::Value = resp.json().await.expect("json error response");
         assert_eq!(body["error"], "unknown mode: bad\"mode");
+    }
+
+    #[tokio::test]
+    async fn set_recording_returns_true_even_if_follow_up_poll_fails() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    recording: Some(false),
+                    estimated_stored_reads: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server.register_control_client(reader_ip, Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let set_cmd = cmd_rx.recv().await.expect("set recording command");
+            let expected = control::encode_command(&Command::SetRecordingState { on: true }, 0x00)
+                .expect("encode set recording");
+            assert_eq!(set_cmd, expected);
+            assert!(
+                control_sink
+                    .feed(b"ab000c4b010000000000000059058f015c")
+                    .await
+            );
+
+            for _ in 0..4 {
+                let _ = cmd_rx.recv().await.expect("follow-up poll command");
+                assert!(control_sink.feed(b"zz not-a-frame").await);
+            }
+        });
+
+        let resp = reqwest::Client::new()
+            .put(format!(
+                "http://{}/api/v1/readers/{}/recording",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("PUT recording");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["recording"], true);
+
+        // Verify cached reader_info also reflects the set_recording response
+        let status_resp = reqwest::Client::new()
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        let status_body: serde_json::Value = status_resp.json().await.expect("status json");
+        let cached_info = &status_body["readers"][0]["reader_info"];
+        assert_eq!(
+            cached_info["recording"], true,
+            "cached reader_info.recording should reflect set_recording response"
+        );
+        assert!(
+            cached_info["estimated_stored_reads"].is_number(),
+            "cached reader_info.estimated_stored_reads should be present from set_recording response"
+        );
+
+        feeder.await.expect("feeder task");
+    }
+
+    #[tokio::test]
+    async fn sync_clock_broadcasts_reader_info_updated() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(reader_ip, crate::reader_control::ReaderInfo::default())
+            .await;
+
+        let mut rx = server.ui_tx.subscribe();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server.register_control_client(reader_ip, Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            for _ in 0..4 {
+                let _ = cmd_rx.recv().await.expect("clock sync read command");
+                assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+            }
+            let _ = cmd_rx.recv().await.expect("clock sync set command");
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_SET_DATE_TIME).as_bytes())
+                    .await
+            );
+            let _ = cmd_rx.recv().await.expect("clock sync verify command");
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let resp = reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (ip, info) = tokio::time::timeout(std::time::Duration::from_secs(1), async move {
+            loop {
+                match rx.recv().await.expect("recv event") {
+                    crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { ip, info } => {
+                        break (ip, info);
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("event timeout");
+
+        assert_eq!(ip, reader_ip);
+        assert!(info.clock.is_some());
+
+        feeder.await.expect("feeder task");
     }
 
     #[tokio::test]
@@ -5387,6 +5732,9 @@ target = "192.168.1.100:10000"
         .expect("start status server");
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
         // Pre-populate with cached values we expect to be preserved
         server
             .update_reader_info(

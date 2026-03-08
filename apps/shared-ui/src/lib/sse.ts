@@ -1,4 +1,5 @@
-export type EventHandler = (data: unknown) => void;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type EventHandler = (data: any) => void;
 
 export interface SseHandle {
   destroy: () => void;

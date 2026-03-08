@@ -1,4 +1,4 @@
-import type { ReaderStatus } from "./api";
+import type { Config3Info, ReaderStatus } from "./api";
 import type { DownloadProgressEvent } from "./download-progress";
 
 export function formatLastSeen(secs: number | null): string {
@@ -30,7 +30,9 @@ export function readerConnectionSummary(readers: ReaderStatus[]): {
   };
 }
 
-export function formatReadMode(mode: string | null | undefined): string {
+export function formatReadMode(
+  mode: Config3Info["mode"] | null | undefined,
+): string {
   if (mode == null) return "\u2014";
   if (mode === "fsls") return "FS/LS";
   if (mode === "raw") return "Raw";

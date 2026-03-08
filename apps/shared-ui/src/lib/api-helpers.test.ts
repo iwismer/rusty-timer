@@ -69,6 +69,19 @@ describe("apiFetch", () => {
     expect(headers["X-Custom"]).toBe("value");
   });
 
+  it("throws ApiError with 'invalid JSON' on non-JSON 200 response", async () => {
+    const { apiFetch } = await import("./api-helpers");
+    const { ApiError } = await import("./api-helpers");
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new SyntaxError("Unexpected token")),
+      text: () => Promise.resolve("not json"),
+    });
+    await expect(apiFetch("/api/v1/bad-json")).rejects.toThrow(ApiError);
+    await expect(apiFetch("/api/v1/bad-json")).rejects.toThrow("invalid JSON");
+  });
+
   it("allows caller to override Content-Type", async () => {
     const { apiFetch } = await import("./api-helpers");
     mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));

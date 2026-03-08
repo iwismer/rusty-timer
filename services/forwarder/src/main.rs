@@ -306,7 +306,7 @@ async fn run_reader(
                 reader_info.estimated_stored_reads.unwrap_or(0),
             ));
             poll_status
-                .update_reader_info(&poll_stream_key, reader_info.clone())
+                .update_reader_info_unless_disconnected(&poll_stream_key, reader_info.clone())
                 .await;
 
             // Transition to 10s polling
@@ -322,7 +322,9 @@ async fn run_reader(
                 tokio::select! {
                     _ = interval.tick() => {
                         forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
-                        poll_status.update_reader_info(&poll_stream_key, info.clone()).await;
+                        poll_status
+                            .update_reader_info_unless_disconnected(&poll_stream_key, info.clone())
+                            .await;
 
                         // Check download progress
                         let is_downloading = {
@@ -1964,6 +1966,53 @@ mod tests {
         assert!(
             body.contains("\"state\":\"disconnected\""),
             "reader should be marked disconnected after journal error"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_reader_info() {
+        let status = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        status
+            .init_readers(&[("10.0.0.42".to_owned(), 10042)])
+            .await;
+        status
+            .update_reader_state("10.0.0.42", ReaderConnectionState::Connected)
+            .await;
+
+        // Populate reader_info
+        use forwarder::reader_control::ReaderInfo;
+        status
+            .update_reader_info(
+                "10.0.0.42",
+                ReaderInfo {
+                    banner: Some("IPICO V2".to_owned()),
+                    hardware: None,
+                    config: None,
+                    tto_enabled: None,
+                    clock: None,
+                    estimated_stored_reads: None,
+                    recording: None,
+                    connect_failures: 0,
+                },
+            )
+            .await;
+
+        // Disconnect should clear reader_info
+        mark_reader_disconnected(&status, "10.0.0.42").await;
+
+        let body = http_get_body(status.local_addr(), "/api/v1/status").await;
+        assert!(
+            !body.contains("IPICO V2"),
+            "reader_info should be cleared after disconnect, got: {body}"
         );
     }
 
