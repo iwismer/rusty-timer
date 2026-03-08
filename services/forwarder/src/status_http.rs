@@ -1722,9 +1722,16 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         readers,
     };
 
-    let body = serde_json::to_string(&resp)
-        .unwrap_or_else(|_| r#"{"error":"serialization error"}"#.to_owned());
-    json_response(StatusCode::OK, body)
+    match serde_json::to_string(&resp) {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(e) => {
+            tracing::error!("status JSON serialization failed: {e}");
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"serialization error"}"#.to_owned(),
+            )
+        }
+    }
 }
 
 async fn logs_handler<J: JournalAccess + Send + 'static>(

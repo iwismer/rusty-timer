@@ -42,6 +42,15 @@ struct PendingRequest {
     reply_tx: oneshot::Sender<Result<ControlFrame, ControlError>>,
 }
 
+/// Wire byte for `RecordingState::Downloading` — used in response disambiguation.
+const RECORDING_STATE_DOWNLOADING: u8 = 0x03;
+/// Minimum data length for an extended status response (vs empty ACK).
+const MIN_EXT_STATUS_LEN: usize = 12;
+/// Minimum data length for a CONFIG3 query response (vs empty ACK).
+const MIN_CONFIG3_LEN: usize = 2;
+/// Minimum data length for a tag message format query response (vs empty ACK).
+const MIN_TAG_FORMAT_LEN: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingRequestKind {
     AnyInstruction(u8),
@@ -77,27 +86,31 @@ impl PendingRequestKind {
             Self::AnyInstruction(instruction) => frame.instruction() == instruction,
             Self::ExtendedStatusWrite => {
                 frame.instruction() == control::INSTR_EXT_STATUS
-                    && (frame.data().is_empty() || frame.data().len() >= 12)
+                    && (frame.data().is_empty() || frame.data().len() >= MIN_EXT_STATUS_LEN)
             }
             Self::DownloadStopWrite => {
                 frame.instruction() == control::INSTR_EXT_STATUS
                     && (frame.data().is_empty()
-                        || (frame.data().len() >= 12 && frame.data()[0] != 0x03))
+                        || (frame.data().len() >= MIN_EXT_STATUS_LEN
+                            && frame.data()[0] != RECORDING_STATE_DOWNLOADING))
             }
             Self::ExtendedStatusQuery => {
-                frame.instruction() == control::INSTR_EXT_STATUS && frame.data().len() >= 12
+                frame.instruction() == control::INSTR_EXT_STATUS
+                    && frame.data().len() >= MIN_EXT_STATUS_LEN
             }
             Self::Config3Write => {
                 frame.instruction() == control::INSTR_CONFIG3 && frame.data().is_empty()
             }
             Self::Config3Query => {
-                frame.instruction() == control::INSTR_CONFIG3 && frame.data().len() >= 2
+                frame.instruction() == control::INSTR_CONFIG3
+                    && frame.data().len() >= MIN_CONFIG3_LEN
             }
             Self::TagMessageFormatWrite => {
                 frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT && frame.data().is_empty()
             }
             Self::TagMessageFormatQuery => {
-                frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT && frame.data().len() >= 8
+                frame.instruction() == control::INSTR_TAG_MESSAGE_FORMAT
+                    && frame.data().len() >= MIN_TAG_FORMAT_LEN
             }
         }
     }
@@ -621,6 +634,10 @@ impl DownloadTracker {
 }
 
 /// Run the initial connection sequence: statistics, banner, ext status, config3, tag format, clock.
+///
+/// Each query is attempted independently; failures are counted in `ReaderInfo::connect_failures`.
+/// All 6 queries are always attempted even if some fail, so the returned `ReaderInfo` contains
+/// partial data from whichever queries succeeded.
 pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
     let mut ri = ReaderInfo::default();
     let mut failures = 0u8;

@@ -323,6 +323,8 @@ impl ControlFrame {
     }
 
     /// Constructor for building frames without going through `parse_response`.
+    /// Intended for testing; production code should use `parse_response`.
+    #[doc(hidden)]
     pub fn new(reader_id: u8, instruction: u8, data: Vec<u8>) -> Self {
         Self {
             reader_id,
@@ -1081,6 +1083,13 @@ mod tests {
             result.is_err(),
             "odd-length data hex should fail: {result:?}"
         );
+    }
+
+    #[test]
+    fn from_config3_ignores_high_bits() {
+        assert_eq!(ReadMode::from_config3(0x80), Some(ReadMode::Raw)); // 0x80 & 0x07 = 0x00
+        assert_eq!(ReadMode::from_config3(0x83), Some(ReadMode::Event)); // 0x83 & 0x07 = 0x03
+        assert_eq!(ReadMode::from_config3(0xFD), Some(ReadMode::FirstLastSeen)); // 0xFD & 0x07 = 0x05
     }
 
     #[test]
