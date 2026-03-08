@@ -14,7 +14,6 @@
   import {
     formatLastSeen,
     readerBadgeState,
-    readerBorderStatus,
     readerConnectionSummary,
     formatClockDrift,
     formatReadMode,
@@ -712,7 +711,7 @@
         <div class="flex flex-col gap-4">
           {#each status.readers as reader}
             {@const info = readerInfoMap[reader.ip]}
-            <Card borderStatus={readerBorderStatus(reader.state)}>
+            <Card borderStatus={readerBadgeState(reader.state)}>
               {#snippet header()}
                 <span class="font-mono text-sm text-text-primary"
                   >{reader.ip}</span

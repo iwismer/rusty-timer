@@ -15,14 +15,6 @@ export function readerBadgeState(
   return "err";
 }
 
-export function readerBorderStatus(
-  state: ReaderStatus["state"],
-): "ok" | "warn" | "err" {
-  if (state === "connected") return "ok";
-  if (state === "connecting") return "warn";
-  return "err";
-}
-
 export function readerConnectionSummary(readers: ReaderStatus[]): {
   connected: number;
   configured: number;
@@ -41,6 +33,7 @@ export function formatReadMode(mode: string | null | undefined): string {
   if (mode == null) return "\u2014";
   if (mode === "fsls") return "FS/LS";
   if (mode === "raw") return "Raw";
+  if (mode === "event") return "Event";
   return mode;
 }
 
