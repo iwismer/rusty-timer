@@ -258,7 +258,11 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     match String::from_utf8(event.raw_frame) {
                                         Ok(json) => {
                                             if socket.send(Message::Text(json.into())).await.is_err() {
-                                                break;
+                                                warn!(
+                                                    stream_id = %sub.stream_id,
+                                                    "WS send failed for reader_status_changed; closing session"
+                                                );
+                                                return;
                                             }
                                         }
                                         Err(e) => {
