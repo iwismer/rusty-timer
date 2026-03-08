@@ -266,7 +266,8 @@ async fn run_reader(
             while let Some(frame) = cmd_rx.recv().await {
                 if let Err(e) = writer.write_all(&frame).await {
                     warn!("control write failed: {e}");
-                    break;
+                    drop(cmd_rx); // Close channel immediately so cmd_tx.send() fails
+                    return;
                 }
             }
         });
