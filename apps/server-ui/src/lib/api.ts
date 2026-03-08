@@ -804,7 +804,10 @@ export interface ReaderDownloadProgressEvent {
 
 /** GET /api/v1/reader-states */
 export async function getReaderStates(): Promise<CachedReaderState[]> {
-  return apiFetch<CachedReaderState[]>("/api/v1/reader-states");
+  const resp = await apiFetch<{ reader_states: CachedReaderState[] }>(
+    "/api/v1/reader-states",
+  );
+  return resp.reader_states;
 }
 
 /** GET /api/v1/forwarders/{forwarderId}/readers/{readerIp}/info */

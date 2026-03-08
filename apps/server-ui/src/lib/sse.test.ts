@@ -92,7 +92,7 @@ describe("sse", () => {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
       if (url.includes("/api/v1/reader-states")) {
-        return Promise.resolve(makeResponse([]));
+        return Promise.resolve(makeResponse({ reader_states: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -348,7 +348,7 @@ describe("sse", () => {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
       if (url.includes("/api/v1/reader-states")) {
-        return Promise.resolve(makeResponse([]));
+        return Promise.resolve(makeResponse({ reader_states: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -377,7 +377,7 @@ describe("sse", () => {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
       if (url.includes("/api/v1/reader-states")) {
-        return Promise.resolve(makeResponse([]));
+        return Promise.resolve(makeResponse({ reader_states: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -432,7 +432,7 @@ describe("sse", () => {
         return Promise.resolve(makeResponse({ assignments: [] }));
       }
       if (url.includes("/api/v1/reader-states")) {
-        return Promise.resolve(makeResponse([]));
+        return Promise.resolve(makeResponse({ reader_states: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -485,7 +485,7 @@ describe("sse", () => {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
       if (url.includes("/api/v1/reader-states")) {
-        return Promise.resolve(makeResponse([]));
+        return Promise.resolve(makeResponse({ reader_states: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -534,7 +534,7 @@ describe("sse", () => {
         return delayedLogs;
       }
       if (url.includes("/api/v1/reader-states")) {
-        return Promise.resolve(makeResponse([]));
+        return Promise.resolve(makeResponse({ reader_states: [] }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
