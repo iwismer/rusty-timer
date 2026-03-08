@@ -132,11 +132,15 @@ impl ControlClient {
 
     /// Send a command without acquiring the in-flight lock.
     ///
-    /// MUST only be called while `in_flight` is held by the caller.
-    /// Used within multi-step sequences (clear_records, start_download,
-    /// stop_download) that hold the lock themselves.
-    async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlClientError> {
-        self.send_inner_with_kind(cmd, PendingRequestKind::for_command(cmd))
+    /// The `_guard` parameter is a proof token that the caller holds the
+    /// `in_flight` lock. Used within multi-step sequences (clear_records,
+    /// start_download, stop_download) that hold the lock themselves.
+    async fn send_inner(
+        &self,
+        cmd: &Command,
+        _guard: &tokio::sync::MutexGuard<'_, ()>,
+    ) -> Result<ControlFrame, ControlClientError> {
+        self.send_inner_with_kind(cmd, PendingRequestKind::for_command(cmd), _guard)
             .await
     }
 
@@ -144,6 +148,7 @@ impl ControlClient {
         &self,
         cmd: &Command,
         kind: PendingRequestKind,
+        _guard: &tokio::sync::MutexGuard<'_, ()>,
     ) -> Result<ControlFrame, ControlClientError> {
         let frame = control::encode_command(cmd, 0x00)?;
 
@@ -177,8 +182,8 @@ impl ControlClient {
 
     /// Send a single command, serializing with other callers via the in-flight lock.
     async fn send(&self, cmd: &Command) -> Result<ControlFrame, ControlClientError> {
-        let _in_flight = self.in_flight.lock().await;
-        self.send_inner(cmd).await
+        let guard = self.in_flight.lock().await;
+        self.send_inner(cmd, &guard).await
     }
 
     pub async fn get_date_time(&self) -> Result<control::ReaderDateTime, ControlClientError> {
@@ -251,40 +256,46 @@ impl ControlClient {
 
         // Step 1: set recording off (sub-cmd 0x00, state=0x00)
         let _ = self
-            .send_inner(&Command::SetRecordingState { on: false })
+            .send_inner(&Command::SetRecordingState { on: false }, &_in_flight)
             .await?;
 
         // Step 2: set download/access off (sub-cmd 0x01, state=0x00)
         let _ = self
-            .send_inner(&Command::SetAccessMode { on: false })
+            .send_inner(&Command::SetAccessMode { on: false }, &_in_flight)
             .await?;
 
         // Step 3: trigger erase
-        let _ = self.send_inner(&Command::TriggerErase).await?;
+        let _ = self.send_inner(&Command::TriggerErase, &_in_flight).await?;
 
         // Wait for erase to complete
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         // Re-send recording off to reset counter
         let _ = self
-            .send_inner(&Command::SetRecordingState { on: false })
+            .send_inner(&Command::SetRecordingState { on: false }, &_in_flight)
             .await?;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Cycle CONFIG3: Event -> Raw
         let _ = self
-            .send_inner(&Command::SetConfig3 {
-                mode: control::ReadMode::Event,
-                timeout: 5,
-            })
+            .send_inner(
+                &Command::SetConfig3 {
+                    mode: control::ReadMode::Event,
+                    timeout: 5,
+                },
+                &_in_flight,
+            )
             .await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
         let _ = self
-            .send_inner(&Command::SetConfig3 {
-                mode: control::ReadMode::Raw,
-                timeout: 5,
-            })
+            .send_inner(
+                &Command::SetConfig3 {
+                    mode: control::ReadMode::Raw,
+                    timeout: 5,
+                },
+                &_in_flight,
+            )
             .await?;
 
         Ok(())
@@ -303,10 +314,12 @@ impl ControlClient {
     /// Returns the initial ExtendedStatus after the start command.
     pub async fn start_download(&self) -> Result<control::ExtendedStatus, ControlClientError> {
         let _in_flight = self.in_flight.lock().await;
-        let _ = self.send_inner(&Command::InitDownload).await?;
-        let _ = self.send_inner(&Command::ConfigureDownload).await?;
+        let _ = self.send_inner(&Command::InitDownload, &_in_flight).await?;
+        let _ = self
+            .send_inner(&Command::ConfigureDownload, &_in_flight)
+            .await?;
         let frame = self
-            .send_inner(&Command::SetAccessMode { on: true })
+            .send_inner(&Command::SetAccessMode { on: true }, &_in_flight)
             .await?;
         Ok(control::decode_extended_status(&frame)?)
     }
@@ -318,12 +331,14 @@ impl ControlClient {
             .send_inner_with_kind(
                 &Command::SetAccessMode { on: false },
                 PendingRequestKind::DownloadStopWrite,
+                &_in_flight,
             )
             .await?;
         let _ = self
             .send_inner_with_kind(
                 &Command::CleanupDownload,
                 PendingRequestKind::DownloadStopWrite,
+                &_in_flight,
             )
             .await?;
         Ok(())
@@ -751,7 +766,10 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
         let (client, sink) = ControlClient::new(cmd_tx);
 
-        let request = tokio::spawn(async move { client.send_inner(&Command::TriggerErase).await });
+        let request = tokio::spawn(async move {
+            let guard = client.in_flight.lock().await;
+            client.send_inner(&Command::TriggerErase, &guard).await
+        });
 
         let cmd = cmd_rx.recv().await.expect("clear trigger command");
         assert_eq!(
@@ -1061,8 +1079,8 @@ mod tests {
 
         let task = tokio::spawn(async move {
             // Acquire in_flight as send_inner requires
-            let _guard = client.in_flight.lock().await;
-            client.send_inner(&Command::GetDateTime).await
+            let guard = client.in_flight.lock().await;
+            client.send_inner(&Command::GetDateTime, &guard).await
         });
 
         // Consume the command so the channel doesn't block
