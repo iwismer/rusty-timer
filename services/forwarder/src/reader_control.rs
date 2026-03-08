@@ -404,9 +404,9 @@ impl ControlResponseSink {
                 Ok(frame) => {
                     // Wrong instruction (unsolicited) — put request back
                     tracing::debug!(
-                        instruction = frame.instruction(),
-                        data_len = frame.data().len(),
-                        "unmatched control frame; putting pending request back"
+                        pending_instruction = ?req.kind,
+                        received_instruction = frame.instruction(),
+                        "control frame not consumed: instruction mismatch"
                     );
                     *pending = Some(req);
                 }
@@ -451,7 +451,7 @@ pub struct Config3Info {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClockInfo {
     pub reader_clock: String,
-    /// Reader clock drift in milliseconds. Positive = reader is ahead of local time, negative = behind.
+    /// Clock drift in milliseconds (system − reader). Positive = reader is behind local time, negative = ahead.
     pub drift_ms: i64,
 }
 
@@ -610,7 +610,13 @@ impl DownloadTracker {
 
     pub fn reset(&mut self) {
         if self.is_active() {
-            let _ = self.event_tx.send(DownloadEvent::Idle);
+            tracing::warn!(
+                current_state = ?self.state,
+                "reset() called during active download — sending error event to subscribers"
+            );
+            let _ = self.event_tx.send(DownloadEvent::Error {
+                message: "download reset (reader disconnected)".to_owned(),
+            });
         }
         self.state = DownloadState::Idle;
         self.reads_received = 0;
@@ -810,22 +816,24 @@ async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) -> Result<(),
         Ok(dt) => {
             let reader_iso = dt.to_iso_string();
             let now = chrono::Local::now();
-            if let Ok(reader_naive) =
-                chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
-            {
-                let system_naive = now.naive_local();
-                let drift = system_naive
-                    .signed_duration_since(reader_naive)
-                    .num_milliseconds();
-                info.clock = Some(ClockInfo {
-                    reader_clock: reader_iso,
-                    drift_ms: drift,
-                });
-            } else {
-                warn!("status poll: failed to parse reader clock: {reader_iso}");
-                info.clock = None;
+            match chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f") {
+                Ok(reader_naive) => {
+                    let system_naive = now.naive_local();
+                    let drift = system_naive
+                        .signed_duration_since(reader_naive)
+                        .num_milliseconds();
+                    info.clock = Some(ClockInfo {
+                        reader_clock: reader_iso,
+                        drift_ms: drift,
+                    });
+                    Ok(())
+                }
+                Err(_) => {
+                    warn!("status poll: failed to parse reader clock: {reader_iso}");
+                    info.clock = None;
+                    Err(())
+                }
             }
-            Ok(())
         }
         Err(e) => {
             warn!("status poll: get_date_time failed: {e}");
@@ -1210,21 +1218,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_tracker_reset_while_active_sends_idle_event() {
+    async fn download_tracker_reset_while_active_sends_error_then_idle_state() {
         let mut tracker = DownloadTracker::new();
         let mut rx = tracker.subscribe();
 
         tracker.begin_startup();
         tracker.start(100);
-        // Drain the Starting and Downloading events
-        let _ = rx.try_recv();
-        let _ = rx.try_recv();
 
-        // Reset while in Downloading state (active)
+        // Reset while in Downloading state (active) sends Error event
         tracker.reset();
 
-        let ev = rx.try_recv().expect("should receive Idle event on reset");
-        assert!(matches!(ev, DownloadEvent::Idle));
+        let ev = rx
+            .try_recv()
+            .expect("should receive Error event on active reset");
+        assert!(matches!(ev, DownloadEvent::Error { .. }));
         assert_eq!(*tracker.state(), DownloadState::Idle);
         assert_eq!(tracker.reads_received(), 0);
     }
@@ -1632,5 +1639,17 @@ mod tests {
         let mut dt = DownloadTracker::new();
         dt.fail("oops".into());
         assert!(matches!(dt.state(), DownloadState::Idle));
+    }
+
+    #[test]
+    fn reset_during_downloading_sends_error_event() {
+        let mut tracker = DownloadTracker::new();
+        let mut rx = tracker.subscribe();
+        tracker.begin_startup();
+        tracker.start(100);
+        tracker.reset();
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DownloadEvent::Error { .. }));
+        assert_eq!(*tracker.state(), DownloadState::Idle);
     }
 }

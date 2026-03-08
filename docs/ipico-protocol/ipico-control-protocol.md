@@ -1,6 +1,6 @@
 # IPICO Reader Protocol Reference
 
-> Last reviewed: 2026-03-07
+> Last reviewed: 2026-03-08
 
 This document consolidates what this repository currently knows about the IPICO
 reader protocol. It covers:
@@ -97,6 +97,10 @@ variants in the captures are therefore later-firmware extensions.
 | `docs/ipico-protocol/captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 mode changes |
 | `docs/ipico-protocol/captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap sequence after fresh boot |
 | `docs/ipico-protocol/captures/setclock.pcapng` | Five consecutive SET_DATE_TIME attempts via the forwarder; confirms SET takes effect at next cs rollover, not immediately |
+| `docs/ipico-protocol/captures/another-clockset.pcapng` | Repeated clock set attempts showing cs reset to ~52 on every SET; proves cs does NOT free-run through SET |
+| `docs/ipico-protocol/captures/another2-clockset.pcapng` | Clock set attempts captured before the pre-SET alignment delay fix; shows ~480ms drift from immediate SET send |
+| `docs/ipico-protocol/captures/another4-clockset.pcapng` | Clock set with post-SET verify sleep (500ms); confirms verify sees target second but drift ±250ms from sub-second misalignment |
+| `docs/ipico-protocol/captures/another5-clockset.pcapng` | Clock set with pre-SET alignment delay; drift reduced to ~25ms across all 6 sync attempts |
 | `docs/ipico-protocol/captures/tto-enable.pcapng` | Two TTO-enable attempts via `0x11` query; reader returns 10-byte format response (`LL=0a`) instead of the 8-byte form seen in earlier captures |
 
 ## Protocol Families
@@ -550,13 +554,15 @@ Notes:
   RTC interrupt to 1-second intervals
 - `Capture`: after a successful clock set, this reader emitted one unsolicited
   `0x4c` frame, then the management software read back `0x02` to verify
-- `Capture` (`setclock.pcapng`): SET_DATE_TIME does **not** take effect
-  immediately. The centisecond counter free-runs uninterrupted and the new
-  second value is applied at the next cs rollover (when cs wraps from 99 → 0).
-  Verify reads performed within the same second consistently show the
-  **pre-SET** second value with a continuing centisecond counter. This means
-  the effective reader clock after the SET is `S.000` at the rollover moment,
-  not `S.<current_cs>` at the command-arrival moment
+- `Capture` (`setclock.pcapng`, `another-clockset.pcapng`): SET_DATE_TIME does
+  **not** take effect immediately. The centisecond counter is **reset to ~52
+  (0x34)** upon receipt of the command, regardless of its prior value. The new
+  second value is applied at the next cs rollover (when cs wraps from 99 → 0),
+  which occurs ~480ms after the reset. The reader emits an unsolicited `0x4c`
+  frame confirming a 500ms sync delay (offset field = `0x01F4`). Verify reads
+  performed before the rollover show the **pre-SET** second value with the
+  reset centisecond counter. The effective reader clock after the SET is
+  `S.000` at the rollover moment, ~500ms after the command is received
 
 #### 0x02 - GET_DATE_TIME
 
@@ -1062,14 +1068,33 @@ Pages `0x00..0x59` were observed, so 90 progress frames were emitted.
 
 `Capture`
 
-Seen once, immediately after a successful `0x01` write in `docs/ipico-protocol/captures/connect.pcapng`:
+Emitted by the reader after a successful `0x01` (SET_DATE_TIME). Observed in
+`connect.pcapng`, `setclock.pcapng`, `another-clockset.pcapng`, and
+`another5-clockset.pcapng`.
+
+Example frames:
 
 ```text
-ab00094c01555202a8555201f459\r\n
+ab00094c01555202a8555201f459\r\n   (connect.pcapng)
+ab00094c01283602ee283601f48e\r\n   (another-clockset.pcapng)
+ab00094c01285503de28550000 55\r\n  (another2-clockset.pcapng, offset=0)
 ```
 
-This is clearly a real reader-generated message, but its field layout is still
-unknown.
+Partial field decode (9-byte payload):
+
+| Offset | Length | Meaning | Encoding |
+| --- | --- | --- | --- |
+| 0 | 1 | Unknown | Always `0x01` |
+| 1-2 | 2 | Pre-SET minute:second | Plain hex (MMSS) |
+| 3 | 1 | Unknown | Varies |
+| 4-5 | 2 | Unknown | Varies |
+| 6-7 | 2 | Post-SET minute:second | Plain hex (MMSS) |
+| 8-9 | 2 | Sync delay / offset (ms) | Big-endian u16 |
+
+The last two bytes are the sync delay in milliseconds. Most frames show
+`0x01F4` (500ms), confirming the time from SET receipt to the new second
+taking effect. One frame showed `0x0000`, indicating the reader considered
+itself already aligned (no correction needed).
 
 ### 0xe0 - bootstrap/init probe
 
@@ -1159,23 +1184,38 @@ While polling is active, the reader can also emit unsolicited traffic:
 
 `Capture`
 
-Observed in `docs/ipico-protocol/captures/settime.pcapng` and
-`docs/ipico-protocol/captures/setclock.pcapng`:
+Observed in `settime.pcapng`, `setclock.pcapng`, `another-clockset.pcapng`,
+and `another5-clockset.pcapng`:
 
-1. Host sends `0x01` (SET_DATE_TIME)
-2. Reader ACKs
-3. Reader may emit unsolicited `0x4c`
-4. Host sends `0x02` (GET_DATE_TIME) to verify
-5. Reader returns the updated clock
+1. Host sends `0x01` (SET_DATE_TIME) with target second S
+2. Reader ACKs immediately
+3. Reader **resets cs to ~52 (0x34)** regardless of its prior value
+4. cs counts up: 52 → 53 → … → 99 → 0 (rollover, ~480ms after reset)
+5. At rollover, the new second S takes effect — reader shows `S.000`
+6. Reader may emit unsolicited `0x4c` confirming 500ms sync delay
+7. Host sends `0x02` (GET_DATE_TIME) to verify
 
-**Timing behaviour** (confirmed in `setclock.pcapng` across 5 SET attempts):
-the new second value does **not** take effect at the moment the command is
-received. The centisecond counter continues free-running and the SET is applied
-at the next cs rollover (cs wraps 99 → 0). A verify read issued within the
-same second will still show the pre-SET second value with a continuing cs
-counter. Any clock-sync algorithm must account for this by predicting the wall
-time at the rollover moment (arrival + time-to-rollover) and rounding to the
-nearest second, since the reader will show `S.000` at rollover
+**Timing behaviour** (confirmed across 30+ SET attempts in multiple captures):
+
+The centisecond counter is **reset to ~52 (0x34)** upon receipt of
+SET_DATE_TIME — it does **not** free-run through the command. The new second
+value takes effect at the next cs rollover (cs wraps 99 → 0), approximately
+480–500ms after receipt. A verify read issued before the rollover will show the
+**pre-SET** second value with cs near the reset point (~52).
+
+**Clock-sync algorithm** (implemented in forwarder `sync_clock_handler`):
+
+1. Probe RTT (3× GET_DATE_TIME, tolerating partial failures) to estimate one-way latency via median
+2. Compute `wall_at_rollover = now + one_way + 500ms` (if sent immediately)
+3. Pick target second `S = round(wall_at_rollover)`
+4. Compute `ideal_send = S.000 − one_way − 500ms` so rollover aligns with S
+5. If `ideal_send` is already past, bump `S` by one second
+6. Sleep until `ideal_send`, then send SET_DATE_TIME with second S
+7. Sleep 500ms + one_way, then verify with GET_DATE_TIME
+
+This pre-SET alignment delay reduces drift from ±500ms (immediate send with
+rounding) to ~25ms (bounded by RTT estimation accuracy). Captures confirm
+consistent 25ms drift across varying pre-SET wait times (8ms–658ms).
 
 ### Read-mode workflow
 
@@ -1356,7 +1396,9 @@ the host-facing TCP wire protocol in this repo and is not expanded here.
 ## Open Questions
 
 - What exactly does `0xe0` initialize?
-- What is the exact schema of the `0x4c` payload?
+- What is the exact schema of the `0x4c` payload? (Partially answered: last 2
+  bytes are sync delay in ms; bytes 1-2 and 6-7 are pre/post-SET MM:SS; bytes
+  3-5 remain unknown)
 - In `0x4b`, what are the exact units and endianness of bytes 1..3 and 4..6?
   The new captures strongly suggest "extent" and "progress", but not the
   exact arithmetic.

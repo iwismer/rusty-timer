@@ -132,8 +132,9 @@ impl TagMessageFormat {
 pub enum Command {
     /// Query the reader's current date/time (instruction 0x02).
     GetDateTime,
-    /// Set the reader's date/time (instruction 0x01). All fields are BCD-encoded
-    /// except day_of_week which is plain: Mon=1..Sat=6, Sun=0.
+    /// Set the reader's date/time (instruction 0x01). Fields are plain decimal
+    /// values; BCD encoding is applied during frame serialization in `encode_command`.
+    /// day_of_week is not BCD-encoded on the wire: Mon=1..Sat=6, Sun=0.
     SetDateTime {
         year: u8,
         month: u8,
@@ -212,17 +213,37 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
             hour,
             minute,
             second,
-        } => vec![
-            to_bcd(*year)?,
-            to_bcd(*month)?,
-            to_bcd(*day)?,
-            *day_of_week,
-            to_bcd(*hour)?,
-            to_bcd(*minute)?,
-            to_bcd(*second)?,
-        ],
+        } => {
+            let checks: &[(&str, u8, u8, u8)] = &[
+                ("month", *month, 1, 12),
+                ("day", *day, 1, 31),
+                ("day_of_week", *day_of_week, 0, 6),
+                ("hour", *hour, 0, 23),
+                ("minute", *minute, 0, 59),
+                ("second", *second, 0, 59),
+            ];
+            for &(field, value, min, max) in checks {
+                if value < min || value > max {
+                    return Err(ControlError::DateTimeOutOfRange {
+                        field,
+                        value,
+                        min,
+                        max,
+                    });
+                }
+            }
+            vec![
+                to_bcd(*year)?,
+                to_bcd(*month)?,
+                to_bcd(*day)?,
+                *day_of_week,
+                to_bcd(*hour)?,
+                to_bcd(*minute)?,
+                to_bcd(*second)?,
+            ]
+        }
         Command::SetConfig3 { mode, timeout } => {
-            // 0x07 = modify lower 3 bits of CONFIG3 (mode selection: bits 0..2)
+            // 0x07 = mask for CONFIG3 bits 0, 1, 2 (mode selection)
             vec![mode.config3_value(), *timeout, 0x07]
         }
         Command::SetTagMessageFormat { format } => format.encode_data(),
@@ -232,7 +253,13 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
         Command::ConfigureDownload => vec![0x07, 0x01, 0x05],
         Command::CleanupDownload => vec![0x07, 0x00],
         Command::TriggerErase => vec![0xd0],
-        _ => vec![],
+        Command::GetDateTime
+        | Command::GetStatistics
+        | Command::GetExtendedStatus
+        | Command::GetConfig3
+        | Command::GetTagMessageFormat
+        | Command::PrintBanner
+        | Command::InitE0 => vec![],
     };
 
     // Length byte: 0xff signals a read/query request (IPICO protocol convention);
@@ -320,7 +347,7 @@ impl ControlFrame {
 
     /// Constructor for building frames without going through `parse_response`.
     /// Intended for testing; production code should use `parse_response`.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(reader_id: u8, instruction: u8, data: Vec<u8>) -> Self {
         Self {
             reader_id,
@@ -340,7 +367,7 @@ pub struct ReaderDateTime {
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
-    pub centisecond: u8, // 0-99 (plain hex, NOT BCD)
+    pub centisecond: u8, // 0..99, each unit = 10ms. NOT BCD-encoded (unlike other date/time bytes).
     pub config: u8,
 }
 
@@ -445,10 +472,19 @@ pub enum ControlError {
     InvalidHex,
     BadLrc,
     ReaderError(u8),
-    UnexpectedLength { instruction: u8, got: usize },
+    UnexpectedLength {
+        instruction: u8,
+        got: usize,
+    },
     UnknownReadMode(u8),
     InvalidBcd(u8),
     DataTooLong(usize),
+    DateTimeOutOfRange {
+        field: &'static str,
+        value: u8,
+        min: u8,
+        max: u8,
+    },
 }
 
 impl fmt::Display for ControlError {
@@ -473,6 +509,17 @@ impl fmt::Display for ControlError {
             }
             ControlError::DataTooLong(len) => {
                 write!(f, "command data too long: {len} bytes (max 255)")
+            }
+            ControlError::DateTimeOutOfRange {
+                field,
+                value,
+                min,
+                max,
+            } => {
+                write!(
+                    f,
+                    "date/time field {field} value {value} out of range (expected {min}..={max})"
+                )
             }
         }
     }
@@ -554,7 +601,7 @@ pub fn decode_date_time(frame: &ControlFrame) -> Result<ReaderDateTime, ControlE
         hour: from_bcd(frame.data()[4])?,
         minute: from_bcd(frame.data()[5])?,
         second: from_bcd(frame.data()[6])?,
-        centisecond: frame.data()[7], // plain hex, NOT BCD
+        centisecond: frame.data()[7], // NOT BCD-encoded; raw byte value 0..99
         config: frame.data()[8],
     })
 }
@@ -1089,6 +1136,15 @@ mod tests {
     }
 
     #[test]
+    fn read_mode_serde_round_trip() {
+        for mode in [ReadMode::Raw, ReadMode::Event, ReadMode::FirstLastSeen] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: ReadMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back, "round-trip failed for {json}");
+        }
+    }
+
+    #[test]
     fn encode_command_with_non_zero_reader_id() {
         let frame = encode_command(&Command::GetDateTime, 0x05).unwrap();
         let s = std::str::from_utf8(&frame).unwrap();
@@ -1100,11 +1156,91 @@ mod tests {
     }
 
     #[test]
-    fn read_mode_serde_round_trip() {
-        for mode in [ReadMode::Raw, ReadMode::Event, ReadMode::FirstLastSeen] {
-            let json = serde_json::to_string(&mode).unwrap();
-            let back: ReadMode = serde_json::from_str(&json).unwrap();
-            assert_eq!(mode, back, "round-trip failed for {json}");
-        }
+    fn set_date_time_rejects_month_zero() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 0,
+            day: 8,
+            day_of_week: 0,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange { field: "month", .. }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_rejects_month_13() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 13,
+            day: 8,
+            day_of_week: 0,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange { field: "month", .. }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_rejects_dow_7() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 3,
+            day: 8,
+            day_of_week: 7,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange {
+                field: "day_of_week",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_rejects_hour_24() {
+        let cmd = Command::SetDateTime {
+            year: 26,
+            month: 3,
+            day: 8,
+            day_of_week: 0,
+            hour: 24,
+            minute: 0,
+            second: 0,
+        };
+        let err = encode_command(&cmd, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ControlError::DateTimeOutOfRange { field: "hour", .. }
+        ));
+    }
+
+    #[test]
+    fn set_date_time_accepts_valid_boundary_values() {
+        let cmd = Command::SetDateTime {
+            year: 99,
+            month: 12,
+            day: 31,
+            day_of_week: 6,
+            hour: 23,
+            minute: 59,
+            second: 59,
+        };
+        assert!(encode_command(&cmd, 0).is_ok());
     }
 }

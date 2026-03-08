@@ -1850,6 +1850,7 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
 
 /// Estimate one-way network latency to a reader by measuring RTT of GET_DATE_TIME probes.
 /// Returns (median one-way latency, successful probe count) from 3 probes.
+/// With an even number of successful probes, takes the upper-middle value (conservative estimate).
 async fn estimate_one_way_latency(
     client: &crate::reader_control::ControlClient,
 ) -> Result<(std::time::Duration, usize), String> {
@@ -1879,23 +1880,74 @@ async fn estimate_one_way_latency(
     Ok((median_rtt / 2, rtts.len()))
 }
 
+/// Compute the target second boundary and pre-SET wait duration for clock sync.
+///
+/// Given the current wall time, one-way latency estimate, and the fixed sync delay,
+/// returns `(target_boundary, pre_set_wait)` where:
+/// - `target_boundary` is the `DateTime<Local>` whole-second that the rollover should align with
+/// - `pre_set_wait` is how long to sleep before sending SET_DATE_TIME
+fn compute_sync_timing(
+    wall_now: chrono::DateTime<chrono::Local>,
+    one_way: std::time::Duration,
+    sync_delay_ms: u64,
+) -> (chrono::DateTime<chrono::Local>, std::time::Duration) {
+    use chrono::Timelike;
+
+    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or_else(|_| {
+        tracing::warn!(
+            one_way_ms = one_way.as_millis(),
+            "one-way latency exceeds chrono Duration range, falling back to zero"
+        );
+        chrono::Duration::zero()
+    });
+    let sync_delay = chrono::Duration::milliseconds(sync_delay_ms as i64);
+    let wall_at_rollover_if_now = wall_now + arrival_offset + sync_delay;
+    let rollover_frac = wall_at_rollover_if_now.nanosecond() as f64 / 1_000_000_000.0;
+
+    let target = if rollover_frac >= 0.5 {
+        wall_at_rollover_if_now + chrono::Duration::seconds(1)
+    } else {
+        wall_at_rollover_if_now
+    };
+    let target_boundary_initial = target
+        .with_nanosecond(0)
+        .expect("nanosecond 0 is always valid");
+
+    let mut target_boundary = target_boundary_initial;
+    let mut ideal_send = target_boundary - arrival_offset - sync_delay;
+    if ideal_send < wall_now {
+        target_boundary += chrono::Duration::seconds(1);
+        ideal_send = target_boundary - arrival_offset - sync_delay;
+    }
+    let pre_set_wait = ideal_send
+        .signed_duration_since(wall_now)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO);
+
+    (target_boundary, pre_set_wait)
+}
+
 /// POST /api/v1/readers/{ip}/sync-clock
 ///
 /// Minimizes clock drift by:
 /// 1. Probing RTT to estimate one-way network latency
-/// 2. Reading the reader's clock to learn its centisecond phase
-/// 3. Choosing the SET_DATE_TIME second value that minimizes drift, accounting
-///    for the fact that SET_DATE_TIME takes effect at the next centisecond
-///    rollover (next second boundary), not immediately.
+/// 2. Rounding the projected rollover time to the nearest whole-second boundary
+/// 3. Delaying the SET command so the rollover aligns with the target second
 ///
-/// The reader's centisecond counter free-runs through SET_DATE_TIME. The new
-/// second value is applied when the cs counter next wraps to 0. At that moment
-/// the reader shows S.000. We pick S = round(wall_at_rollover) so that
-/// |drift| ≤ 500ms worst case, ~250ms average.
+/// SET_DATE_TIME resets the centisecond counter to ~52 (520ms) and applies the
+/// new second value when cs next rolls over from 99 → 0, which takes ~480ms.
+/// The reader's unsolicited 0x4c frame confirms a 500ms sync delay. We compute
+/// the ideal send time so that: send_time + one_way + SYNC_DELAY = S.000,
+/// reducing drift from ±500ms (pure rounding) to ~25ms (RTT estimation error).
 async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
+    /// Fixed delay (ms) from SET_DATE_TIME receipt to the new second taking
+    /// effect. The reader resets cs to ~52 and the rollover to second S.000
+    /// occurs ~480ms later; the reader's 0x4c frame reports 500ms.
+    const SYNC_DELAY_MS: u64 = 500;
+
     let client = {
         state
             .control_clients
@@ -1922,76 +1974,72 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    // Step 2: read the reader's clock to learn its centisecond phase
-    let dt = match client.get_date_time().await {
-        Ok(dt) => dt,
-        Err(e) => {
-            return json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": format!("failed to read reader clock: {}", e)})
-                    .to_string(),
-            );
-        }
-    };
     let wall_now = chrono::Local::now();
+    let (target_boundary, pre_set_wait) = compute_sync_timing(wall_now, one_way, SYNC_DELAY_MS);
+    if !pre_set_wait.is_zero() {
+        tokio::time::sleep(pre_set_wait).await;
+    }
 
-    // The reader sampled its clock ~one_way ago. The SET_DATE_TIME we're about
-    // to send will arrive ~one_way from now. So from sample to arrival ≈ 2*one_way.
-    // Reader centisecond at arrival: (cs*10 + 2*one_way_ms) mod 1000
-    let cs = dt.centisecond as f64;
-    let reader_cs_at_arrival_ms = (cs * 10.0 + one_way.as_secs_f64() * 2000.0) % 1000.0;
-    let reader_frac = reader_cs_at_arrival_ms / 1000.0; // 0.0 .. 1.0
-
-    // Wall clock at the moment the command arrives
-    let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or(chrono::Duration::zero());
-    let arrival_wall = wall_now + arrival_offset;
-
-    // Step 3: choose the second value that minimizes drift.
-    // SET_DATE_TIME takes effect at the next cs rollover (when cs wraps to 0),
-    // NOT immediately. At that moment the reader shows S.000.
-    // Time from arrival to rollover = (1.0 - reader_frac) seconds.
-    let rollover_delay_ms = ((1.0 - reader_frac) * 1000.0) as i64;
-    let wall_at_rollover = arrival_wall + chrono::Duration::milliseconds(rollover_delay_ms);
-    let rollover_frac = wall_at_rollover.nanosecond() as f64 / 1_000_000_000.0;
-
-    // Pick S = round(wall_at_rollover) so that |S.000 - wall_at_rollover| ≤ 500ms
-    let target = if rollover_frac >= 0.5 {
-        wall_at_rollover + chrono::Duration::seconds(1)
-    } else {
-        wall_at_rollover
-    };
-
-    let year = (target.year() % 100) as u8;
-    let month = target.month() as u8;
-    let day = target.day() as u8;
-    let dow = target.weekday().num_days_from_sunday() as u8;
-    let hour = target.hour() as u8;
-    let minute = target.minute() as u8;
-    let second = target.second() as u8;
+    let year = (target_boundary.year() % 100) as u8;
+    let month = target_boundary.month() as u8;
+    let day = target_boundary.day() as u8;
+    let dow = target_boundary.weekday().num_days_from_sunday() as u8;
+    let hour = target_boundary.hour() as u8;
+    let minute = target_boundary.minute() as u8;
+    let second = target_boundary.second() as u8;
 
     if let Err(e) = client
         .set_date_time(year, month, day, dow, hour, minute, second)
         .await
     {
+        // Clear stale clock info so UI doesn't show pre-sync value
+        {
+            let mut info = {
+                let ss = state.subsystem.lock().await;
+                ss.readers
+                    .get(&ip)
+                    .and_then(|r| r.reader_info.clone())
+                    .unwrap_or_default()
+            };
+            info.clock = None;
+            update_cached_reader_info(&state, &ip, info).await;
+        }
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"error": e.to_string()}).to_string(),
         );
     }
 
+    // Wait for the sync to complete before verifying. The reader needs ~500ms
+    // after receiving SET_DATE_TIME for the new second to take effect. We add
+    // margin for the one-way latency of the SET command itself.
+    let verify_wait = std::time::Duration::from_millis(SYNC_DELAY_MS) + one_way;
+    tokio::time::sleep(verify_wait).await;
+
     match client.get_date_time().await {
         Ok(dt) => {
             let reader_iso = dt.to_iso_string();
             let verify_now = chrono::Local::now();
-            let drift_ms =
-                chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
-                    .ok()
-                    .map(|reader_naive| {
-                        verify_now
-                            .naive_local()
-                            .signed_duration_since(reader_naive)
-                            .num_milliseconds()
-                    });
+            let drift_ms = match chrono::NaiveDateTime::parse_from_str(
+                &reader_iso,
+                "%Y-%m-%dT%H:%M:%S%.3f",
+            ) {
+                Ok(reader_naive) => Some(
+                    verify_now
+                        .naive_local()
+                        .signed_duration_since(reader_naive)
+                        .num_milliseconds(),
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        reader_ip = %ip,
+                        reader_clock = %reader_iso,
+                        error = %e,
+                        "clock sync verification: failed to parse reader timestamp for drift calculation"
+                    );
+                    None
+                }
+            };
 
             // Update stored reader_info and broadcast so SSE subscribers see the new clock
             {
@@ -2010,12 +2058,12 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
             }
 
             state.logger.log(format!(
-                "reader {} clock synced to {} (one-way latency: {:.1}ms, cs phase: {:.0}, rollover frac: {:.0}ms)",
+                "reader {} clock synced to {} (one-way latency: {:.1}ms, pre-set wait: {:.0}ms, sync delay: {}ms)",
                 ip,
                 reader_iso,
                 one_way.as_secs_f64() * 1000.0,
-                cs,
-                rollover_frac * 1000.0,
+                pre_set_wait.as_secs_f64() * 1000.0,
+                SYNC_DELAY_MS,
             ));
             json_response(
                 StatusCode::OK,
@@ -2047,6 +2095,7 @@ async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
             }
             r.reader_info = Some(info.clone());
         } else {
+            tracing::warn!(reader_ip = %ip, "update_cached_reader_info: reader not found in status map, skipping broadcast");
             return;
         }
     }
@@ -2542,7 +2591,7 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
         // If there's an initial terminal event, yield it and close
         if let Some(evt) = initial_event {
             let json = serde_json::to_string(&evt)
-                .unwrap_or_else(|e| format!(r#"{{"state":"error","message":"serialize: {e}"}}"#));
+                .unwrap_or_else(|e| serde_json::json!({"state": "error", "message": format!("serialize: {e}")}).to_string());
             yield Ok::<_, Infallible>(SseEvent::default().data(json));
             return;
         }
@@ -2568,7 +2617,7 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
                             | crate::reader_control::DownloadEvent::Error { .. }
                     );
                     let json = serde_json::to_string(&evt)
-                        .unwrap_or_else(|e| format!(r#"{{"state":"error","message":"serialize: {e}"}}"#));
+                        .unwrap_or_else(|e| serde_json::json!({"state": "error", "message": format!("serialize: {e}")}).to_string());
                     yield Ok::<_, Infallible>(SseEvent::default().data(json));
                     if is_terminal {
                         return;
@@ -3564,7 +3613,7 @@ mod tests {
             let expected_date_time =
                 control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
 
-            for _ in 0..4 {
+            for _ in 0..3 {
                 let get_cmd = cmd_rx.recv().await.expect("get date/time command");
                 assert_eq!(get_cmd, expected_date_time);
                 assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
@@ -3750,6 +3799,117 @@ mod tests {
         let reader = &body["readers"][0];
         assert_eq!(reader["state"], "disconnected");
         assert!(reader["reader_info"].is_null());
+    }
+
+    #[tokio::test]
+    async fn sync_clock_succeeds_with_partial_rtt_probe_failure() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let expected_date_time =
+                control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
+            let valid_response = b"ab000902260306051855443727cf";
+
+            // Probe 1: valid response
+            let cmd = cmd_rx.recv().await.expect("probe 1 command");
+            assert_eq!(cmd, expected_date_time);
+            assert!(control_sink.feed(valid_response).await);
+
+            // Probe 2: malformed response → parse error consumed by pending request
+            let cmd = cmd_rx.recv().await.expect("probe 2 command");
+            assert_eq!(cmd, expected_date_time);
+            assert!(control_sink.feed(b"ab0001").await);
+
+            // Probe 3: valid response
+            let cmd = cmd_rx.recv().await.expect("probe 3 command");
+            assert_eq!(cmd, expected_date_time);
+            assert!(control_sink.feed(valid_response).await);
+
+            // SET_DATE_TIME
+            let set_cmd = cmd_rx.recv().await.expect("set date/time command");
+            let set_text = std::str::from_utf8(&set_cmd).expect("set date/time utf8");
+            assert!(
+                set_text.starts_with("ab000701"),
+                "unexpected set_date_time frame: {set_text}"
+            );
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_SET_DATE_TIME).as_bytes())
+                    .await
+            );
+
+            // Verify GET_DATE_TIME
+            let verify_cmd = cmd_rx.recv().await.expect("verify date/time command");
+            assert_eq!(verify_cmd, expected_date_time);
+            assert!(control_sink.feed(valid_response).await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+    }
+
+    #[tokio::test]
+    async fn sync_clock_returns_503_when_no_control_client() {
+        let reader_ip = "192.168.1.99";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -4570,7 +4730,7 @@ mod tests {
         server.register_control_client(reader_ip, Arc::new(control_client));
 
         let feeder = tokio::spawn(async move {
-            for _ in 0..4 {
+            for _ in 0..3 {
                 let _ = cmd_rx.recv().await.expect("clock sync read command");
                 assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
             }
@@ -5989,5 +6149,74 @@ target = "192.168.1.100:10000"
             .await
             .unwrap();
         assert_eq!(resp.status(), 503);
+    }
+
+    #[test]
+    fn sync_timing_rollover_frac_above_half_rounds_up() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.200, one_way=50ms, sync=500ms → rollover_if_now=.750, frac=0.75 → rounds UP
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(200_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(50);
+        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 1);
+        assert_eq!(target.nanosecond(), 0);
+        assert!(wait < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sync_timing_rollover_frac_below_half_stays_same_second() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.800, one_way=50ms, sync=500ms → rollover_if_now=1.350, frac=0.35 → truncates to 1.000
+        // ideal_send=1.000-0.050-0.500=0.450 < 0.800 → BUMP → target=2.000
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(800_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(50);
+        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 2);
+        assert_eq!(target.nanosecond(), 0);
+    }
+
+    #[test]
+    fn sync_timing_ideal_send_past_bumps_target() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.500, one_way=1ms, sync=500ms → rollover_if_now=1.001, frac=0.001 → target=1.000
+        // ideal_send=1.000-0.001-0.500=0.499 < 0.500 → BUMP → target=2.000
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(500_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::from_millis(1);
+        let (target, wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 2);
+        assert_eq!(target.nanosecond(), 0);
+        assert!(wait > std::time::Duration::from_millis(900));
+        assert!(wait < std::time::Duration::from_millis(1100));
+    }
+
+    #[test]
+    fn sync_timing_zero_latency() {
+        use chrono::TimeZone;
+        use chrono::Timelike;
+        // wall_now=.300, one_way=0, sync=500ms → rollover_if_now=.800, frac=0.8 → rounds UP
+        let wall_now = chrono::Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .unwrap()
+            .with_nanosecond(300_000_000)
+            .unwrap();
+        let one_way = std::time::Duration::ZERO;
+        let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
+        assert_eq!(target.second(), 1);
+        assert_eq!(target.nanosecond(), 0);
     }
 }
