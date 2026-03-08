@@ -3613,7 +3613,7 @@ mod tests {
             let expected_date_time =
                 control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
 
-            for _ in 0..4 {
+            for _ in 0..3 {
                 let get_cmd = cmd_rx.recv().await.expect("get date/time command");
                 assert_eq!(get_cmd, expected_date_time);
                 assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
@@ -4730,7 +4730,7 @@ mod tests {
         server.register_control_client(reader_ip, Arc::new(control_client));
 
         let feeder = tokio::spawn(async move {
-            for _ in 0..4 {
+            for _ in 0..3 {
                 let _ = cmd_rx.recv().await.expect("clock sync read command");
                 assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
             }

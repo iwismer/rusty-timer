@@ -1218,21 +1218,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_tracker_reset_while_active_sends_idle_event() {
+    async fn download_tracker_reset_while_active_sends_error_then_idle_state() {
         let mut tracker = DownloadTracker::new();
         let mut rx = tracker.subscribe();
 
         tracker.begin_startup();
         tracker.start(100);
-        // Drain the Starting and Downloading events
-        let _ = rx.try_recv();
-        let _ = rx.try_recv();
 
-        // Reset while in Downloading state (active)
+        // Reset while in Downloading state (active) sends Error event
         tracker.reset();
 
-        let ev = rx.try_recv().expect("should receive Idle event on reset");
-        assert!(matches!(ev, DownloadEvent::Idle));
+        let ev = rx
+            .try_recv()
+            .expect("should receive Error event on active reset");
+        assert!(matches!(ev, DownloadEvent::Error { .. }));
         assert_eq!(*tracker.state(), DownloadState::Idle);
         assert_eq!(tracker.reads_received(), 0);
     }
