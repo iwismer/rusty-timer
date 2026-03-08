@@ -1089,6 +1089,15 @@ mod tests {
     }
 
     #[test]
+    fn read_mode_serde_round_trip() {
+        for mode in [ReadMode::Raw, ReadMode::Event, ReadMode::FirstLastSeen] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: ReadMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back, "round-trip failed for {json}");
+        }
+    }
+
+    #[test]
     fn encode_command_with_non_zero_reader_id() {
         let frame = encode_command(&Command::GetDateTime, 0x05).unwrap();
         let s = std::str::from_utf8(&frame).unwrap();
