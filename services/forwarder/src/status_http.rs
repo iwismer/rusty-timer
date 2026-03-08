@@ -5370,4 +5370,276 @@ target = "192.168.1.100:10000"
             .unwrap();
         assert_eq!(resp.status(), 404);
     }
+
+    /// Test that `run_status_poll_merge_successes` preserves cached estimated_stored_reads
+    /// and recording when the follow-up extended status poll fails.
+    #[tokio::test]
+    async fn set_read_mode_preserves_stored_reads_when_ext_status_poll_fails() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        // Pre-populate with cached values we expect to be preserved
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    config: Some(crate::reader_control::Config3Info {
+                        mode: control::ReadMode::Raw,
+                        timeout: 5,
+                    }),
+                    estimated_stored_reads: Some(42),
+                    recording: Some(true),
+                    tto_enabled: Some(false),
+                    clock: Some(crate::reader_control::ClockInfo {
+                        reader_clock: "2026-03-06T18:55:44.000".to_owned(),
+                        drift_ms: 100,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            // 1. SetConfig3 command -> ACK
+            let _set_cmd = cmd_rx.recv().await.expect("set config3 command");
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_CONFIG3).as_bytes())
+                    .await
+            );
+
+            // 2. GetExtendedStatus -> send garbage (causes failure)
+            let _ext_cmd = cmd_rx.recv().await.expect("ext status command");
+            assert!(control_sink.feed(b"not-an-ext-status").await);
+
+            // 3. GetConfig3 -> valid response
+            let _cfg_cmd = cmd_rx.recv().await.expect("config3 command");
+            assert!(
+                control_sink
+                    .feed(config3_response(control::ReadMode::Event, 7).as_bytes())
+                    .await
+            );
+
+            // 4. GetTagMessageFormat -> valid response
+            let _tag_cmd = cmd_rx.recv().await.expect("tag format command");
+            let tag_format = TagMessageFormat {
+                field_mask: 0xff,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
+            // 5. GetDateTime -> valid response
+            let _dt_cmd = cmd_rx.recv().await.expect("date/time command");
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/read-mode",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"event","timeout":7}"#)
+            .send()
+            .await
+            .expect("PUT read-mode");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        // Verify: estimated_stored_reads and recording are preserved (not null)
+        // because run_status_poll_merge_successes keeps cached values on failure
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["config"]["mode"], "event", "config should be updated");
+        assert_eq!(
+            info["estimated_stored_reads"], 42,
+            "estimated_stored_reads should be preserved from cache"
+        );
+        assert_eq!(
+            info["recording"], true,
+            "recording should be preserved from cache"
+        );
+    }
+
+    /// Test that set_recording_handler returns the new recording state.
+    #[tokio::test]
+    async fn set_recording_on_returns_recording_true() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            // 1. SetRecordingState -> extended status response (recording bit set)
+            let _cmd = cmd_rx.recv().await.expect("set recording command");
+            // Extended status with recording_state byte = 0x01 (recording)
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            // run_status_poll follow-up: GetExtendedStatus
+            let _cmd = cmd_rx.recv().await.expect("ext status poll");
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            // GetConfig3
+            let _cmd = cmd_rx.recv().await.expect("config3 poll");
+            assert!(
+                control_sink
+                    .feed(config3_response(control::ReadMode::Raw, 5).as_bytes())
+                    .await
+            );
+
+            // GetTagMessageFormat
+            let _cmd = cmd_rx.recv().await.expect("tag format poll");
+            let tag_format = TagMessageFormat {
+                field_mask: 0x7f,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
+            // GetDateTime
+            let _cmd = cmd_rx.recv().await.expect("date/time poll");
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/recording",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("PUT recording");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("json response");
+        assert!(body["recording"].is_boolean());
+
+        feeder.await.expect("response feeder task");
+    }
+
+    /// Test that set_recording returns 503 when reader is not connected.
+    #[tokio::test]
+    async fn set_recording_returns_503_when_reader_disconnected() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/10.0.0.99/recording",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503);
+    }
+
+    /// Test that clear_records returns 503 when reader is not connected.
+    #[tokio::test]
+    async fn clear_records_returns_503_when_reader_disconnected() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/10.0.0.99/clear-records",
+                server.local_addr()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503);
+    }
 }
