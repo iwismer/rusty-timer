@@ -91,6 +91,9 @@ describe("sse", () => {
       if (url.includes("/api/v1/logs")) {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(makeResponse([]));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
   });
@@ -344,6 +347,9 @@ describe("sse", () => {
       if (url.includes("/api/v1/logs")) {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(makeResponse([]));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
@@ -370,22 +376,25 @@ describe("sse", () => {
       if (url.includes("/api/v1/logs")) {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(makeResponse([]));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
     const { initSSE } = await import("./sse");
     initSSE();
 
-    // Eager startup sync should run immediately (streams, races, forwarder assignments, and logs).
-    expect(mockFetch).toHaveBeenCalledTimes(4);
+    // Eager startup sync should run immediately (streams, races, forwarder assignments, logs, and reader states).
+    expect(mockFetch).toHaveBeenCalledTimes(5);
 
     // onopen should trigger exactly one follow-up sync.
     await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(mockFetch).toHaveBeenCalledTimes(8);
+    expect(mockFetch).toHaveBeenCalledTimes(10);
 
     // No additional fetches without explicit resync triggers.
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(mockFetch).toHaveBeenCalledTimes(8);
+    expect(mockFetch).toHaveBeenCalledTimes(10);
   });
 
   it("updates streams even when logs fetch fails during resync", async () => {
@@ -421,6 +430,9 @@ describe("sse", () => {
       }
       if (url.includes("/api/v1/forwarder-races")) {
         return Promise.resolve(makeResponse({ assignments: [] }));
+      }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(makeResponse([]));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -472,6 +484,9 @@ describe("sse", () => {
       if (url.includes("/api/v1/logs")) {
         return Promise.resolve(makeResponse({ entries: [] }));
       }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(makeResponse([]));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
@@ -482,12 +497,12 @@ describe("sse", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     es.emit("resync", "{}");
 
-    expect(mockFetch).toHaveBeenCalledTimes(4);
+    expect(mockFetch).toHaveBeenCalledTimes(5);
 
     resolveFirstStream(makeResponse({ streams: [streamA] }));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(mockFetch).toHaveBeenCalledTimes(8);
+    expect(mockFetch).toHaveBeenCalledTimes(10);
     expect(streamCalls).toBe(2);
     expect(get(streamsStore)[0].online).toBe(true);
   });
@@ -517,6 +532,9 @@ describe("sse", () => {
       }
       if (url.includes("/api/v1/logs")) {
         return delayedLogs;
+      }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(makeResponse([]));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
