@@ -253,11 +253,22 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                         Ok(event) => {
                             // Intercept control messages encoded as sentinel ReadEvents.
                             // These must not reach the receiver as chip reads or advance cursors.
-                            if event.read_type.starts_with("__") {
-                                if event.read_type == "__reader_status_changed"
-                                    && let Ok(json) = String::from_utf8(event.raw_frame.clone())
-                                {
-                                    let _ = socket.send(Message::Text(json.into())).await;
+                            if event.read_type.starts_with(rt_protocol::SENTINEL_READ_TYPE_PREFIX) {
+                                if event.read_type == rt_protocol::READER_STATUS_CHANGED_READ_TYPE {
+                                    match String::from_utf8(event.raw_frame) {
+                                        Ok(json) => {
+                                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                stream_id = %sub.stream_id,
+                                                error = %e,
+                                                "invalid UTF-8 in reader_status_changed payload"
+                                            );
+                                        }
+                                    }
                                 }
                                 continue;
                             }
