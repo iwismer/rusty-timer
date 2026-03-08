@@ -1828,13 +1828,16 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
     let ss = state.subsystem.lock().await;
     match ss.readers.get(&ip) {
         Some(r) => match &r.reader_info {
-            Some(info) => json_response(
-                StatusCode::OK,
-                serde_json::to_string(info).unwrap_or_else(|e| {
+            Some(info) => match serde_json::to_string(info) {
+                Ok(json) => json_response(StatusCode::OK, json),
+                Err(e) => {
                     tracing::error!(error = %e, "failed to serialize reader info");
-                    "{}".to_owned()
-                }),
-            ),
+                    json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        r#"{"error":"internal serialization error"}"#.to_owned(),
+                    )
+                }
+            },
             None => json_response(StatusCode::OK, "{}".to_owned()),
         },
         None => text_response(StatusCode::NOT_FOUND, "unknown reader"),
@@ -2279,13 +2282,16 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     };
     crate::reader_control::run_status_poll(&client, &mut info).await;
     update_cached_reader_info(&state, &ip, info.clone()).await;
-    json_response(
-        StatusCode::OK,
-        serde_json::to_string(&info).unwrap_or_else(|e| {
+    match serde_json::to_string(&info) {
+        Ok(json) => json_response(StatusCode::OK, json),
+        Err(e) => {
             tracing::error!(error = %e, "failed to serialize reader info");
-            "{}".to_owned()
-        }),
-    )
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"internal serialization error"}"#.to_owned(),
+            )
+        }
+    }
 }
 
 /// POST /api/v1/readers/{ip}/clear-records
