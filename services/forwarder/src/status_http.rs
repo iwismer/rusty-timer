@@ -1992,6 +1992,18 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
         .set_date_time(year, month, day, dow, hour, minute, second)
         .await
     {
+        // Clear stale clock info so UI doesn't show pre-sync value
+        {
+            let mut info = {
+                let ss = state.subsystem.lock().await;
+                ss.readers
+                    .get(&ip)
+                    .and_then(|r| r.reader_info.clone())
+                    .unwrap_or_default()
+            };
+            info.clock = None;
+            update_cached_reader_info(&state, &ip, info).await;
+        }
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"error": e.to_string()}).to_string(),
