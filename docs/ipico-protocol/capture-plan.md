@@ -34,6 +34,7 @@ These have already been collected and analyzed:
 | `captures/direct-fslsreads-con-dis.pcapng` | Direct FSLS session; only one `aa` frame was captured and it had no literal `FS` / `LS` suffix |
 | `captures/direct-raw-reads-con-dis.pcapng` | Direct raw session; `aa` traffic only, with the same 36-character layout seen elsewhere |
 | `captures/event-read.pcapng` | Forwarder-backed live read capture while the reader reported event mode (`0305`); shows one initial `aa` report and one delayed timeout-driven resend of the same embedded timestamp |
+| `captures/fsls-event-tto.pcapng` | Combined FSLS/event capture with TTO off/on transitions; confirms the `0x11` TTO bit toggles 36-character vs 42-character `aa` frames and exposes non-zero FSLS status bytes only in `0505` mode |
 | `captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 |
 | `captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap after fresh boot but does not isolate power-off |
 
@@ -326,6 +327,17 @@ Important:
 Why:
 
 - Helps decode command `0x11` and the real shape of `aa` reports
+
+Current status:
+
+- `captures/fsls-event-tto.pcapng` resolved the on-wire role of the `0x11`
+  TTO bit for ordinary ID messages
+- With `0x11` parameter 0 = `0x7f`, ordinary reads use the 36-character `aa`
+  form
+- With `0x11` parameter 0 = `0xff`, ordinary reads expand to 42 characters by
+  adding TTO index / page / status bytes before the LRC
+- In `0505` FSLS mode, the status byte is non-zero on the observed follow-up
+  records; in `0305` event mode it remains `00`
 
 Suggested files:
 

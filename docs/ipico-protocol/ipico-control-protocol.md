@@ -93,6 +93,7 @@ variants in the captures are therefore later-firmware extensions.
 | `docs/ipico-protocol/captures/direct-fslsreads-con-dis.pcapng` | Direct read session in FSLS mode; only one `aa` frame was captured and it had no `FS` / `LS` suffix |
 | `docs/ipico-protocol/captures/direct-raw-reads-con-dis.pcapng` | Direct read session in raw mode; `aa` traffic only, with the same 36-character layout seen elsewhere |
 | `docs/ipico-protocol/captures/event-read.pcapng` | Forwarder-backed live read capture while the reader reported event mode (`0305`); shows one initial `aa` frame followed by a delayed resend of the same embedded timestamp about 5.5s later |
+| `docs/ipico-protocol/captures/fsls-event-tto.pcapng` | Combined FSLS/event capture with TTO off/on transitions; confirms the `0x11` TTO bit toggles 36-character vs 42-character `aa` frames and exposes non-zero FSLS status bytes only in `0505` mode |
 | `docs/ipico-protocol/captures/record-on-off.pcapng` | Record-off then record-on toggle via `0x4b` + CONFIG3 mode changes |
 | `docs/ipico-protocol/captures/turnon-con-dis.pcapng` | Full power-on, connect, poll, disconnect; confirms bootstrap sequence after fresh boot |
 | `docs/ipico-protocol/captures/setclock.pcapng` | Five consecutive SET_DATE_TIME attempts via the forwarder; confirms SET takes effect at next cs rollover, not immediately |
@@ -334,7 +335,15 @@ match the standard ASCII format described by the PDF:
 - 10 ms counter included
 - LRC included
 - Tag CRC bytes omitted from the tag ID field
-- No TTO bytes included in the captured sessions
+
+Earlier captures showed the common 36-character form without TTO bytes. The new
+`fsls-event-tto.pcapng` capture shows both variants on the same reader/firmware:
+
+- `Capture`: `0x11` query returns `7f fc 61 61 aa 00 0d 0a 00 00` and the
+  resulting `aa` frames are 36 characters long (no TTO fields)
+- `Capture`: `0x11` query returns `ff fc 61 61 aa 00 0d 0a 00 00` and the
+  resulting `aa` frames are 42 characters long, with 3 extra bytes inserted
+  before the LRC
 
 The 2007 spec (section 7.15) defines parameters 0-8 (up to 9 bytes), where
 parameter 8 (separator) was added in firmware version 6.4.
@@ -355,9 +364,37 @@ layout as the set command. The response length varies by firmware:
 
 Consumers should accept 8 or more data bytes and ignore any beyond the 9th
 
+### TTO-enabled `aa` frame layout is now observed
+
+`Capture + Spec`
+
+`docs/ipico-protocol/captures/fsls-event-tto.pcapng` shows the TTO-enabled
+ASCII layout directly on the wire. When `0x11` parameter 0 is `0xff`, the
+reader sends:
+
+```text
+aa RR TTTTTTTTTTTT IIQQ yymmdd hhmmss cc iippst LL
+```
+
+Where:
+
+- `RR` = reader ID
+- `TTTTTTTTTTTT` = tag ID without CRC
+- `IIQQ` = I/Q counters
+- `cc` = 10 ms count
+- `ii` = TTO index byte
+- `pp` = TTO page byte
+- `st` = TTO status / tamper byte
+- `LL` = LRC
+
+Observed examples:
+
+- `aa00058000123b3200012603081222022f060080cd`
+- `aa000580001286080001260308122253100c00009d`
+
 ### First/Last-seen reporting
 
-`Spec`
+`Spec + Capture`
 
 The PDF says First/Last-seen state is carried in the TTO tamper byte when TTO
 fields are enabled:
@@ -366,7 +403,21 @@ fields are enabled:
 - Bit 6 -> last seen
 - Bit 0 -> tamper
 
-That is the protocol behavior described by the spec.
+The new capture adds an observed split between FSLS and event mode:
+
+- `Capture`: with `CONFIG3 = 0505` and TTO enabled, the added bytes look like
+  `060080`, `060060`, `070080`, `080060`
+- `Capture`: with `CONFIG3 = 0305` and TTO enabled, the added bytes look like
+  `0c0000`, `0d0000`, `0e0000`
+
+Observed implications:
+
+- Byte 1 behaves like the spec's TTO index byte and increments across reads
+- Byte 2 remains `00`, which matches the spec's "page 0 = tag ID" rule
+- Byte 3 is non-zero only in FSLS mode, strongly indicating this is the
+  First/Last-seen status byte described by the spec
+- The observed delayed FSLS value is `0x60`, not the spec's clean `0x40`, so
+  there is still one undocumented status bit involved on this firmware
 
 ### Important local convention note
 
@@ -415,6 +466,24 @@ This does not prove that event mode is semantically identical to FSLS; it does
 show that the reader's observed TCP behavior is timeout-driven in both modes
 when TTO bytes are absent, which is weaker and more ambiguous than the PDF's
 clean distinction between event and first/last-seen.
+
+### TTO clarifies semantics but does not change timeout behavior
+
+`Capture + Inference`
+
+`docs/ipico-protocol/captures/fsls-event-tto.pcapng` makes the practical role
+of the `0x11` TTO bit much clearer:
+
+- `Capture`: switching `0x11` parameter 0 from `0x7f` to `0xff` changes the
+  on-wire `aa` format from 36 to 42 characters
+- `Capture`: the same capture still shows delayed follow-up traffic in both
+  `0505` and `0305`, so the TTO bit does not itself change the timeout/resend
+  behavior
+- `Inference`: the `0x11` TTO flag is a report-format toggle that exposes extra
+  metadata; it is not a separate read mode
+- `Inference`: this is the first in-repo capture that shows an on-wire FS/LS
+  indicator, and it appears in the TTO status byte rather than as a literal
+  `FS` / `LS` suffix
 
 ### Stored-read downloads use the same `aa` format
 

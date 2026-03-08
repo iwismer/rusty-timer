@@ -298,18 +298,32 @@ def try_parse_aa_at(text, pos):
     """
     if pos + 36 > len(text) or text[pos : pos + 2] != "aa":
         return None
-    try:
-        expected = int(text[pos + 34 : pos + 36], 16)
-        actual = sum(text[pos + 2 : pos + 34].encode("ascii")) & 0xFF
-        if expected != actual:
-            return None
-    except ValueError:
-        return None
 
-    frame_len = 36
-    if pos + 38 <= len(text) and text[pos + 36 : pos + 38] in ("FS", "LS"):
-        frame_len = 38
-    return text[pos : pos + frame_len], pos + frame_len
+    def checksum_matches(frame_len, checksum_pos):
+        if pos + frame_len > len(text):
+            return False
+        try:
+            expected = int(text[pos + checksum_pos : pos + checksum_pos + 2], 16)
+            actual = sum(text[pos + 2 : pos + checksum_pos].encode("ascii")) & 0xFF
+            return expected == actual
+        except ValueError:
+            return False
+
+    # TTO-enabled layout: 3 extra bytes (index/page/status) before the LRC.
+    if checksum_matches(42, 40):
+        return text[pos : pos + 42], pos + 42
+
+    if (
+        pos + 38 <= len(text)
+        and text[pos + 36 : pos + 38] in ("FS", "LS")
+        and checksum_matches(38, 34)
+    ):
+        return text[pos : pos + 38], pos + 38
+
+    if checksum_matches(36, 34):
+        return text[pos : pos + 36], pos + 36
+
+    return None
 
 
 def scan_frames(text):
@@ -350,6 +364,7 @@ def decode_aa(frame):
     d["reader_id"] = frame[2:4]
     d["tag_id"] = frame[4:16]
     d["unknown"] = frame[16:20]
+    d["tto"] = None
 
     try:
         d["year"] = int(frame[20:22])
@@ -368,16 +383,30 @@ def decode_aa(frame):
     except (ValueError, IndexError):
         d["timestamp"] = "PARSE_ERROR"
 
-    expected = int(frame[34:36], 16)
-    actual = sum(frame[2:34].encode("ascii")) & 0xFF
+    checksum_start = 34
+    checksum_end = 36
+    if len(frame) == 42:
+        d["tto"] = {
+            "index": frame[34:36],
+            "page": frame[36:38],
+            "status": frame[38:40],
+        }
+        checksum_start = 40
+        checksum_end = 42
+
+    expected = int(frame[checksum_start:checksum_end], 16)
+    actual = sum(frame[2:checksum_start].encode("ascii")) & 0xFF
     d["checksum_ok"] = expected == actual
+
+    d["suffix"] = None
+    d["read_type"] = "RAW"
+
+    if d["tto"] and (int(d["tto"]["status"], 16) & 0xC0):
+        d["read_type"] = "FSLS"
 
     if len(frame) == 38:
         d["suffix"] = frame[36:38]
         d["read_type"] = "FSLS"
-    else:
-        d["suffix"] = None
-        d["read_type"] = "RAW"
 
     return d
 
@@ -447,7 +476,13 @@ def format_aa(d):
     rdr = d["reader_id"]
     rt = d["read_type"]
     sfx = f" [{d['suffix']}]" if d.get("suffix") else ""
-    return f"TAG  reader={rdr} tag={tag} time={ts} type={rt}{sfx}"
+    tto = ""
+    if d["tto"]:
+        tto = (
+            f" tto=index={d['tto']['index']} page={d['tto']['page']}"
+            f" status={d['tto']['status']}"
+        )
+    return f"TAG  reader={rdr} tag={tag} time={ts} type={rt}{sfx}{tto}"
 
 
 def format_ab(d):
