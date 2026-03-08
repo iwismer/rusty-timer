@@ -20,9 +20,273 @@
     readRaceFilterPreference,
     writeRaceFilterPreference,
   } from "$lib/raceFilterPreference";
-  import { StatusBadge, Card } from "@rusty-timer/shared-ui";
+  import { StatusBadge, Card, AlertBanner } from "@rusty-timer/shared-ui";
+  import {
+    formatReadMode,
+    formatTtoState,
+    formatClockDrift,
+    readerControlDisabled,
+    computeDownloadPercent,
+  } from "@rusty-timer/shared-ui/lib/reader-view-model";
+  import {
+    READ_MODE_OPTIONS,
+    shouldShowTimeoutInput,
+    initialTimeoutDraft,
+    resolveTimeoutSeconds,
+  } from "@rusty-timer/shared-ui/lib/read-mode-form";
+  import { readerStatesStore, downloadProgressStore } from "$lib/stores";
+  import {
+    syncReaderClock,
+    setReaderReadMode,
+    setReaderTto,
+    setReaderRecording,
+    clearReaderRecords,
+    startReaderDownload,
+    refreshReader,
+    reconnectReader,
+  } from "$lib/api";
   import { resolveChipRead } from "$lib/chipResolver";
   import { raceDataStore, ensureRaceDataLoaded } from "$lib/raceDataLoader";
+
+  // Reader control state
+  let expandedReader = $state<string | null>(null);
+  let controlBusy: Record<string, boolean> = $state({});
+  let controlFeedback: Record<
+    string,
+    { kind: "ok" | "err"; message: string } | undefined
+  > = $state({});
+  let readModeDrafts: Record<string, string> = $state({});
+  let readModeTimeoutDrafts: Record<string, string> = $state({});
+
+  function toggleReaderExpand(key: string) {
+    expandedReader = expandedReader === key ? null : key;
+  }
+
+  function readerKey(forwarderId: string, readerIp: string): string {
+    return `${forwarderId}:${readerIp}`;
+  }
+
+  function readModeDraftValue(
+    key: string,
+    info: api.ReaderInfo | null | undefined,
+  ): "raw" | "event" | "fsls" {
+    return ((readModeDrafts[key] as "raw" | "event" | "fsls" | undefined) ??
+      info?.config?.mode ??
+      "raw") as "raw" | "event" | "fsls";
+  }
+
+  function readModeTimeoutDraftValue(
+    key: string,
+    info: api.ReaderInfo | null | undefined,
+  ): string {
+    return (
+      readModeTimeoutDrafts[key] ?? initialTimeoutDraft(info?.config?.timeout)
+    );
+  }
+
+  function updateReadModeDraft(
+    key: string,
+    mode: "raw" | "event" | "fsls",
+    info: api.ReaderInfo | null | undefined,
+  ) {
+    readModeDrafts = { ...readModeDrafts, [key]: mode };
+    if (shouldShowTimeoutInput(mode) && readModeTimeoutDrafts[key] == null) {
+      readModeTimeoutDrafts = {
+        ...readModeTimeoutDrafts,
+        [key]: initialTimeoutDraft(info?.config?.timeout),
+      };
+    }
+  }
+
+  function updateReadModeTimeoutDraft(key: string, value: string) {
+    readModeTimeoutDrafts = { ...readModeTimeoutDrafts, [key]: value };
+  }
+
+  async function handleSyncClock(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+  ) {
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      const resp = await syncReaderClock(forwarderId, readerIp);
+      controlFeedback[key] = {
+        kind: "ok",
+        message: `Clock synced — drift: ${formatClockDrift(resp.reader_info?.clock?.drift_ms)}`,
+      };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "Failed to sync clock",
+      };
+    }
+    controlBusy[key] = false;
+  }
+
+  async function handleSetReadMode(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+    mode: "raw" | "event" | "fsls",
+    timeoutDraft: string,
+    currentTimeout: number | null | undefined,
+  ) {
+    const timeout = resolveTimeoutSeconds(timeoutDraft, currentTimeout);
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      const resp = await setReaderReadMode(
+        forwarderId,
+        readerIp,
+        mode,
+        timeout,
+      );
+      readModeDrafts = { ...readModeDrafts, [key]: mode };
+      readModeTimeoutDrafts = {
+        ...readModeTimeoutDrafts,
+        [key]: String(timeout),
+      };
+      controlFeedback[key] = {
+        kind: "ok",
+        message: shouldShowTimeoutInput(mode)
+          ? `Mode set to ${formatReadMode(mode)} (${timeout}s)`
+          : `Mode set to ${formatReadMode(mode)}`,
+      };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "Set mode failed",
+      };
+    }
+    controlBusy[key] = false;
+  }
+
+  async function handleSetTto(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+    info: api.ReaderInfo | null | undefined,
+  ) {
+    const currentlyEnabled = info?.tto_enabled === true;
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      await setReaderTto(forwarderId, readerIp, !currentlyEnabled);
+      controlFeedback[key] = {
+        kind: "ok",
+        message: currentlyEnabled
+          ? "TTO reporting disabled"
+          : "TTO reporting enabled",
+      };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "TTO toggle failed",
+      };
+    }
+    controlBusy[key] = false;
+  }
+
+  async function handleSetRecording(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+    info: api.ReaderInfo | null | undefined,
+  ) {
+    const currentlyRecording = info?.recording === true;
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      await setReaderRecording(forwarderId, readerIp, !currentlyRecording);
+      controlFeedback[key] = {
+        kind: "ok",
+        message: currentlyRecording ? "Recording stopped" : "Recording started",
+      };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "Toggle recording failed",
+      };
+    }
+    controlBusy[key] = false;
+  }
+
+  async function handleRefresh(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+  ) {
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      await refreshReader(forwarderId, readerIp);
+      controlFeedback[key] = { kind: "ok", message: "Reader info refreshed" };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "Refresh failed",
+      };
+    }
+    controlBusy[key] = false;
+  }
+
+  async function handleClearRecords(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+  ) {
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      await clearReaderRecords(forwarderId, readerIp);
+      controlFeedback[key] = { kind: "ok", message: "Records cleared" };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "Clear failed",
+      };
+    }
+    controlBusy[key] = false;
+  }
+
+  async function handleStartDownload(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+  ) {
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      await startReaderDownload(forwarderId, readerIp);
+      controlFeedback[key] = { kind: "ok", message: "Download started" };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "Download failed",
+      };
+    }
+    controlBusy[key] = false;
+  }
+
+  async function handleReconnect(
+    forwarderId: string,
+    readerIp: string,
+    key: string,
+  ) {
+    controlBusy[key] = true;
+    controlFeedback[key] = undefined;
+    try {
+      await reconnectReader(forwarderId, readerIp);
+      controlFeedback[key] = { kind: "ok", message: "Reconnect requested" };
+    } catch (e: any) {
+      controlFeedback[key] = {
+        kind: "err",
+        message: e.message ?? "Reconnect failed",
+      };
+    }
+    controlBusy[key] = false;
+  }
 
   // Metrics fetching state
   let requestedMetricStreamIds = $state(new Set<string>());
@@ -349,6 +613,23 @@
                     <StatusBadge label="offline" state="err" />
                   </span>
                 {/if}
+                <button
+                  onclick={() =>
+                    toggleReaderExpand(
+                      readerKey(stream.forwarder_id, stream.reader_ip),
+                    )}
+                  class="ml-auto text-xs text-text-muted hover:text-text-primary transition-colors flex items-center gap-1"
+                  aria-expanded={expandedReader ===
+                    readerKey(stream.forwarder_id, stream.reader_ip)}
+                >
+                  Details
+                  <span
+                    class="inline-block transition-transform {expandedReader ===
+                    readerKey(stream.forwarder_id, stream.reader_ip)
+                      ? 'rotate-180'
+                      : ''}">▾</span
+                  >
+                </button>
               </div>
 
               <div class="flex gap-6 mb-3">
@@ -401,6 +682,300 @@
                 <span>&middot;</span>
                 <span>epoch {stream.stream_epoch}</span>
               </div>
+
+              {#if expandedReader === readerKey(stream.forwarder_id, stream.reader_ip)}
+                {@const key = readerKey(stream.forwarder_id, stream.reader_ip)}
+                {@const rs = $readerStatesStore[key]}
+                {@const info = rs?.reader_info}
+                {@const busy = controlBusy[key]}
+                {@const disabled =
+                  !stream.online ||
+                  readerControlDisabled(rs?.state ?? "disconnected", busy)}
+                {@const dp = $downloadProgressStore[key]}
+
+                <div class="mt-4 pt-4 border-t border-border">
+                  {#if !rs}
+                    <p class="text-sm text-text-muted">
+                      No reader data available
+                    </p>
+                  {:else}
+                    <!-- Info grid -->
+                    <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
+                      {#if info?.banner}
+                        <div class="col-span-2">
+                          <span class="text-text-muted">Banner:</span>
+                          <span class="font-mono ml-2 text-xs"
+                            >{info.banner}</span
+                          >
+                        </div>
+                      {/if}
+                      <div>
+                        <span class="text-text-muted">Firmware:</span>
+                        <span class="font-mono ml-2"
+                          >{info?.hardware?.fw_version ?? "\u2014"}</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Hardware:</span>
+                        <span class="font-mono ml-2"
+                          >{info?.hardware?.hw_code ?? "\u2014"}</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Clock Drift:</span>
+                        <span class="font-mono ml-2"
+                          >{formatClockDrift(info?.clock?.drift_ms)}</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Reader State:</span>
+                        <span class="ml-2">
+                          <StatusBadge
+                            label={rs.state}
+                            state={rs.state === "connected"
+                              ? "ok"
+                              : rs.state === "connecting"
+                                ? "warn"
+                                : "err"}
+                          />
+                        </span>
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Read Mode:</span>
+                        <span class="font-mono ml-2"
+                          >{formatReadMode(info?.config?.mode)}</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-text-muted">TTO:</span>
+                        <span class="font-mono ml-2"
+                          >{formatTtoState(info?.tto_enabled)}</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Recording:</span>
+                        <span class="font-mono ml-2"
+                          >{info?.recording == null
+                            ? "\u2014"
+                            : info.recording
+                              ? "Yes"
+                              : "No"}</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Stored Reads:</span>
+                        <span class="font-mono ml-2"
+                          >{info?.estimated_stored_reads?.toLocaleString() ??
+                            "\u2014"}</span
+                        >
+                      </div>
+                    </div>
+
+                    <!-- Read mode controls -->
+                    <div class="col-span-2 mb-4">
+                      <span class="text-sm text-text-muted">Read Mode:</span>
+                      <span
+                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
+                      >
+                        <select
+                          class="px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                          value={readModeDraftValue(key, info)}
+                          onchange={(e) => {
+                            updateReadModeDraft(
+                              key,
+                              (e.currentTarget as HTMLSelectElement).value as
+                                | "raw"
+                                | "event"
+                                | "fsls",
+                              info,
+                            );
+                          }}
+                          {disabled}
+                        >
+                          {#each READ_MODE_OPTIONS as option}
+                            <option value={option.value}>{option.label}</option>
+                          {/each}
+                        </select>
+                        {#if shouldShowTimeoutInput(readModeDraftValue(key, info))}
+                          <label
+                            class="inline-flex items-center gap-1 text-xs text-text-muted"
+                          >
+                            <span>Timeout</span>
+                            <input
+                              class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                              type="number"
+                              min="1"
+                              max="255"
+                              value={readModeTimeoutDraftValue(key, info)}
+                              oninput={(e) => {
+                                updateReadModeTimeoutDraft(
+                                  key,
+                                  (e.currentTarget as HTMLInputElement).value,
+                                );
+                              }}
+                              {disabled}
+                            />
+                            <span>s</span>
+                          </label>
+                        {/if}
+                        <button
+                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={() => {
+                            handleSetReadMode(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                              readModeDraftValue(key, info),
+                              readModeTimeoutDraftValue(key, info),
+                              info?.config?.timeout,
+                            );
+                          }}
+                          {disabled}>Apply</button
+                        >
+                      </span>
+                    </div>
+
+                    <!-- TTO toggle -->
+                    <div class="mb-4">
+                      <span class="text-sm text-text-muted">TTO Bytes:</span>
+                      <span
+                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
+                      >
+                        <span class="font-mono text-sm"
+                          >{formatTtoState(info?.tto_enabled)}</span
+                        >
+                        <button
+                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={() =>
+                            handleSetTto(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                              info,
+                            )}
+                          {disabled}
+                        >
+                          {info?.tto_enabled ? "Disable TTO" : "Enable TTO"}
+                        </button>
+                      </span>
+                    </div>
+
+                    <!-- Action buttons row -->
+                    <div
+                      class="flex items-center gap-3 pt-3 border-t border-border flex-wrap"
+                    >
+                      <button
+                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                        onclick={() =>
+                          handleSyncClock(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                            key,
+                          )}
+                        {disabled}>Sync Clock</button
+                      >
+                      <button
+                        class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                        onclick={() =>
+                          handleRefresh(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                            key,
+                          )}
+                        {disabled}>Refresh</button
+                      >
+                      <button
+                        class={info?.recording
+                          ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                          : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
+                        onclick={() =>
+                          handleSetRecording(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                            key,
+                            info,
+                          )}
+                        {disabled}
+                        >{info?.recording
+                          ? "Stop Recording"
+                          : "Start Recording"}</button
+                      >
+                      <button
+                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                        onclick={() =>
+                          handleStartDownload(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                            key,
+                          )}
+                        {disabled}>Download Reads</button
+                      >
+                      <button
+                        class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                        onclick={() =>
+                          handleClearRecords(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                            key,
+                          )}
+                        {disabled}>Clear Records</button
+                      >
+                      <button
+                        class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                        onclick={() =>
+                          handleReconnect(
+                            stream.forwarder_id,
+                            stream.reader_ip,
+                            key,
+                          )}
+                        disabled={busy}>Reconnect</button
+                      >
+                    </div>
+
+                    <!-- Download progress bar -->
+                    {#if dp?.state === "downloading"}
+                      {@const percent = computeDownloadPercent(
+                        dp,
+                        info?.estimated_stored_reads,
+                      )}
+                      <div
+                        class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
+                      >
+                        <div
+                          class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden"
+                        >
+                          <div
+                            class="h-full bg-accent rounded-full transition-all"
+                            style="width: {percent}%"
+                          ></div>
+                        </div>
+                        <span class="text-xs font-mono whitespace-nowrap">
+                          {dp.reads_received} reads &middot; {percent}%
+                        </span>
+                      </div>
+                    {/if}
+
+                    <!-- Feedback banner -->
+                    {#if controlFeedback[key]}
+                      {@const fb = controlFeedback[key]}
+                      {#if fb}
+                        <div class="mt-3">
+                          <AlertBanner
+                            variant={fb.kind}
+                            message={fb.message}
+                            onDismiss={() => {
+                              controlFeedback = {
+                                ...controlFeedback,
+                                [key]: undefined,
+                              };
+                            }}
+                          />
+                        </div>
+                      {/if}
+                    {/if}
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
