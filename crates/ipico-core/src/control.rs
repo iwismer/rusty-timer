@@ -94,10 +94,19 @@ pub enum Command {
     PrintBanner,
     /// Undocumented 0xe0 initialization probe sent during connection setup.
     InitE0,
-    /// Write to the 0x4b extended-status register. The first byte of `data`
-    /// selects the sub-command (e.g., 0x00/0x01 for erase setup, 0xd0 for
-    /// erase trigger, 0x02/0x07 for download control).
-    SetExtendedStatus { data: Vec<u8> },
+    /// Set the reader's recording state (0x4b sub-cmd 0x00).
+    SetRecordingState { on: bool },
+    /// Set the reader's download/access mode (0x4b sub-cmd 0x01).
+    SetAccessMode { on: bool },
+    /// Initialize download sequence (0x4b sub-cmd 0x02).
+    InitDownload,
+    /// Configure download parameters (0x4b sub-cmd 0x07, params [0x01, 0x05]).
+    /// Parameter meaning unknown, replicated from observed IPICO Connect behavior.
+    ConfigureDownload,
+    /// Clean up after download (0x4b sub-cmd 0x07, param 0x00).
+    CleanupDownload,
+    /// Trigger EEPROM erase (0x4b sub-cmd 0xd0).
+    TriggerErase,
 }
 
 impl Command {
@@ -111,7 +120,12 @@ impl Command {
             Command::SetConfig3 { .. } => INSTR_CONFIG3,
             Command::PrintBanner => INSTR_PRINT_BANNER,
             Command::InitE0 => INSTR_UNKNOWN_E0,
-            Command::SetExtendedStatus { .. } => INSTR_EXT_STATUS,
+            Command::SetRecordingState { .. }
+            | Command::SetAccessMode { .. }
+            | Command::InitDownload
+            | Command::ConfigureDownload
+            | Command::CleanupDownload
+            | Command::TriggerErase => INSTR_EXT_STATUS,
         }
     }
 }
@@ -143,7 +157,12 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
             // 0x07 = modify lower 3 bits of CONFIG3 (mode selection: bits 0..2)
             vec![mode.config3_value(), *timeout, 0x07]
         }
-        Command::SetExtendedStatus { data } => data.clone(),
+        Command::SetRecordingState { on } => vec![0x00, if *on { 0x01 } else { 0x00 }],
+        Command::SetAccessMode { on } => vec![0x01, if *on { 0x01 } else { 0x00 }],
+        Command::InitDownload => vec![0x02],
+        Command::ConfigureDownload => vec![0x07, 0x01, 0x05],
+        Command::CleanupDownload => vec![0x07, 0x00],
+        Command::TriggerErase => vec![0xd0],
         _ => vec![],
     };
 
@@ -629,32 +648,20 @@ mod tests {
     }
 
     #[test]
-    fn encode_set_ext_status_clear_step1() {
-        let frame = encode_command(
-            &Command::SetExtendedStatus {
-                data: vec![0x00, 0x00],
-            },
-            0x00,
-        )
-        .unwrap();
+    fn encode_set_recording_state_off() {
+        let frame = encode_command(&Command::SetRecordingState { on: false }, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00024b000018\r\n");
     }
 
     #[test]
-    fn encode_set_ext_status_clear_step2() {
-        let frame = encode_command(
-            &Command::SetExtendedStatus {
-                data: vec![0x01, 0x00],
-            },
-            0x00,
-        )
-        .unwrap();
+    fn encode_set_access_mode_off() {
+        let frame = encode_command(&Command::SetAccessMode { on: false }, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00024b010019\r\n");
     }
 
     #[test]
-    fn encode_set_ext_status_clear_trigger() {
-        let frame = encode_command(&Command::SetExtendedStatus { data: vec![0xd0] }, 0x00).unwrap();
+    fn encode_trigger_erase() {
+        let frame = encode_command(&Command::TriggerErase, 0x00).unwrap();
         assert_eq!(std::str::from_utf8(&frame).unwrap(), "ab00014bd0eb\r\n");
     }
 
@@ -816,6 +823,14 @@ mod tests {
             Command::GetExtendedStatus,
             Command::GetConfig3,
             Command::InitE0,
+            Command::SetRecordingState { on: true },
+            Command::SetRecordingState { on: false },
+            Command::SetAccessMode { on: true },
+            Command::SetAccessMode { on: false },
+            Command::InitDownload,
+            Command::ConfigureDownload,
+            Command::CleanupDownload,
+            Command::TriggerErase,
         ] {
             let encoded = encode_command(&cmd, 0x00).unwrap();
             let line = &encoded[..encoded.len() - 2]; // strip \r\n
