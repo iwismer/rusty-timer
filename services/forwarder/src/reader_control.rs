@@ -546,11 +546,6 @@ impl DownloadTracker {
         }
         self.download_progress = progress;
         self.stored_data_extent = extent;
-        let _ = self.event_tx.send(DownloadEvent::Downloading {
-            progress: self.download_progress,
-            total: self.stored_data_extent,
-            reads_received: self.reads_received,
-        });
     }
 
     pub fn begin_startup(&mut self) {
@@ -750,6 +745,45 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
     if let Err(()) = poll_clock(client, info).await {
         info.clock = None;
     }
+}
+
+/// Poll reader status, but preserve cached values when an individual poll fails.
+pub async fn run_status_poll_merge_successes(client: &ControlClient, info: &mut ReaderInfo) {
+    let mut merged = info.clone();
+
+    match client.get_extended_status().await {
+        Ok(ext) => {
+            merged.estimated_stored_reads = Some(ext.estimated_stored_reads());
+            merged.recording = Some(ext.recording_state.is_recording());
+        }
+        Err(e) => {
+            warn!("status poll: get_extended_status failed: {e}");
+        }
+    }
+
+    match client.get_config3().await {
+        Ok((mode, timeout)) => {
+            merged.config = Some(Config3Info { mode, timeout });
+        }
+        Err(e) => {
+            warn!("status poll: get_config3 failed: {e}");
+        }
+    }
+
+    let mut tto_polled = merged.clone();
+    if poll_tag_message_format(client, &mut tto_polled)
+        .await
+        .is_ok()
+    {
+        merged.tto_enabled = tto_polled.tto_enabled;
+    }
+
+    let mut clock_polled = merged.clone();
+    if poll_clock(client, &mut clock_polled).await.is_ok() {
+        merged.clock = clock_polled.clock;
+    }
+
+    *info = merged;
 }
 
 async fn poll_tag_message_format(client: &ControlClient, info: &mut ReaderInfo) -> Result<(), ()> {
@@ -1022,15 +1056,6 @@ mod tests {
 
         tracker.update_progress(50, 100);
         assert_eq!(tracker.download_progress(), 50);
-        let ev = rx.try_recv().expect("progress event");
-        assert!(matches!(
-            ev,
-            DownloadEvent::Downloading {
-                progress: 50,
-                total: 100,
-                reads_received: 2,
-            }
-        ));
 
         tracker.complete();
         assert_eq!(*tracker.state(), DownloadState::Complete);
