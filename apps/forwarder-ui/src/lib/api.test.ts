@@ -134,6 +134,50 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("startDownloadReads returns parsed JSON on 202", async () => {
+    const { startDownloadReads } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(202, { status: "started", estimated_reads: 42 }),
+    );
+    const result = await startDownloadReads("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/download-reads",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result).toEqual({ status: "started", estimated_reads: 42 });
+  });
+
+  it("startDownloadReads throws on 409 conflict", async () => {
+    const { startDownloadReads } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(409, { error: "download already in progress" }),
+    );
+    await expect(startDownloadReads("192.168.1.10")).rejects.toThrow(
+      "Download already in progress",
+    );
+  });
+
+  it("startDownloadReads throws on other errors", async () => {
+    const { startDownloadReads } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(500, "Internal Server Error"));
+    await expect(startDownloadReads("192.168.1.10")).rejects.toThrow("-> 500:");
+  });
+
+  it("setReadMode sends mode and timeout", async () => {
+    const { setReadMode } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { mode: "fsls" }));
+
+    await setReadMode("192.168.1.10", "fsls", 10);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/read-mode",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ mode: "fsls", timeout: 10 }),
+      }),
+    );
+  });
+
   it("downloadUpdate returns failed status payload on 409", async () => {
     const { downloadUpdate } = await import("./api");
     mockFetch.mockResolvedValue(
@@ -148,5 +192,116 @@ describe("forwarder api client", () => {
       status: "failed",
       error: "no update available",
     });
+  });
+
+  it("getReaderInfo fetches reader info", async () => {
+    const { getReaderInfo } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { banner: "IPICO v4" }));
+    const info = await getReaderInfo("192.168.1.10");
+    expect(info.banner).toBe("IPICO v4");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/info",
+      expect.any(Object),
+    );
+  });
+
+  it("syncReaderClock calls sync-clock endpoint", async () => {
+    const { syncReaderClock } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, {
+        reader_clock: "2026-03-07T12:00:00.000",
+        clock_drift_ms: 42,
+      }),
+    );
+    const result = await syncReaderClock("192.168.1.10");
+    expect(result.clock_drift_ms).toBe(42);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/sync-clock",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("getReadMode fetches current read mode", async () => {
+    const { getReadMode } = await import("./api");
+    mockFetch.mockResolvedValue(
+      makeResponse(200, { mode: "event", timeout: 5 }),
+    );
+    const result = await getReadMode("192.168.1.10");
+    expect(result.mode).toBe("event");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/read-mode",
+      expect.any(Object),
+    );
+  });
+
+  it("getTtoState fetches current tto state", async () => {
+    const { getTtoState } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { enabled: true }));
+    const result = await getTtoState("192.168.1.10");
+    expect(result.enabled).toBe(true);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/tto",
+      expect.any(Object),
+    );
+  });
+
+  it("setTtoState sends enabled flag", async () => {
+    const { setTtoState } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { enabled: false }));
+
+    const result = await setTtoState("192.168.1.10", false);
+
+    expect(result.enabled).toBe(false);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/tto",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+  });
+
+  it("refreshReader posts to refresh endpoint", async () => {
+    const { refreshReader } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { banner: "IPICO v4" }));
+    await refreshReader("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/refresh",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("clearReaderRecords posts to clear-records endpoint", async () => {
+    const { clearReaderRecords } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await clearReaderRecords("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/clear-records",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("setRecording sends enabled flag", async () => {
+    const { setRecording } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { recording: true }));
+    const result = await setRecording("192.168.1.10", true);
+    expect(result.recording).toBe(true);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/recording",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+      }),
+    );
+  });
+
+  it("reconnectReader posts to reconnect endpoint", async () => {
+    const { reconnectReader } = await import("./api");
+    mockFetch.mockResolvedValue(makeResponse(200, { ok: true }));
+    await reconnectReader("192.168.1.10");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/readers/192.168.1.10/reconnect",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

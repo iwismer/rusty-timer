@@ -35,9 +35,10 @@ rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-ui-http = { path = "../../crates/rt-ui-http" }
 rt-updater = { path = "../../crates/rt-updater" }
 ipico-core = { path = "../../crates/ipico-core" }
+async-stream = "0.3"
 rust-embed = { version = "8", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 rt-test-utils = { path = "../../crates/rt-test-utils" }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }

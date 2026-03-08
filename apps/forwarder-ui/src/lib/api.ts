@@ -1,5 +1,37 @@
 import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
 
+export interface HardwareInfo {
+  fw_version: string;
+  hw_code: number;
+  reader_id: number;
+  config3: number;
+}
+
+export interface Config3Info {
+  mode: "raw" | "event" | "fsls";
+  timeout: number;
+}
+
+export interface TtoState {
+  enabled: boolean;
+}
+
+export interface ClockInfo {
+  reader_clock: string;
+  drift_ms: number;
+}
+
+export interface ReaderInfo {
+  banner?: string | null;
+  hardware?: HardwareInfo | null;
+  config?: Config3Info | null;
+  tto_enabled?: boolean | null;
+  clock?: ClockInfo | null;
+  estimated_stored_reads?: number | null;
+  recording?: boolean | null;
+  connect_failures?: number;
+}
+
 export interface ReaderStatus {
   ip: string;
   state: "connected" | "connecting" | "disconnected";
@@ -8,6 +40,7 @@ export interface ReaderStatus {
   last_seen_secs: number | null;
   local_port: number;
   current_epoch_name?: string | null;
+  reader_info?: ReaderInfo | null;
 }
 
 export interface ForwarderStatus {
@@ -161,4 +194,90 @@ export async function downloadUpdate(): Promise<UpdateStatusResponse> {
     throw new Error(`download update -> ${resp.status}: ${text}`);
   }
   return (await resp.json()) as UpdateStatusResponse;
+}
+
+export async function getReaderInfo(ip: string): Promise<ReaderInfo> {
+  return apiFetch<ReaderInfo>(`/api/v1/readers/${ip}/info`);
+}
+
+export async function syncReaderClock(
+  ip: string,
+): Promise<{ reader_clock: string; clock_drift_ms: number | null }> {
+  return apiFetch(`/api/v1/readers/${ip}/sync-clock`, { method: "POST" });
+}
+
+export async function getReadMode(
+  ip: string,
+): Promise<{ mode: "raw" | "event" | "fsls"; timeout: number }> {
+  return apiFetch(`/api/v1/readers/${ip}/read-mode`);
+}
+
+export async function setReadMode(
+  ip: string,
+  mode: "raw" | "event" | "fsls",
+  timeout = 5,
+): Promise<{ mode: string }> {
+  return apiFetch(`/api/v1/readers/${ip}/read-mode`, {
+    method: "PUT",
+    body: JSON.stringify({ mode, timeout }),
+  });
+}
+
+export async function getTtoState(ip: string): Promise<TtoState> {
+  return apiFetch<TtoState>(`/api/v1/readers/${ip}/tto`);
+}
+
+export async function setTtoState(
+  ip: string,
+  enabled: boolean,
+): Promise<TtoState> {
+  return apiFetch<TtoState>(`/api/v1/readers/${ip}/tto`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function refreshReader(ip: string): Promise<ReaderInfo> {
+  return apiFetch<ReaderInfo>(`/api/v1/readers/${ip}/refresh`, {
+    method: "POST",
+  });
+}
+
+export async function clearReaderRecords(ip: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/v1/readers/${ip}/clear-records`, { method: "POST" });
+}
+
+export interface DownloadReadsResponse {
+  status: "started";
+  estimated_reads: number;
+}
+
+export async function startDownloadReads(
+  ip: string,
+): Promise<DownloadReadsResponse> {
+  try {
+    return await apiFetch<DownloadReadsResponse>(
+      `/api/v1/readers/${ip}/download-reads`,
+      { method: "POST" },
+    );
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes("-> 409:")) {
+      throw new Error("Download already in progress");
+    }
+    throw err;
+  }
+}
+
+export async function setRecording(
+  ip: string,
+  enabled: boolean,
+): Promise<{ recording: boolean }> {
+  return apiFetch(`/api/v1/readers/${ip}/recording`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function reconnectReader(ip: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/v1/readers/${ip}/reconnect`, { method: "POST" });
 }

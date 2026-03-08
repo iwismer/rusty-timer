@@ -80,6 +80,10 @@ cd apps/forwarder-ui && npm run format
 cd apps/receiver-ui && npm run format
 ```
 
+## Tools
+
+- `scripts/parse_pcap.py` — Python script that parses `.pcapng` capture files and decodes IPICO protocol frames from reassembled TCP streams. Use this when you need to understand or debug raw IPICO reader traffic captured in pcapng files (found in `docs/ipico-protocol/captures/`).
+
 ## Important Notes
 
 - Integration tests require Docker (for Postgres via testcontainers-rs)

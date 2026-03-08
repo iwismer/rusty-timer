@@ -22,7 +22,7 @@ use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{Duration, sleep};
@@ -102,6 +102,59 @@ fn chunk_for_replay(events: Vec<ReadEvent>, max_events_per_batch: u32) -> Vec<Ve
         .collect()
 }
 
+fn download_progress_advanced_or_started(
+    was_downloading: &mut bool,
+    last_download_progress: &mut u32,
+    last_download_reads: &mut u32,
+    last_progress_time: &mut tokio::time::Instant,
+    current_progress: u32,
+    current_reads: u32,
+) -> bool {
+    if !*was_downloading {
+        *was_downloading = true;
+        *last_download_progress = current_progress;
+        *last_download_reads = current_reads;
+        *last_progress_time = tokio::time::Instant::now();
+        return true;
+    }
+
+    if current_progress != *last_download_progress || current_reads != *last_download_reads {
+        *last_download_progress = current_progress;
+        *last_download_reads = current_reads;
+        *last_progress_time = tokio::time::Instant::now();
+        return true;
+    }
+
+    false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadStallOutcome {
+    CompleteEmpty,
+    FailStalled,
+}
+
+fn stall_outcome_for_download(
+    reported_extent: u32,
+    saw_download_activity: bool,
+) -> DownloadStallOutcome {
+    if reported_extent == 0 && !saw_download_activity {
+        DownloadStallOutcome::CompleteEmpty
+    } else {
+        DownloadStallOutcome::FailStalled
+    }
+}
+
+async fn fail_active_download(
+    tracker: &tokio::sync::Mutex<forwarder::reader_control::DownloadTracker>,
+    message: String,
+) {
+    let mut dt = tracker.lock().await;
+    if dt.is_active() {
+        dt.fail(message);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
@@ -119,10 +172,14 @@ async fn run_reader(
     let stream_key = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
 
+    let reconnect_notify = Arc::new(Notify::new());
+    status.register_reconnect_notify(&stream_key, reconnect_notify.clone());
+
     loop {
         // Check for shutdown before attempting connect
         if *shutdown_rx.borrow() {
             info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
+            status.deregister_reconnect_notify(&stream_key);
             return;
         }
 
@@ -132,16 +189,19 @@ async fn run_reader(
             .update_reader_state(&stream_key, ReaderConnectionState::Connecting)
             .await;
 
-        let stream = match TcpStream::connect(&target_addr).await {
-            Ok(s) => {
-                logger.log(format!("reader {} connected", reader_ip));
-                backoff_secs = 1; // reset backoff on successful connect
-                status
-                    .update_reader_state(&stream_key, ReaderConnectionState::Connected)
-                    .await;
-                s
-            }
-            Err(e) => {
+        let stream = match tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(&target_addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            other => {
+                let e = match other {
+                    Ok(Err(e)) => e.to_string(),
+                    Err(_) => "connect timeout (5s)".to_string(),
+                    _ => unreachable!(),
+                };
                 logger.log_at(
                     UiLogLevel::Warn,
                     format!(
@@ -153,8 +213,13 @@ async fn run_reader(
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
+                    _ = reconnect_notify.notified() => {
+                        info!(reader_ip = %reader_ip, "reconnect requested during connect backoff");
+                        backoff_secs = 1;
+                    }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
+                            status.deregister_reconnect_notify(&stream_key);
                             return;
                         }
                     }
@@ -163,6 +228,11 @@ async fn run_reader(
                 continue;
             }
         };
+        logger.log(format!("reader {} connected", reader_ip));
+        backoff_secs = 1;
+        status
+            .update_reader_state(&stream_key, ReaderConnectionState::Connected)
+            .await;
 
         // Initialize stream state in journal on first connect
         {
@@ -176,7 +246,178 @@ async fn run_reader(
             }
         }
 
-        let mut reader = BufReader::new(stream);
+        let (read_half, write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half);
+
+        // Set up control channels
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, control_sink) = forwarder::reader_control::ControlClient::new(cmd_tx);
+        let control_client = Arc::new(control_client);
+        status.register_control_client(&stream_key, control_client.clone());
+
+        let download_tracker = Arc::new(tokio::sync::Mutex::new(
+            forwarder::reader_control::DownloadTracker::new(),
+        ));
+        status.register_download_tracker(&stream_key, download_tracker.clone());
+
+        // Writer task: drains command channel to TCP socket
+        let mut writer = write_half;
+        let writer_handle = tokio::spawn(async move {
+            while let Some(frame) = cmd_rx.recv().await {
+                if let Err(e) = writer.write_all(&frame).await {
+                    warn!("control write failed: {e}");
+                    drop(cmd_rx); // Close channel immediately so cmd_tx.send() fails
+                    return;
+                }
+            }
+        });
+
+        // Spawn connect sequence + 30s status polling task.
+        // This runs concurrently with the read loop so that control
+        // responses arriving on the socket can be demuxed to the sink.
+        let poll_client = control_client.clone();
+        let mut poll_shutdown = shutdown_rx.clone();
+        let poll_logger = logger.clone();
+        let poll_reader_ip = reader_ip.clone();
+        let poll_status = status.clone();
+        let poll_stream_key = stream_key.clone();
+        let poll_download_tracker = download_tracker.clone();
+        let poll_handle = tokio::spawn(async move {
+            // Run initial connection sequence
+            let reader_info = forwarder::reader_control::run_connect_sequence(&poll_client).await;
+            if reader_info.connect_failures == 6 {
+                poll_logger.log_at(
+                    rt_ui_log::UiLogLevel::Error,
+                    format!(
+                        "Reader {}: control protocol non-functional — all 6 connect queries failed",
+                        poll_reader_ip,
+                    ),
+                );
+            }
+            poll_logger.log(format!(
+                "reader {} identified: fw={}, stored_reads={}",
+                poll_reader_ip,
+                reader_info
+                    .hardware
+                    .as_ref()
+                    .map(|h| h.fw_version.as_str())
+                    .unwrap_or("?"),
+                reader_info.estimated_stored_reads.unwrap_or(0),
+            ));
+            poll_status
+                .update_reader_info(&poll_stream_key, reader_info.clone())
+                .await;
+
+            // Transition to 10s polling
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            interval.tick().await; // skip first immediate tick
+            let mut info = reader_info;
+            let mut last_download_progress = 0u32;
+            let mut last_download_reads = 0u32;
+            let mut last_progress_time = tokio::time::Instant::now();
+            let mut was_downloading = false;
+            let mut saw_download_activity = false;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
+                        poll_status.update_reader_info(&poll_stream_key, info.clone()).await;
+
+                        // Check download progress
+                        let is_downloading = {
+                            let dt = poll_download_tracker.lock().await;
+                            dt.is_downloading()
+                        };
+
+                        if is_downloading {
+                            match poll_client.get_extended_status().await {
+                                Ok(ext) => {
+                                    let progress = ext.download_progress;
+                                    let extent = ext.stored_data_extent;
+
+                                    let mut dt = poll_download_tracker.lock().await;
+                                    if !dt.is_downloading() {
+                                        was_downloading = false;
+                                        continue;
+                                    }
+
+                                    dt.update_progress(progress, extent);
+
+                                    // Safety timeout: no progress for 30 seconds.
+                                    // If we have never observed any activity, treat this as an
+                                    // empty download and complete cleanly.
+                                    let current_progress = progress;
+                                    let current_reads = dt.reads_received();
+                                    if current_progress > 0 || current_reads > 0 {
+                                        saw_download_activity = true;
+                                    }
+                                    if !download_progress_advanced_or_started(
+                                        &mut was_downloading,
+                                        &mut last_download_progress,
+                                        &mut last_download_reads,
+                                        &mut last_progress_time,
+                                        current_progress,
+                                        current_reads,
+                                    ) && last_progress_time.elapsed() > Duration::from_secs(30)
+                                    {
+                                        drop(dt);
+                                        let stop_result = poll_client.stop_download().await;
+                                        let mut dt = poll_download_tracker.lock().await;
+                                        match stop_result {
+                                            Err(e) => {
+                                                dt.fail(format!("stop_download failed: {}", e))
+                                            }
+                                            Ok(()) => match stall_outcome_for_download(
+                                                extent,
+                                                saw_download_activity,
+                                            ) {
+                                                DownloadStallOutcome::CompleteEmpty => dt.complete(),
+                                                DownloadStallOutcome::FailStalled => {
+                                                    dt.fail(
+                                                        "download stalled: no progress for 30 seconds"
+                                                            .to_owned(),
+                                                    )
+                                                }
+                                            },
+                                        }
+                                        was_downloading = false;
+                                        saw_download_activity = false;
+                                        continue;
+                                    }
+
+                                    if extent > 0 && progress >= extent {
+                                        drop(dt); // release lock before sending commands
+                                        if let Err(e) = poll_client.stop_download().await {
+                                            let mut dt = poll_download_tracker.lock().await;
+                                            dt.fail(format!("stop_download failed: {}", e));
+                                        } else {
+                                            let mut dt = poll_download_tracker.lock().await;
+                                            dt.complete();
+                                        }
+                                        was_downloading = false;
+                                        saw_download_activity = false;
+                                    }
+                                }
+                                Err(error) => {
+                                    fail_active_download(
+                                        &poll_download_tracker,
+                                        format!("download status polling failed: {}", error),
+                                    )
+                                    .await;
+                                    was_downloading = false;
+                                    saw_download_activity = false;
+                                }
+                            }
+                        } else {
+                            was_downloading = false;
+                            saw_download_activity = false;
+                        }
+                    }
+                    _ = poll_shutdown.changed() => break,
+                }
+            }
+        });
+
         let mut frame_buf = Vec::new();
 
         loop {
@@ -188,6 +429,9 @@ async fn run_reader(
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
+                        status.deregister_control_client(&stream_key);
+                        status.deregister_download_tracker(&stream_key);
+                        status.deregister_reconnect_notify(&stream_key);
                         return;
                     }
                     continue;
@@ -200,6 +444,11 @@ async fn run_reader(
                         UiLogLevel::Warn,
                         format!("reader {} read error: {}; reconnecting", reader_ip, e),
                     );
+                    fail_active_download(
+                        &download_tracker,
+                        format!("reader {} read error during download: {}", reader_ip, e),
+                    )
+                    .await;
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
@@ -208,6 +457,11 @@ async fn run_reader(
                         UiLogLevel::Warn,
                         format!("reader {} connection closed; reconnecting", reader_ip),
                     );
+                    fail_active_download(
+                        &download_tracker,
+                        format!("reader {} connection closed during download", reader_ip),
+                    )
+                    .await;
                     mark_reader_disconnected(&status, &stream_key).await;
                     break;
                 }
@@ -233,6 +487,17 @@ async fn run_reader(
                 }
             };
             if raw_line.is_empty() {
+                continue;
+            }
+
+            // Demux: control responses vs tag reads
+            if raw_line.starts_with("ab") {
+                control_sink.feed(raw_line.as_bytes()).await;
+                continue;
+            }
+            if !raw_line.starts_with("aa") {
+                // Non-framed: banner text or other reader output
+                control_sink.feed_banner_line(raw_line.as_bytes()).await;
                 continue;
             }
 
@@ -300,6 +565,11 @@ async fn run_reader(
                 "event journaled"
             );
 
+            {
+                let mut dt = download_tracker.lock().await;
+                dt.record_read();
+            }
+
             // Fan out the exact bytes read from the reader, preserving
             // upstream line framing (for example CRLF).
             let raw_bytes = frame_buf.clone();
@@ -311,6 +581,11 @@ async fn run_reader(
             status.record_read(&stream_key).await;
         }
 
+        writer_handle.abort();
+        poll_handle.abort();
+        status.deregister_control_client(&stream_key);
+        status.deregister_download_tracker(&stream_key);
+
         // Reconnect with backoff
         let delay = Duration::from_secs(backoff_secs);
         info!(
@@ -320,8 +595,13 @@ async fn run_reader(
         );
         tokio::select! {
             _ = sleep(delay) => {}
+            _ = reconnect_notify.notified() => {
+                info!(reader_ip = %reader_ip, "reconnect requested during backoff");
+                backoff_secs = 1;
+            }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
+                    status.deregister_reconnect_notify(&stream_key);
                     return;
                 }
             }
@@ -1523,6 +1803,101 @@ mod tests {
     }
 
     #[test]
+    fn download_progress_baseline_resets_when_download_starts() {
+        let mut was_downloading = false;
+        let mut last_download_progress = 0u32;
+        let mut last_download_reads = 0u32;
+        let mut last_progress_time = tokio::time::Instant::now();
+
+        let started = download_progress_advanced_or_started(
+            &mut was_downloading,
+            &mut last_download_progress,
+            &mut last_download_reads,
+            &mut last_progress_time,
+            0,
+            0,
+        );
+
+        assert!(started, "starting a download must reset stall baseline");
+        assert!(was_downloading);
+        assert_eq!(last_download_progress, 0);
+        assert_eq!(last_download_reads, 0);
+    }
+
+    #[test]
+    fn download_progress_baseline_only_advances_on_change_after_start() {
+        let mut was_downloading = true;
+        let mut last_download_progress = 10u32;
+        let mut last_download_reads = 20u32;
+        let mut last_progress_time = tokio::time::Instant::now();
+
+        let unchanged = download_progress_advanced_or_started(
+            &mut was_downloading,
+            &mut last_download_progress,
+            &mut last_download_reads,
+            &mut last_progress_time,
+            10,
+            20,
+        );
+        assert!(!unchanged);
+
+        let changed = download_progress_advanced_or_started(
+            &mut was_downloading,
+            &mut last_download_progress,
+            &mut last_download_reads,
+            &mut last_progress_time,
+            11,
+            20,
+        );
+        assert!(changed);
+        assert_eq!(last_download_progress, 11);
+        assert_eq!(last_download_reads, 20);
+    }
+
+    #[test]
+    fn stalled_download_without_progress_is_treated_as_empty_completion() {
+        assert_eq!(
+            stall_outcome_for_download(0, false),
+            DownloadStallOutcome::CompleteEmpty
+        );
+    }
+
+    #[test]
+    fn stalled_download_with_nonzero_extent_is_treated_as_error() {
+        assert_eq!(
+            stall_outcome_for_download(1, false),
+            DownloadStallOutcome::FailStalled
+        );
+    }
+
+    #[test]
+    fn stalled_download_after_progress_is_treated_as_error() {
+        assert_eq!(
+            stall_outcome_for_download(1, true),
+            DownloadStallOutcome::FailStalled
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_active_download_marks_downloading_as_error() {
+        let tracker = tokio::sync::Mutex::new(forwarder::reader_control::DownloadTracker::new());
+        {
+            let mut dt = tracker.lock().await;
+            dt.begin_startup();
+            dt.start(42);
+        }
+
+        fail_active_download(&tracker, "connection lost".to_owned()).await;
+
+        let dt = tracker.lock().await;
+        assert!(matches!(
+            dt.state(),
+            forwarder::reader_control::DownloadState::Error(message)
+                if message == "connection lost"
+        ));
+    }
+
+    #[test]
     fn append_read_to_journal_returns_error_when_stream_missing() {
         let temp_dir = tempdir().expect("create tempdir");
         let db_path = temp_dir.path().join("forwarder.sqlite3");
@@ -1704,7 +2079,11 @@ mod tests {
             .write_all(b"aa400000000123450a2a01123018455927a7FS\n")
             .await
             .expect("write fsls read");
-        drop(reader_stream);
+        // Graceful shutdown: the forwarder's connect sequence sends control
+        // commands to the socket; if we drop with unread data the OS may
+        // RST and discard our buffered writes. Shut down the write half
+        // first so the reader sees EOF cleanly.
+        let _ = reader_stream.shutdown().await;
 
         let mut events = Vec::new();
         for _ in 0..50 {

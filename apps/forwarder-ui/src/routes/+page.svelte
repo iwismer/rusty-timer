@@ -15,8 +15,25 @@
     formatLastSeen,
     readerBadgeState,
     readerConnectionSummary,
+    formatClockDrift,
+    formatReadMode,
+    formatTtoState,
+    readerControlDisabled,
+    computeDownloadPercent,
+    computeTickingLastSeen,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
+  import {
+    READ_MODE_OPTIONS,
+    initialTimeoutDraft,
+    resolveTimeoutSeconds,
+    shouldShowTimeoutInput,
+  } from "$lib/read-mode-form";
+  import {
+    subscribeDownloadProgress,
+    type DownloadProgressEvent,
+    type DownloadProgressHandle,
+  } from "$lib/download-progress";
 
   let status = $state<ForwarderStatus | null>(null);
   let error = $state<string | null>(null);
@@ -33,6 +50,23 @@
   let resetEpochFeedback = $state<
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
   >({});
+  let expandedReader = $state<string | null>(null);
+  let readerInfoMap = $state<Record<string, api.ReaderInfo>>({});
+  let readModeDrafts = $state<Record<string, string>>({});
+  let readModeTimeoutDrafts = $state<Record<string, string>>({});
+  let controlBusy = $state<Record<string, boolean>>({});
+  let controlFeedback = $state<
+    Record<string, { kind: "ok" | "err"; message: string } | undefined>
+  >({});
+  let downloadState = $state<Record<string, DownloadProgressEvent | null>>({});
+  let downloadHandles: Record<string, DownloadProgressHandle> = {};
+  let localClockStr = $state("");
+  let readerInfoReceivedAt = $state<Record<string, number>>({});
+  let clockTickNow = $state(Date.now());
+  let readerClockBaseTs = $state<Record<string, number>>({});
+  let readerClockBaseLocal = $state<Record<string, number>>({});
+  let lastSeenBase = $state<Record<string, number | null>>({});
+  let lastSeenReceivedAt = $state<Record<string, number>>({});
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -47,6 +81,19 @@
     error = null;
     try {
       status = await api.getStatus();
+      if (status) {
+        const now = Date.now();
+        for (const r of status.readers) {
+          lastSeenBase = { ...lastSeenBase, [r.ip]: r.last_seen_secs };
+          lastSeenReceivedAt = { ...lastSeenReceivedAt, [r.ip]: now };
+          if (r.reader_info) {
+            readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
+            readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
+            if (r.reader_info.clock?.reader_clock)
+              storeReaderClockBase(r.ip, r.reader_info.clock.reader_clock);
+          }
+        }
+      }
       const [usResult, logsResp] = await Promise.allSettled([
         api.getUpdateStatus(),
         api.getLogs(),
@@ -184,7 +231,359 @@
     }
   }
 
+  function toggleReaderExpand(ip: string) {
+    expandedReader = expandedReader === ip ? null : ip;
+  }
+
+  function readModeDraftValue(
+    ip: string,
+    info: api.ReaderInfo | undefined,
+  ): "raw" | "event" | "fsls" {
+    return (
+      (readModeDrafts[ip] as "raw" | "event" | "fsls" | undefined) ??
+      info?.config?.mode ??
+      "raw"
+    );
+  }
+
+  function readModeTimeoutDraftValue(
+    ip: string,
+    info: api.ReaderInfo | undefined,
+  ) {
+    return (
+      readModeTimeoutDrafts[ip] ?? initialTimeoutDraft(info?.config?.timeout)
+    );
+  }
+
+  function updateReadModeDraft(
+    ip: string,
+    mode: "raw" | "event" | "fsls",
+    info: api.ReaderInfo | undefined,
+  ) {
+    readModeDrafts = { ...readModeDrafts, [ip]: mode };
+    if (shouldShowTimeoutInput(mode) && readModeTimeoutDrafts[ip] == null) {
+      readModeTimeoutDrafts = {
+        ...readModeTimeoutDrafts,
+        [ip]: initialTimeoutDraft(info?.config?.timeout),
+      };
+    }
+  }
+
+  function updateReadModeTimeoutDraft(ip: string, value: string) {
+    readModeTimeoutDrafts = { ...readModeTimeoutDrafts, [ip]: value };
+  }
+
+  function readerDetailsId(ip: string): string {
+    return `reader-details-${ip.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  }
+
+  async function handleSyncClock(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.syncReaderClock(ip);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: {
+          ...readerInfoMap[ip],
+          clock: {
+            reader_clock: result.reader_clock,
+            drift_ms: result.clock_drift_ms ?? 0,
+          },
+        },
+      };
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+      if (result.reader_clock) storeReaderClockBase(ip, result.reader_clock);
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "ok", message: `Clock synced: ${result.reader_clock}` },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Sync failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleSetReadMode(
+    ip: string,
+    mode: "raw" | "event" | "fsls",
+    timeoutDraft: string,
+    currentTimeout: number | null | undefined,
+  ) {
+    const timeout = resolveTimeoutSeconds(timeoutDraft, currentTimeout);
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.setReadMode(ip, mode, timeout);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: {
+          ...readerInfoMap[ip],
+          config: {
+            mode: result.mode as "raw" | "event" | "fsls",
+            timeout,
+          },
+        },
+      };
+      readModeDrafts = { ...readModeDrafts, [ip]: result.mode };
+      readModeTimeoutDrafts = {
+        ...readModeTimeoutDrafts,
+        [ip]: String(timeout),
+      };
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: {
+          kind: "ok",
+          message: shouldShowTimeoutInput(result.mode)
+            ? `Mode set to ${formatReadMode(result.mode)} (${timeout}s)`
+            : `Mode set to ${formatReadMode(result.mode)}`,
+        },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Set mode failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleRefreshReader(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    try {
+      const info = await api.refreshReader(ip);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], ...info },
+      };
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+      if (info.clock?.reader_clock)
+        storeReaderClockBase(ip, info.clock.reader_clock);
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Refresh failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleClearRecords(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      await api.clearReaderRecords(ip);
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "ok", message: "Records cleared" },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Clear failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleReconnect(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      await api.reconnectReader(ip);
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "ok", message: "Reconnect requested" },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Reconnect failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleToggleRecording(ip: string) {
+    const info = readerInfoMap[ip];
+    const currentlyRecording = info?.recording === true;
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.setRecording(ip, !currentlyRecording);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], recording: result.recording },
+      };
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: {
+          kind: "ok",
+          message: result.recording ? "Recording started" : "Recording stopped",
+        },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Toggle recording failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleToggleTto(ip: string) {
+    const info = readerInfoMap[ip];
+    const currentlyEnabled = info?.tto_enabled === true;
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    try {
+      const result = await api.setTtoState(ip, !currentlyEnabled);
+      readerInfoMap = {
+        ...readerInfoMap,
+        [ip]: { ...readerInfoMap[ip], tto_enabled: result.enabled },
+      };
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: {
+          kind: "ok",
+          message: result.enabled
+            ? "TTO reporting enabled"
+            : "TTO reporting disabled",
+        },
+      };
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `TTO toggle failed: ${e}` },
+      };
+    } finally {
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  async function handleDownloadReads(ip: string) {
+    controlBusy = { ...controlBusy, [ip]: true };
+    controlFeedback = { ...controlFeedback, [ip]: undefined };
+    downloadState = { ...downloadState, [ip]: null };
+
+    try {
+      await api.startDownloadReads(ip);
+
+      // Open SSE to track progress
+      downloadHandles[ip]?.close();
+      downloadHandles[ip] = subscribeDownloadProgress(
+        ip,
+        (event) => {
+          downloadState = { ...downloadState, [ip]: event };
+          if (event.state === "complete") {
+            controlFeedback = {
+              ...controlFeedback,
+              [ip]: {
+                kind: "ok",
+                message: `Download complete: ${event.reads_received} reads received`,
+              },
+            };
+            controlBusy = { ...controlBusy, [ip]: false };
+            delete downloadHandles[ip];
+          } else if (event.state === "error") {
+            controlFeedback = {
+              ...controlFeedback,
+              [ip]: {
+                kind: "err",
+                message: `Download failed: ${event.message}`,
+              },
+            };
+            controlBusy = { ...controlBusy, [ip]: false };
+            delete downloadHandles[ip];
+          }
+        },
+        () => {
+          // SSE connection error
+          controlFeedback = {
+            ...controlFeedback,
+            [ip]: {
+              kind: "err",
+              message: "Lost connection to download progress",
+            },
+          };
+          controlBusy = { ...controlBusy, [ip]: false };
+          downloadState = { ...downloadState, [ip]: null };
+          delete downloadHandles[ip];
+        },
+      );
+    } catch (e) {
+      controlFeedback = {
+        ...controlFeedback,
+        [ip]: { kind: "err", message: `Download failed: ${e}` },
+      };
+      controlBusy = { ...controlBusy, [ip]: false };
+    }
+  }
+
+  let clockInterval: ReturnType<typeof setInterval>;
+
+  function updateLocalClock() {
+    const now = new Date();
+    const y = now.getFullYear();
+    const mo = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    const h = String(now.getHours()).padStart(2, "0");
+    const mi = String(now.getMinutes()).padStart(2, "0");
+    const s = String(now.getSeconds()).padStart(2, "0");
+    localClockStr = `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+    clockTickNow = Date.now();
+  }
+
+  function parseReaderClock(iso: string): number {
+    // Parse as UTC to avoid timezone ambiguity
+    const normalized = iso.replace(" ", "T");
+    const withZ = normalized.endsWith("Z") ? normalized : normalized + "Z";
+    return new Date(withZ).getTime();
+  }
+
+  function storeReaderClockBase(ip: string, clockStr: string) {
+    const ts = parseReaderClock(clockStr);
+    if (!isNaN(ts)) {
+      readerClockBaseTs = { ...readerClockBaseTs, [ip]: ts };
+      readerClockBaseLocal = { ...readerClockBaseLocal, [ip]: Date.now() };
+    }
+  }
+
+  function tickingLastSeen(ip: string): number | null {
+    return computeTickingLastSeen(
+      lastSeenBase[ip] ?? null,
+      lastSeenReceivedAt[ip] ?? null,
+      clockTickNow,
+    );
+  }
+
+  function tickingReaderClock(ip: string): string {
+    const baseTs = readerClockBaseTs[ip];
+    const baseLocal = readerClockBaseLocal[ip];
+    if (baseTs == null || baseLocal == null) return "\u2014";
+    const elapsed = clockTickNow - baseLocal;
+    const now = new Date(baseTs + elapsed);
+    const y = now.getUTCFullYear();
+    const mo = String(now.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(now.getUTCDate()).padStart(2, "0");
+    const h = String(now.getUTCHours()).padStart(2, "0");
+    const mi = String(now.getUTCMinutes()).padStart(2, "0");
+    const s = String(now.getUTCSeconds()).padStart(2, "0");
+    return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+  }
+
   onMount(() => {
+    updateLocalClock();
+    clockInterval = setInterval(updateLocalClock, 1000);
     loadAll();
     initSSE({
       onStatusChanged: (data) => {
@@ -203,10 +602,28 @@
             r.ip === reader.ip ? reader : r,
           );
           status = { ...status, readers };
+          lastSeenBase = {
+            ...lastSeenBase,
+            [reader.ip]: reader.last_seen_secs,
+          };
+          lastSeenReceivedAt = {
+            ...lastSeenReceivedAt,
+            [reader.ip]: Date.now(),
+          };
         }
       },
       onLogEntry: (entry) => {
         logs = pushLogEntry(logs, entry);
+      },
+      onReaderInfoUpdated: (data) => {
+        const { ip, ...info } = data;
+        readerInfoMap = {
+          ...readerInfoMap,
+          [ip]: { ...readerInfoMap[ip], ...info },
+        };
+        readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
+        if (info.clock?.reader_clock)
+          storeReaderClockBase(ip, info.clock.reader_clock);
       },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {
@@ -230,7 +647,13 @@
     });
   });
 
-  onDestroy(() => destroySSE());
+  onDestroy(() => {
+    clearInterval(clockInterval);
+    destroySSE();
+    for (const handle of Object.values(downloadHandles)) {
+      handle.close();
+    }
+  });
 </script>
 
 <main class="max-w-[900px] mx-auto px-6 py-6">
@@ -330,150 +753,377 @@
       {#if status.readers.length === 0}
         <p class="text-sm text-text-muted m-0">No readers configured.</p>
       {:else}
-        <div class="overflow-x-auto -mx-4 -mb-4">
-          <table class="w-full text-sm border-collapse">
-            <thead>
-              <tr class="border-b border-border">
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
+        <div class="flex flex-col gap-4">
+          {#each status.readers as reader}
+            {@const info = readerInfoMap[reader.ip]}
+            <Card borderStatus={readerBadgeState(reader.state)}>
+              {#snippet header()}
+                <span class="font-mono text-sm text-text-primary"
+                  >{reader.ip}</span
                 >
-                  Reader IP
-                </th>
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Status
-                </th>
-                <th
-                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Reads (session)
-                </th>
-                <th
-                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Reads (total)
-                </th>
-                <th
-                  class="text-right px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Local Port
-                </th>
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Last seen
-                </th>
-                <th
-                  class="text-left px-4 py-2.5 text-xs font-medium text-text-secondary"
-                >
-                  Current epoch name
-                </th>
-                <th class="px-4 py-2.5"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each status.readers as reader}
-                <tr class="border-b border-border last:border-b-0">
-                  <td class="px-4 py-2.5 font-mono text-text-primary">
-                    {reader.ip}
-                  </td>
-                  <td class="px-4 py-2.5">
-                    <StatusBadge
-                      label={reader.state}
-                      state={readerBadgeState(reader.state)}
-                    />
-                  </td>
-                  <td
-                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                <StatusBadge
+                  label={reader.state}
+                  state={readerBadgeState(reader.state)}
+                />
+                {#if reader.state !== "connected"}
+                  <button
+                    class="ml-2 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    onclick={() => handleReconnect(reader.ip)}
+                    disabled={controlBusy[reader.ip]}
                   >
-                    {reader.reads_session.toLocaleString()}
-                  </td>
-                  <td
-                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                    Reconnect
+                  </button>
+                {/if}
+                <button
+                  class="ml-auto inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                  onclick={() => toggleReaderExpand(reader.ip)}
+                  aria-expanded={expandedReader === reader.ip}
+                  aria-controls={readerDetailsId(reader.ip)}
+                  aria-label={expandedReader === reader.ip
+                    ? "Hide details"
+                    : "Show details"}
+                >
+                  <span
+                    class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
+                    >▾</span
                   >
-                    {reader.reads_total.toLocaleString()}
-                  </td>
-                  <td
-                    class="px-4 py-2.5 text-right font-mono text-text-primary"
+                  <span>Details</span>
+                </button>
+              {/snippet}
+
+              <!-- Always-visible stats row -->
+              <div class="flex flex-wrap gap-x-6 gap-y-2 text-sm mb-3">
+                <div>
+                  <span class="text-text-muted">Reads (session):</span>
+                  <span class="font-mono ml-1 text-text-primary"
+                    >{reader.reads_session.toLocaleString()}</span
                   >
-                    {reader.local_port}
-                  </td>
-                  <td class="px-4 py-2.5 text-xs text-text-secondary">
-                    {formatLastSeen(reader.last_seen_secs)}
-                  </td>
-                  <td class="px-4 py-2.5">
-                    <div class="flex flex-col gap-1">
-                      {#if reader.current_epoch_name}
-                        <span class="text-xs text-text-muted font-mono">
-                          Active: {reader.current_epoch_name}
-                        </span>
-                      {/if}
-                      <div class="flex items-center gap-2">
-                        <input
-                          type="text"
-                          class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
-                          placeholder="Set name"
-                          value={epochNameDrafts[reader.ip] ?? ""}
-                          oninput={(event) =>
-                            updateEpochNameDraft(
-                              reader.ip,
-                              (event.currentTarget as HTMLInputElement).value,
-                            )}
-                          disabled={epochNameBusy[reader.ip] === true}
-                        />
-                        <button
-                          onclick={() =>
-                            handleSetCurrentEpochName(
-                              reader.ip,
-                              (epochNameDrafts[reader.ip] ?? "").trim() || null,
-                            )}
-                          class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                          disabled={epochNameBusy[reader.ip] === true}
-                        >
-                          Save
-                        </button>
-                      </div>
-                      {#if epochNameFeedback[reader.ip]}
-                        {@const feedback = epochNameFeedback[reader.ip]}
-                        {#if feedback}
-                          <span
-                            class={`text-xs ${
-                              feedback.kind === "ok"
-                                ? "text-status-ok"
-                                : "text-status-err"
-                            }`}
-                          >
-                            {feedback.message}
-                          </span>
-                        {/if}
-                      {/if}
-                    </div>
-                  </td>
-                  <td class="px-4 py-2.5 text-right">
-                    <div class="flex flex-col items-end gap-1">
-                      <button
-                        onclick={() => handleResetEpoch(reader.ip)}
-                        class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                </div>
+                <div>
+                  <span class="text-text-muted">Reads (total):</span>
+                  <span class="font-mono ml-1 text-text-primary"
+                    >{reader.reads_total.toLocaleString()}</span
+                  >
+                </div>
+                <div>
+                  <span class="text-text-muted">Local Port:</span>
+                  <span class="font-mono ml-1 text-text-primary"
+                    >{reader.local_port}</span
+                  >
+                </div>
+                <div>
+                  <span class="text-text-muted">Last seen:</span>
+                  <span class="ml-1 text-text-secondary"
+                    >{formatLastSeen(tickingLastSeen(reader.ip))}</span
+                  >
+                </div>
+              </div>
+
+              <!-- Epoch name row -->
+              <div class="flex flex-col gap-1">
+                {#if reader.current_epoch_name}
+                  <span class="text-xs text-text-muted font-mono">
+                    Active epoch: {reader.current_epoch_name}
+                  </span>
+                {/if}
+                <div class="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
+                    placeholder="Set epoch name"
+                    value={epochNameDrafts[reader.ip] ?? ""}
+                    oninput={(event) =>
+                      updateEpochNameDraft(
+                        reader.ip,
+                        (event.currentTarget as HTMLInputElement).value,
+                      )}
+                    disabled={epochNameBusy[reader.ip] === true}
+                  />
+                  <button
+                    onclick={() =>
+                      handleSetCurrentEpochName(
+                        reader.ip,
+                        (epochNameDrafts[reader.ip] ?? "").trim() || null,
+                      )}
+                    class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={epochNameBusy[reader.ip] === true}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onclick={() => handleResetEpoch(reader.ip)}
+                    class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                  >
+                    Advance Epoch
+                  </button>
+                </div>
+                {#if epochNameFeedback[reader.ip]}
+                  {@const feedback = epochNameFeedback[reader.ip]}
+                  {#if feedback}
+                    <span
+                      class={`text-xs ${feedback.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
+                    >
+                      {feedback.message}
+                    </span>
+                  {/if}
+                {/if}
+                {#if resetEpochFeedback[reader.ip]}
+                  {@const rf = resetEpochFeedback[reader.ip]}
+                  {#if rf}
+                    <span
+                      class={`text-xs ${rf.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
+                    >
+                      {rf.message}
+                    </span>
+                  {/if}
+                {/if}
+              </div>
+
+              <!-- Expanded details -->
+              {#if expandedReader === reader.ip}
+                <div
+                  id={readerDetailsId(reader.ip)}
+                  class="mt-4 pt-4 border-t border-border"
+                >
+                  <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
+                    <div class="col-span-2">
+                      <span class="text-text-muted">Banner:</span>
+                      <span class="font-mono ml-2 text-xs"
+                        >{info?.banner ?? "\u2014"}</span
                       >
-                        Advance Epoch
-                      </button>
-                      {#if resetEpochFeedback[reader.ip]}
-                        {@const rf = resetEpochFeedback[reader.ip]}
-                        {#if rf}
-                          <span
-                            class={`text-xs ${rf.kind === "ok" ? "text-status-ok" : "text-status-err"}`}
-                          >
-                            {rf.message}
-                          </span>
-                        {/if}
-                      {/if}
                     </div>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+                    <div>
+                      <span class="text-text-muted">Firmware:</span>
+                      <span class="font-mono ml-2"
+                        >{info?.hardware?.fw_version ?? "\u2014"}</span
+                      >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Hardware:</span>
+                      <span class="font-mono ml-2"
+                        >{info?.hardware?.hw_code != null
+                          ? `0x${info.hardware.hw_code.toString(16)}`
+                          : "\u2014"}</span
+                      >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Reader Clock:</span>
+                      <span class="font-mono ml-2"
+                        >{tickingReaderClock(reader.ip)}</span
+                      >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Clock Drift:</span>
+                      <span class="font-mono ml-2"
+                        >{formatClockDrift(info?.clock?.drift_ms)}</span
+                      >
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Local Clock:</span>
+                      <span class="font-mono ml-2">{localClockStr}</span>
+                    </div>
+                    <div>
+                      <span class="text-text-muted">Last Refresh:</span>
+                      <span class="ml-2"
+                        >{#if readerInfoReceivedAt[reader.ip]}{formatLastSeen(
+                            Math.round(
+                              (clockTickNow - readerInfoReceivedAt[reader.ip]) /
+                                1000,
+                            ),
+                          )}{:else}&mdash;{/if}</span
+                      >
+                    </div>
+                    <div class="col-span-2">
+                      <span class="text-text-muted">Read Mode:</span>
+                      <span
+                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
+                      >
+                        <select
+                          class="px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                          value={readModeDraftValue(reader.ip, info)}
+                          onchange={(e) => {
+                            e.stopPropagation();
+                            updateReadModeDraft(
+                              reader.ip,
+                              (e.currentTarget as HTMLSelectElement).value as
+                                | "raw"
+                                | "event"
+                                | "fsls",
+                              info,
+                            );
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}
+                        >
+                          {#each READ_MODE_OPTIONS as option}
+                            <option value={option.value}>{option.label}</option>
+                          {/each}
+                        </select>
+                        {#if shouldShowTimeoutInput(readModeDraftValue(reader.ip, info))}
+                          <label
+                            class="inline-flex items-center gap-1 text-xs text-text-secondary"
+                          >
+                            <span>Timeout</span>
+                            <input
+                              class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
+                              type="number"
+                              min="1"
+                              max="255"
+                              value={readModeTimeoutDraftValue(reader.ip, info)}
+                              oninput={(e) => {
+                                e.stopPropagation();
+                                updateReadModeTimeoutDraft(
+                                  reader.ip,
+                                  (e.currentTarget as HTMLInputElement).value,
+                                );
+                              }}
+                              disabled={controlBusy[reader.ip] ||
+                                reader.state !== "connected"}
+                            />
+                            <span>s</span>
+                          </label>
+                        {/if}
+                        <button
+                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleSetReadMode(
+                              reader.ip,
+                              readModeDraftValue(reader.ip, info),
+                              readModeTimeoutDraftValue(reader.ip, info),
+                              info?.config?.timeout,
+                            );
+                          }}
+                          disabled={controlBusy[reader.ip] ||
+                            reader.state !== "connected"}>Apply</button
+                        >
+                      </span>
+                    </div>
+                    <div class="col-span-2">
+                      <span class="text-text-muted">TTO Bytes:</span>
+                      <span
+                        class="ml-2 inline-flex items-center gap-2 flex-wrap"
+                      >
+                        <span
+                          class="px-2 py-0.5 text-xs rounded-full bg-surface-0 text-text-secondary border border-border"
+                        >
+                          {formatTtoState(info?.tto_enabled)}
+                        </span>
+                        <button
+                          class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            handleToggleTto(reader.ip);
+                          }}
+                          disabled={readerControlDisabled(
+                            reader.state,
+                            controlBusy[reader.ip],
+                          )}
+                        >
+                          {info?.tto_enabled ? "Disable TTO" : "Enable TTO"}
+                        </button>
+                      </span>
+                    </div>
+                  </div>
+                  <div
+                    class="flex items-center gap-3 pt-3 border-t border-border flex-wrap"
+                  >
+                    <button
+                      class={btnPrimary}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleSyncClock(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Sync Clock</button
+                    >
+                    <button
+                      class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleRefreshReader(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Refresh</button
+                    >
+                    <button
+                      class={info?.recording
+                        ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                        : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleToggleRecording(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}
+                      >{info?.recording
+                        ? "Stop Recording"
+                        : "Start Recording"}</button
+                    >
+                    <button
+                      class={btnPrimary}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleDownloadReads(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Download Reads</button
+                    >
+                    <button
+                      class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleClearRecords(reader.ip);
+                      }}
+                      disabled={controlBusy[reader.ip] ||
+                        reader.state !== "connected"}>Clear Records</button
+                    >
+                  </div>
+                  {#if downloadState[reader.ip]?.state === "downloading"}
+                    {@const dl = downloadState[reader.ip]}
+                    {@const percent = computeDownloadPercent(
+                      dl,
+                      info?.estimated_stored_reads,
+                    )}
+                    <div
+                      class="mt-3 flex items-center gap-3 text-sm text-text-secondary"
+                    >
+                      <div
+                        class="flex-1 h-2 rounded-full bg-surface-2 overflow-hidden"
+                      >
+                        <div
+                          class="h-full bg-accent rounded-full transition-all"
+                          style="width: {percent}%"
+                        ></div>
+                      </div>
+                      <span class="text-xs font-mono whitespace-nowrap">
+                        {dl?.state === "downloading" || dl?.state === "complete"
+                          ? dl.reads_received
+                          : 0} reads &middot; {percent}%
+                      </span>
+                    </div>
+                  {/if}
+                  {#if controlFeedback[reader.ip]}
+                    {@const fb = controlFeedback[reader.ip]}
+                    {#if fb}
+                      <div class="mt-3">
+                        <AlertBanner
+                          variant={fb.kind}
+                          message={fb.message}
+                          onDismiss={() => {
+                            controlFeedback = {
+                              ...controlFeedback,
+                              [reader.ip]: undefined,
+                            };
+                          }}
+                        />
+                      </div>
+                    {/if}
+                  {/if}
+                </div>
+              {/if}
+            </Card>
+          {/each}
         </div>
       {/if}
     </Card>
