@@ -10,8 +10,19 @@ use rt_protocol::{ReaderControlAction, ReaderControlResponse};
 use serde::Deserialize;
 use std::time::Duration;
 
+/// Timeout for reader control request/response round trips.
+/// Longer-running operations (SyncClock ~3s, ClearRecords ~10s) are handled
+/// via fire-and-forget or background tasks on the forwarder side, so this
+/// timeout only covers short command-response cycles.
 const READER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Proxy an HTTP reader-control request to a connected forwarder via its
+/// command channel. Looks up the forwarder's mpsc sender, sends the command,
+/// then awaits a oneshot reply. The read lock on `forwarder_command_senders`
+/// is dropped before the send to avoid holding it across the await.
+///
+/// Returns the forwarder's `ReaderControlResponse`, or an HTTP error if the
+/// forwarder is not connected, the queue is saturated, or the response times out.
 async fn send_reader_control(
     state: &AppState,
     forwarder_id: &str,
@@ -91,6 +102,10 @@ async fn send_fire_and_forget(
     drop(senders);
 
     let request_id = uuid::Uuid::new_v4().to_string();
+    // reply_rx intentionally dropped -- we don't wait for the forwarder's response.
+    // The forwarder will process the command but its response will be discarded.
+    // The pending_reader_controls map in ws_forwarder will hold the entry until
+    // it expires via expire_pending_requests (10s), which is acceptable overhead.
     let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
     let cmd = ForwarderCommand::ReaderControl {
         request_id,
