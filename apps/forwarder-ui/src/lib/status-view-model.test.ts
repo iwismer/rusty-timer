@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  formatLastSeen,
+  formatLastRead,
   readerBadgeState,
   readerConnectionSummary,
   formatClockDrift,
@@ -8,18 +8,18 @@ import {
   formatTtoState,
   readerControlDisabled,
   computeDownloadPercent,
-  computeTickingLastSeen,
+  computeTickingLastRead,
 } from "./status-view-model";
 
-describe("formatLastSeen", () => {
+describe("formatLastRead", () => {
   it("formats null as never", () => {
-    expect(formatLastSeen(null)).toBe("never");
+    expect(formatLastRead(null)).toBe("never");
   });
 
   it("formats seconds/minutes/hours", () => {
-    expect(formatLastSeen(12)).toBe("12s ago");
-    expect(formatLastSeen(125)).toBe("2m ago");
-    expect(formatLastSeen(7200)).toBe("2h ago");
+    expect(formatLastRead(12)).toBe("12s ago");
+    expect(formatLastRead(125)).toBe("2m ago");
+    expect(formatLastRead(7200)).toBe("2h ago");
   });
 });
 
@@ -39,7 +39,7 @@ describe("readerConnectionSummary", () => {
         state: "connected",
         reads_session: 0,
         reads_total: 0,
-        last_seen_secs: null,
+        last_read_secs: null,
         local_port: 10001,
       },
       {
@@ -47,7 +47,7 @@ describe("readerConnectionSummary", () => {
         state: "disconnected",
         reads_session: 0,
         reads_total: 0,
-        last_seen_secs: null,
+        last_read_secs: null,
         local_port: 10002,
       },
       {
@@ -55,7 +55,7 @@ describe("readerConnectionSummary", () => {
         state: "connected",
         reads_session: 0,
         reads_total: 0,
-        last_seen_secs: null,
+        last_read_secs: null,
         local_port: 10003,
       },
     ]);
@@ -153,28 +153,28 @@ describe("readerControlDisabled", () => {
   });
 });
 
-describe("computeTickingLastSeen", () => {
+describe("computeTickingLastRead", () => {
   it("returns null when base is null", () => {
-    expect(computeTickingLastSeen(null, 1000, 2000)).toBe(null);
+    expect(computeTickingLastRead(null, 1000, 2000)).toBe(null);
   });
 
   it("returns base when receivedAt is null", () => {
-    expect(computeTickingLastSeen(5, null, 2000)).toBe(5);
+    expect(computeTickingLastRead(5, null, 2000)).toBe(5);
   });
 
   it("adds elapsed seconds to base", () => {
-    expect(computeTickingLastSeen(5, 10000, 13000)).toBe(8);
+    expect(computeTickingLastRead(5, 10000, 13000)).toBe(8);
   });
 
   it("floors partial seconds", () => {
-    expect(computeTickingLastSeen(5, 10000, 12999)).toBe(7);
+    expect(computeTickingLastRead(5, 10000, 12999)).toBe(7);
   });
 
   it("handles zero base", () => {
-    expect(computeTickingLastSeen(0, 10000, 11500)).toBe(1);
+    expect(computeTickingLastRead(0, 10000, 11500)).toBe(1);
   });
 
   it("clamps elapsed to zero when now is before receivedAt", () => {
-    expect(computeTickingLastSeen(2, 10000, 9500)).toBe(2);
+    expect(computeTickingLastRead(2, 10000, 9500)).toBe(2);
   });
 });

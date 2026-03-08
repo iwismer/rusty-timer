@@ -13,7 +13,7 @@ pub enum ForwarderUiEvent {
         state: String,
         reads_session: u64,
         reads_total: i64,
-        last_seen_secs: Option<u64>,
+        last_read_secs: Option<u64>,
         local_port: u16,
         current_epoch_name: Option<String>,
     },
@@ -53,7 +53,7 @@ mod tests {
             state: "connected".to_owned(),
             reads_session: 42,
             reads_total: 100,
-            last_seen_secs: Some(3),
+            last_read_secs: Some(3),
             local_port: 10010,
             current_epoch_name: Some("Race Day".to_owned()),
         };

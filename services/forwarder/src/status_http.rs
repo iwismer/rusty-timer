@@ -476,7 +476,7 @@ impl StatusServer {
                     state: state_str.to_owned(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
@@ -500,7 +500,7 @@ impl StatusServer {
                     state: state_str.to_owned(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
@@ -526,7 +526,7 @@ impl StatusServer {
                     .to_owned(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
@@ -1679,7 +1679,7 @@ struct ReaderStatusJson {
     state: String,
     reads_session: u64,
     reads_total: i64,
-    last_seen_secs: Option<u64>,
+    last_read_secs: Option<u64>,
     local_port: u16,
     current_epoch_name: Option<String>,
     reader_info: Option<crate::reader_control::ReaderInfo>,
@@ -1703,7 +1703,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 state: state_str.to_owned(),
                 reads_session: r.reads_since_restart,
                 reads_total: r.reads_total,
-                last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                 local_port: r.local_port,
                 current_epoch_name: r.current_epoch_name.clone(),
                 reader_info: r.reader_info.clone(),
@@ -2813,7 +2813,7 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
                     state: state_str.to_owned(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
