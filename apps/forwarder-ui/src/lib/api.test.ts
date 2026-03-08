@@ -178,6 +178,17 @@ describe("forwarder api client", () => {
     );
   });
 
+  it("applyUpdate throws ApiError on non-200 response", async () => {
+    const { applyUpdate } = await import("./api");
+    const { ApiError } = await import("@rusty-timer/shared-ui/lib/api-helpers");
+    mockFetch.mockResolvedValue(makeResponse(500, "Internal Server Error"));
+    await expect(applyUpdate()).rejects.toThrow(ApiError);
+    await expect(async () => {
+      mockFetch.mockResolvedValue(makeResponse(500, "Internal Server Error"));
+      await applyUpdate();
+    }).rejects.toThrow("-> 500:");
+  });
+
   it("downloadUpdate throws on 409 conflict", async () => {
     const { downloadUpdate } = await import("./api");
     mockFetch.mockResolvedValue(
@@ -186,6 +197,17 @@ describe("forwarder api client", () => {
     await expect(downloadUpdate()).rejects.toThrow(
       "Download already in progress",
     );
+  });
+
+  it("downloadUpdate throws ApiError on server error", async () => {
+    const { downloadUpdate } = await import("./api");
+    const { ApiError } = await import("@rusty-timer/shared-ui/lib/api-helpers");
+    mockFetch.mockResolvedValue(makeResponse(503, "Service Unavailable"));
+    await expect(downloadUpdate()).rejects.toThrow(ApiError);
+    await expect(async () => {
+      mockFetch.mockResolvedValue(makeResponse(503, "Service Unavailable"));
+      await downloadUpdate();
+    }).rejects.toThrow("-> 503:");
   });
 
   it("getReaderInfo fetches reader info", async () => {
