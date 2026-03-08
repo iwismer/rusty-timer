@@ -460,7 +460,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 let cached = CachedReaderState {
                                     forwarder_id: device_id.clone(),
                                     reader_ip: update.reader_ip.clone(),
-                                    state: update.state.clone(),
+                                    state: update.state,
                                     reader_info: update.reader_info.clone(),
                                 };
                                 state.reader_states.write().await.insert(key, cached);
