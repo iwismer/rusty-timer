@@ -3,9 +3,6 @@
 //! Pure functions — no async, no I/O. All frame encoding/decoding for the
 //! `ab`-prefixed control protocol described in
 //! `docs/ipico-protocol/ipico-control-protocol.md`.
-//!
-//! Note: `ControlError` includes `Timeout` and `ChannelClosed` variants used
-//! by the async control client in the forwarder service.
 
 use std::fmt;
 
@@ -251,8 +248,7 @@ impl ControlFrame {
         &self.data
     }
 
-    /// Test-only constructor for building frames without going through `parse_response`.
-    #[cfg(test)]
+    /// Constructor for building frames without going through `parse_response`.
     pub fn new(reader_id: u8, instruction: u8, data: Vec<u8>) -> Self {
         Self {
             reader_id,
@@ -380,8 +376,6 @@ pub enum ControlError {
     UnexpectedLength { instruction: u8, got: usize },
     UnknownReadMode(u8),
     InvalidBcd(u8),
-    Timeout,
-    ChannelClosed,
 }
 
 impl fmt::Display for ControlError {
@@ -404,8 +398,6 @@ impl fmt::Display for ControlError {
             ControlError::InvalidBcd(byte) => {
                 write!(f, "invalid BCD byte 0x{byte:02x}")
             }
-            ControlError::Timeout => write!(f, "reader response timeout"),
-            ControlError::ChannelClosed => write!(f, "control channel closed (connection lost)"),
         }
     }
 }
@@ -530,8 +522,18 @@ pub fn decode_extended_status(frame: &ControlFrame) -> Result<ExtendedStatus, Co
     }
     Ok(ExtendedStatus {
         recording_state: RecordingState::from_byte(frame.data()[0]),
-        stored_data_extent: u32::from_be_bytes([0, frame.data()[1], frame.data()[2], frame.data()[3]]),
-        download_progress: u32::from_be_bytes([0, frame.data()[4], frame.data()[5], frame.data()[6]]),
+        stored_data_extent: u32::from_be_bytes([
+            0,
+            frame.data()[1],
+            frame.data()[2],
+            frame.data()[3],
+        ]),
+        download_progress: u32::from_be_bytes([
+            0,
+            frame.data()[4],
+            frame.data()[5],
+            frame.data()[6],
+        ]),
         hw_identifier: u16::from_be_bytes([frame.data()[8], frame.data()[9]]),
         hw_config: frame.data()[10],
         storage_state: frame.data()[11],

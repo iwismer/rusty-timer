@@ -1,10 +1,41 @@
 //! IPICO reader control client for the forwarder.
 
 use ipico_core::control::{self, Command, ControlError, ControlFrame};
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tracing::{info, warn};
+
+/// Error from the control client, wrapping protocol parse errors and adding
+/// transport-level errors (timeout, channel closed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlClientError {
+    /// Protocol-level error from ipico-core.
+    Protocol(ControlError),
+    /// Reader did not respond within the timeout.
+    Timeout,
+    /// Control channel closed (connection lost).
+    ChannelClosed,
+}
+
+impl fmt::Display for ControlClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Protocol(e) => write!(f, "{e}"),
+            Self::Timeout => write!(f, "reader response timeout"),
+            Self::ChannelClosed => write!(f, "control channel closed (connection lost)"),
+        }
+    }
+}
+
+impl std::error::Error for ControlClientError {}
+
+impl From<ControlError> for ControlClientError {
+    fn from(e: ControlError) -> Self {
+        Self::Protocol(e)
+    }
+}
 
 struct PendingRequest {
     kind: PendingRequestKind,
@@ -24,7 +55,12 @@ enum PendingRequestKind {
 impl PendingRequestKind {
     fn for_command(cmd: &Command) -> Self {
         match cmd {
-            Command::SetExtendedStatus { .. } => Self::ExtendedStatusWrite,
+            Command::SetRecordingState { .. }
+            | Command::SetAccessMode { .. }
+            | Command::InitDownload
+            | Command::ConfigureDownload
+            | Command::CleanupDownload
+            | Command::TriggerErase => Self::ExtendedStatusWrite,
             Command::GetExtendedStatus => Self::ExtendedStatusQuery,
             Command::SetConfig3 { .. } => Self::Config3Write,
             Command::GetConfig3 => Self::Config3Query,
@@ -34,23 +70,24 @@ impl PendingRequestKind {
 
     fn matches(self, frame: &ControlFrame) -> bool {
         match self {
-            Self::AnyInstruction(instruction) => frame.instruction == instruction,
+            Self::AnyInstruction(instruction) => frame.instruction() == instruction,
             Self::ExtendedStatusWrite => {
-                frame.instruction == control::INSTR_EXT_STATUS
-                    && (frame.data.is_empty() || frame.data.len() >= 12)
+                frame.instruction() == control::INSTR_EXT_STATUS
+                    && (frame.data().is_empty() || frame.data().len() >= 12)
             }
             Self::DownloadStopWrite => {
-                frame.instruction == control::INSTR_EXT_STATUS
-                    && (frame.data.is_empty() || (frame.data.len() >= 12 && frame.data[0] != 0x03))
+                frame.instruction() == control::INSTR_EXT_STATUS
+                    && (frame.data().is_empty()
+                        || (frame.data().len() >= 12 && frame.data()[0] != 0x03))
             }
             Self::ExtendedStatusQuery => {
-                frame.instruction == control::INSTR_EXT_STATUS && frame.data.len() >= 12
+                frame.instruction() == control::INSTR_EXT_STATUS && frame.data().len() >= 12
             }
             Self::Config3Write => {
-                frame.instruction == control::INSTR_CONFIG3 && frame.data.is_empty()
+                frame.instruction() == control::INSTR_CONFIG3 && frame.data().is_empty()
             }
             Self::Config3Query => {
-                frame.instruction == control::INSTR_CONFIG3 && frame.data.len() >= 2
+                frame.instruction() == control::INSTR_CONFIG3 && frame.data().len() >= 2
             }
         }
     }
@@ -98,7 +135,7 @@ impl ControlClient {
     /// MUST only be called while `in_flight` is held by the caller.
     /// Used within multi-step sequences (clear_records, start_download,
     /// stop_download) that hold the lock themselves.
-    async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
+    async fn send_inner(&self, cmd: &Command) -> Result<ControlFrame, ControlClientError> {
         self.send_inner_with_kind(cmd, PendingRequestKind::for_command(cmd))
             .await
     }
@@ -107,7 +144,7 @@ impl ControlClient {
         &self,
         cmd: &Command,
         kind: PendingRequestKind,
-    ) -> Result<ControlFrame, ControlError> {
+    ) -> Result<ControlFrame, ControlClientError> {
         let frame = control::encode_command(cmd, 0x00)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -119,56 +156,56 @@ impl ControlClient {
         self.cmd_tx
             .send(frame)
             .await
-            .map_err(|_| ControlError::ChannelClosed)?;
+            .map_err(|_| ControlClientError::ChannelClosed)?;
 
         match tokio::time::timeout(self.timeout, reply_rx).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => result.map_err(ControlClientError::Protocol),
             Ok(Err(_)) => {
                 // oneshot sender dropped — control response sink is gone (connection lost)
                 let mut pending = self.pending.lock().await;
                 *pending = None;
-                Err(ControlError::ChannelClosed)
+                Err(ControlClientError::ChannelClosed)
             }
             Err(_) => {
                 // tokio timeout elapsed — reader did not respond in time
                 let mut pending = self.pending.lock().await;
                 *pending = None;
-                Err(ControlError::Timeout)
+                Err(ControlClientError::Timeout)
             }
         }
     }
 
     /// Send a single command, serializing with other callers via the in-flight lock.
-    async fn send(&self, cmd: &Command) -> Result<ControlFrame, ControlError> {
+    async fn send(&self, cmd: &Command) -> Result<ControlFrame, ControlClientError> {
         let _in_flight = self.in_flight.lock().await;
         self.send_inner(cmd).await
     }
 
-    pub async fn get_date_time(&self) -> Result<control::ReaderDateTime, ControlError> {
+    pub async fn get_date_time(&self) -> Result<control::ReaderDateTime, ControlClientError> {
         let frame = self.send(&Command::GetDateTime).await?;
-        control::decode_date_time(&frame)
+        Ok(control::decode_date_time(&frame)?)
     }
 
-    pub async fn get_statistics(&self) -> Result<control::ReaderStatistics, ControlError> {
+    pub async fn get_statistics(&self) -> Result<control::ReaderStatistics, ControlClientError> {
         let frame = self.send(&Command::GetStatistics).await?;
-        control::decode_statistics(&frame)
+        Ok(control::decode_statistics(&frame)?)
     }
 
-    pub async fn get_extended_status(&self) -> Result<control::ExtendedStatus, ControlError> {
+    pub async fn get_extended_status(&self) -> Result<control::ExtendedStatus, ControlClientError> {
         let frame = self.send(&Command::GetExtendedStatus).await?;
-        control::decode_extended_status(&frame)
+        Ok(control::decode_extended_status(&frame)?)
     }
 
-    pub async fn get_config3(&self) -> Result<(control::ReadMode, u8), ControlError> {
+    pub async fn get_config3(&self) -> Result<(control::ReadMode, u8), ControlClientError> {
         let frame = self.send(&Command::GetConfig3).await?;
-        control::decode_config3(&frame)
+        Ok(control::decode_config3(&frame)?)
     }
 
     pub async fn set_config3(
         &self,
         mode: control::ReadMode,
         timeout: u8,
-    ) -> Result<(), ControlError> {
+    ) -> Result<(), ControlClientError> {
         let _frame = self.send(&Command::SetConfig3 { mode, timeout }).await?;
         Ok(())
     }
@@ -183,7 +220,7 @@ impl ControlClient {
         hour: u8,
         min: u8,
         sec: u8,
-    ) -> Result<(), ControlError> {
+    ) -> Result<(), ControlClientError> {
         let _frame = self
             .send(&Command::SetDateTime {
                 year,
@@ -198,7 +235,7 @@ impl ControlClient {
         Ok(())
     }
 
-    pub async fn print_banner(&self) -> Result<String, ControlError> {
+    pub async fn print_banner(&self) -> Result<String, ControlClientError> {
         {
             self.banner_buf.lock().await.clear();
         }
@@ -209,36 +246,28 @@ impl ControlClient {
 
     /// Execute the full clear-records workflow: 3 erase sub-commands via 0x4b,
     /// 10s wait, counter reset, then CONFIG3 cycling (Event -> Raw).
-    pub async fn clear_records(&self) -> Result<(), ControlError> {
+    pub async fn clear_records(&self) -> Result<(), ControlClientError> {
         let _in_flight = self.in_flight.lock().await;
 
-        // Step 1: reset address
+        // Step 1: set recording off (sub-cmd 0x00, state=0x00)
         let _ = self
-            .send_inner(&Command::SetExtendedStatus {
-                data: vec![0x00, 0x00],
-            })
+            .send_inner(&Command::SetRecordingState { on: false })
             .await?;
 
-        // Step 2: set mode
+        // Step 2: set download/access off (sub-cmd 0x01, state=0x00)
         let _ = self
-            .send_inner(&Command::SetExtendedStatus {
-                data: vec![0x01, 0x00],
-            })
+            .send_inner(&Command::SetAccessMode { on: false })
             .await?;
 
         // Step 3: trigger erase
-        let _ = self
-            .send_inner(&Command::SetExtendedStatus { data: vec![0xd0] })
-            .await?;
+        let _ = self.send_inner(&Command::TriggerErase).await?;
 
         // Wait for erase to complete
         tokio::time::sleep(Duration::from_secs(10)).await;
 
-        // Reset counter
+        // Re-send recording off to reset counter
         let _ = self
-            .send_inner(&Command::SetExtendedStatus {
-                data: vec![0x00, 0x00],
-            })
+            .send_inner(&Command::SetRecordingState { on: false })
             .await?;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -262,67 +291,41 @@ impl ControlClient {
     }
 
     /// Toggle the reader's internal recording state.
-    pub async fn set_recording(&self, on: bool) -> Result<control::ExtendedStatus, ControlError> {
-        let state_byte = if on { 0x01 } else { 0x00 };
-        let frame = self
-            .send(&Command::SetExtendedStatus {
-                data: vec![0x00, state_byte],
-            })
-            .await?;
-        control::decode_extended_status(&frame)
+    pub async fn set_recording(
+        &self,
+        on: bool,
+    ) -> Result<control::ExtendedStatus, ControlClientError> {
+        let frame = self.send(&Command::SetRecordingState { on }).await?;
+        Ok(control::decode_extended_status(&frame)?)
     }
 
     /// Send the 3-step download-start sequence (init, configure, start).
     /// Returns the initial ExtendedStatus after the start command.
-    pub async fn start_download(&self) -> Result<control::ExtendedStatus, ControlError> {
+    pub async fn start_download(&self) -> Result<control::ExtendedStatus, ControlClientError> {
         let _in_flight = self.in_flight.lock().await;
-
-        // Step 1: init download (sub-cmd 0x02)
-        let _ = self
-            .send_inner(&Command::SetExtendedStatus { data: vec![0x02] })
-            .await?;
-
-        // Step 2: configure download (sub-cmd 0x07, params [0x01, 0x05])
-        let _ = self
-            .send_inner(&Command::SetExtendedStatus {
-                data: vec![0x07, 0x01, 0x05],
-            })
-            .await?;
-
-        // Step 3: start download (sub-cmd 0x01, state=0x01)
+        let _ = self.send_inner(&Command::InitDownload).await?;
+        let _ = self.send_inner(&Command::ConfigureDownload).await?;
         let frame = self
-            .send_inner(&Command::SetExtendedStatus {
-                data: vec![0x01, 0x01],
-            })
+            .send_inner(&Command::SetAccessMode { on: true })
             .await?;
-
-        control::decode_extended_status(&frame)
+        Ok(control::decode_extended_status(&frame)?)
     }
 
     /// Send the 2-step download-stop sequence (stop, cleanup).
-    pub async fn stop_download(&self) -> Result<(), ControlError> {
+    pub async fn stop_download(&self) -> Result<(), ControlClientError> {
         let _in_flight = self.in_flight.lock().await;
-
-        // Step 1: stop download (sub-cmd 0x01, state=0x00)
         let _ = self
             .send_inner_with_kind(
-                &Command::SetExtendedStatus {
-                    data: vec![0x01, 0x00],
-                },
+                &Command::SetAccessMode { on: false },
                 PendingRequestKind::DownloadStopWrite,
             )
             .await?;
-
-        // Step 2: cleanup (sub-cmd 0x07, param 0x00)
         let _ = self
             .send_inner_with_kind(
-                &Command::SetExtendedStatus {
-                    data: vec![0x07, 0x00],
-                },
+                &Command::CleanupDownload,
                 PendingRequestKind::DownloadStopWrite,
             )
             .await?;
-
         Ok(())
     }
 }
@@ -550,7 +553,7 @@ pub async fn run_connect_sequence(client: &ControlClient) -> ReaderInfo {
     match client.get_extended_status().await {
         Ok(ext) => {
             ri.estimated_stored_reads = Some(ext.estimated_stored_reads());
-            ri.recording = Some(ext.recording_state == 0x01);
+            ri.recording = Some(ext.recording_state.is_recording());
             info!(
                 estimated_stored_reads = ext.estimated_stored_reads(),
                 storage_state = ext.storage_state,
@@ -578,7 +581,7 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
     match client.get_extended_status().await {
         Ok(ext) => {
             info.estimated_stored_reads = Some(ext.estimated_stored_reads());
-            info.recording = Some(ext.recording_state == 0x01);
+            info.recording = Some(ext.recording_state.is_recording());
         }
         Err(e) => warn!("status poll: get_extended_status failed: {e}"),
     }
@@ -748,11 +751,7 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
         let (client, sink) = ControlClient::new(cmd_tx);
 
-        let request = tokio::spawn(async move {
-            client
-                .send_inner(&Command::SetExtendedStatus { data: vec![0xd0] })
-                .await
-        });
+        let request = tokio::spawn(async move { client.send_inner(&Command::TriggerErase).await });
 
         let cmd = cmd_rx.recv().await.expect("clear trigger command");
         assert_eq!(
@@ -925,7 +924,7 @@ mod tests {
             .await
             .expect("task join")
             .expect("start_download result");
-        assert_eq!(ext.recording_state, 0x03);
+        assert_eq!(ext.recording_state, control::RecordingState::Downloading);
     }
 
     #[tokio::test]
@@ -1074,7 +1073,7 @@ mod tests {
 
         let result = task.await.expect("task join");
         assert!(
-            matches!(result, Err(ControlError::Timeout)),
+            matches!(result, Err(ControlClientError::Timeout)),
             "expected Timeout, got {result:?}"
         );
     }
@@ -1092,93 +1091,69 @@ mod tests {
 
         let result = client.get_date_time().await;
         assert!(
-            matches!(result, Err(ControlError::ChannelClosed)),
+            matches!(result, Err(ControlClientError::ChannelClosed)),
             "expected ChannelClosed, got {result:?}"
         );
     }
 
     #[test]
     fn pending_request_kind_ext_status_write_matches_empty_ack() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_EXT_STATUS,
-            data: vec![],
-        };
+        let frame = ControlFrame::new(0, control::INSTR_EXT_STATUS, vec![]);
         assert!(PendingRequestKind::ExtendedStatusWrite.matches(&frame));
         assert!(!PendingRequestKind::ExtendedStatusQuery.matches(&frame));
     }
 
     #[test]
     fn pending_request_kind_ext_status_write_matches_full_response() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_EXT_STATUS,
-            data: vec![0; 12],
-        };
+        let frame = ControlFrame::new(0, control::INSTR_EXT_STATUS, vec![0; 12]);
         assert!(PendingRequestKind::ExtendedStatusWrite.matches(&frame));
         assert!(PendingRequestKind::ExtendedStatusQuery.matches(&frame));
     }
 
     #[test]
     fn pending_request_kind_download_stop_write_rejects_downloading_status() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_EXT_STATUS,
-            data: vec![0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        };
+        let frame = ControlFrame::new(
+            0,
+            control::INSTR_EXT_STATUS,
+            vec![0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
         assert!(!PendingRequestKind::DownloadStopWrite.matches(&frame));
     }
 
     #[test]
     fn pending_request_kind_download_stop_write_accepts_stopped_status() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_EXT_STATUS,
-            data: vec![0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        };
+        let frame = ControlFrame::new(
+            0,
+            control::INSTR_EXT_STATUS,
+            vec![0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
         assert!(PendingRequestKind::DownloadStopWrite.matches(&frame));
     }
 
     #[test]
     fn pending_request_kind_ext_status_query_rejects_short() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_EXT_STATUS,
-            data: vec![0; 5],
-        };
+        let frame = ControlFrame::new(0, control::INSTR_EXT_STATUS, vec![0; 5]);
         assert!(!PendingRequestKind::ExtendedStatusQuery.matches(&frame));
         assert!(!PendingRequestKind::ExtendedStatusWrite.matches(&frame));
     }
 
     #[test]
     fn pending_request_kind_config3_write_matches_empty_ack() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_CONFIG3,
-            data: vec![],
-        };
+        let frame = ControlFrame::new(0, control::INSTR_CONFIG3, vec![]);
         assert!(PendingRequestKind::Config3Write.matches(&frame));
         assert!(!PendingRequestKind::Config3Query.matches(&frame));
     }
 
     #[test]
     fn pending_request_kind_config3_query_matches_data_response() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_CONFIG3,
-            data: vec![0x03, 0x05],
-        };
+        let frame = ControlFrame::new(0, control::INSTR_CONFIG3, vec![0x03, 0x05]);
         assert!(!PendingRequestKind::Config3Write.matches(&frame));
         assert!(PendingRequestKind::Config3Query.matches(&frame));
     }
 
     #[test]
     fn pending_request_kind_any_instruction_matches() {
-        let frame = control::ControlFrame {
-            reader_id: 0,
-            instruction: control::INSTR_GET_DATE_TIME,
-            data: vec![0; 9],
-        };
+        let frame = ControlFrame::new(0, control::INSTR_GET_DATE_TIME, vec![0; 9]);
         assert!(PendingRequestKind::AnyInstruction(control::INSTR_GET_DATE_TIME).matches(&frame));
         assert!(!PendingRequestKind::AnyInstruction(control::INSTR_GET_STATISTICS).matches(&frame));
     }
