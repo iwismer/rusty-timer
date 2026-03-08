@@ -2263,7 +2263,8 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
                         return;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!("download SSE client lagged, skipped {n} events");
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
