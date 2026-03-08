@@ -292,11 +292,39 @@ impl ReaderStatistics {
     }
 }
 
+/// Reader recording/access state from the 0x4b extended status register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum RecordingState {
+    /// Recording off (0x00).
+    Off,
+    /// Recording on (0x01).
+    On,
+    /// Download/access mode active (0x03).
+    Downloading,
+    /// Unrecognized state byte.
+    Unknown(u8),
+}
+
+impl RecordingState {
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0x00 => Self::Off,
+            0x01 => Self::On,
+            0x03 => Self::Downloading,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn is_recording(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
+
 /// Decoded 0x4b extended status response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExtendedStatus {
-    /// Recorder/access state: 0x00 = recording off, 0x01 = recording on, 0x03 = download mode.
-    pub recording_state: u8,
+    /// Recorder/access state from byte 0 of the 0x4b response.
+    pub recording_state: RecordingState,
     /// 24-bit big-endian stored-data extent (bytes 1-3).
     pub stored_data_extent: u32,
     /// 24-bit big-endian download progress (bytes 4-6).
@@ -310,6 +338,8 @@ pub struct ExtendedStatus {
 
 impl ExtendedStatus {
     /// Approximate number of stored reads based on ~32 bytes per record.
+    /// This divisor is a local estimate; the exact unit of the stored-data
+    /// extent field is not confirmed (see protocol spec Open Questions).
     pub fn estimated_stored_reads(&self) -> u32 {
         self.stored_data_extent / 32
     }
@@ -475,7 +505,7 @@ pub fn decode_extended_status(frame: &ControlFrame) -> Result<ExtendedStatus, Co
         });
     }
     Ok(ExtendedStatus {
-        recording_state: frame.data[0],
+        recording_state: RecordingState::from_byte(frame.data[0]),
         stored_data_extent: u32::from_be_bytes([0, frame.data[1], frame.data[2], frame.data[3]]),
         download_progress: u32::from_be_bytes([0, frame.data[4], frame.data[5], frame.data[6]]),
         hw_identifier: u16::from_be_bytes([frame.data[8], frame.data[9]]),
@@ -728,7 +758,7 @@ mod tests {
         let frame = parse_response(b"ab000d4b010b012f0000000059058f0c005a").unwrap();
         assert_eq!(frame.instruction, INSTR_EXT_STATUS);
         let ext = decode_extended_status(&frame).unwrap();
-        assert_eq!(ext.recording_state, 0x01);
+        assert_eq!(ext.recording_state, RecordingState::On);
         assert_eq!(ext.stored_data_extent, 0x0b012f);
         assert_eq!(ext.download_progress, 0);
         assert_eq!(ext.hw_identifier, 0x5905);
@@ -746,6 +776,7 @@ mod tests {
         let hex = format!("ab{}{:02x}", body, lrc(body.as_bytes()));
         let frame = parse_response(hex.as_bytes()).unwrap();
         let ext = decode_extended_status(&frame).unwrap();
+        assert_eq!(ext.recording_state, RecordingState::Off);
         assert_eq!(ext.stored_data_extent, 0);
         assert_eq!(ext.storage_state, 0x01);
         assert_eq!(ext.flags, None);
