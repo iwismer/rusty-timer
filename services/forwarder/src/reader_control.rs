@@ -433,6 +433,7 @@ pub struct Config3Info {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClockInfo {
     pub reader_clock: String,
+    /// Reader clock drift in milliseconds. Positive = reader is ahead of local time, negative = behind.
     pub drift_ms: i64,
 }
 
@@ -460,6 +461,7 @@ pub enum DownloadEvent {
     Downloading {
         progress: u32,
         total: u32,
+        /// Count of `aa`-frame chip reads received from the reader since this download started.
         reads_received: u32,
     },
     /// Download completed successfully.

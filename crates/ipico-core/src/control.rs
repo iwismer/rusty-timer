@@ -44,6 +44,8 @@ impl ReadMode {
         }
     }
 
+    /// Decode a read mode from the CONFIG3 register byte.
+    /// Masks to the lower 3 bits (mode selection) since upper bits control unrelated features.
     pub fn from_config3(byte: u8) -> Option<ReadMode> {
         match byte & 0x07 {
             0x00 => Some(ReadMode::Raw),
@@ -69,20 +71,31 @@ impl fmt::Display for ReadMode {
 }
 
 /// Tag ID message format settings for command `0x11`.
+/// See `docs/ipico-protocol/ipico-control-protocol.md` for field semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagMessageFormat {
+    /// Bitmask controlling which fields appear in tag reports.
     pub field_mask: u8,
+    /// Bitmask controlling which ID bytes are included.
     pub id_byte_mask: u8,
+    /// First ASCII header byte.
     pub ascii_header_1: u8,
+    /// Second ASCII header byte.
     pub ascii_header_2: u8,
+    /// First binary header byte.
     pub binary_header_1: u8,
+    /// Second binary header byte.
     pub binary_header_2: u8,
+    /// First trailer byte.
     pub trailer_1: u8,
+    /// Second trailer byte.
     pub trailer_2: u8,
+    /// Optional 9th byte: field separator (absent in 8-byte format).
     pub separator: Option<u8>,
 }
 
 impl TagMessageFormat {
+    /// Bit 7 of `field_mask`; when set, TTO (time-to-out) bytes are included in tag reports.
     const TTO_BIT: u8 = 0x80;
 
     pub fn tto_enabled(&self) -> bool {
@@ -406,9 +419,9 @@ impl RecordingState {
 pub struct ExtendedStatus {
     /// Recorder/access state from byte 0 of the 0x4b response.
     pub recording_state: RecordingState,
-    /// 24-bit big-endian stored-data extent (bytes 1-3).
+    /// 24-bit big-endian stored-data extent (bytes 1-3). Unit unknown; see protocol spec Open Questions.
     pub stored_data_extent: u32,
-    /// 24-bit big-endian download progress (bytes 4-6).
+    /// 24-bit big-endian download progress (bytes 4-6). Unit unknown; see protocol spec Open Questions.
     pub download_progress: u32,
     pub hw_identifier: u16,
     pub hw_config: u8,
@@ -1006,7 +1019,6 @@ mod tests {
         )
         .unwrap();
         // data = [0x05, 0x05, 0x07], hex body = "00030905050700"
-        // Verify by running the test - the LRC will be computed correctly by encode_command
         let s = std::str::from_utf8(&frame).unwrap();
         assert!(s.starts_with("ab000309050507"));
         assert!(s.ends_with("\r\n"));
