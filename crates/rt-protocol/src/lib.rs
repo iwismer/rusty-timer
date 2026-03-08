@@ -373,6 +373,8 @@ pub struct StreamInfo {
     pub stream_epoch: u64,
     /// True when the forwarder's WS session is currently connected.
     pub online: bool,
+    /// True when the forwarder reports its TCP connection to the reader hardware is up.
+    pub reader_connected: bool,
 }
 
 /// Request body for `PATCH /api/v1/streams/{stream_id}`.
