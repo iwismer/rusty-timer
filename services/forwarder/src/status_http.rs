@@ -3802,6 +3802,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_clock_returns_503_when_no_control_client() {
+        let reader_ip = "192.168.1.99";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn get_tto_returns_enabled_false_when_tag_format_bit_7_is_clear() {
         let reader_ip = "192.168.1.10";
         let server = StatusServer::start(
