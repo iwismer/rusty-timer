@@ -1011,11 +1011,9 @@
                       <span
                         class="ml-2 inline-flex items-center gap-2 flex-wrap"
                       >
-                        <span
-                          class="px-2 py-0.5 text-xs rounded-full bg-surface-0 text-text-secondary border border-border"
+                        <span class="font-mono"
+                          >{formatTtoState(info?.tto_enabled)}</span
                         >
-                          {formatTtoState(info?.tto_enabled)}
-                        </span>
                         <button
                           class="px-2.5 py-0.5 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
                           onclick={(e) => {
