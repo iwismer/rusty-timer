@@ -255,17 +255,17 @@ export interface DownloadReadsResponse {
 export async function startDownloadReads(
   ip: string,
 ): Promise<DownloadReadsResponse> {
-  const resp = await fetch(`/api/v1/readers/${ip}/download-reads`, {
-    method: "POST",
-  });
-  if (resp.status === 409) {
-    throw new Error("Download already in progress");
+  try {
+    return await apiFetch<DownloadReadsResponse>(
+      `/api/v1/readers/${ip}/download-reads`,
+      { method: "POST" },
+    );
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes("-> 409:")) {
+      throw new Error("Download already in progress");
+    }
+    throw err;
   }
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`download reads -> ${resp.status}: ${text}`);
-  }
-  return (await resp.json()) as DownloadReadsResponse;
 }
 
 export async function setRecording(

@@ -160,9 +160,7 @@ describe("forwarder api client", () => {
   it("startDownloadReads throws on other errors", async () => {
     const { startDownloadReads } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(500, "Internal Server Error"));
-    await expect(startDownloadReads("192.168.1.10")).rejects.toThrow(
-      "download reads -> 500",
-    );
+    await expect(startDownloadReads("192.168.1.10")).rejects.toThrow("-> 500:");
   });
 
   it("setReadMode sends mode and timeout", async () => {
