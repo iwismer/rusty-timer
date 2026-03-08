@@ -818,6 +818,7 @@ async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) -> Result<(),
                 });
             } else {
                 warn!("status poll: failed to parse reader clock: {reader_iso}");
+                info.clock = None;
             }
             Ok(())
         }
@@ -1086,6 +1087,66 @@ mod tests {
         );
         assert_eq!(info.recording, Some(true));
         assert_eq!(info.estimated_stored_reads, Some(22537));
+    }
+
+    #[tokio::test]
+    async fn run_status_poll_merge_successes_preserves_cached_on_partial_failure() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move {
+            let mut info = ReaderInfo {
+                config: Some(Config3Info {
+                    mode: control::ReadMode::Event,
+                    timeout: 5,
+                }),
+                tto_enabled: Some(true),
+                clock: Some(ClockInfo {
+                    reader_clock: "2026-03-08T12:00:00.000".to_owned(),
+                    drift_ms: 12,
+                }),
+                estimated_stored_reads: Some(321),
+                recording: Some(true),
+                ..Default::default()
+            };
+            run_status_poll_merge_successes(&client, &mut info).await;
+            info
+        });
+
+        // ext_status succeeds with new values
+        let _cmd = cmd_rx.recv().await.expect("ext status command");
+        assert!(sink.feed(b"ab000d4b010b012f0000000059058f0c005a").await);
+
+        // config3 fails
+        let _cmd = cmd_rx.recv().await.expect("config3 command");
+        assert!(sink.feed(b"zz not-a-frame").await);
+
+        // tag format fails
+        let _cmd = cmd_rx.recv().await.expect("tag format command");
+        assert!(sink.feed(b"zz not-a-frame").await);
+
+        // clock fails
+        let _cmd = cmd_rx.recv().await.expect("clock command");
+        assert!(sink.feed(b"zz not-a-frame").await);
+
+        let info = task.await.expect("poll task");
+
+        // ext_status updated (succeeded)
+        assert_eq!(info.estimated_stored_reads, Some(22537));
+        assert_eq!(info.recording, Some(true));
+        // config3 preserved (failed, merge kept old)
+        assert_eq!(
+            info.config.as_ref().map(|c| c.mode),
+            Some(control::ReadMode::Event)
+        );
+        assert_eq!(info.config.as_ref().map(|c| c.timeout), Some(5));
+        // tto_enabled preserved (failed, merge kept old)
+        assert_eq!(info.tto_enabled, Some(true));
+        // clock preserved (failed, merge kept old)
+        assert_eq!(
+            info.clock.as_ref().map(|c| c.reader_clock.as_str()),
+            Some("2026-03-08T12:00:00.000")
+        );
     }
 
     #[tokio::test]
