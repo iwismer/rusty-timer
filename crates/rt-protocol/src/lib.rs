@@ -1,8 +1,8 @@
 // rt-protocol: Remote forwarding protocol types and serialization.
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
-// deserialization. The enum variants map 1:1 to the frozen v1/v1.2 message
-// kinds.
+// deserialization. The original v1/v1.2 message kinds are preserved;
+// additional variants have been added for reader status tracking.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
