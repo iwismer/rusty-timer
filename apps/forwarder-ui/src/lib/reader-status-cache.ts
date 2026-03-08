@@ -65,9 +65,8 @@ export function applyReaderInfoUpdate(
   update: ReaderInfoUpdate,
   now: number,
 ): ReaderStatusCaches {
-  const reader = status?.readers.find(
-    (candidate) => candidate.ip === update.ip,
-  );
+  const { ip, ...info } = update;
+  const reader = status?.readers.find((candidate) => candidate.ip === ip);
   if (reader?.state === "disconnected") {
     return previous;
   }
@@ -75,14 +74,14 @@ export function applyReaderInfoUpdate(
   const next: ReaderStatusCaches = {
     readerInfoMap: {
       ...previous.readerInfoMap,
-      [update.ip]: {
-        ...previous.readerInfoMap[update.ip],
-        ...update,
+      [ip]: {
+        ...previous.readerInfoMap[ip],
+        ...info,
       },
     },
     readerInfoReceivedAt: {
       ...previous.readerInfoReceivedAt,
-      [update.ip]: now,
+      [ip]: now,
     },
     readerClockBaseTs: { ...previous.readerClockBaseTs },
     readerClockBaseLocal: { ...previous.readerClockBaseLocal },
@@ -90,7 +89,7 @@ export function applyReaderInfoUpdate(
     lastReadReceivedAt: previous.lastReadReceivedAt,
   };
 
-  const readerClock = update.clock?.reader_clock;
+  const readerClock = info.clock?.reader_clock;
   if (!readerClock) {
     return next;
   }
@@ -100,7 +99,7 @@ export function applyReaderInfoUpdate(
     return next;
   }
 
-  next.readerClockBaseTs[update.ip] = ts;
-  next.readerClockBaseLocal[update.ip] = now;
+  next.readerClockBaseTs[ip] = ts;
+  next.readerClockBaseLocal[ip] = now;
   return next;
 }
