@@ -401,8 +401,13 @@ impl ControlResponseSink {
                     let _ = req.reply_tx.send(result);
                     return true;
                 }
-                Ok(_) => {
+                Ok(frame) => {
                     // Wrong instruction (unsolicited) — put request back
+                    tracing::debug!(
+                        instruction = frame.instruction(),
+                        data_len = frame.data().len(),
+                        "unmatched control frame; putting pending request back"
+                    );
                     *pending = Some(req);
                 }
             }
@@ -1202,6 +1207,26 @@ mod tests {
         assert_eq!(tracker.reads_received(), 0);
         assert_eq!(tracker.download_progress(), 0);
         assert_eq!(tracker.stored_data_extent(), 0);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_reset_while_active_sends_idle_event() {
+        let mut tracker = DownloadTracker::new();
+        let mut rx = tracker.subscribe();
+
+        tracker.begin_startup();
+        tracker.start(100);
+        // Drain the Starting and Downloading events
+        let _ = rx.try_recv();
+        let _ = rx.try_recv();
+
+        // Reset while in Downloading state (active)
+        tracker.reset();
+
+        let ev = rx.try_recv().expect("should receive Idle event on reset");
+        assert!(matches!(ev, DownloadEvent::Idle));
+        assert_eq!(*tracker.state(), DownloadState::Idle);
+        assert_eq!(tracker.reads_received(), 0);
     }
 
     #[tokio::test]

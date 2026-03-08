@@ -449,6 +449,10 @@ impl StatusServer {
             }
             r.reader_info = Some(info.clone());
         } else {
+            tracing::debug!(
+                reader_ip,
+                "reader IP not found in map, skipping info update"
+            );
             return;
         }
         let _ = self
