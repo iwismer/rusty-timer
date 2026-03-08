@@ -4504,6 +4504,23 @@ mod tests {
         let body: serde_json::Value = resp.json().await.expect("json body");
         assert_eq!(body["recording"], true);
 
+        // Verify cached reader_info also reflects the set_recording response
+        let status_resp = reqwest::Client::new()
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        let status_body: serde_json::Value = status_resp.json().await.expect("status json");
+        let cached_info = &status_body["readers"][0]["reader_info"];
+        assert_eq!(
+            cached_info["recording"], true,
+            "cached reader_info.recording should reflect set_recording response"
+        );
+        assert!(
+            cached_info["estimated_stored_reads"].is_number(),
+            "cached reader_info.estimated_stored_reads should be present from set_recording response"
+        );
+
         feeder.await.expect("feeder task");
     }
 
