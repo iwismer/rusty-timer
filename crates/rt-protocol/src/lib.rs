@@ -5,6 +5,7 @@
 // kinds.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Shared sub-types
@@ -70,6 +71,21 @@ pub struct ForwarderHello {
     /// Configured in the forwarder's TOML config. Optional in payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+}
+
+/// Forwarder-to-server: report a reader connection/disconnection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderStatusUpdate {
+    pub reader_ip: String,
+    pub connected: bool,
+}
+
+/// Server-to-receiver: a reader's connection status has changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderStatusChanged {
+    pub stream_id: Uuid,
+    pub reader_ip: String,
+    pub connected: bool,
 }
 
 /// A batch of read events from a forwarder.
@@ -330,6 +346,8 @@ pub enum WsMessage {
     ConfigSetResponse(ConfigSetResponse),
     RestartRequest(RestartRequest),
     RestartResponse(RestartResponse),
+    ReaderStatusUpdate(ReaderStatusUpdate),
+    ReaderStatusChanged(ReaderStatusChanged),
 }
 
 // ---------------------------------------------------------------------------
@@ -387,4 +405,36 @@ pub struct HttpErrorEnvelope {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_status_update_round_trip() {
+        let msg = WsMessage::ReaderStatusUpdate(ReaderStatusUpdate {
+            reader_ip: "192.168.1.10".to_string(),
+            connected: true,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"reader_status_update\""));
+        assert!(json.contains("\"connected\":true"));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn reader_status_changed_round_trip() {
+        let msg = WsMessage::ReaderStatusChanged(ReaderStatusChanged {
+            stream_id: Uuid::nil(),
+            reader_ip: "192.168.1.10".to_string(),
+            connected: false,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"reader_status_changed\""));
+        assert!(json.contains("\"connected\":false"));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
 }
