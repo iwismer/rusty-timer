@@ -604,6 +604,9 @@ impl DownloadTracker {
     }
 
     pub fn reset(&mut self) {
+        if self.is_active() {
+            let _ = self.event_tx.send(DownloadEvent::Idle);
+        }
         self.state = DownloadState::Idle;
         self.reads_received = 0;
         self.stored_data_extent = 0;
@@ -750,6 +753,45 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
     if let Err(()) = poll_clock(client, info).await {
         info.clock = None;
     }
+}
+
+/// Poll reader status, but preserve cached values when an individual poll fails.
+pub async fn run_status_poll_merge_successes(client: &ControlClient, info: &mut ReaderInfo) {
+    let mut merged = info.clone();
+
+    match client.get_extended_status().await {
+        Ok(ext) => {
+            merged.estimated_stored_reads = Some(ext.estimated_stored_reads());
+            merged.recording = Some(ext.recording_state.is_recording());
+        }
+        Err(e) => {
+            warn!("status poll: get_extended_status failed: {e}");
+        }
+    }
+
+    match client.get_config3().await {
+        Ok((mode, timeout)) => {
+            merged.config = Some(Config3Info { mode, timeout });
+        }
+        Err(e) => {
+            warn!("status poll: get_config3 failed: {e}");
+        }
+    }
+
+    let mut tto_polled = merged.clone();
+    if poll_tag_message_format(client, &mut tto_polled)
+        .await
+        .is_ok()
+    {
+        merged.tto_enabled = tto_polled.tto_enabled;
+    }
+
+    let mut clock_polled = merged.clone();
+    if poll_clock(client, &mut clock_polled).await.is_ok() {
+        merged.clock = clock_polled.clock;
+    }
+
+    *info = merged;
 }
 
 async fn poll_tag_message_format(client: &ControlClient, info: &mut ReaderInfo) -> Result<(), ()> {

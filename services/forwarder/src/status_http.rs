@@ -67,6 +67,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
+use tracing::Instrument;
 
 // ---------------------------------------------------------------------------
 // Public config
@@ -91,6 +92,20 @@ pub enum ReaderConnectionState {
     Connecting,
     Connected,
     Disconnected,
+}
+
+impl From<&ReaderConnectionState> for crate::ui_events::ReaderConnectionState {
+    fn from(state: &ReaderConnectionState) -> Self {
+        match state {
+            ReaderConnectionState::Connected => crate::ui_events::ReaderConnectionState::Connected,
+            ReaderConnectionState::Connecting => {
+                crate::ui_events::ReaderConnectionState::Connecting
+            }
+            ReaderConnectionState::Disconnected => {
+                crate::ui_events::ReaderConnectionState::Disconnected
+            }
+        }
+    }
 }
 
 /// Per-reader status tracked in memory.
@@ -464,19 +479,14 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.current_epoch_name = name;
-            let state_str = match &r.state {
-                ReaderConnectionState::Connected => "connected",
-                ReaderConnectionState::Connecting => "connecting",
-                ReaderConnectionState::Disconnected => "disconnected",
-            };
             let _ = self
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: state_str.to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
@@ -488,19 +498,14 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.state = state;
-            let state_str = match &r.state {
-                ReaderConnectionState::Connected => "connected",
-                ReaderConnectionState::Connecting => "connecting",
-                ReaderConnectionState::Disconnected => "disconnected",
-            };
             let _ = self
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: state_str.to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
@@ -518,15 +523,10 @@ impl StatusServer {
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: match &r.state {
-                        ReaderConnectionState::Connected => "connected",
-                        ReaderConnectionState::Connecting => "connecting",
-                        ReaderConnectionState::Disconnected => "disconnected",
-                    }
-                    .to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
@@ -1679,7 +1679,7 @@ struct ReaderStatusJson {
     state: String,
     reads_session: u64,
     reads_total: i64,
-    last_read_secs: Option<u64>,
+    last_seen_secs: Option<u64>,
     local_port: u16,
     current_epoch_name: Option<String>,
     reader_info: Option<crate::reader_control::ReaderInfo>,
@@ -1703,7 +1703,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
                 state: state_str.to_owned(),
                 reads_session: r.reads_since_restart,
                 reads_total: r.reads_total,
-                last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                 local_port: r.local_port,
                 current_epoch_name: r.current_epoch_name.clone(),
                 reader_info: r.reader_info.clone(),
@@ -1797,7 +1797,10 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
         Some(r) => match &r.reader_info {
             Some(info) => json_response(
                 StatusCode::OK,
-                serde_json::to_string(info).unwrap_or_else(|_| "{}".to_owned()),
+                serde_json::to_string(info).unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "failed to serialize reader info");
+                    "{}".to_owned()
+                }),
             ),
             None => json_response(StatusCode::OK, "{}".to_owned()),
         },
@@ -2085,15 +2088,12 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
             );
         }
     };
-    if let Err(e) = client.set_config3(mode, body.timeout).await {
-        return json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": e.to_string()}).to_string(),
-        );
-    }
-
-    match client.get_config3().await {
-        Ok((verified_mode, timeout)) => {
+    match client.set_config3(mode, body.timeout).await {
+        Ok(()) => {
+            state
+                .logger
+                .log(format!("reader {} read mode set to {}", ip, mode));
+            // Refresh full status so SSE subscribers see the new read mode
             let mut info = {
                 let ss = state.subsystem.lock().await;
                 ss.readers
@@ -2102,21 +2102,21 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
                     .unwrap_or_default()
             };
             info.config = Some(crate::reader_control::Config3Info {
-                mode: verified_mode,
-                timeout,
+                mode,
+                timeout: body.timeout,
             });
+            // Only re-emit clock data if this follow-up poll gets a fresh sample.
+            info.clock = None;
+            crate::reader_control::run_status_poll_merge_successes(&client, &mut info).await;
             update_cached_reader_info(&state, &ip, info).await;
-            state
-                .logger
-                .log(format!("reader {} read mode set to {}", ip, verified_mode));
             json_response(
                 StatusCode::OK,
-                serde_json::json!({"mode": verified_mode.as_str()}).to_string(),
+                serde_json::json!({"mode": mode.as_str()}).to_string(),
             )
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": format!("set ok but verify failed: {}", e)}).to_string(),
+            serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -2239,7 +2239,10 @@ async fn refresh_handler_reader<J: JournalAccess + Send + 'static>(
     update_cached_reader_info(&state, &ip, info.clone()).await;
     json_response(
         StatusCode::OK,
-        serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_owned()),
+        serde_json::to_string(&info).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to serialize reader info");
+            "{}".to_owned()
+        }),
     )
 }
 
@@ -2412,19 +2415,22 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     // Spawn background task to initiate the download
     let bg_tracker = tracker.clone();
     let bg_ip = ip.clone();
-    tokio::spawn(async move {
-        match client.start_download().await {
-            Ok(ext) => {
-                let mut dt = bg_tracker.lock().await;
-                dt.start(ext.stored_data_extent);
-            }
-            Err(e) => {
-                tracing::warn!(reader_ip = %bg_ip, error = %e, "download start failed");
-                let mut dt = bg_tracker.lock().await;
-                dt.fail(format!("{}", e));
+    tokio::spawn(
+        async move {
+            match client.start_download().await {
+                Ok(ext) => {
+                    let mut dt = bg_tracker.lock().await;
+                    dt.start(ext.stored_data_extent);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "download start failed");
+                    let mut dt = bg_tracker.lock().await;
+                    dt.fail(format!("{}", e));
+                }
             }
         }
-    });
+        .instrument(tracing::info_span!("download_start", reader_ip = %bg_ip)),
+    );
 
     json_response(
         StatusCode::ACCEPTED,
@@ -2484,9 +2490,20 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
             return;
         }
 
-        // Stream events from the broadcast channel
+        // Stream events from the broadcast channel (5-minute inactivity timeout)
         loop {
-            match rx.recv().await {
+            let recv_result = tokio::select! {
+                result = rx.recv() => result,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                    let timeout_json = serde_json::json!({
+                        "state": "error",
+                        "message": "download progress stream timed out"
+                    }).to_string();
+                    yield Ok::<_, Infallible>(SseEvent::default().data(timeout_json));
+                    return;
+                }
+            };
+            match recv_result {
                 Ok(evt) => {
                     let is_terminal = matches!(
                         evt,
@@ -2819,19 +2836,14 @@ async fn set_current_epoch_name_handler<J: JournalAccess + Send + 'static>(
         let mut ss = state.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(&reader_ip) {
             r.current_epoch_name = normalized_name;
-            let state_str = match &r.state {
-                ReaderConnectionState::Connected => "connected",
-                ReaderConnectionState::Connecting => "connecting",
-                ReaderConnectionState::Disconnected => "disconnected",
-            };
             let _ = state
                 .ui_tx
                 .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
                     ip: reader_ip.to_owned(),
-                    state: state_str.to_owned(),
+                    state: (&r.state).into(),
                     reads_session: r.reads_since_restart,
                     reads_total: r.reads_total,
-                    last_read_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
                     local_port: r.local_port,
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
@@ -3245,6 +3257,12 @@ mod tests {
         format!("ab{body}{lrc:02x}")
     }
 
+    fn config3_response(mode: control::ReadMode, timeout: u8) -> String {
+        let body = format!("000209{:02x}{timeout:02x}", mode.config3_value());
+        let lrc = control::lrc(body.as_bytes());
+        format!("ab{body}{lrc:02x}")
+    }
+
     #[tokio::test]
     async fn update_apply_sets_failed_status_when_staged_file_missing() {
         let server = StatusServer::start(
@@ -3452,6 +3470,106 @@ mod tests {
         assert_eq!(info["banner"], "ARM9 Controller");
         assert_eq!(info["hardware"]["hw_code"], 143);
         assert_eq!(info["tto_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn sync_clock_emits_reader_info_update_and_populates_missing_cache() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+
+        let mut ui_rx = server.ui_tx.subscribe();
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let expected_date_time =
+                control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
+
+            for _ in 0..4 {
+                let get_cmd = cmd_rx.recv().await.expect("get date/time command");
+                assert_eq!(get_cmd, expected_date_time);
+                assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+            }
+
+            let set_cmd = cmd_rx.recv().await.expect("set date/time command");
+            let set_text = std::str::from_utf8(&set_cmd).expect("set date/time utf8");
+            assert!(
+                set_text.starts_with("ab000701"),
+                "unexpected set_date_time frame: {set_text}"
+            );
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_SET_DATE_TIME).as_bytes())
+                    .await
+            );
+
+            let verify_cmd = cmd_rx.recv().await.expect("verify date/time command");
+            assert_eq!(verify_cmd, expected_date_time);
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match ui_rx.recv().await.expect("ui event") {
+                    crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { ip, info } => {
+                        break (ip, info);
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("reader info update event");
+        assert_eq!(event.0, reader_ip);
+        assert_eq!(
+            event.1.clock.as_ref().expect("clock info").reader_clock,
+            "2026-03-06T18:55:44.550"
+        );
+
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["clock"]["reader_clock"], "2026-03-06T18:55:44.550");
+        assert!(info["clock"]["drift_ms"].is_number());
     }
 
     #[tokio::test]
@@ -3711,6 +3829,403 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         feeder.await.expect("response feeder task");
+    }
+
+    #[tokio::test]
+    async fn set_read_mode_clears_clock_when_follow_up_poll_fails() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    config: Some(crate::reader_control::Config3Info {
+                        mode: control::ReadMode::Raw,
+                        timeout: 5,
+                    }),
+                    tto_enabled: Some(true),
+                    clock: Some(crate::reader_control::ClockInfo {
+                        reader_clock: "2026-03-06T18:55:44.000".to_owned(),
+                        drift_ms: 123,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let set_cmd = cmd_rx.recv().await.expect("set config3 command");
+            let expected_set = control::encode_command(
+                &Command::SetConfig3 {
+                    mode: control::ReadMode::Event,
+                    timeout: 7,
+                },
+                0x00,
+            )
+            .expect("encode set config3");
+            assert_eq!(set_cmd, expected_set);
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_CONFIG3).as_bytes())
+                    .await
+            );
+
+            let ext_status_cmd = cmd_rx.recv().await.expect("ext status command");
+            assert_eq!(
+                std::str::from_utf8(&ext_status_cmd).expect("ext status command utf8"),
+                "ab00ff4bc2\r\n"
+            );
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            let config3_cmd = cmd_rx.recv().await.expect("config3 command");
+            let expected_get =
+                control::encode_command(&Command::GetConfig3, 0x00).expect("encode get config3");
+            assert_eq!(config3_cmd, expected_get);
+            assert!(
+                control_sink
+                    .feed(config3_response(control::ReadMode::Event, 7).as_bytes())
+                    .await
+            );
+
+            let tag_format_cmd = cmd_rx.recv().await.expect("tag format command");
+            let expected_tag_format = control::encode_command(&Command::GetTagMessageFormat, 0x00)
+                .expect("encode tag format query");
+            assert_eq!(tag_format_cmd, expected_tag_format);
+            let tag_format = TagMessageFormat {
+                field_mask: 0xff,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
+            let date_time_cmd = cmd_rx.recv().await.expect("date/time command");
+            let expected_date_time =
+                control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
+            assert_eq!(date_time_cmd, expected_date_time);
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_GET_DATE_TIME).as_bytes())
+                    .await
+            );
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/read-mode",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"event","timeout":7}"#)
+            .send()
+            .await
+            .expect("PUT read-mode");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["config"]["mode"], "event");
+        assert_eq!(info["config"]["timeout"], 7);
+        assert!(info["clock"].is_null());
+    }
+
+    #[tokio::test]
+    async fn set_read_mode_uses_requested_config_when_follow_up_config_poll_fails() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    config: Some(crate::reader_control::Config3Info {
+                        mode: control::ReadMode::Raw,
+                        timeout: 5,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let set_cmd = cmd_rx.recv().await.expect("set config3 command");
+            let expected_set = control::encode_command(
+                &Command::SetConfig3 {
+                    mode: control::ReadMode::Event,
+                    timeout: 7,
+                },
+                0x00,
+            )
+            .expect("encode set config3");
+            assert_eq!(set_cmd, expected_set);
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_CONFIG3).as_bytes())
+                    .await
+            );
+
+            let ext_status_cmd = cmd_rx.recv().await.expect("ext status command");
+            assert_eq!(
+                std::str::from_utf8(&ext_status_cmd).expect("ext status command utf8"),
+                "ab00ff4bc2\r\n"
+            );
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            let config3_cmd = cmd_rx.recv().await.expect("config3 command");
+            let expected_get =
+                control::encode_command(&Command::GetConfig3, 0x00).expect("encode get config3");
+            assert_eq!(config3_cmd, expected_get);
+            assert!(control_sink.feed(b"not-a-config3-frame").await);
+
+            let tag_format_cmd = cmd_rx.recv().await.expect("tag format command");
+            let expected_tag_format = control::encode_command(&Command::GetTagMessageFormat, 0x00)
+                .expect("encode tag format query");
+            assert_eq!(tag_format_cmd, expected_tag_format);
+            let tag_format = TagMessageFormat {
+                field_mask: 0xff,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
+            let date_time_cmd = cmd_rx.recv().await.expect("date/time command");
+            let expected_date_time =
+                control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
+            assert_eq!(date_time_cmd, expected_date_time);
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/read-mode",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"event","timeout":7}"#)
+            .send()
+            .await
+            .expect("PUT read-mode");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["config"]["mode"], "event");
+        assert_eq!(info["config"]["timeout"], 7);
+    }
+
+    #[tokio::test]
+    async fn set_read_mode_updates_cached_config_when_follow_up_poll_succeeds() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    config: Some(crate::reader_control::Config3Info {
+                        mode: control::ReadMode::Raw,
+                        timeout: 5,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let set_cmd = cmd_rx.recv().await.expect("set config3 command");
+            let expected_set = control::encode_command(
+                &Command::SetConfig3 {
+                    mode: control::ReadMode::FirstLastSeen,
+                    timeout: 9,
+                },
+                0x00,
+            )
+            .expect("encode set config3");
+            assert_eq!(set_cmd, expected_set);
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_CONFIG3).as_bytes())
+                    .await
+            );
+
+            let ext_status_cmd = cmd_rx.recv().await.expect("ext status command");
+            assert_eq!(
+                std::str::from_utf8(&ext_status_cmd).expect("ext status command utf8"),
+                "ab00ff4bc2\r\n"
+            );
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            let config3_cmd = cmd_rx.recv().await.expect("config3 command");
+            let expected_get =
+                control::encode_command(&Command::GetConfig3, 0x00).expect("encode get config3");
+            assert_eq!(config3_cmd, expected_get);
+            assert!(
+                control_sink
+                    .feed(config3_response(control::ReadMode::FirstLastSeen, 9).as_bytes())
+                    .await
+            );
+
+            let tag_format_cmd = cmd_rx.recv().await.expect("tag format command");
+            let expected_tag_format = control::encode_command(&Command::GetTagMessageFormat, 0x00)
+                .expect("encode tag format query");
+            assert_eq!(tag_format_cmd, expected_tag_format);
+            let tag_format = TagMessageFormat {
+                field_mask: 0x7f,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
+            let date_time_cmd = cmd_rx.recv().await.expect("date/time command");
+            let expected_date_time =
+                control::encode_command(&Command::GetDateTime, 0x00).expect("encode get date/time");
+            assert_eq!(date_time_cmd, expected_date_time);
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/read-mode",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"fsls","timeout":9}"#)
+            .send()
+            .await
+            .expect("PUT read-mode");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["config"]["mode"], "fsls");
+        assert_eq!(info["config"]["timeout"], 9);
+        assert_eq!(info["tto_enabled"], false);
     }
 
     #[tokio::test]
@@ -4854,5 +5369,277 @@ target = "192.168.1.100:10000"
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    /// Test that `run_status_poll_merge_successes` preserves cached estimated_stored_reads
+    /// and recording when the follow-up extended status poll fails.
+    #[tokio::test]
+    async fn set_read_mode_preserves_stored_reads_when_ext_status_poll_fails() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        // Pre-populate with cached values we expect to be preserved
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    config: Some(crate::reader_control::Config3Info {
+                        mode: control::ReadMode::Raw,
+                        timeout: 5,
+                    }),
+                    estimated_stored_reads: Some(42),
+                    recording: Some(true),
+                    tto_enabled: Some(false),
+                    clock: Some(crate::reader_control::ClockInfo {
+                        reader_clock: "2026-03-06T18:55:44.000".to_owned(),
+                        drift_ms: 100,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            // 1. SetConfig3 command -> ACK
+            let _set_cmd = cmd_rx.recv().await.expect("set config3 command");
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_CONFIG3).as_bytes())
+                    .await
+            );
+
+            // 2. GetExtendedStatus -> send garbage (causes failure)
+            let _ext_cmd = cmd_rx.recv().await.expect("ext status command");
+            assert!(control_sink.feed(b"not-an-ext-status").await);
+
+            // 3. GetConfig3 -> valid response
+            let _cfg_cmd = cmd_rx.recv().await.expect("config3 command");
+            assert!(
+                control_sink
+                    .feed(config3_response(control::ReadMode::Event, 7).as_bytes())
+                    .await
+            );
+
+            // 4. GetTagMessageFormat -> valid response
+            let _tag_cmd = cmd_rx.recv().await.expect("tag format command");
+            let tag_format = TagMessageFormat {
+                field_mask: 0xff,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
+            // 5. GetDateTime -> valid response
+            let _dt_cmd = cmd_rx.recv().await.expect("date/time command");
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/read-mode",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"mode":"event","timeout":7}"#)
+            .send()
+            .await
+            .expect("PUT read-mode");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        feeder.await.expect("response feeder task");
+
+        // Verify: estimated_stored_reads and recording are preserved (not null)
+        // because run_status_poll_merge_successes keeps cached values on failure
+        let status = client
+            .get(format!("http://{}/api/v1/status", server.local_addr()))
+            .send()
+            .await
+            .expect("GET /api/v1/status");
+        let body: serde_json::Value = status.json().await.expect("status json");
+        let info = &body["readers"][0]["reader_info"];
+        assert_eq!(info["config"]["mode"], "event", "config should be updated");
+        assert_eq!(
+            info["estimated_stored_reads"], 42,
+            "estimated_stored_reads should be preserved from cache"
+        );
+        assert_eq!(
+            info["recording"], true,
+            "recording should be preserved from cache"
+        );
+    }
+
+    /// Test that set_recording_handler returns the new recording state.
+    #[tokio::test]
+    async fn set_recording_on_returns_recording_true() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server
+            .control_clients()
+            .write()
+            .expect("control client lock")
+            .insert(reader_ip.to_owned(), Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            // 1. SetRecordingState -> extended status response (recording bit set)
+            let _cmd = cmd_rx.recv().await.expect("set recording command");
+            // Extended status with recording_state byte = 0x01 (recording)
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            // run_status_poll follow-up: GetExtendedStatus
+            let _cmd = cmd_rx.recv().await.expect("ext status poll");
+            assert!(
+                control_sink
+                    .feed(b"ab000d4b010b012f0000000059058f0c005a")
+                    .await
+            );
+
+            // GetConfig3
+            let _cmd = cmd_rx.recv().await.expect("config3 poll");
+            assert!(
+                control_sink
+                    .feed(config3_response(control::ReadMode::Raw, 5).as_bytes())
+                    .await
+            );
+
+            // GetTagMessageFormat
+            let _cmd = cmd_rx.recv().await.expect("tag format poll");
+            let tag_format = TagMessageFormat {
+                field_mask: 0x7f,
+                id_byte_mask: 0xfc,
+                ascii_header_1: 0x61,
+                ascii_header_2: 0x61,
+                binary_header_1: 0xaa,
+                binary_header_2: 0x00,
+                trailer_1: 0x0d,
+                trailer_2: 0x0a,
+                separator: None,
+            };
+            assert!(
+                control_sink
+                    .feed(tag_message_format_response(&tag_format).as_bytes())
+                    .await
+            );
+
+            // GetDateTime
+            let _cmd = cmd_rx.recv().await.expect("date/time poll");
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/{}/recording",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("PUT recording");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("json response");
+        assert!(body["recording"].is_boolean());
+
+        feeder.await.expect("response feeder task");
+    }
+
+    /// Test that set_recording returns 503 when reader is not connected.
+    #[tokio::test]
+    async fn set_recording_returns_503_when_reader_disconnected() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!(
+                "http://{}/api/v1/readers/10.0.0.99/recording",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503);
+    }
+
+    /// Test that clear_records returns 503 when reader is not connected.
+    #[tokio::test]
+    async fn clear_records_returns_503_when_reader_disconnected() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/readers/10.0.0.99/clear-records",
+                server.local_addr()
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503);
     }
 }

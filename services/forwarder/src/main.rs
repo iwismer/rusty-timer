@@ -262,10 +262,11 @@ async fn run_reader(
 
         // Writer task: drains command channel to TCP socket
         let mut writer = write_half;
+        let writer_reader_ip = reader_ip.clone();
         let writer_handle = tokio::spawn(async move {
             while let Some(frame) = cmd_rx.recv().await {
                 if let Err(e) = writer.write_all(&frame).await {
-                    warn!("control write failed: {e}");
+                    warn!(reader_ip = %writer_reader_ip, "control write failed: {e}");
                     drop(cmd_rx); // Close channel immediately so cmd_tx.send() fails
                     return;
                 }

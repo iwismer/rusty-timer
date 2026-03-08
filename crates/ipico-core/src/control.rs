@@ -21,18 +21,14 @@ pub const INSTR_UNKNOWN_E0: u8 = 0xe0;
 
 // ── ReadMode ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ReadMode {
+    #[serde(rename = "raw")]
     Raw,
+    #[serde(rename = "event")]
     Event,
+    #[serde(rename = "fsls")]
     FirstLastSeen,
-}
-
-impl serde::Serialize for ReadMode {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
 }
 
 impl ReadMode {
@@ -1101,5 +1097,14 @@ mod tests {
         let parsed = parse_response(&frame[..frame.len() - 2]).unwrap();
         assert_eq!(parsed.reader_id(), 0x05);
         assert_eq!(parsed.instruction(), INSTR_GET_DATE_TIME);
+    }
+
+    #[test]
+    fn read_mode_serde_round_trip() {
+        for mode in [ReadMode::Raw, ReadMode::Event, ReadMode::FirstLastSeen] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: ReadMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back, "round-trip failed for {json}");
+        }
     }
 }

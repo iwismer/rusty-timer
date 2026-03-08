@@ -1,4 +1,4 @@
-import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
+import { apiFetch, ApiError } from "@rusty-timer/shared-ui/lib/api-helpers";
 
 export interface HardwareInfo {
   fw_version: string;
@@ -29,7 +29,7 @@ export interface ReaderInfo {
   clock?: ClockInfo | null;
   estimated_stored_reads?: number | null;
   recording?: boolean | null;
-  connect_failures?: number;
+  connect_failures: number;
 }
 
 export interface ReaderStatus {
@@ -37,7 +37,7 @@ export interface ReaderStatus {
   state: "connected" | "connecting" | "disconnected";
   reads_session: number;
   reads_total: number;
-  last_read_secs: number | null;
+  last_seen_secs: number | null;
   local_port: number;
   current_epoch_name?: string | null;
   reader_info?: ReaderInfo | null;
@@ -216,7 +216,7 @@ export async function setReadMode(
   ip: string,
   mode: "raw" | "event" | "fsls",
   timeout = 5,
-): Promise<{ mode: string }> {
+): Promise<{ mode: Config3Info["mode"] }> {
   return apiFetch(`/api/v1/readers/${ip}/read-mode`, {
     method: "PUT",
     body: JSON.stringify({ mode, timeout }),
@@ -261,7 +261,7 @@ export async function startDownloadReads(
       { method: "POST" },
     );
   } catch (err: unknown) {
-    if (err instanceof Error && err.message.includes("-> 409:")) {
+    if (err instanceof ApiError && err.status === 409) {
       throw new Error("Download already in progress");
     }
     throw err;

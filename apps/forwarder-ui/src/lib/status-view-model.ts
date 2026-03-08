@@ -1,7 +1,7 @@
 import type { ReaderStatus } from "./api";
 import type { DownloadProgressEvent } from "./download-progress";
 
-export function formatLastRead(secs: number | null): string {
+export function formatLastSeen(secs: number | null): string {
   if (secs === null) return "never";
   if (secs < 60) return `${secs}s ago`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
@@ -58,14 +58,6 @@ export function formatClockDrift(ms: number | null | undefined): string {
   return `${sign}${(abs / 1000).toFixed(1)}s`;
 }
 
-export function driftColorClass(ms: number | null | undefined): string {
-  if (ms == null) return "";
-  const abs = Math.abs(ms);
-  if (abs < 100) return "text-green-500";
-  if (abs < 500) return "text-yellow-500";
-  return "text-red-500";
-}
-
 export function computeDownloadPercent(
   download: DownloadProgressEvent | null | undefined,
   estimatedReads: number | null | undefined,
@@ -91,7 +83,7 @@ export function computeDownloadPercent(
   return 0;
 }
 
-export function computeTickingLastRead(
+export function computeTickingLastSeen(
   baseSecs: number | null,
   receivedAt: number | null,
   now: number,
@@ -100,4 +92,11 @@ export function computeTickingLastRead(
   if (receivedAt == null) return baseSecs;
   const elapsedSecs = Math.max(0, Math.floor((now - receivedAt) / 1000));
   return baseSecs + elapsedSecs;
+}
+
+export function computeElapsedSecondsSince(
+  receivedAt: number,
+  now: number,
+): number {
+  return Math.max(0, Math.round((now - receivedAt) / 1000));
 }

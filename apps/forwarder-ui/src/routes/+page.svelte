@@ -12,16 +12,16 @@
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
-    formatLastRead,
+    computeElapsedSecondsSince,
+    formatLastSeen,
     readerBadgeState,
     readerConnectionSummary,
     formatClockDrift,
-    driftColorClass,
     formatReadMode,
     formatTtoState,
     readerControlDisabled,
     computeDownloadPercent,
-    computeTickingLastRead,
+    computeTickingLastSeen,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
   import {
@@ -66,8 +66,8 @@
   let clockTickNow = $state(Date.now());
   let readerClockBaseTs = $state<Record<string, number>>({});
   let readerClockBaseLocal = $state<Record<string, number>>({});
-  let lastReadBase = $state<Record<string, number | null>>({});
-  let lastReadReceivedAt = $state<Record<string, number>>({});
+  let lastSeenBase = $state<Record<string, number | null>>({});
+  let lastSeenReceivedAt = $state<Record<string, number>>({});
 
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
@@ -85,8 +85,8 @@
       if (status) {
         const now = Date.now();
         for (const r of status.readers) {
-          lastReadBase = { ...lastReadBase, [r.ip]: r.last_read_secs };
-          lastReadReceivedAt = { ...lastReadReceivedAt, [r.ip]: now };
+          lastSeenBase = { ...lastSeenBase, [r.ip]: r.last_seen_secs };
+          lastSeenReceivedAt = { ...lastSeenReceivedAt, [r.ip]: now };
           if (r.reader_info) {
             readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
             readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
@@ -559,10 +559,10 @@
     }
   }
 
-  function tickingLastRead(ip: string): number | null {
-    return computeTickingLastRead(
-      lastReadBase[ip] ?? null,
-      lastReadReceivedAt[ip] ?? null,
+  function tickingLastSeen(ip: string): number | null {
+    return computeTickingLastSeen(
+      lastSeenBase[ip] ?? null,
+      lastSeenReceivedAt[ip] ?? null,
       clockTickNow,
     );
   }
@@ -603,12 +603,12 @@
             r.ip === reader.ip ? reader : r,
           );
           status = { ...status, readers };
-          lastReadBase = {
-            ...lastReadBase,
-            [reader.ip]: reader.last_read_secs,
+          lastSeenBase = {
+            ...lastSeenBase,
+            [reader.ip]: reader.last_seen_secs,
           };
-          lastReadReceivedAt = {
-            ...lastReadReceivedAt,
+          lastSeenReceivedAt = {
+            ...lastSeenReceivedAt,
             [reader.ip]: Date.now(),
           };
         }
@@ -813,9 +813,9 @@
                   >
                 </div>
                 <div>
-                  <span class="text-text-muted">Last read:</span>
+                  <span class="text-text-muted">Last seen:</span>
                   <span class="ml-1 text-text-secondary"
-                    >{formatLastRead(tickingLastRead(reader.ip))}</span
+                    >{formatLastSeen(tickingLastSeen(reader.ip))}</span
                   >
                 </div>
               </div>
@@ -915,10 +915,8 @@
                     </div>
                     <div>
                       <span class="text-text-muted">Clock Drift:</span>
-                      <span
-                        class="font-mono ml-2 {driftColorClass(
-                          info?.clock?.drift_ms,
-                        )}">{formatClockDrift(info?.clock?.drift_ms)}</span
+                      <span class="font-mono ml-2"
+                        >{formatClockDrift(info?.clock?.drift_ms)}</span
                       >
                     </div>
                     <div>
@@ -928,14 +926,10 @@
                     <div>
                       <span class="text-text-muted">Last Refresh:</span>
                       <span class="ml-2"
-                        >{#if readerInfoReceivedAt[reader.ip]}{formatLastRead(
-                            Math.max(
-                              0,
-                              Math.round(
-                                (clockTickNow -
-                                  readerInfoReceivedAt[reader.ip]) /
-                                  1000,
-                              ),
+                        >{#if readerInfoReceivedAt[reader.ip]}{formatLastSeen(
+                            computeElapsedSecondsSince(
+                              readerInfoReceivedAt[reader.ip],
+                              clockTickNow,
                             ),
                           )}{:else}&mdash;{/if}</span
                       >

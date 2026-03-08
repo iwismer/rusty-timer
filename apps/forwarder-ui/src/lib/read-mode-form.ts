@@ -8,8 +8,10 @@ export const READ_MODE_OPTIONS = [
   { value: "fsls", label: "First/Last Seen" },
 ] as const;
 
+import type { Config3Info } from "./api";
+
 export function shouldShowTimeoutInput(
-  mode: string | null | undefined,
+  mode: Config3Info["mode"] | null | undefined,
 ): boolean {
   return mode === "event" || mode === "fsls";
 }

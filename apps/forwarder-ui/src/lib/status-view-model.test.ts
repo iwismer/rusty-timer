@@ -1,26 +1,26 @@
 import { describe, expect, it } from "vitest";
 import {
-  formatLastRead,
+  computeElapsedSecondsSince,
+  formatLastSeen,
   readerBadgeState,
   readerConnectionSummary,
   formatClockDrift,
-  driftColorClass,
   formatReadMode,
   formatTtoState,
   readerControlDisabled,
   computeDownloadPercent,
-  computeTickingLastRead,
+  computeTickingLastSeen,
 } from "./status-view-model";
 
-describe("formatLastRead", () => {
+describe("formatLastSeen", () => {
   it("formats null as never", () => {
-    expect(formatLastRead(null)).toBe("never");
+    expect(formatLastSeen(null)).toBe("never");
   });
 
   it("formats seconds/minutes/hours", () => {
-    expect(formatLastRead(12)).toBe("12s ago");
-    expect(formatLastRead(125)).toBe("2m ago");
-    expect(formatLastRead(7200)).toBe("2h ago");
+    expect(formatLastSeen(12)).toBe("12s ago");
+    expect(formatLastSeen(125)).toBe("2m ago");
+    expect(formatLastSeen(7200)).toBe("2h ago");
   });
 });
 
@@ -40,7 +40,7 @@ describe("readerConnectionSummary", () => {
         state: "connected",
         reads_session: 0,
         reads_total: 0,
-        last_read_secs: null,
+        last_seen_secs: null,
         local_port: 10001,
       },
       {
@@ -48,7 +48,7 @@ describe("readerConnectionSummary", () => {
         state: "disconnected",
         reads_session: 0,
         reads_total: 0,
-        last_read_secs: null,
+        last_seen_secs: null,
         local_port: 10002,
       },
       {
@@ -56,7 +56,7 @@ describe("readerConnectionSummary", () => {
         state: "connected",
         reads_session: 0,
         reads_total: 0,
-        last_read_secs: null,
+        last_seen_secs: null,
         local_port: 10003,
       },
     ]);
@@ -93,31 +93,6 @@ describe("formatClockDrift", () => {
     expect(formatClockDrift(-200)).toBe("-200ms");
     expect(formatClockDrift(1500)).toBe("+1.5s");
     expect(formatClockDrift(-3200)).toBe("-3.2s");
-  });
-});
-
-describe("driftColorClass", () => {
-  it("returns empty string for null/undefined", () => {
-    expect(driftColorClass(null)).toBe("");
-    expect(driftColorClass(undefined)).toBe("");
-  });
-
-  it("returns green for |drift| < 100ms", () => {
-    expect(driftColorClass(0)).toBe("text-green-500");
-    expect(driftColorClass(99)).toBe("text-green-500");
-    expect(driftColorClass(-50)).toBe("text-green-500");
-  });
-
-  it("returns yellow for 100ms <= |drift| < 500ms", () => {
-    expect(driftColorClass(100)).toBe("text-yellow-500");
-    expect(driftColorClass(499)).toBe("text-yellow-500");
-    expect(driftColorClass(-200)).toBe("text-yellow-500");
-  });
-
-  it("returns red for |drift| >= 500ms", () => {
-    expect(driftColorClass(500)).toBe("text-red-500");
-    expect(driftColorClass(1000)).toBe("text-red-500");
-    expect(driftColorClass(-600)).toBe("text-red-500");
   });
 });
 
@@ -179,28 +154,38 @@ describe("readerControlDisabled", () => {
   });
 });
 
-describe("computeTickingLastRead", () => {
+describe("computeTickingLastSeen", () => {
   it("returns null when base is null", () => {
-    expect(computeTickingLastRead(null, 1000, 2000)).toBe(null);
+    expect(computeTickingLastSeen(null, 1000, 2000)).toBe(null);
   });
 
   it("returns base when receivedAt is null", () => {
-    expect(computeTickingLastRead(5, null, 2000)).toBe(5);
+    expect(computeTickingLastSeen(5, null, 2000)).toBe(5);
   });
 
   it("adds elapsed seconds to base", () => {
-    expect(computeTickingLastRead(5, 10000, 13000)).toBe(8);
+    expect(computeTickingLastSeen(5, 10000, 13000)).toBe(8);
   });
 
   it("floors partial seconds", () => {
-    expect(computeTickingLastRead(5, 10000, 12999)).toBe(7);
+    expect(computeTickingLastSeen(5, 10000, 12999)).toBe(7);
   });
 
   it("handles zero base", () => {
-    expect(computeTickingLastRead(0, 10000, 11500)).toBe(1);
+    expect(computeTickingLastSeen(0, 10000, 11500)).toBe(1);
   });
 
   it("clamps elapsed to zero when now is before receivedAt", () => {
-    expect(computeTickingLastRead(2, 10000, 9500)).toBe(2);
+    expect(computeTickingLastSeen(2, 10000, 9500)).toBe(2);
+  });
+});
+
+describe("computeElapsedSecondsSince", () => {
+  it("clamps negative elapsed time to zero", () => {
+    expect(computeElapsedSecondsSince(10_600, 10_000)).toBe(0);
+  });
+
+  it("rounds positive elapsed time to the nearest second", () => {
+    expect(computeElapsedSecondsSince(10_000, 10_600)).toBe(1);
   });
 });
