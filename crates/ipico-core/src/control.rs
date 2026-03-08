@@ -165,6 +165,7 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Vec<u8> {
 
 /// BCD encode: decimal value to BCD byte (e.g., 25 -> 0x25).
 pub fn to_bcd(val: u8) -> u8 {
+    debug_assert!(val <= 99, "BCD value out of range: {val}");
     ((val / 10) << 4) | (val % 10)
 }
 
@@ -276,6 +277,7 @@ pub enum ControlError {
     BadLrc,
     ReaderError(u8),
     UnexpectedLength { instruction: u8, got: usize },
+    UnknownReadMode(u8),
     Timeout,
 }
 
@@ -292,6 +294,9 @@ impl fmt::Display for ControlError {
                     f,
                     "unexpected data length for instruction 0x{instruction:02x}: got {got}"
                 )
+            }
+            ControlError::UnknownReadMode(byte) => {
+                write!(f, "unknown read mode byte 0x{byte:02x}")
             }
             ControlError::Timeout => write!(f, "reader response timeout"),
         }
@@ -438,16 +443,28 @@ pub fn decode_config3(frame: &ControlFrame) -> Result<(ReadMode, u8), ControlErr
             got: frame.data.len(),
         });
     }
-    let mode = ReadMode::from_config3(frame.data[0]).ok_or(ControlError::UnexpectedLength {
-        instruction: frame.instruction,
-        got: frame.data.len(),
-    })?;
+    let mode = ReadMode::from_config3(frame.data[0])
+        .ok_or(ControlError::UnknownReadMode(frame.data[0]))?;
     Ok((mode, frame.data[1]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_config3_unknown_mode_returns_descriptive_error() {
+        let frame = ControlFrame {
+            reader_id: 0,
+            instruction: INSTR_CONFIG3,
+            data: vec![0x02, 0x05],
+        };
+        let err = decode_config3(&frame).unwrap_err();
+        assert!(
+            matches!(err, ControlError::UnknownReadMode(0x02)),
+            "expected UnknownReadMode(0x02), got {err:?}"
+        );
+    }
 
     #[test]
     fn bcd_round_trip() {
