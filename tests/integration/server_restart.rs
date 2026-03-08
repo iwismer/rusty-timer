@@ -375,3 +375,48 @@ async fn server_restart_http_api_accessible_after_restart() {
         .expect("stream created before restart should be visible after restart");
     assert_eq!(fwd_stream["reader_ip"].as_str(), Some("10.130.130.1"));
 }
+
+#[tokio::test]
+async fn server_startup_clears_stale_reader_connected_state() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+
+    let stream_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO streams (stream_id, forwarder_id, reader_ip, online, reader_connected)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(stream_id)
+    .bind("fwd-stale-01")
+    .bind("10.9.9.9:10000")
+    .bind(true)
+    .bind(true)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    server::db::reset_stream_connection_state_on_startup(&pool)
+        .await
+        .unwrap();
+
+    let addr = start_server_instance(pool.clone()).await;
+    let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/v1/streams"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let stream = body["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["stream_id"].as_str() == Some(&stream_id.to_string()))
+        .unwrap();
+
+    assert_eq!(stream["online"].as_bool(), Some(false));
+    assert_eq!(stream["reader_connected"].as_bool(), Some(false));
+}
