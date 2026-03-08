@@ -51,6 +51,11 @@ impl PendingRequestKind {
     }
 }
 
+/// Sends commands to a single IPICO reader over TCP and awaits responses.
+///
+/// Commands are serialized via `in_flight` to prevent interleaving. Multi-step
+/// sequences (clear_records, start_download, stop_download) hold the lock
+/// across all sub-steps.
 pub struct ControlClient {
     cmd_tx: mpsc::Sender<Vec<u8>>,
     pending: Arc<Mutex<Option<PendingRequest>>>,
@@ -305,6 +310,9 @@ impl ControlClient {
 
 impl ControlResponseSink {
     /// Feed an `ab`-prefixed control response line (without \r\n).
+    ///
+    /// Returns `true` if the frame matched and was consumed by a pending request,
+    /// or `false` if no request was pending or the instruction did not match.
     pub async fn feed(&self, line: &[u8]) -> bool {
         let result = control::parse_response(line);
         let mut pending = self.pending.lock().await;
@@ -1021,5 +1029,71 @@ mod tests {
             matches!(result, Err(ControlError::ChannelClosed)),
             "expected ChannelClosed, got {result:?}"
         );
+    }
+
+    #[test]
+    fn pending_request_kind_ext_status_write_matches_empty_ack() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_EXT_STATUS,
+            data: vec![],
+        };
+        assert!(PendingRequestKind::ExtendedStatusWrite.matches(&frame));
+        assert!(!PendingRequestKind::ExtendedStatusQuery.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_ext_status_write_matches_full_response() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_EXT_STATUS,
+            data: vec![0; 12],
+        };
+        assert!(PendingRequestKind::ExtendedStatusWrite.matches(&frame));
+        assert!(PendingRequestKind::ExtendedStatusQuery.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_ext_status_query_rejects_short() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_EXT_STATUS,
+            data: vec![0; 5],
+        };
+        assert!(!PendingRequestKind::ExtendedStatusQuery.matches(&frame));
+        assert!(!PendingRequestKind::ExtendedStatusWrite.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_config3_write_matches_empty_ack() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_CONFIG3,
+            data: vec![],
+        };
+        assert!(PendingRequestKind::Config3Write.matches(&frame));
+        assert!(!PendingRequestKind::Config3Query.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_config3_query_matches_data_response() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_CONFIG3,
+            data: vec![0x03, 0x05],
+        };
+        assert!(!PendingRequestKind::Config3Write.matches(&frame));
+        assert!(PendingRequestKind::Config3Query.matches(&frame));
+    }
+
+    #[test]
+    fn pending_request_kind_any_instruction_matches() {
+        let frame = control::ControlFrame {
+            reader_id: 0,
+            instruction: control::INSTR_GET_DATE_TIME,
+            data: vec![0; 9],
+        };
+        assert!(PendingRequestKind::AnyInstruction(control::INSTR_GET_DATE_TIME).matches(&frame));
+        assert!(!PendingRequestKind::AnyInstruction(control::INSTR_GET_STATISTICS).matches(&frame));
     }
 }
