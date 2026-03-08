@@ -574,7 +574,13 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
 
     for sid in stream_map.values() {
-        let _ = set_stream_online(&state.pool, *sid, false).await;
+        if let Err(e) = set_stream_online(&state.pool, *sid, false).await {
+            error!(
+                stream_id = %sid,
+                error = %e,
+                "failed to mark stream offline during disconnect cleanup"
+            );
+        }
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id: *sid,
             online: Some(false),
