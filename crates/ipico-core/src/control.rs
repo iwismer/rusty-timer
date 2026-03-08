@@ -252,7 +252,13 @@ pub fn encode_command(cmd: &Command, reader_id: u8) -> Result<Vec<u8>, ControlEr
         Command::ConfigureDownload => vec![0x07, 0x01, 0x05],
         Command::CleanupDownload => vec![0x07, 0x00],
         Command::TriggerErase => vec![0xd0],
-        _ => vec![],
+        Command::GetDateTime
+        | Command::GetStatistics
+        | Command::GetExtendedStatus
+        | Command::GetConfig3
+        | Command::GetTagMessageFormat
+        | Command::PrintBanner
+        | Command::InitE0 => vec![],
     };
 
     // Length byte: 0xff signals a read/query request (IPICO protocol convention);
@@ -340,7 +346,7 @@ impl ControlFrame {
 
     /// Constructor for building frames without going through `parse_response`.
     /// Intended for testing; production code should use `parse_response`.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(reader_id: u8, instruction: u8, data: Vec<u8>) -> Self {
         Self {
             reader_id,
