@@ -96,6 +96,53 @@ describe("rebuildReaderCachesFromStatus", () => {
     expect(result.lastSeenBase).toEqual({ "10.0.0.99": 7 });
     expect(result.lastSeenReceivedAt).toEqual({ "10.0.0.99": now });
   });
+
+  it("handles mixed connected and disconnected readers", () => {
+    const now = 1234567890;
+    const info = makeInfo();
+    const result = rebuildReaderCachesFromStatus(
+      makeStatus([
+        {
+          ip: "10.0.0.1",
+          state: "connected",
+          reads_session: 10,
+          reads_total: 20,
+          last_read_secs: 5,
+          local_port: 10001,
+          reader_info: info,
+        },
+        {
+          ip: "10.0.0.2",
+          state: "disconnected",
+          reads_session: 0,
+          reads_total: 0,
+          last_read_secs: null,
+          local_port: 10002,
+          reader_info: null,
+        },
+      ]),
+      {
+        readerInfoMap: { "10.0.0.2": makeInfo({ banner: "stale" }) },
+        readerInfoReceivedAt: { "10.0.0.2": 111 },
+        readerClockBaseTs: { "10.0.0.2": 222 },
+        readerClockBaseLocal: { "10.0.0.2": 333 },
+        lastReadBase: {},
+        lastReadReceivedAt: {},
+      },
+      now,
+    );
+
+    // Connected reader has info
+    expect(result.readerInfoMap["10.0.0.1"]).toEqual(info);
+    expect(result.readerInfoReceivedAt["10.0.0.1"]).toBe(now);
+    // Disconnected reader's stale info is gone
+    expect(result.readerInfoMap["10.0.0.2"]).toBeUndefined();
+    expect(result.readerInfoReceivedAt["10.0.0.2"]).toBeUndefined();
+    expect(result.readerClockBaseTs["10.0.0.2"]).toBeUndefined();
+    // Both have lastReadBase
+    expect(result.lastReadBase["10.0.0.1"]).toBe(5);
+    expect(result.lastReadBase["10.0.0.2"]).toBeNull();
+  });
 });
 
 describe("applyReaderInfoUpdate", () => {
@@ -132,6 +179,73 @@ describe("applyReaderInfoUpdate", () => {
     );
 
     expect(result).toEqual(previous);
+  });
+
+  it("applies update when status is null (pre-first-fetch)", () => {
+    const now = 1234567890;
+    const previous = {
+      readerInfoMap: {},
+      readerInfoReceivedAt: {},
+      readerClockBaseTs: {},
+      readerClockBaseLocal: {},
+      lastReadBase: {},
+      lastReadReceivedAt: {},
+    };
+
+    const result = applyReaderInfoUpdate(
+      null,
+      previous,
+      {
+        ip: "10.0.0.42",
+        banner: "IPICO V2",
+        clock: { reader_clock: "2026-03-08 12:34:56", drift_ms: 0 },
+      },
+      now,
+    );
+
+    expect(result.readerInfoMap["10.0.0.42"]).toBeDefined();
+    expect(result.readerInfoMap["10.0.0.42"].banner).toBe("IPICO V2");
+    expect(result.readerInfoReceivedAt["10.0.0.42"]).toBe(now);
+    expect(result.readerClockBaseTs["10.0.0.42"]).toBeGreaterThan(0);
+    expect(result.readerClockBaseLocal["10.0.0.42"]).toBe(now);
+  });
+
+  it("applies update and populates clock for connected reader", () => {
+    const now = 1234567890;
+    const previous = {
+      readerInfoMap: { "10.0.0.42": makeInfo({ banner: "old" }) },
+      readerInfoReceivedAt: { "10.0.0.42": 100 },
+      readerClockBaseTs: {},
+      readerClockBaseLocal: {},
+      lastReadBase: {},
+      lastReadReceivedAt: {},
+    };
+
+    const result = applyReaderInfoUpdate(
+      makeStatus([
+        {
+          ip: "10.0.0.42",
+          state: "connected",
+          reads_session: 0,
+          reads_total: 0,
+          last_read_secs: 0,
+          local_port: 10042,
+          reader_info: null,
+        },
+      ]),
+      previous,
+      {
+        ip: "10.0.0.42",
+        banner: "updated",
+        clock: { reader_clock: "2026-03-08 14:00:00", drift_ms: 5 },
+      },
+      now,
+    );
+
+    expect(result.readerInfoMap["10.0.0.42"].banner).toBe("updated");
+    expect(result.readerInfoReceivedAt["10.0.0.42"]).toBe(now);
+    expect(result.readerClockBaseTs["10.0.0.42"]).toBeGreaterThan(0);
+    expect(result.readerClockBaseLocal["10.0.0.42"]).toBe(now);
   });
 });
 
