@@ -200,6 +200,11 @@ impl SubsystemStatus {
     pub fn set_restart_needed(&mut self) {
         self.restart_needed = true;
     }
+
+    /// Return a reference to the readers map.
+    pub fn readers(&self) -> &HashMap<String, ReaderStatus> {
+        &self.readers
+    }
 }
 
 // ---------------------------------------------------------------------------
