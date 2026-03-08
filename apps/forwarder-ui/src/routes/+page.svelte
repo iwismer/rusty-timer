@@ -926,9 +926,13 @@
                       <span class="text-text-muted">Last Refresh:</span>
                       <span class="ml-2"
                         >{#if readerInfoReceivedAt[reader.ip]}{formatLastSeen(
-                            Math.round(
-                              (clockTickNow - readerInfoReceivedAt[reader.ip]) /
-                                1000,
+                            Math.max(
+                              0,
+                              Math.round(
+                                (clockTickNow -
+                                  readerInfoReceivedAt[reader.ip]) /
+                                  1000,
+                              ),
                             ),
                           )}{:else}&mdash;{/if}</span
                       >
