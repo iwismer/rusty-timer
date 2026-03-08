@@ -5,14 +5,13 @@ export interface ReaderInfo {
   fw_version?: string | null;
   hw_code?: number | null;
   reader_id?: number | null;
-  unique_tag_count?: number | null;
-  stored_record_pages?: number | null;
+  config3?: number | null;
+  estimated_stored_reads?: number | null;
+  recording?: boolean | null;
   reader_clock?: string | null;
   clock_drift_ms?: number | null;
   read_mode?: string | null;
   read_mode_timeout?: number | null;
-  recording?: boolean | null;
-  estimated_stored_reads?: number | null;
 }
 
 export interface ReaderStatus {
