@@ -88,6 +88,14 @@ pub struct ReaderStatusChanged {
     pub connected: bool,
 }
 
+/// Sentinel `read_type` prefix used to tunnel control messages through the
+/// per-stream `ReadEvent` broadcast channel. Receivers MUST check for this
+/// prefix before processing events as chip reads.
+pub const SENTINEL_READ_TYPE_PREFIX: &str = "__";
+
+/// Sentinel `read_type` for reader-status-changed control messages.
+pub const READER_STATUS_CHANGED_READ_TYPE: &str = "__reader_status_changed";
+
 /// A batch of read events from a forwarder.
 ///
 /// `batch_id` is an opaque correlation ID for logging/debugging.  The server

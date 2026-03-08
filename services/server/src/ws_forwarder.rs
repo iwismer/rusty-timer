@@ -453,17 +453,27 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         reader_ip: update.reader_ip.clone(),
                                         connected: update.connected,
                                     };
-                                    if let Ok(json) = serde_json::to_string(&WsMessage::ReaderStatusChanged(changed)) {
-                                        let tx = state.get_or_create_broadcast(*sid).await;
-                                        let _ = tx.send(ReadEvent {
-                                            forwarder_id: device_id.clone(),
-                                            reader_ip: update.reader_ip.clone(),
-                                            stream_epoch: 0,
-                                            seq: 0,
-                                            reader_timestamp: String::new(),
-                                            raw_frame: json.into_bytes(),
-                                            read_type: "__reader_status_changed".to_owned(),
-                                        });
+                                    match serde_json::to_string(&WsMessage::ReaderStatusChanged(changed)) {
+                                        Ok(json) => {
+                                            let tx = state.get_or_create_broadcast(*sid).await;
+                                            let _ = tx.send(ReadEvent {
+                                                forwarder_id: device_id.clone(),
+                                                reader_ip: update.reader_ip.clone(),
+                                                stream_epoch: 0,
+                                                seq: 0,
+                                                reader_timestamp: String::new(),
+                                                raw_frame: json.into_bytes(),
+                                                read_type: rt_protocol::READER_STATUS_CHANGED_READ_TYPE.to_owned(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                device_id = %device_id,
+                                                reader_ip = %update.reader_ip,
+                                                error = %e,
+                                                "failed to serialize ReaderStatusChanged for broadcast"
+                                            );
+                                        }
                                     }
                                 } else {
                                     warn!(
