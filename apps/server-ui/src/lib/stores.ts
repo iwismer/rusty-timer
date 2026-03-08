@@ -1,7 +1,9 @@
 import { writable } from "svelte/store";
 import type {
   AnnouncerConfig,
+  CachedReaderState,
   RaceEntry,
+  ReaderDownloadProgressEvent,
   StreamEntry,
   StreamMetrics,
 } from "./api";
@@ -18,6 +20,13 @@ export const racesLoadedStore = writable(false);
 export const announcerConfigStore = writable<AnnouncerConfig | null>(null);
 export const announcerConfigSavingStore = writable(false);
 export const announcerConfigErrorStore = writable<string | null>(null);
+
+export const readerStatesStore = writable<Record<string, CachedReaderState>>(
+  {},
+);
+export const downloadProgressStore = writable<
+  Record<string, ReaderDownloadProgressEvent>
+>({});
 
 export const logsStore = writable<string[]>([]);
 
@@ -81,6 +90,27 @@ export function setAnnouncerConfigError(error: string | null): void {
   announcerConfigErrorStore.set(error);
 }
 
+export function setReaderState(key: string, state: CachedReaderState): void {
+  readerStatesStore.update((s) => ({ ...s, [key]: state }));
+}
+
+export function removeReaderStatesForForwarder(forwarderId: string): void {
+  readerStatesStore.update((s) => {
+    const next: Record<string, CachedReaderState> = {};
+    for (const [k, v] of Object.entries(s)) {
+      if (v.forwarder_id !== forwarderId) next[k] = v;
+    }
+    return next;
+  });
+}
+
+export function setDownloadProgress(
+  key: string,
+  progress: ReaderDownloadProgressEvent,
+): void {
+  downloadProgressStore.update((s) => ({ ...s, [key]: progress }));
+}
+
 export function resetStores(): void {
   streamsStore.set([]);
   metricsStore.set({});
@@ -91,4 +121,6 @@ export function resetStores(): void {
   announcerConfigStore.set(null);
   announcerConfigSavingStore.set(false);
   announcerConfigErrorStore.set(null);
+  readerStatesStore.set({});
+  downloadProgressStore.set({});
 }

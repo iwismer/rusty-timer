@@ -8,9 +8,18 @@ import {
   setForwarderRace,
   pushLog,
   logsStore,
+  readerStatesStore,
+  setReaderState,
+  setDownloadProgress,
 } from "./stores";
-import { getForwarderRaces, getLogs, getRaces, getStreams } from "./api";
-import type { StreamEntry, StreamMetrics } from "./api";
+import {
+  getForwarderRaces,
+  getLogs,
+  getRaces,
+  getReaderStates,
+  getStreams,
+} from "./api";
+import type { CachedReaderState, StreamEntry, StreamMetrics } from "./api";
 import { mergeLogsWithPendingLive } from "./logs-merge";
 
 type StreamUpdatedEvent = {
@@ -93,6 +102,26 @@ export function initSSE(): void {
     }
   });
 
+  eventSource.addEventListener("reader_info_updated", (e: MessageEvent) => {
+    const data = JSON.parse(e.data);
+    const key = `${data.forwarder_id}:${data.reader_ip}`;
+    setReaderState(key, {
+      forwarder_id: data.forwarder_id,
+      reader_ip: data.reader_ip,
+      state: data.state,
+      reader_info: data.reader_info,
+    });
+  });
+
+  eventSource.addEventListener(
+    "reader_download_progress",
+    (e: MessageEvent) => {
+      const data = JSON.parse(e.data);
+      const key = `${data.forwarder_id}:${data.reader_ip}`;
+      setDownloadProgress(key, data);
+    },
+  );
+
   eventSource.addEventListener("resync", async () => {
     await resync();
   });
@@ -126,13 +155,19 @@ async function resync(): Promise<void> {
     // Coalesce multiple resync triggers into a single follow-up fetch.
     while (true) {
       resyncQueued = false;
-      const [streamsResp, racesResp, assignmentsResp, logsResp] =
-        await Promise.allSettled([
-          getStreams(),
-          getRaces(),
-          getForwarderRaces(),
-          getLogs(),
-        ]);
+      const [
+        streamsResp,
+        racesResp,
+        assignmentsResp,
+        logsResp,
+        readerStatesResp,
+      ] = await Promise.allSettled([
+        getStreams(),
+        getRaces(),
+        getForwarderRaces(),
+        getLogs(),
+        getReaderStates(),
+      ]);
 
       if (streamsResp.status === "fulfilled") {
         replaceStreams(streamsResp.value.streams);
@@ -152,6 +187,13 @@ async function resync(): Promise<void> {
           ),
         );
         pendingLiveLogs = [];
+      }
+      if (readerStatesResp.status === "fulfilled") {
+        const next: Record<string, CachedReaderState> = {};
+        for (const rs of readerStatesResp.value) {
+          next[`${rs.forwarder_id}:${rs.reader_ip}`] = rs;
+        }
+        readerStatesStore.set(next);
       }
       if (!resyncQueued) break;
     }
