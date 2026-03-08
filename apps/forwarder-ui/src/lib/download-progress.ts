@@ -26,8 +26,8 @@ export function subscribeDownloadProgress(
       if (data.state === "complete" || data.state === "error") {
         es.close();
       }
-    } catch {
-      // ignore malformed messages
+    } catch (err) {
+      console.error("Failed to parse download progress event:", err, msg.data);
     }
   };
 
