@@ -24,6 +24,22 @@ class ProcessFileFlowTests(unittest.TestCase):
         self.assertEqual(output.count("TAG  reader=00"), 16)
         self.assertIn("aa00058000120e38000e26030713560136b0", output)
 
+    def test_process_file_decodes_tto_enabled_reads(self) -> None:
+        capture = CAPTURES_DIR / "fsls-event-tto.pcapng"
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            parse_pcap.process_file(str(capture))
+
+        output = stdout.getvalue()
+
+        self.assertIn(
+            "TAG  reader=00 tag=058000123b32 time=2026-03-08T12:22:02.470 "
+            "type=RAW tto=index=06 page=00 status=80",
+            output,
+        )
+        self.assertIn("aa00058000123b3200012603081222022f060080cd", output)
+
 
 if __name__ == "__main__":
     unittest.main()
