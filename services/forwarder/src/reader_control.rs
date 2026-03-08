@@ -374,10 +374,15 @@ impl ControlResponseSink {
 
     /// Feed a non-framed line (banner text).
     pub async fn feed_banner_line(&self, line: &[u8]) {
-        if let Ok(s) = std::str::from_utf8(line) {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                self.banner_buf.lock().await.push(trimmed.to_owned());
+        match std::str::from_utf8(line) {
+            Ok(s) => {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    self.banner_buf.lock().await.push(trimmed.to_owned());
+                }
+            }
+            Err(_) => {
+                warn!("non-UTF-8 banner line ({} bytes), skipping", line.len());
             }
         }
     }
@@ -423,17 +428,19 @@ pub struct ReaderInfo {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum DownloadEvent {
+    /// Download is in progress. `progress` and `total` are raw 24-bit extent
+    /// values from the 0x4b extended status register (not read counts).
+    /// `reads_received` is the count of `aa`-frame chip reads received so far.
     Downloading {
         progress: u32,
         total: u32,
         reads_received: u32,
     },
-    Complete {
-        reads_received: u32,
-    },
-    Error {
-        message: String,
-    },
+    /// Download completed successfully.
+    Complete { reads_received: u32 },
+    /// Download failed with the given error message.
+    Error { message: String },
+    /// No download active.
     Idle,
 }
 
@@ -508,6 +515,11 @@ impl DownloadTracker {
     }
 
     pub fn start(&mut self, stored_data_extent: u32) {
+        debug_assert!(
+            matches!(self.state, DownloadState::Starting),
+            "start() called in {:?} state, expected Starting",
+            self.state,
+        );
         self.state = DownloadState::Downloading;
         self.reads_received = 0;
         self.download_progress = 0;
@@ -515,6 +527,11 @@ impl DownloadTracker {
     }
 
     pub fn complete(&mut self) {
+        debug_assert!(
+            matches!(self.state, DownloadState::Downloading),
+            "complete() called in {:?} state, expected Downloading",
+            self.state,
+        );
         self.state = DownloadState::Complete;
         let _ = self.event_tx.send(DownloadEvent::Complete {
             reads_received: self.reads_received,
@@ -522,6 +539,14 @@ impl DownloadTracker {
     }
 
     pub fn fail(&mut self, msg: String) {
+        debug_assert!(
+            matches!(
+                self.state,
+                DownloadState::Starting | DownloadState::Downloading
+            ),
+            "fail() called in {:?} state, expected Starting or Downloading",
+            self.state,
+        );
         self.state = DownloadState::Error(msg.clone());
         let _ = self.event_tx.send(DownloadEvent::Error { message: msg });
     }
@@ -896,6 +921,7 @@ mod tests {
         let mut tracker = DownloadTracker::new();
         let mut rx = tracker.subscribe();
 
+        tracker.begin_startup();
         tracker.start(100);
         assert_eq!(*tracker.state(), DownloadState::Downloading);
         assert_eq!(tracker.stored_data_extent(), 100);
@@ -951,6 +977,7 @@ mod tests {
         let mut tracker = DownloadTracker::new();
         let mut rx = tracker.subscribe();
 
+        tracker.begin_startup();
         tracker.start(50);
         tracker.fail("connection lost".to_string());
         assert_eq!(
@@ -1236,5 +1263,57 @@ mod tests {
         let frame = ControlFrame::new(0, control::INSTR_GET_DATE_TIME, vec![0; 9]);
         assert!(PendingRequestKind::AnyInstruction(control::INSTR_GET_DATE_TIME).matches(&frame));
         assert!(!PendingRequestKind::AnyInstruction(control::INSTR_GET_STATISTICS).matches(&frame));
+    }
+
+    #[tokio::test]
+    async fn download_tracker_update_progress_ignored_when_idle() {
+        let mut tracker = DownloadTracker::new();
+        tracker.update_progress(50, 100);
+        assert_eq!(tracker.download_progress(), 0);
+        assert_eq!(tracker.stored_data_extent(), 0);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_update_progress_ignored_when_complete() {
+        let mut tracker = DownloadTracker::new();
+        tracker.begin_startup();
+        tracker.start(100);
+        tracker.complete();
+        tracker.update_progress(50, 100);
+        // download_progress was 0 from start(), complete() doesn't change it
+        assert_eq!(tracker.download_progress(), 0);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_begin_startup_then_start() {
+        let mut tracker = DownloadTracker::new();
+        assert!(!tracker.is_active());
+
+        tracker.begin_startup();
+        assert!(tracker.is_active());
+        assert!(!tracker.is_downloading());
+        assert_eq!(*tracker.state(), DownloadState::Starting);
+
+        tracker.start(200);
+        assert!(tracker.is_active());
+        assert!(tracker.is_downloading());
+        assert_eq!(tracker.stored_data_extent(), 200);
+        assert_eq!(tracker.reads_received(), 0);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_fail_during_starting() {
+        let mut tracker = DownloadTracker::new();
+        let mut rx = tracker.subscribe();
+
+        tracker.begin_startup();
+        tracker.fail("connection lost".to_string());
+        assert_eq!(
+            *tracker.state(),
+            DownloadState::Error("connection lost".to_string())
+        );
+
+        let ev = rx.try_recv().expect("error event");
+        assert!(matches!(ev, DownloadEvent::Error { message } if message == "connection lost"));
     }
 }

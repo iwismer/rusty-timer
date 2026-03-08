@@ -1873,6 +1873,7 @@ mod tests {
         let tracker = tokio::sync::Mutex::new(forwarder::reader_control::DownloadTracker::new());
         {
             let mut dt = tracker.lock().await;
+            dt.begin_startup();
             dt.start(42);
         }
 
