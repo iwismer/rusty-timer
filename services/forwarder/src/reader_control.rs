@@ -732,8 +732,6 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
         }
         Err(e) => {
             warn!("status poll: get_extended_status failed: {e}");
-            info.estimated_stored_reads = None;
-            info.recording = None;
         }
     }
 
@@ -743,16 +741,11 @@ pub async fn run_status_poll(client: &ControlClient, info: &mut ReaderInfo) {
         }
         Err(e) => {
             warn!("status poll: get_config3 failed: {e}");
-            info.config = None;
         }
     }
 
-    if let Err(()) = poll_tag_message_format(client, info).await {
-        info.tto_enabled = None;
-    }
-    if let Err(()) = poll_clock(client, info).await {
-        info.clock = None;
-    }
+    let _ = poll_tag_message_format(client, info).await;
+    let _ = poll_clock(client, info).await;
 }
 
 /// Poll reader status, but preserve cached values when an individual poll fails.
@@ -802,7 +795,6 @@ async fn poll_tag_message_format(client: &ControlClient, info: &mut ReaderInfo) 
         }
         Err(e) => {
             warn!("get_tag_message_format failed: {e}");
-            info.tto_enabled = None;
             Err(())
         }
     }
@@ -826,13 +818,11 @@ async fn poll_clock(client: &ControlClient, info: &mut ReaderInfo) -> Result<(),
                 });
             } else {
                 warn!("status poll: failed to parse reader clock: {reader_iso}");
-                info.clock = None;
             }
             Ok(())
         }
         Err(e) => {
             warn!("status poll: get_date_time failed: {e}");
-            info.clock = None;
             Err(())
         }
     }
@@ -1029,6 +1019,73 @@ mod tests {
         task.await
             .expect("task join")
             .expect("set_recording result");
+    }
+
+    #[tokio::test]
+    async fn run_status_poll_keeps_existing_fields_when_follow_up_queries_fail() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (client, sink) = ControlClient::new(cmd_tx);
+
+        let task = tokio::spawn(async move {
+            let mut info = ReaderInfo {
+                config: Some(Config3Info {
+                    mode: control::ReadMode::Event,
+                    timeout: 5,
+                }),
+                tto_enabled: Some(true),
+                clock: Some(ClockInfo {
+                    reader_clock: "2026-03-08T12:00:00.000".to_owned(),
+                    drift_ms: 12,
+                }),
+                estimated_stored_reads: Some(321),
+                recording: Some(true),
+                ..Default::default()
+            };
+            run_status_poll(&client, &mut info).await;
+            info
+        });
+
+        let ext_status_cmd = cmd_rx.recv().await.expect("ext status command");
+        assert_eq!(
+            std::str::from_utf8(&ext_status_cmd).expect("ext status utf8"),
+            "ab00ff4bc2\r\n"
+        );
+        assert!(sink.feed(b"ab000d4b010b012f0000000059058f0c005a").await);
+
+        let config3_cmd = cmd_rx.recv().await.expect("config3 command");
+        assert_eq!(
+            std::str::from_utf8(&config3_cmd).expect("config3 utf8"),
+            "ab00ff0995\r\n"
+        );
+        assert!(sink.feed(b"zz not-a-frame").await);
+
+        let tag_format_cmd = cmd_rx.recv().await.expect("tag format command");
+        assert_eq!(
+            tag_format_cmd,
+            control::encode_command(&Command::GetTagMessageFormat, 0x00)
+                .expect("encode tag format"),
+        );
+        assert!(sink.feed(b"zz not-a-frame").await);
+
+        let date_time_cmd = cmd_rx.recv().await.expect("date/time command");
+        assert_eq!(
+            std::str::from_utf8(&date_time_cmd).expect("date/time utf8"),
+            "ab00000222\r\n"
+        );
+        assert!(sink.feed(b"zz not-a-frame").await);
+
+        let info = task.await.expect("poll task");
+        assert_eq!(
+            info.config.as_ref().map(|c| c.mode),
+            Some(control::ReadMode::Event)
+        );
+        assert_eq!(info.tto_enabled, Some(true));
+        assert_eq!(
+            info.clock.as_ref().map(|c| c.reader_clock.as_str()),
+            Some("2026-03-08T12:00:00.000")
+        );
+        assert_eq!(info.recording, Some(true));
+        assert_eq!(info.estimated_stored_reads, Some(22537));
     }
 
     #[tokio::test]

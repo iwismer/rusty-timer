@@ -2333,7 +2333,7 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
         .logger
         .log(format!("reader {} setting recording {}", ip, label));
     match client.set_recording(body.enabled).await {
-        Ok(_ext) => {
+        Ok(ext) => {
             // Refresh full status so SSE subscribers see the new recording state
             let mut info = {
                 let ss = state.subsystem.lock().await;
@@ -2342,7 +2342,11 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
                     .and_then(|r| r.reader_info.clone())
                     .unwrap_or_default()
             };
+            info.recording = Some(ext.recording_state.is_recording());
+            info.estimated_stored_reads = Some(ext.estimated_stored_reads());
             crate::reader_control::run_status_poll(&client, &mut info).await;
+            info.recording = Some(ext.recording_state.is_recording());
+            info.estimated_stored_reads = Some(ext.estimated_stored_reads());
             update_cached_reader_info(&state, &ip, info.clone()).await;
             let recording = info.recording.unwrap_or(false);
             json_response(
@@ -3406,6 +3410,9 @@ mod tests {
 
         server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
         server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
             .update_reader_info(
                 reader_ip,
                 crate::reader_control::ReaderInfo {
@@ -4421,6 +4428,145 @@ mod tests {
 
         let body: serde_json::Value = resp.json().await.expect("json error response");
         assert_eq!(body["error"], "unknown mode: bad\"mode");
+    }
+
+    #[tokio::test]
+    async fn set_recording_returns_true_even_if_follow_up_poll_fails() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(
+                reader_ip,
+                crate::reader_control::ReaderInfo {
+                    recording: Some(false),
+                    estimated_stored_reads: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server.register_control_client(reader_ip, Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            let set_cmd = cmd_rx.recv().await.expect("set recording command");
+            let expected = control::encode_command(&Command::SetRecordingState { on: true }, 0x00)
+                .expect("encode set recording");
+            assert_eq!(set_cmd, expected);
+            assert!(
+                control_sink
+                    .feed(b"ab000c4b010000000000000059058f015c")
+                    .await
+            );
+
+            for _ in 0..4 {
+                let _ = cmd_rx.recv().await.expect("follow-up poll command");
+                assert!(control_sink.feed(b"zz not-a-frame").await);
+            }
+        });
+
+        let resp = reqwest::Client::new()
+            .put(format!(
+                "http://{}/api/v1/readers/{}/recording",
+                server.local_addr(),
+                reader_ip
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true}"#)
+            .send()
+            .await
+            .expect("PUT recording");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["recording"], true);
+
+        feeder.await.expect("feeder task");
+    }
+
+    #[tokio::test]
+    async fn sync_clock_broadcasts_reader_info_updated() {
+        let reader_ip = "192.168.1.10";
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.init_readers(&[(reader_ip.to_owned(), 10010)]).await;
+        server
+            .update_reader_state(reader_ip, ReaderConnectionState::Connected)
+            .await;
+        server
+            .update_reader_info(reader_ip, crate::reader_control::ReaderInfo::default())
+            .await;
+
+        let mut rx = server.ui_tx.subscribe();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let (control_client, control_sink) = crate::reader_control::ControlClient::new(cmd_tx);
+        server.register_control_client(reader_ip, Arc::new(control_client));
+
+        let feeder = tokio::spawn(async move {
+            for _ in 0..4 {
+                let _ = cmd_rx.recv().await.expect("clock sync read command");
+                assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+            }
+            let _ = cmd_rx.recv().await.expect("clock sync set command");
+            assert!(
+                control_sink
+                    .feed(ack_for(control::INSTR_SET_DATE_TIME).as_bytes())
+                    .await
+            );
+            let _ = cmd_rx.recv().await.expect("clock sync verify command");
+            assert!(control_sink.feed(b"ab000902260306051855443727cf").await);
+        });
+
+        let resp = reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/v1/readers/{}/sync-clock",
+                server.local_addr(),
+                reader_ip
+            ))
+            .send()
+            .await
+            .expect("POST sync-clock");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (ip, info) = tokio::time::timeout(std::time::Duration::from_secs(1), async move {
+            loop {
+                match rx.recv().await.expect("recv event") {
+                    crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { ip, info } => {
+                        break (ip, info);
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("event timeout");
+
+        assert_eq!(ip, reader_ip);
+        assert!(info.clock.is_some());
+
+        feeder.await.expect("feeder task");
     }
 
     #[tokio::test]
