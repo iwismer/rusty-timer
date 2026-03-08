@@ -208,6 +208,9 @@ pub async fn set_stream_online(
     Ok(())
 }
 
+/// Update the `reader_connected` flag for a stream. When setting to `true`,
+/// the update is guarded by `online = true` to enforce the invariant:
+/// `!online => !reader_connected`.
 pub async fn set_reader_connected(
     pool: &PgPool,
     stream_id: Uuid,

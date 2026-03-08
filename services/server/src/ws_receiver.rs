@@ -266,10 +266,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                             }
                                         }
                                         Err(e) => {
-                                            warn!(
+                                            error!(
                                                 stream_id = %sub.stream_id,
                                                 error = %e,
-                                                "invalid UTF-8 in reader_status_changed payload"
+                                                "invalid UTF-8 in reader_status_changed payload; possible data corruption"
                                             );
                                         }
                                     }

@@ -465,7 +465,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     // Forward ReaderStatusChanged to connected receivers.
                                     // The per-stream broadcast is typed ReadEvent, so we
                                     // encode the status change as a sentinel ReadEvent that
-                                    // the receiver handler will detect and re-serialize.
+                                    // the receiver handler will detect and forward directly.
                                     let changed = rt_protocol::ReaderStatusChanged {
                                         stream_id: *sid,
                                         reader_ip: update.reader_ip.clone(),

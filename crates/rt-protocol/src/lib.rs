@@ -2,7 +2,8 @@
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
 // deserialization. The original v1/v1.2 message kinds are preserved;
-// additional variants have been added for reader status tracking.
+// ReaderStatusUpdate and ReaderStatusChanged have been added for reader
+// status tracking.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -89,11 +90,13 @@ pub struct ReaderStatusChanged {
 }
 
 /// Sentinel `read_type` prefix used to tunnel control messages through the
-/// per-stream `ReadEvent` broadcast channel. Receivers MUST check for this
-/// prefix before processing events as chip reads.
+/// per-stream `ReadEvent` broadcast channel. The server's receiver WS handler
+/// MUST filter events with this prefix and never forward them as chip reads.
 pub const SENTINEL_READ_TYPE_PREFIX: &str = "__";
 
 /// Sentinel `read_type` for reader-status-changed control messages.
+/// When a `ReadEvent` carries this type, its `raw_frame` contains the
+/// JSON-serialized `WsMessage::ReaderStatusChanged` payload.
 pub const READER_STATUS_CHANGED_READ_TYPE: &str = "__reader_status_changed";
 
 /// A batch of read events from a forwarder.
@@ -373,7 +376,9 @@ pub struct StreamInfo {
     pub stream_epoch: u64,
     /// True when the forwarder's WS session is currently connected.
     pub online: bool,
-    /// True when the forwarder reports its TCP connection to the reader hardware is up.
+    /// True when the forwarder reports its TCP connection to the reader hardware
+    /// is up. Invariant: `!online` implies `!reader_connected`.
+    #[serde(default)]
     pub reader_connected: bool,
 }
 
