@@ -1883,19 +1883,23 @@ async fn estimate_one_way_latency(
 ///
 /// Minimizes clock drift by:
 /// 1. Probing RTT to estimate one-way network latency
-/// 2. Reading the reader's clock to learn its centisecond phase
-/// 3. Choosing the SET_DATE_TIME second value that minimizes drift, accounting
-///    for the fact that SET_DATE_TIME takes effect at the next centisecond
-///    rollover (next second boundary), not immediately.
+/// 2. Choosing the SET_DATE_TIME second value that minimizes drift, accounting
+///    for the reader's fixed sync delay after receiving the command.
 ///
-/// The reader's centisecond counter free-runs through SET_DATE_TIME. The new
-/// second value is applied when the cs counter next wraps to 0. At that moment
-/// the reader shows S.000. We pick S = round(wall_at_rollover) so that
-/// |drift| ≤ 500ms worst case, ~250ms average.
+/// SET_DATE_TIME resets the centisecond counter to ~52 (520ms) and applies the
+/// new second value when cs next rolls over from 99 → 0, which takes ~480ms.
+/// The reader's unsolicited 0x4c frame confirms a 500ms sync delay. We use
+/// SYNC_DELAY_MS = 500 to predict when the new second S.000 will take effect,
+/// then pick S = round(wall_at_rollover) so |drift| ≤ 500ms worst case.
 async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     Path(ip): Path<String>,
 ) -> Response {
+    /// Fixed delay (ms) from SET_DATE_TIME receipt to the new second taking
+    /// effect. The reader resets cs to ~52 and the rollover to second S.000
+    /// occurs ~480ms later; the reader's 0x4c frame reports 500ms.
+    const SYNC_DELAY_MS: u64 = 500;
+
     let client = {
         state
             .control_clients
@@ -1922,36 +1926,14 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
         }
     };
 
-    // Step 2: read the reader's clock to learn its centisecond phase
-    let dt = match client.get_date_time().await {
-        Ok(dt) => dt,
-        Err(e) => {
-            return json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": format!("failed to read reader clock: {}", e)})
-                    .to_string(),
-            );
-        }
-    };
     let wall_now = chrono::Local::now();
 
-    // The reader sampled its clock ~one_way ago. The SET_DATE_TIME we're about
-    // to send will arrive ~one_way from now. So from sample to arrival ≈ 2*one_way.
-    // Reader centisecond at arrival: (cs*10 + 2*one_way_ms) mod 1000
-    let cs = dt.centisecond as f64;
-    let reader_cs_at_arrival_ms = (cs * 10.0 + one_way.as_secs_f64() * 2000.0) % 1000.0;
-    let reader_frac = reader_cs_at_arrival_ms / 1000.0; // 0.0 .. 1.0
-
-    // Wall clock at the moment the command arrives
+    // Step 2: predict when the new second will take effect.
+    // The SET command arrives ~one_way from now. The reader then takes
+    // SYNC_DELAY_MS to apply the new second (cs resets to ~52, rolls to 0).
     let arrival_offset = chrono::Duration::from_std(one_way).unwrap_or(chrono::Duration::zero());
-    let arrival_wall = wall_now + arrival_offset;
-
-    // Step 3: choose the second value that minimizes drift.
-    // SET_DATE_TIME takes effect at the next cs rollover (when cs wraps to 0),
-    // NOT immediately. At that moment the reader shows S.000.
-    // Time from arrival to rollover = (1.0 - reader_frac) seconds.
-    let rollover_delay_ms = ((1.0 - reader_frac) * 1000.0) as i64;
-    let wall_at_rollover = arrival_wall + chrono::Duration::milliseconds(rollover_delay_ms);
+    let sync_delay = chrono::Duration::milliseconds(SYNC_DELAY_MS as i64);
+    let wall_at_rollover = wall_now + arrival_offset + sync_delay;
     let rollover_frac = wall_at_rollover.nanosecond() as f64 / 1_000_000_000.0;
 
     // Pick S = round(wall_at_rollover) so that |S.000 - wall_at_rollover| ≤ 500ms
@@ -1978,6 +1960,12 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
             serde_json::json!({"error": e.to_string()}).to_string(),
         );
     }
+
+    // Wait for the sync to complete before verifying. The reader needs ~500ms
+    // after receiving SET_DATE_TIME for the new second to take effect. We add
+    // margin for the one-way latency of the SET command itself.
+    let verify_wait = std::time::Duration::from_millis(SYNC_DELAY_MS) + one_way;
+    tokio::time::sleep(verify_wait).await;
 
     match client.get_date_time().await {
         Ok(dt) => {
@@ -2010,12 +1998,11 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
             }
 
             state.logger.log(format!(
-                "reader {} clock synced to {} (one-way latency: {:.1}ms, cs phase: {:.0}, rollover frac: {:.0}ms)",
+                "reader {} clock synced to {} (one-way latency: {:.1}ms, sync delay: {}ms)",
                 ip,
                 reader_iso,
                 one_way.as_secs_f64() * 1000.0,
-                cs,
-                rollover_frac * 1000.0,
+                SYNC_DELAY_MS,
             ));
             json_response(
                 StatusCode::OK,

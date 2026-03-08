@@ -550,13 +550,15 @@ Notes:
   RTC interrupt to 1-second intervals
 - `Capture`: after a successful clock set, this reader emitted one unsolicited
   `0x4c` frame, then the management software read back `0x02` to verify
-- `Capture` (`setclock.pcapng`): SET_DATE_TIME does **not** take effect
-  immediately. The centisecond counter free-runs uninterrupted and the new
-  second value is applied at the next cs rollover (when cs wraps from 99 → 0).
-  Verify reads performed within the same second consistently show the
-  **pre-SET** second value with a continuing centisecond counter. This means
-  the effective reader clock after the SET is `S.000` at the rollover moment,
-  not `S.<current_cs>` at the command-arrival moment
+- `Capture` (`setclock.pcapng`, `another-clockset.pcapng`): SET_DATE_TIME does
+  **not** take effect immediately. The centisecond counter is **reset to ~52
+  (0x34)** upon receipt of the command, regardless of its prior value. The new
+  second value is applied at the next cs rollover (when cs wraps from 99 → 0),
+  which occurs ~480ms after the reset. The reader emits an unsolicited `0x4c`
+  frame confirming a 500ms sync delay (offset field = `0x01F4`). Verify reads
+  performed before the rollover show the **pre-SET** second value with the
+  reset centisecond counter. The effective reader clock after the SET is
+  `S.000` at the rollover moment, ~500ms after the command is received
 
 #### 0x02 - GET_DATE_TIME
 
