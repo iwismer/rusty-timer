@@ -441,6 +441,10 @@ impl StatusServer {
         let mut ss = self.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             if r.state == ReaderConnectionState::Disconnected {
+                tracing::debug!(
+                    reader_ip,
+                    "dropping reader info update for disconnected reader"
+                );
                 return;
             }
             r.reader_info = Some(info.clone());
@@ -2028,6 +2032,10 @@ async fn update_cached_reader_info<J: JournalAccess + Send + 'static>(
         let mut ss = state.subsystem.lock().await;
         if let Some(r) = ss.readers.get_mut(ip) {
             if r.state == ReaderConnectionState::Disconnected {
+                tracing::debug!(
+                    ip,
+                    "dropping cached reader info update for disconnected reader"
+                );
                 return;
             }
             r.reader_info = Some(info.clone());
