@@ -152,7 +152,14 @@ where
                                     connected = status.connected,
                                     "reader connection status changed"
                                 );
-                                if !status.connected {
+                                if status.connected {
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
+                                        entry: format!(
+                                            "reader reconnected: {} (stream {})",
+                                            status.reader_ip, status.stream_id
+                                        ),
+                                    });
+                                } else {
                                     warn!(
                                         stream_id = %status.stream_id,
                                         reader_ip = %status.reader_ip,

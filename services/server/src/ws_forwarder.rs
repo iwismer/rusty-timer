@@ -52,18 +52,26 @@ pub async fn ws_forwarder_handler(
 }
 
 async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
-    if let Ok(Some(stream)) = fetch_stream_snapshot(&state.pool, stream_id).await {
-        let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
-            stream_id: stream.stream_id,
-            forwarder_id: stream.forwarder_id,
-            reader_ip: stream.reader_ip,
-            display_alias: stream.display_alias,
-            forwarder_display_name: stream.forwarder_display_name,
-            online: stream.online,
-            reader_connected: stream.reader_connected,
-            stream_epoch: stream.stream_epoch,
-            created_at: stream.created_at.to_rfc3339(),
-        });
+    match fetch_stream_snapshot(&state.pool, stream_id).await {
+        Ok(Some(stream)) => {
+            let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
+                stream_id: stream.stream_id,
+                forwarder_id: stream.forwarder_id,
+                reader_ip: stream.reader_ip,
+                display_alias: stream.display_alias,
+                forwarder_display_name: stream.forwarder_display_name,
+                online: stream.online,
+                reader_connected: stream.reader_connected,
+                stream_epoch: stream.stream_epoch,
+                created_at: stream.created_at.to_rfc3339(),
+            });
+        }
+        Ok(None) => {
+            warn!(stream_id = %stream_id, "stream not found when publishing StreamCreated");
+        }
+        Err(e) => {
+            error!(stream_id = %stream_id, error = %e, "failed to fetch stream snapshot for dashboard");
+        }
     }
 }
 
