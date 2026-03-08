@@ -1800,7 +1800,7 @@ async fn reader_info_handler<J: JournalAccess + Send + 'static>(
 /// Returns the median one-way latency (RTT/2) from 3 probes.
 async fn estimate_one_way_latency(
     client: &crate::reader_control::ControlClient,
-) -> std::time::Duration {
+) -> Result<std::time::Duration, String> {
     const PROBES: usize = 3;
     let mut rtts = Vec::with_capacity(PROBES);
     for _ in 0..PROBES {
@@ -1810,12 +1810,13 @@ async fn estimate_one_way_latency(
         }
     }
     if rtts.is_empty() {
-        tracing::warn!("all RTT probes failed, falling back to 20ms one-way latency estimate");
-        return std::time::Duration::from_millis(20);
+        return Err(
+            "all RTT probes failed; cannot estimate network latency for clock sync".to_string(),
+        );
     }
     rtts.sort();
     let median_rtt = rtts[rtts.len() / 2];
-    median_rtt / 2
+    Ok(median_rtt / 2)
 }
 
 /// POST /api/v1/readers/{ip}/sync-clock
@@ -1851,7 +1852,15 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     use chrono::Timelike;
 
     // Step 1: estimate one-way latency
-    let one_way = estimate_one_way_latency(&client).await;
+    let one_way = match estimate_one_way_latency(&client).await {
+        Ok(d) => d,
+        Err(msg) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"error": msg}).to_string(),
+            );
+        }
+    };
 
     // Step 2: read the reader's clock to learn its centisecond phase
     let dt = match client.get_date_time().await {
@@ -1859,7 +1868,8 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
         Err(e) => {
             return json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"failed to read reader clock: {}\"}}", e),
+                serde_json::json!({"error": format!("failed to read reader clock: {}", e)})
+                    .to_string(),
             );
         }
     };
@@ -1905,7 +1915,7 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
     {
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"{}\"}}", e),
+            serde_json::json!({"error": e.to_string()}).to_string(),
         );
     }
 
@@ -1948,21 +1958,15 @@ async fn sync_clock_handler<J: JournalAccess + Send + 'static>(
                 cs,
                 rollover_frac * 1000.0,
             ));
-            let drift_json = match drift_ms {
-                Some(d) => format!("{}", d),
-                None => "null".to_owned(),
-            };
             json_response(
                 StatusCode::OK,
-                format!(
-                    "{{\"reader_clock\":\"{}\",\"clock_drift_ms\":{}}}",
-                    reader_iso, drift_json
-                ),
+                serde_json::json!({"reader_clock": reader_iso, "clock_drift_ms": drift_ms})
+                    .to_string(),
             )
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"set ok but verify failed: {}\"}}", e),
+            serde_json::json!({"error": format!("set ok but verify failed: {}", e)}).to_string(),
         ),
     }
 }
@@ -1986,11 +1990,11 @@ async fn get_read_mode_handler<J: JournalAccess + Send + 'static>(
     match client.get_config3().await {
         Ok((mode, timeout)) => json_response(
             StatusCode::OK,
-            format!("{{\"mode\":\"{}\",\"timeout\":{}}}", mode.as_str(), timeout),
+            serde_json::json!({"mode": mode.as_str(), "timeout": timeout}).to_string(),
         ),
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"{}\"}}", e),
+            serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -2048,12 +2052,12 @@ async fn set_read_mode_handler<J: JournalAccess + Send + 'static>(
                 .log(format!("reader {} read mode set to {}", ip, mode));
             json_response(
                 StatusCode::OK,
-                format!("{{\"mode\":\"{}\"}}", mode.as_str()),
+                serde_json::json!({"mode": mode.as_str()}).to_string(),
             )
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"{}\"}}", e),
+            serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -2126,7 +2130,7 @@ async fn clear_records_handler<J: JournalAccess + Send + 'static>(
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"{}\"}}", e),
+            serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -2176,11 +2180,14 @@ async fn set_recording_handler<J: JournalAccess + Send + 'static>(
                     info: info.clone(),
                 });
             let recording = info.recording.unwrap_or(false);
-            json_response(StatusCode::OK, format!("{{\"recording\":{}}}", recording))
+            json_response(
+                StatusCode::OK,
+                serde_json::json!({"recording": recording}).to_string(),
+            )
         }
         Err(e) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"{}\"}}", e),
+            serde_json::json!({"error": e.to_string()}).to_string(),
         ),
     }
 }
@@ -2225,7 +2232,7 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     };
     let Some(client) = client else {
         return json_response(
-            StatusCode::NOT_FOUND,
+            StatusCode::SERVICE_UNAVAILABLE,
             r#"{"error":"reader not connected"}"#.to_string(),
         );
     };
@@ -2239,7 +2246,7 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
     };
     let Some(tracker) = tracker else {
         return json_response(
-            StatusCode::NOT_FOUND,
+            StatusCode::SERVICE_UNAVAILABLE,
             r#"{"error":"reader not connected"}"#.to_string(),
         );
     };
@@ -2293,10 +2300,7 @@ async fn download_reads_handler<J: JournalAccess + Send + 'static>(
 
     json_response(
         StatusCode::ACCEPTED,
-        format!(
-            r#"{{"status":"started","estimated_reads":{}}}"#,
-            estimated_reads
-        ),
+        serde_json::json!({"status": "started", "estimated_reads": estimated_reads}).to_string(),
     )
 }
 
@@ -2373,6 +2377,11 @@ async fn download_progress_handler<J: JournalAccess + Send + 'static>(
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    let err_json = serde_json::json!({
+                        "state": "error",
+                        "message": "download tracker closed unexpectedly"
+                    }).to_string();
+                    yield Ok::<_, Infallible>(SseEvent::default().data(err_json));
                     return;
                 }
             }
@@ -2513,7 +2522,7 @@ async fn reset_epoch_handler<J: JournalAccess + Send + 'static>(
             state
                 .logger
                 .log(format!("epoch reset for {} via API", reader_ip));
-            let body = format!("{{\"new_epoch\":{}}}", new_epoch);
+            let body = serde_json::json!({"new_epoch": new_epoch}).to_string();
             json_response(StatusCode::OK, body)
         }
         Err(EpochResetError::NotFound) => text_response(StatusCode::NOT_FOUND, "stream not found"),
@@ -4292,7 +4301,7 @@ target = "192.168.1.100:10000"
     }
 
     #[tokio::test]
-    async fn download_reads_returns_404_for_unknown_reader() {
+    async fn download_reads_returns_503_for_unknown_reader() {
         let server = StatusServer::start(
             StatusConfig {
                 bind: "127.0.0.1:0".to_owned(),
@@ -4312,7 +4321,7 @@ target = "192.168.1.100:10000"
             .send()
             .await
             .expect("POST download-reads unknown reader");
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
