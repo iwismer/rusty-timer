@@ -30,6 +30,7 @@ pub enum DashboardEvent {
         display_alias: Option<String>,
         forwarder_display_name: Option<String>,
         online: bool,
+        reader_connected: bool,
         stream_epoch: i64,
         created_at: String,
     },
@@ -37,6 +38,8 @@ pub enum DashboardEvent {
         stream_id: Uuid,
         #[serde(skip_serializing_if = "Option::is_none")]
         online: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reader_connected: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         stream_epoch: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]

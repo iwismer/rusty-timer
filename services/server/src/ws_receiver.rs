@@ -251,6 +251,16 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 loop {
                     match sub.rx.try_recv() {
                         Ok(event) => {
+                            // Intercept control messages encoded as sentinel ReadEvents.
+                            // These must not reach the receiver as chip reads or advance cursors.
+                            if event.read_type.starts_with("__") {
+                                if event.read_type == "__reader_status_changed"
+                                    && let Ok(json) = String::from_utf8(event.raw_frame.clone())
+                                {
+                                    let _ = socket.send(Message::Text(json.into())).await;
+                                }
+                                continue;
+                            }
                             let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
                                 warn!(
                                     stream_id = %sub.stream_id,

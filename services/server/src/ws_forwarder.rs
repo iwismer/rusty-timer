@@ -6,8 +6,8 @@ use crate::{
         announcer_config,
         events::{
             IngestResult, count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
-            fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
-            upsert_stream,
+            fetch_stream_snapshot, set_reader_connected, set_stream_online,
+            update_forwarder_display_name, upsert_event, upsert_stream,
         },
         races::lookup_stream_chip_participant,
     },
@@ -24,7 +24,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use rt_protocol::{AckEntry, ForwarderAck, WsMessage, error_codes};
+use rt_protocol::{AckEntry, ForwarderAck, ReadEvent, WsMessage, error_codes};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::time::{Duration, Instant};
@@ -60,6 +60,7 @@ async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
             display_alias: stream.display_alias,
             forwarder_display_name: stream.forwarder_display_name,
             online: stream.online,
+            reader_connected: stream.reader_connected,
             stream_epoch: stream.stream_epoch,
             created_at: stream.created_at.to_rfc3339(),
         });
@@ -279,6 +280,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id: sid,
             online: None,
+            reader_connected: None,
             stream_epoch: None,
             display_alias: None,
             forwarder_display_name: Some(initial_display_name_patch.clone()),
@@ -397,6 +399,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
                                             stream_id: sid,
                                             online: None,
+                                            reader_connected: None,
                                             stream_epoch: None,
                                             display_alias: None,
                                             forwarder_display_name: Some(display_name_patch.clone()),
@@ -423,6 +426,53 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
+                            Ok(WsMessage::ReaderStatusUpdate(update)) => {
+                                if let Some(sid) = stream_map.get(&update.reader_ip) {
+                                    if let Err(e) = set_reader_connected(&state.pool, *sid, update.connected).await {
+                                        error!(
+                                            device_id = %device_id,
+                                            reader_ip = %update.reader_ip,
+                                            error = %e,
+                                            "failed to set reader_connected"
+                                        );
+                                    }
+                                    let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+                                        stream_id: *sid,
+                                        online: None,
+                                        reader_connected: Some(update.connected),
+                                        stream_epoch: None,
+                                        display_alias: None,
+                                        forwarder_display_name: None,
+                                    });
+                                    // Forward ReaderStatusChanged to connected receivers.
+                                    // The per-stream broadcast is typed ReadEvent, so we
+                                    // encode the status change as a sentinel ReadEvent that
+                                    // the receiver handler will detect and re-serialize.
+                                    let changed = rt_protocol::ReaderStatusChanged {
+                                        stream_id: *sid,
+                                        reader_ip: update.reader_ip.clone(),
+                                        connected: update.connected,
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&WsMessage::ReaderStatusChanged(changed)) {
+                                        let tx = state.get_or_create_broadcast(*sid).await;
+                                        let _ = tx.send(ReadEvent {
+                                            forwarder_id: device_id.clone(),
+                                            reader_ip: update.reader_ip.clone(),
+                                            stream_epoch: 0,
+                                            seq: 0,
+                                            reader_timestamp: String::new(),
+                                            raw_frame: json.into_bytes(),
+                                            read_type: "__reader_status_changed".to_owned(),
+                                        });
+                                    }
+                                } else {
+                                    warn!(
+                                        device_id = %device_id,
+                                        reader_ip = %update.reader_ip,
+                                        "reader_status_update for unknown reader_ip"
+                                    );
+                                }
+                            }
                             Ok(WsMessage::ConfigGetResponse(resp)) => {
                                 if let Some((_, reply)) = pending_config_gets.remove(&resp.request_id) {
                                     let _ = reply.send(ForwarderProxyReply::Response(resp));
@@ -510,6 +560,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id: *sid,
             online: Some(false),
+            reader_connected: Some(false),
             stream_epoch: None,
             display_alias: None,
             forwarder_display_name: None,
@@ -732,6 +783,7 @@ async fn handle_event_batch(
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id,
             online: None,
+            reader_connected: None,
             stream_epoch: Some(new_epoch),
             display_alias: None,
             forwarder_display_name: None,
