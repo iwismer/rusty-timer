@@ -441,7 +441,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                             device_id = %device_id,
                                             reader_ip = %update.reader_ip,
                                             error = %e,
-                                            "failed to set reader_connected"
+                                            "failed to persist reader_connected; SSE/broadcast will diverge from HTTP API until next update"
                                         );
                                     }
                                     let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
