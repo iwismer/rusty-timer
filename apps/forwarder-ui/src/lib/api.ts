@@ -1,17 +1,30 @@
 import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
 
+export interface HardwareInfo {
+  fw_version: string;
+  hw_code: number;
+  reader_id: number;
+  config3: number;
+}
+
+export interface Config3Info {
+  mode: "raw" | "event" | "fsls";
+  timeout: number;
+}
+
+export interface ClockInfo {
+  reader_clock: string;
+  drift_ms: number;
+}
+
 export interface ReaderInfo {
   banner?: string | null;
-  fw_version?: string | null;
-  hw_code?: number | null;
-  reader_id?: number | null;
-  config3?: number | null;
+  hardware?: HardwareInfo | null;
+  config?: Config3Info | null;
+  clock?: ClockInfo | null;
   estimated_stored_reads?: number | null;
   recording?: boolean | null;
-  reader_clock?: string | null;
-  clock_drift_ms?: number | null;
-  read_mode?: string | null;
-  read_mode_timeout?: number | null;
+  connect_failures?: number;
 }
 
 export interface ReaderStatus {
@@ -190,13 +203,13 @@ export async function syncReaderClock(
 
 export async function getReadMode(
   ip: string,
-): Promise<{ mode: string; timeout: number }> {
+): Promise<{ mode: "raw" | "event" | "fsls"; timeout: number }> {
   return apiFetch(`/api/v1/readers/${ip}/read-mode`);
 }
 
 export async function setReadMode(
   ip: string,
-  mode: string,
+  mode: "raw" | "event" | "fsls",
   timeout = 5,
 ): Promise<{ mode: string }> {
   return apiFetch(`/api/v1/readers/${ip}/read-mode`, {
@@ -216,7 +229,7 @@ export async function clearReaderRecords(ip: string): Promise<{ ok: boolean }> {
 }
 
 export interface DownloadReadsResponse {
-  status: string;
+  status: "started";
   estimated_reads: number;
 }
 

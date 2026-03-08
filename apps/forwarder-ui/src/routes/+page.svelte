@@ -87,8 +87,8 @@
           if (r.reader_info) {
             readerInfoMap = { ...readerInfoMap, [r.ip]: r.reader_info };
             readerInfoReceivedAt = { ...readerInfoReceivedAt, [r.ip]: now };
-            if (r.reader_info.reader_clock)
-              storeReaderClockBase(r.ip, r.reader_info.reader_clock);
+            if (r.reader_info.clock?.reader_clock)
+              storeReaderClockBase(r.ip, r.reader_info.clock.reader_clock);
           }
         }
       }
@@ -233,8 +233,15 @@
     expandedReader = expandedReader === ip ? null : ip;
   }
 
-  function readModeDraftValue(ip: string, info: api.ReaderInfo | undefined) {
-    return readModeDrafts[ip] ?? info?.read_mode ?? "raw";
+  function readModeDraftValue(
+    ip: string,
+    info: api.ReaderInfo | undefined,
+  ): "raw" | "event" | "fsls" {
+    return (
+      (readModeDrafts[ip] as "raw" | "event" | "fsls" | undefined) ??
+      info?.config?.mode ??
+      "raw"
+    );
   }
 
   function readModeTimeoutDraftValue(
@@ -242,20 +249,20 @@
     info: api.ReaderInfo | undefined,
   ) {
     return (
-      readModeTimeoutDrafts[ip] ?? initialTimeoutDraft(info?.read_mode_timeout)
+      readModeTimeoutDrafts[ip] ?? initialTimeoutDraft(info?.config?.timeout)
     );
   }
 
   function updateReadModeDraft(
     ip: string,
-    mode: string,
+    mode: "raw" | "event" | "fsls",
     info: api.ReaderInfo | undefined,
   ) {
     readModeDrafts = { ...readModeDrafts, [ip]: mode };
     if (mode === "fsls" && readModeTimeoutDrafts[ip] == null) {
       readModeTimeoutDrafts = {
         ...readModeTimeoutDrafts,
-        [ip]: initialTimeoutDraft(info?.read_mode_timeout),
+        [ip]: initialTimeoutDraft(info?.config?.timeout),
       };
     }
   }
@@ -277,8 +284,10 @@
         ...readerInfoMap,
         [ip]: {
           ...readerInfoMap[ip],
-          reader_clock: result.reader_clock,
-          clock_drift_ms: result.clock_drift_ms,
+          clock: {
+            reader_clock: result.reader_clock,
+            drift_ms: result.clock_drift_ms ?? 0,
+          },
         },
       };
       readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
@@ -299,7 +308,7 @@
 
   async function handleSetReadMode(
     ip: string,
-    mode: string,
+    mode: "raw" | "event" | "fsls",
     timeoutDraft: string,
     currentTimeout: number | null | undefined,
   ) {
@@ -312,8 +321,10 @@
         ...readerInfoMap,
         [ip]: {
           ...readerInfoMap[ip],
-          read_mode: result.mode,
-          read_mode_timeout: timeout,
+          config: {
+            mode: result.mode as "raw" | "event" | "fsls",
+            timeout,
+          },
         },
       };
       readModeDrafts = { ...readModeDrafts, [ip]: result.mode };
@@ -350,7 +361,8 @@
         [ip]: { ...readerInfoMap[ip], ...info },
       };
       readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-      if (info.reader_clock) storeReaderClockBase(ip, info.reader_clock);
+      if (info.clock?.reader_clock)
+        storeReaderClockBase(ip, info.clock.reader_clock);
     } catch (e) {
       controlFeedback = {
         ...controlFeedback,
@@ -579,7 +591,8 @@
           [ip]: { ...readerInfoMap[ip], ...info },
         };
         readerInfoReceivedAt = { ...readerInfoReceivedAt, [ip]: Date.now() };
-        if (info.reader_clock) storeReaderClockBase(ip, info.reader_clock);
+        if (info.clock?.reader_clock)
+          storeReaderClockBase(ip, info.clock.reader_clock);
       },
       onResync: () => loadAll(),
       onConnectionChange: (connected) => {
@@ -851,14 +864,14 @@
                     <div>
                       <span class="text-text-muted">Firmware:</span>
                       <span class="font-mono ml-2"
-                        >{info?.fw_version ?? "\u2014"}</span
+                        >{info?.hardware?.fw_version ?? "\u2014"}</span
                       >
                     </div>
                     <div>
                       <span class="text-text-muted">Hardware:</span>
                       <span class="font-mono ml-2"
-                        >{info?.hw_code != null
-                          ? `0x${info.hw_code.toString(16)}`
+                        >{info?.hardware?.hw_code != null
+                          ? `0x${info.hardware.hw_code.toString(16)}`
                           : "\u2014"}</span
                       >
                     </div>
@@ -871,7 +884,7 @@
                     <div>
                       <span class="text-text-muted">Clock Drift:</span>
                       <span class="font-mono ml-2"
-                        >{formatClockDrift(info?.clock_drift_ms)}</span
+                        >{formatClockDrift(info?.clock?.drift_ms)}</span
                       >
                     </div>
                     <div>
@@ -901,7 +914,10 @@
                             e.stopPropagation();
                             updateReadModeDraft(
                               reader.ip,
-                              (e.currentTarget as HTMLSelectElement).value,
+                              (e.currentTarget as HTMLSelectElement).value as
+                                | "raw"
+                                | "event"
+                                | "fsls",
                               info,
                             );
                           }}
@@ -944,7 +960,7 @@
                               reader.ip,
                               readModeDraftValue(reader.ip, info),
                               readModeTimeoutDraftValue(reader.ip, info),
-                              info?.read_mode_timeout,
+                              info?.config?.timeout,
                             );
                           }}
                           disabled={controlBusy[reader.ip] ||
