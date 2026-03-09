@@ -18,6 +18,7 @@
 - **[Server operations](runbooks/server-operations.md)** — Monitoring, recovery, epoch reset, exports
 - **[Forwarder operations](runbooks/forwarder-operations.md)** — Configuration, health checks, journal management
 - **[Receiver operations](runbooks/receiver-operations.md)** — Subscriptions, mode switching, troubleshooting
+- **[Announcer](announcer.md)** — Live public finisher display: setup, configuration, race-day usage
 
 ## Service Reference
 
