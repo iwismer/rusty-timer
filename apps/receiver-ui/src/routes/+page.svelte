@@ -10,6 +10,7 @@
     Card,
     StatusBadge,
     AlertBanner,
+    HelpTip,
   } from "@rusty-timer/shared-ui";
   import type {
     RaceEntry,
@@ -977,11 +978,15 @@
       </section>
     </Card>
 
-    <Card title="Config">
+    <Card title="Config" helpSection="config" helpContext="receiver">
       <section data-testid="config-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
-            Receiver ID
+            Receiver ID <HelpTip
+              fieldKey="receiver_id"
+              sectionKey="config"
+              context="receiver"
+            />
             <input
               data-testid="receiver-id-input"
               class="{inputClass} mt-1"
@@ -990,7 +995,11 @@
             />
           </label>
           <label class="block text-xs font-medium text-text-muted">
-            Server URL
+            Server URL <HelpTip
+              fieldKey="server_url"
+              sectionKey="config"
+              context="receiver"
+            />
             <input
               data-testid="server-url-input"
               class="{inputClass} mt-1"
@@ -999,7 +1008,11 @@
             />
           </label>
           <label class="block text-xs font-medium text-text-muted">
-            Token
+            Token <HelpTip
+              fieldKey="token"
+              sectionKey="config"
+              context="receiver"
+            />
             <input
               data-testid="token-input"
               type="password"
@@ -1009,7 +1022,11 @@
             />
           </label>
           <label class="block text-xs font-medium text-text-muted">
-            Update Mode
+            Update Mode <HelpTip
+              fieldKey="update_mode"
+              sectionKey="config"
+              context="receiver"
+            />
             <select
               data-testid="update-mode-select"
               class="{inputClass} mt-1"
@@ -1051,11 +1068,19 @@
   </div>
 
   <div class="mb-6">
-    <Card title="Receiver Mode">
+    <Card
+      title="Receiver Mode"
+      helpSection="receiver_mode"
+      helpContext="receiver"
+    >
       <section data-testid="mode-section">
         <div class="grid gap-3">
           <label class="block text-xs font-medium text-text-muted">
-            Mode
+            Mode <HelpTip
+              fieldKey="mode"
+              sectionKey="receiver_mode"
+              context="receiver"
+            />
             <select
               data-testid="mode-select"
               class="{inputClass} mt-1"
@@ -1122,7 +1147,7 @@
   </div>
 
   <div class="mb-6">
-    <Card>
+    <Card helpSection="streams" helpContext="receiver">
       {#snippet header()}
         <div class="flex items-center justify-between w-full gap-2">
           <h2 class="text-sm font-semibold text-text-primary">

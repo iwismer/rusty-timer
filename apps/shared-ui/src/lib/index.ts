@@ -9,6 +9,9 @@ export { default as StatCard } from "../components/StatCard.svelte";
 export { default as ForwarderConfig } from "../components/ForwarderConfig.svelte";
 export { default as ForwarderConfigPage } from "../components/ForwarderConfigPage.svelte";
 export { default as ConfirmDialog } from "../components/ConfirmDialog.svelte";
+export { default as HelpDialog } from "../components/HelpDialog.svelte";
+export { default as HelpTip } from "../components/HelpTip.svelte";
+export { default as HelpSearch } from "../components/HelpSearch.svelte";
 export type {
   ConfigApi,
   ConfigLoadResult,
@@ -17,3 +20,4 @@ export type {
 } from "../lib/config-types";
 export * from "../lib/reader-view-model";
 export * from "../lib/read-mode-form";
+export * from "../lib/help/index";

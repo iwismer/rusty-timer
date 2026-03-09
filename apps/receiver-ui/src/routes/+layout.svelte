@@ -37,6 +37,7 @@
         active: page.url.pathname.startsWith("/admin"),
       },
     ]}
+    helpContext="receiver"
   />
 
   <div class="grow">

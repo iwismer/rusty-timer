@@ -32,6 +32,7 @@
       { href: "/", label: "Status", active: currentPath === "/" },
       { href: "/config", label: "Config", active: currentPath === "/config" },
     ]}
+    helpContext="forwarder"
   />
 
   <div class="grow">

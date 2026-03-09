@@ -9,6 +9,8 @@
     Card,
     AlertBanner,
     LogViewer,
+    HelpTip,
+    HelpDialog,
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
@@ -44,6 +46,8 @@
 
   let status = $state<ForwarderStatus | null>(null);
   let error = $state<string | null>(null);
+  let readModeHelpOpen = $state(false);
+  let readModeHelpField = $state<string | undefined>(undefined);
   let updateVersion = $state<string | null>(null);
   let updateStatus = $state<"available" | "downloaded" | null>(null);
   let updateBusy = $state(false);
@@ -982,7 +986,17 @@
                       >
                     </div>
                     <div class="col-span-2">
-                      <span class="text-text-muted">Read Mode:</span>
+                      <span class="text-text-muted"
+                        >Read Mode: <HelpTip
+                          fieldKey="read_mode"
+                          sectionKey="read_mode"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readModeHelpField = fk;
+                            readModeHelpOpen = true;
+                          }}
+                        /></span
+                      >
                       <span
                         class="ml-2 inline-flex items-center gap-2 flex-wrap"
                       >
@@ -1011,7 +1025,17 @@
                           <label
                             class="inline-flex items-center gap-1 text-xs text-text-secondary"
                           >
-                            <span>Timeout</span>
+                            <span
+                              >Timeout <HelpTip
+                                fieldKey="timeout"
+                                sectionKey="read_mode"
+                                context="forwarder"
+                                onOpenModal={(fk) => {
+                                  readModeHelpField = fk;
+                                  readModeHelpOpen = true;
+                                }}
+                              /></span
+                            >
                             <input
                               class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
                               type="number"
@@ -1187,3 +1211,14 @@
     <p class="text-sm text-text-muted">Loading...</p>
   {/if}
 </main>
+
+<HelpDialog
+  open={readModeHelpOpen}
+  sectionKey="read_mode"
+  context="forwarder"
+  scrollToField={readModeHelpField}
+  onClose={() => {
+    readModeHelpOpen = false;
+    readModeHelpField = undefined;
+  }}
+/>

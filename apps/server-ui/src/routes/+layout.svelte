@@ -72,7 +72,7 @@
 </svelte:head>
 
 <div class="flex flex-col min-h-screen min-h-[100dvh]">
-  <NavBar links={navLinks} />
+  <NavBar links={navLinks} helpContext="forwarder" />
 
   <div class="grow">
     {@render children()}

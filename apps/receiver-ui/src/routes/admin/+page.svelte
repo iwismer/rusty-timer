@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Card } from "@rusty-timer/shared-ui";
+  import { Card, HelpTip } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
 
   let streams = $state<api.StreamEntry[]>([]);
@@ -229,7 +229,12 @@
   {:else}
     <div class="space-y-6">
       <!-- Cursor Reset -->
-      <Card title="Cursor Reset" borderStatus="warn">
+      <Card
+        title="Cursor Reset"
+        borderStatus="warn"
+        helpSection="cursor_reset"
+        helpContext="receiver-admin"
+      >
         <p class="text-sm text-text-muted m-0 mb-4">
           Reset resume cursors per stream. The selected stream will replay from
           the beginning on next connect.
@@ -313,7 +318,12 @@
       </Card>
 
       <!-- Earliest-Epoch Overrides -->
-      <Card title="Earliest-Epoch Overrides" borderStatus="warn">
+      <Card
+        title="Earliest-Epoch Overrides"
+        borderStatus="warn"
+        helpSection="epoch_overrides"
+        helpContext="receiver-admin"
+      >
         <p class="text-sm text-text-muted m-0 mb-4">
           Clear earliest-epoch overrides per stream or all at once. Streams will
           revert to receiving all available epochs.
@@ -370,7 +380,11 @@
       </Card>
 
       <!-- Local Port Overrides -->
-      <Card title="Local Port Overrides">
+      <Card
+        title="Local Port Overrides"
+        helpSection="port_overrides"
+        helpContext="receiver-admin"
+      >
         <p class="text-sm text-text-muted m-0 mb-4">
           Set or clear the local forwarding port per subscription. Leave empty
           to use the default port.
@@ -384,7 +398,13 @@
               <tr class="border-b border-border text-left text-text-muted">
                 <th class="py-2 pr-4 font-medium">Forwarder</th>
                 <th class="py-2 pr-4 font-medium">Reader</th>
-                <th class="py-2 pr-4 font-medium">Port Override</th>
+                <th class="py-2 pr-4 font-medium"
+                  >Port Override <HelpTip
+                    fieldKey="port_override"
+                    sectionKey="port_overrides"
+                    context="receiver-admin"
+                  /></th
+                >
                 <th class="py-2 font-medium"></th>
               </tr>
             </thead>
@@ -427,7 +447,12 @@
       </Card>
 
       <!-- Purge Subscriptions -->
-      <Card title="Purge Subscriptions" borderStatus="warn">
+      <Card
+        title="Purge Subscriptions"
+        borderStatus="warn"
+        helpSection="purge_subscriptions"
+        helpContext="receiver-admin"
+      >
         <p class="text-sm text-text-muted m-0 mb-4">
           Remove all stream subscriptions. The receiver will have no streams
           until new ones are added.
@@ -450,7 +475,12 @@
       </Card>
 
       <!-- Reset Profile -->
-      <Card title="Reset Profile" borderStatus="warn">
+      <Card
+        title="Reset Profile"
+        borderStatus="warn"
+        helpSection="reset_profile"
+        helpContext="receiver-admin"
+      >
         <p class="text-sm text-text-muted m-0 mb-4">
           Clear server URL, token, and receiver ID back to defaults. The
           receiver will need to be reconfigured before connecting.
@@ -472,7 +502,12 @@
       </Card>
 
       <!-- Factory Reset -->
-      <Card title="Factory Reset" borderStatus="err">
+      <Card
+        title="Factory Reset"
+        borderStatus="err"
+        helpSection="factory_reset"
+        helpContext="receiver-admin"
+      >
         <p class="text-sm text-text-muted m-0 mb-4">
           Clear <strong>all</strong> local data: profile, subscriptions, cursors,
           and epoch overrides. The receiver will disconnect and return to a fresh

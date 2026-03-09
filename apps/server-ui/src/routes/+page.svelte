@@ -20,7 +20,13 @@
     readRaceFilterPreference,
     writeRaceFilterPreference,
   } from "$lib/raceFilterPreference";
-  import { StatusBadge, Card, AlertBanner } from "@rusty-timer/shared-ui";
+  import {
+    StatusBadge,
+    Card,
+    AlertBanner,
+    HelpTip,
+    HelpDialog,
+  } from "@rusty-timer/shared-ui";
   import {
     formatReadMode,
     formatTtoState,
@@ -54,6 +60,8 @@
   // Reader control state
   let expandedReader = $state<string | null>(null);
   let controlBusy: Record<string, boolean> = $state({});
+  let readModeHelpOpen = $state(false);
+  let readModeHelpField = $state<string | undefined>(undefined);
   let controlFeedback: Record<
     string,
     { kind: "ok" | "err"; message: string } | undefined
@@ -840,7 +848,17 @@
 
                     <!-- Read mode controls -->
                     <div class="col-span-2 mb-4">
-                      <span class="text-sm text-text-muted">Read Mode:</span>
+                      <span class="text-sm text-text-muted"
+                        >Read Mode: <HelpTip
+                          fieldKey="read_mode"
+                          sectionKey="read_mode"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readModeHelpField = fk;
+                            readModeHelpOpen = true;
+                          }}
+                        /></span
+                      >
                       <span
                         class="ml-2 inline-flex items-center gap-2 flex-wrap"
                       >
@@ -867,7 +885,17 @@
                           <label
                             class="inline-flex items-center gap-1 text-xs text-text-muted"
                           >
-                            <span>Timeout</span>
+                            <span
+                              >Timeout <HelpTip
+                                fieldKey="timeout"
+                                sectionKey="read_mode"
+                                context="forwarder"
+                                onOpenModal={(fk) => {
+                                  readModeHelpField = fk;
+                                  readModeHelpOpen = true;
+                                }}
+                              /></span
+                            >
                             <input
                               class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
                               type="number"
@@ -1068,3 +1096,14 @@
     {/if}
   {/if}
 </main>
+
+<HelpDialog
+  open={readModeHelpOpen}
+  sectionKey="read_mode"
+  context="forwarder"
+  scrollToField={readModeHelpField}
+  onClose={() => {
+    readModeHelpOpen = false;
+    readModeHelpField = undefined;
+  }}
+/>
