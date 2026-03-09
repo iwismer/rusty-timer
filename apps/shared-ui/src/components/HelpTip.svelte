@@ -2,7 +2,7 @@
   import { getContext, onDestroy } from "svelte";
   import { getField } from "../lib/help/index";
   import type { HelpContextName } from "../lib/help/help-types";
-  import { resolvePopoverPosition } from "../lib/help-tip";
+  import { computePopoverStyle } from "../lib/help-tip";
 
   let {
     fieldKey,
@@ -32,23 +32,21 @@
 
   let btnEl: HTMLButtonElement | undefined = $state();
   let showingPopover = $state(false);
-  let popoverPosition = $state<"above" | "below">("below");
+  let popoverStyle = $state("");
   let showTimer: ReturnType<typeof setTimeout> | undefined;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
-  let positionClass = $derived(
-    popoverPosition === "above"
-      ? "bottom-full mb-2 left-0"
-      : "top-full mt-2 left-0",
-  );
+  function updatePosition() {
+    if (btnEl) {
+      const rect = btnEl.getBoundingClientRect();
+      popoverStyle = computePopoverStyle(rect, window.innerWidth, window.innerHeight);
+    }
+  }
 
   function scheduleShow() {
     clearTimeout(hideTimer);
     showTimer = setTimeout(() => {
-      if (btnEl) {
-        const rect = btnEl.getBoundingClientRect();
-        popoverPosition = resolvePopoverPosition(rect, window.innerHeight);
-      }
+      updatePosition();
       showingPopover = true;
     }, 200);
   }
@@ -66,10 +64,7 @@
 
   function showPopover() {
     clearTimeout(hideTimer);
-    if (btnEl) {
-      const rect = btnEl.getBoundingClientRect();
-      popoverPosition = resolvePopoverPosition(rect, window.innerHeight);
-    }
+    updatePosition();
     showingPopover = true;
   }
 
@@ -97,7 +92,7 @@
 </script>
 
 {#if field}
-  <span class="relative inline-flex items-center ml-1">
+  <span class="inline-flex items-center ml-1">
     <button
       bind:this={btnEl}
       onmouseenter={scheduleShow}
@@ -113,7 +108,8 @@
 
     {#if showingPopover}
       <div
-        class="absolute z-50 w-72 p-3 rounded-lg border border-border bg-surface-1 shadow-lg text-sm {positionClass}"
+        class="fixed z-50 w-72 p-3 rounded-lg border border-border bg-surface-1 shadow-lg text-sm"
+        style={popoverStyle}
         role="tooltip"
         onmouseenter={cancelHide}
         onmouseleave={scheduleHide}
