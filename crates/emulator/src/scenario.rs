@@ -19,7 +19,7 @@
 //!       - type: jitter | disconnect | reconnect_delay
 //!         after_events: 100
 //!         duration_ms: 2000
-//!     # Optional control state (defaults shown):
+//!     # Optional control state (example values, not defaults):
 //!     initial_read_mode: "event"   # "raw" | "event" | "fsls"; defaults to read_type
 //!     initial_tto_enabled: true    # default: false
 //!     initial_recording: false     # default: false

@@ -23,9 +23,8 @@ use crate::scenario::ReaderScenarioConfig;
 
 /// Parse a read mode string into `ReadMode`.
 ///
-/// The `ReadMode` enum has serde deserialization but no standalone `FromStr`
-/// implementation. We provide a lightweight local helper to avoid pulling in
-/// a serde deserializer for a single string match.
+/// A manual match is simpler than round-tripping through serde for a
+/// three-variant enum that lacks a `FromStr` implementation.
 fn read_mode_from_str(s: &str) -> Option<ReadMode> {
     match s {
         "raw" => Some(ReadMode::Raw),
