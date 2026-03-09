@@ -25,9 +25,10 @@ fn validate_reader_ip(reader_ip: &str) -> Result<(), (StatusCode, Json<serde_jso
 }
 
 /// Timeout for reader control request/response round trips.
-/// Longer-running operations (SyncClock ~3s, ClearRecords ~10s) are handled
-/// via fire-and-forget or background tasks on the forwarder side, so this
-/// timeout only covers short command-response cycles.
+///
+/// ClearRecords, StartDownload, and SyncClock are fire-and-forget or
+/// background tasks on the forwarder, so this timeout covers only
+/// short command-response cycles (GetInfo, SetReadMode, etc.).
 const READER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Proxy an HTTP reader-control request to a connected forwarder via its
@@ -114,7 +115,10 @@ fn reader_control_response_to_http(resp: ReaderControlResponse) -> axum::respons
     }
 }
 
-/// Send a fire-and-forget command to a reader (sends command, returns 202 immediately).
+/// Send a fire-and-forget reader control command.
+///
+/// Returns 202 if the command was queued, 404 if the forwarder is not
+/// connected, or 504 if the command queue is saturated.
 async fn send_fire_and_forget(
     state: &AppState,
     forwarder_id: &str,

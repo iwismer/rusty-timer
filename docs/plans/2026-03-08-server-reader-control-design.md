@@ -62,7 +62,7 @@ All under `/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/`:
 | PUT | `/tto` | SetTto |
 | PUT | `/recording` | SetRecording |
 | POST | `/clear-records` | ClearRecords (fire-and-forget, returns 202) |
-| POST | `/download-reads` | StartDownload (fire-and-forget, returns 202) |
+| POST | `/start-download` | StartDownload (fire-and-forget, returns 202) |
 | POST | `/stop-download` | StopDownload |
 | POST | `/refresh` | Refresh |
 | POST | `/reconnect` | Reconnect |
