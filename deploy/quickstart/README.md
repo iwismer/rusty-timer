@@ -19,8 +19,8 @@ Wait a few seconds for Postgres to initialise and the server to run
 migrations, then verify:
 
 ```bash
-curl http://localhost:8080/api/healthz
-# {"status":"ok"}
+curl http://localhost:8080/healthz
+# ok
 ```
 
 Open **http://localhost:8080** in a browser to see the dashboard.
@@ -32,51 +32,55 @@ Before connecting a forwarder or receiver you need to create tokens.
 ### Forwarder token
 
 ```bash
-curl -s -X POST http://localhost:8080/api/device-tokens \
+curl -sS -X POST http://localhost:8080/api/v1/admin/tokens \
   -H 'Content-Type: application/json' \
-  -d '{"name": "my-forwarder", "role": "forwarder"}' | jq .
+  -d '{"device_type": "forwarder", "device_id": "fwd-001"}'
 ```
 
-Save the `raw_token` value from the response — it will not be shown
-again.
+Save the raw token from the response — it will not be shown again.
 
 ### Receiver token
 
 ```bash
-curl -s -X POST http://localhost:8080/api/device-tokens \
+curl -sS -X POST http://localhost:8080/api/v1/admin/tokens \
   -H 'Content-Type: application/json' \
-  -d '{"name": "my-receiver", "role": "receiver"}' | jq .
+  -d '{"device_type": "receiver", "device_id": "receiver-001"}'
 ```
 
 ## Connect a Forwarder
 
 Download a pre-built forwarder binary from the
 [Releases](https://github.com/iwismer/rusty-timer/releases) page, then
-point it at this server using its TOML config file. See
-[deploy/sbc/](../sbc/) for the full forwarder deployment guide.
+point it at this server using its TOML config file. See the
+[forwarder configuration reference](../../services/forwarder/README.md#configuration)
+for the config format, or [deploy/sbc/](../sbc/) for Raspberry Pi
+deployment.
 
-Set the server URL to `ws://YOUR_HOST_IP:8080/ws/forwarder` and paste
-the raw token you created above.
+Set `server.base_url` to `ws://YOUR_HOST_IP:8080` and put the raw token
+in the file referenced by `auth.token_file`.
 
 ## Connect a Receiver
 
 Download a pre-built receiver binary from the
-[Releases](https://github.com/iwismer/rusty-timer/releases) page. See
-[docs/runbooks/receiver-operations.md](../../docs/runbooks/receiver-operations.md)
-for configuration and usage.
+[Releases](https://github.com/iwismer/rusty-timer/releases) page. On
+Windows, see the
+[receiver quickstart](../../docs/receiver-quickstart.md) for a
+step-by-step walkthrough, or the
+[receiver operations runbook](../../docs/runbooks/receiver-operations.md)
+for full operational procedures.
 
-Set the server URL to `ws://YOUR_HOST_IP:8080/ws/receiver` and paste
-the raw token you created above.
+Set the server URL to `ws://YOUR_HOST_IP:8080` and paste the raw token
+you created above.
 
 ## URLs
 
 | Page | URL |
 |------|-----|
 | Dashboard | http://localhost:8080 |
-| Announcer config | http://localhost:8080/announcer/config |
+| Announcer config | http://localhost:8080/announcer-config |
 | Announcer screen | http://localhost:8080/announcer |
-| Health check | http://localhost:8080/api/healthz |
-| API base | http://localhost:8080/api/ |
+| Health check | http://localhost:8080/healthz |
+| API base | http://localhost:8080/api/v1/streams |
 
 ## Stop
 
