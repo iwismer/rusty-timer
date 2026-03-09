@@ -561,13 +561,68 @@ fn handle_set_date_time(
         );
         return vec![];
     }
-    let year = from_bcd(data[0]).unwrap_or(0) as i32;
-    let month = from_bcd(data[1]).unwrap_or(1) as u32;
-    let day = from_bcd(data[2]).unwrap_or(1) as u32;
-    // data[3] is day_of_week — skip
-    let hour = from_bcd(data[4]).unwrap_or(0) as u32;
-    let minute = from_bcd(data[5]).unwrap_or(0) as u32;
-    let second = from_bcd(data[6]).unwrap_or(0) as u32;
+    // Validate BCD encoding for all date/time fields (data[3] is day_of_week, not BCD)
+    let year = match from_bcd(data[0]) {
+        Ok(v) => v as i32,
+        Err(_) => {
+            eprintln!(
+                "[emulator] SetDateTime: invalid BCD byte for year: 0x{:02x}",
+                data[0]
+            );
+            return vec![];
+        }
+    };
+    let month = match from_bcd(data[1]) {
+        Ok(v) => v as u32,
+        Err(_) => {
+            eprintln!(
+                "[emulator] SetDateTime: invalid BCD byte for month: 0x{:02x}",
+                data[1]
+            );
+            return vec![];
+        }
+    };
+    let day = match from_bcd(data[2]) {
+        Ok(v) => v as u32,
+        Err(_) => {
+            eprintln!(
+                "[emulator] SetDateTime: invalid BCD byte for day: 0x{:02x}",
+                data[2]
+            );
+            return vec![];
+        }
+    };
+    // data[3] is day_of_week — skip (not BCD encoded)
+    let hour = match from_bcd(data[4]) {
+        Ok(v) => v as u32,
+        Err(_) => {
+            eprintln!(
+                "[emulator] SetDateTime: invalid BCD byte for hour: 0x{:02x}",
+                data[4]
+            );
+            return vec![];
+        }
+    };
+    let minute = match from_bcd(data[5]) {
+        Ok(v) => v as u32,
+        Err(_) => {
+            eprintln!(
+                "[emulator] SetDateTime: invalid BCD byte for minute: 0x{:02x}",
+                data[5]
+            );
+            return vec![];
+        }
+    };
+    let second = match from_bcd(data[6]) {
+        Ok(v) => v as u32,
+        Err(_) => {
+            eprintln!(
+                "[emulator] SetDateTime: invalid BCD byte for second: 0x{:02x}",
+                data[6]
+            );
+            return vec![];
+        }
+    };
 
     let full_year = 2000 + year;
     match Local
@@ -1141,6 +1196,23 @@ mod tests {
         let mut state = make_test_state();
         // Valid frame structure with unknown instruction 0xAA
         assert!(handle_control_frame(&mut state, "ab00ffaa00").is_empty());
+    }
+
+    #[test]
+    fn handle_set_datetime_rejects_invalid_bcd() {
+        let mut state = make_test_state();
+        let original_offset = state.clock_offset_ms();
+        // Build a SetDateTime frame with invalid BCD bytes (0xFF)
+        let data = [0xFF, 0xFF, 0xFF, 0x01, 0xFF, 0xFF, 0xFF];
+        let frame = build_response_frame(0x00, INSTR_SET_DATE_TIME, &data);
+        let trimmed = frame.trim_end();
+        let responses = handle_control_frame(&mut state, trimmed);
+        assert!(responses.is_empty(), "invalid BCD should return empty vec");
+        assert_eq!(
+            state.clock_offset_ms(),
+            original_offset,
+            "clock offset should not be modified on invalid BCD"
+        );
     }
 
     #[test]
