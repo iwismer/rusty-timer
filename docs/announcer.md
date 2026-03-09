@@ -2,10 +2,11 @@
 
 ## Overview
 
-The announcer is a live, public-facing screen served at `/announcer` that shows
-recent finishers during a race. It is built into `rt-server` and requires no
-additional services. Point a projector, TV, or tablet at the announcer URL and
-spectators see finisher names as they cross the line.
+The announcer is a live screen served at `/announcer` that shows recent
+finishers during a race. It is primarily intended as a tool for a race
+announcer, but it can also be pointed at a projector, TV, or tablet for public
+display so spectators see finisher names as they cross the line. It is built
+into `rt-server` and requires no additional services.
 
 ## How It Works
 
