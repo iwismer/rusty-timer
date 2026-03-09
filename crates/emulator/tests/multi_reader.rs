@@ -12,7 +12,9 @@
 //! 9. Raw read lines are valid IPICO wire-format
 //! 10. Chip IDs map to hex tag IDs in parsed reads
 
-use emulator::scenario::{EmulatorMode, ReaderScenarioConfig, load_scenario_from_str};
+use emulator::scenario::{
+    EmulatorMode, ReaderScenarioConfig, load_scenario_from_file, load_scenario_from_str,
+};
 use ipico_core::read::ChipRead;
 use std::convert::TryFrom;
 
@@ -430,4 +432,15 @@ fn generate_reader_events_returns_error_for_invalid_read_type() {
         err.contains("read_type"),
         "error should mention read_type: {err}"
     );
+}
+
+#[test]
+fn load_control_reader_scenario() {
+    let path = std::path::Path::new("test_assets/scenarios/control_reader.yaml");
+    let cfg = load_scenario_from_file(path).unwrap();
+    assert_eq!(cfg.readers.len(), 1);
+    let r = &cfg.readers[0];
+    assert_eq!(r.initial_read_mode.as_deref(), Some("event"));
+    assert_eq!(r.initial_tto_enabled, Some(true));
+    assert_eq!(r.stored_reads, Some(100));
 }

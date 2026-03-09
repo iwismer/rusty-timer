@@ -1,0 +1,15 @@
+mode: reader
+seed: 42
+readers:
+  - ip: "192.168.1.100:9001"
+    port: 9001
+    read_type: raw
+    chip_ids: [1234, 5678, 9012]
+    events_per_second: 10
+    total_events: 50
+    start_delay_ms: 0
+    initial_read_mode: "event"
+    initial_tto_enabled: true
+    initial_recording: true
+    stored_reads: 100
+    clock_offset_ms: 5000

@@ -177,12 +177,17 @@ fn validate_scenario(cfg: &ScenarioConfig) -> Result<(), ScenarioError> {
         })?;
 
         if let Some(ref mode_str) = reader.initial_read_mode {
-            ReadType::try_from(mode_str.as_str()).map_err(|_| {
-                ScenarioError::Invalid(format!(
+            // initial_read_mode accepts both ReadType values ("raw", "fsls")
+            // and ReadMode values ("event") since it maps to the control
+            // protocol's ReadMode enum, not just the wire ReadType.
+            let valid = ReadType::try_from(mode_str.as_str()).is_ok()
+                || matches!(mode_str.as_str(), "event");
+            if !valid {
+                return Err(ScenarioError::Invalid(format!(
                     "reader '{}' has invalid initial_read_mode '{}'",
                     reader.ip, mode_str
-                ))
-            })?;
+                )));
+            }
         }
     }
     Ok(())
