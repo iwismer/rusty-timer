@@ -4,6 +4,8 @@
   import type { HelpContextName } from "../lib/help/help-types";
   import { computePopoverStyle } from "../lib/help-tip";
 
+  export const HELP_OPEN_MODAL_KEY = "help-open-modal";
+
   let {
     fieldKey,
     sectionKey,
@@ -17,8 +19,8 @@
   } = $props();
 
   // Injected by parent Card component when helpSection is set. Falls back to onOpenModal prop.
-  const contextOpenHelp = hasContext("help-open-modal")
-    ? getContext<(fieldKey?: string) => void>("help-open-modal")
+  const contextOpenHelp = hasContext(HELP_OPEN_MODAL_KEY)
+    ? getContext<(fieldKey?: string) => void>(HELP_OPEN_MODAL_KEY)
     : undefined;
 
   let field = $derived(getField(context, sectionKey, fieldKey));

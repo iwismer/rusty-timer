@@ -1,3 +1,4 @@
+// Estimated max height for positioning; if popover content exceeds this, the above/below logic may misplace the popover.
 const POPOVER_HEIGHT = 200;
 const POPOVER_WIDTH = 288; // w-72 = 18rem = 288px
 const GAP = 8;

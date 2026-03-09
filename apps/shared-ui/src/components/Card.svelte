@@ -4,6 +4,7 @@
   import { resolveHeaderBgClass } from "../lib/card-logic";
   import type { HelpContextName } from "../lib/help/help-types";
   import HelpDialog from "./HelpDialog.svelte";
+  import { HELP_OPEN_MODAL_KEY } from "./HelpTip.svelte";
 
   let {
     title = undefined,
@@ -46,9 +47,15 @@
     helpScrollToField = undefined;
   }
 
-  // Always provide context so child HelpTip components can access it.
-  setContext("help-open-modal", (fieldKey?: string) => {
-    if (helpSection) openHelp(fieldKey);
+  // Provide context for child HelpTip components. The callback is a no-op if helpSection is not set on this Card.
+  setContext(HELP_OPEN_MODAL_KEY, (fieldKey?: string) => {
+    if (helpSection) {
+      openHelp(fieldKey);
+    } else {
+      console.warn(
+        `[Card] HelpTip clicked for field="${fieldKey}", but this Card has no helpSection configured.`,
+      );
+    }
   });
 </script>
 

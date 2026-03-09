@@ -54,7 +54,7 @@
 
   $effect(() => {
     if (open && scrollToField) {
-      // Delay scrollIntoView to the next frame so the dialog DOM has rendered the target element
+      // Delay scrollIntoView by 50ms to ensure the dialog DOM has rendered the target element
       const timer = setTimeout(() => {
         const el = document.getElementById(`help-${scrollToField}`);
         if (el) {
@@ -176,7 +176,7 @@
           type="button"
         >&times;</button>
       </div>
-      <p class="text-sm text-text-muted">Help content for this section is not yet available.</p>
+      <p class="text-sm text-text-muted">Help content for "{sectionKey}" is not yet available.</p>
     </div>
   {/if}
 </dialog>

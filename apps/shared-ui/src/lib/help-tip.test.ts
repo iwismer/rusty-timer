@@ -23,6 +23,14 @@ describe("computePopoverStyle", () => {
     expect(style).toContain("left: 104px");
   });
 
+  it("defaults to below when neither above nor below has sufficient space", () => {
+    const rect = { top: 100, bottom: 120, left: 50, right: 70 };
+    // viewport only 200px tall: 80px above, 80px below — neither has 200+8 space
+    const style = computePopoverStyle(rect, 800, 200);
+    // Should default to below: top = bottom + GAP = 128
+    expect(style).toContain("top: 128px");
+  });
+
   it("clamps left edge to minimum gap", () => {
     const nearLeft = { top: 100, bottom: 120, left: 2, right: 18 };
     const style = computePopoverStyle(nearLeft, 1024, 800);

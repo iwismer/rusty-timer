@@ -14,16 +14,24 @@ const CONTEXTS: Record<HelpContextName, HelpContext> = {
 
 /** Look up a help section by context and section key. Returns undefined if not found. */
 export function getSection(context: HelpContextName, sectionKey: string): SectionHelp | undefined {
-  return CONTEXTS[context]?.[sectionKey];
+  if (!(context in CONTEXTS)) {
+    console.warn(`[help] Unknown context "${context}". Valid: ${Object.keys(CONTEXTS).join(", ")}`);
+    return undefined;
+  }
+  return CONTEXTS[context][sectionKey];
 }
 
 /** Look up a field's help content by context, section key, and field key. Returns undefined if not found. */
 export function getField(context: HelpContextName, sectionKey: string, fieldKey: string): FieldHelp | undefined {
-  return CONTEXTS[context]?.[sectionKey]?.fields[fieldKey];
+  if (!(context in CONTEXTS)) {
+    console.warn(`[help] Unknown context "${context}". Valid: ${Object.keys(CONTEXTS).join(", ")}`);
+    return undefined;
+  }
+  return CONTEXTS[context][sectionKey]?.fields[fieldKey];
 }
 
 /** Search all help content across all contexts. Returns matches grouped by context+section.
- *  When a section title/overview matches but no individual fields match, all fields from that section are included. */
+ *  When no individual fields match (e.g., only the section title, overview, or tips matched), all fields from that section are included. */
 export function searchHelp(query: string): HelpSearchResult[] {
   if (!query.trim()) return [];
   const q = query.toLowerCase();
