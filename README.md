@@ -73,6 +73,8 @@ options and details.
 | Forwarder on Raspberry Pi | [deploy/sbc/](deploy/sbc/) |
 | Race-day operations | [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-guide.md) |
 
+Pre-built binaries are available on the [Releases](https://github.com/iwismer/rusty-timer/releases) page.
+
 See the [full documentation index](docs/) for all guides, runbooks, and
 reference docs.
 
