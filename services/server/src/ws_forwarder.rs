@@ -446,51 +446,66 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::ReaderStatusUpdate(update)) => {
                                 if let Some(sid) = stream_map.get(&update.reader_ip) {
-                                    if let Err(e) = set_reader_connected(&state.pool, *sid, update.connected).await {
-                                        error!(
-                                            device_id = %device_id,
-                                            reader_ip = %update.reader_ip,
-                                            error = %e,
-                                            "failed to persist reader_connected; SSE/broadcast will diverge from HTTP API until next update"
-                                        );
-                                    }
-                                    let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
-                                        stream_id: *sid,
-                                        online: None,
-                                        reader_connected: Some(update.connected),
-                                        stream_epoch: None,
-                                        display_alias: None,
-                                        forwarder_display_name: None,
-                                    });
-                                    // Forward ReaderStatusChanged to connected receivers.
-                                    // The per-stream broadcast is typed ReadEvent, so we
-                                    // encode the status change as a sentinel ReadEvent that
-                                    // the receiver handler will detect and forward directly.
-                                    let changed = rt_protocol::ReaderStatusChanged {
-                                        stream_id: *sid,
-                                        reader_ip: update.reader_ip.clone(),
-                                        connected: update.connected,
-                                    };
-                                    match serde_json::to_string(&WsMessage::ReaderStatusChanged(changed)) {
-                                        Ok(json) => {
-                                            let tx = state.get_or_create_broadcast(*sid).await;
-                                            let _ = tx.send(ReadEvent {
-                                                forwarder_id: device_id.clone(),
-                                                reader_ip: update.reader_ip.clone(),
-                                                stream_epoch: 0,
-                                                seq: 0,
-                                                reader_timestamp: String::new(),
-                                                raw_frame: json.into_bytes(),
-                                                read_type: rt_protocol::READER_STATUS_CHANGED_READ_TYPE.to_owned(),
-                                            });
-                                        }
+                                    let applied = match set_reader_connected(&state.pool, *sid, update.connected).await {
+                                        Ok(applied) => applied,
                                         Err(e) => {
                                             error!(
                                                 device_id = %device_id,
                                                 reader_ip = %update.reader_ip,
                                                 error = %e,
-                                                "failed to serialize ReaderStatusChanged for broadcast"
+                                                "failed to persist reader_connected; SSE/broadcast will diverge from HTTP API until next update"
                                             );
+                                            // On DB error, still broadcast for best-effort real-time updates
+                                            true
+                                        }
+                                    };
+                                    if !applied {
+                                        warn!(
+                                            device_id = %device_id,
+                                            reader_ip = %update.reader_ip,
+                                            stream_id = %sid,
+                                            "reader_connected=true rejected: stream is offline"
+                                        );
+                                    }
+                                    if applied {
+                                        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+                                            stream_id: *sid,
+                                            online: None,
+                                            reader_connected: Some(update.connected),
+                                            stream_epoch: None,
+                                            display_alias: None,
+                                            forwarder_display_name: None,
+                                        });
+                                        // Forward ReaderStatusChanged to connected receivers.
+                                        // The per-stream broadcast is typed ReadEvent, so we
+                                        // encode the status change as a sentinel ReadEvent that
+                                        // the receiver handler will detect and forward directly.
+                                        let changed = rt_protocol::ReaderStatusChanged {
+                                            stream_id: *sid,
+                                            reader_ip: update.reader_ip.clone(),
+                                            connected: update.connected,
+                                        };
+                                        match serde_json::to_string(&WsMessage::ReaderStatusChanged(changed)) {
+                                            Ok(json) => {
+                                                let tx = state.get_or_create_broadcast(*sid).await;
+                                                let _ = tx.send(ReadEvent {
+                                                    forwarder_id: device_id.clone(),
+                                                    reader_ip: update.reader_ip.clone(),
+                                                    stream_epoch: 0,
+                                                    seq: 0,
+                                                    reader_timestamp: String::new(),
+                                                    raw_frame: json.into_bytes(),
+                                                    read_type: rt_protocol::READER_STATUS_CHANGED_READ_TYPE.to_owned(),
+                                                });
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    device_id = %device_id,
+                                                    reader_ip = %update.reader_ip,
+                                                    error = %e,
+                                                    "failed to serialize ReaderStatusChanged for broadcast"
+                                                );
+                                            }
                                         }
                                     }
                                 } else {

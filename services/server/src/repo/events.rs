@@ -211,12 +211,15 @@ pub async fn set_stream_online(
 /// Update the `reader_connected` flag for a stream. When setting to `true`,
 /// the update is guarded by `online = true` to enforce the invariant:
 /// `!online => !reader_connected`.
+///
+/// Returns `true` if the row was actually updated, `false` if the guard
+/// prevented the update (e.g. stream is offline).
 pub async fn set_reader_connected(
     pool: &PgPool,
     stream_id: Uuid,
     connected: bool,
-) -> Result<(), sqlx::Error> {
-    if connected {
+) -> Result<bool, sqlx::Error> {
+    let result = if connected {
         // Only set connected=true if the stream is online (forwarder WS is up).
         // This enforces the invariant: !online => !reader_connected.
         sqlx::query!(
@@ -224,16 +227,16 @@ pub async fn set_reader_connected(
             stream_id
         )
         .execute(pool)
-        .await?;
+        .await?
     } else {
         sqlx::query!(
             "UPDATE streams SET reader_connected = false WHERE stream_id = $1",
             stream_id
         )
         .execute(pool)
-        .await?;
-    }
-    Ok(())
+        .await?
+    };
+    Ok(result.rows_affected() > 0)
 }
 
 pub struct StreamMetricsRow {
