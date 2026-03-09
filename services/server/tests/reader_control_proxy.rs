@@ -83,18 +83,15 @@ async fn reader_control_returns_200_on_success() {
     .await;
 
     let client = reqwest::Client::new();
-    let request_task = tokio::spawn({
-        let addr = addr;
-        async move {
-            client
-                .get(format!(
-                    "http://{}/api/v1/forwarders/{}/readers/{}/info",
-                    addr, device_id, reader_ip
-                ))
-                .send()
-                .await
-                .unwrap()
-        }
+    let request_task = tokio::spawn(async move {
+        client
+            .get(format!(
+                "http://{}/api/v1/forwarders/{}/readers/{}/info",
+                addr, device_id, reader_ip
+            ))
+            .send()
+            .await
+            .unwrap()
     });
 
     let proxied = tokio::time::timeout(std::time::Duration::from_secs(5), fwd.recv_message())
@@ -155,18 +152,15 @@ async fn reader_control_returns_502_on_forwarder_error() {
     .await;
 
     let client = reqwest::Client::new();
-    let request_task = tokio::spawn({
-        let addr = addr;
-        async move {
-            client
-                .get(format!(
-                    "http://{}/api/v1/forwarders/{}/readers/{}/info",
-                    addr, device_id, reader_ip
-                ))
-                .send()
-                .await
-                .unwrap()
-        }
+    let request_task = tokio::spawn(async move {
+        client
+            .get(format!(
+                "http://{}/api/v1/forwarders/{}/readers/{}/info",
+                addr, device_id, reader_ip
+            ))
+            .send()
+            .await
+            .unwrap()
     });
 
     let proxied = tokio::time::timeout(std::time::Duration::from_secs(5), fwd.recv_message())
@@ -213,18 +207,15 @@ async fn reader_control_returns_502_on_forwarder_disconnect() {
     .await;
 
     let client = reqwest::Client::new();
-    let request_task = tokio::spawn({
-        let addr = addr;
-        async move {
-            client
-                .get(format!(
-                    "http://{}/api/v1/forwarders/{}/readers/{}/info",
-                    addr, device_id, reader_ip
-                ))
-                .send()
-                .await
-                .unwrap()
-        }
+    let request_task = tokio::spawn(async move {
+        client
+            .get(format!(
+                "http://{}/api/v1/forwarders/{}/readers/{}/info",
+                addr, device_id, reader_ip
+            ))
+            .send()
+            .await
+            .unwrap()
     });
 
     let proxied = tokio::time::timeout(std::time::Duration::from_secs(5), fwd.recv_message())
