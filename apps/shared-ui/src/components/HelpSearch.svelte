@@ -53,7 +53,11 @@
   }
 
   function handleClickOutside(e: MouseEvent) {
-    const target = e.target as HTMLElement;
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) {
+      searchOpen = false;
+      return;
+    }
     if (!target.closest("[data-help-search]")) {
       searchOpen = false;
     }

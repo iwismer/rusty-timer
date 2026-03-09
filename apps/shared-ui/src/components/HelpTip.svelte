@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getContext } from "svelte";
+  import { getContext, onDestroy } from "svelte";
   import { getField } from "../lib/help/index";
   import type { HelpContextName } from "../lib/help/help-types";
   import { resolvePopoverPosition } from "../lib/help-tip";
@@ -21,6 +21,15 @@
   );
 
   let field = $derived(getField(context, sectionKey, fieldKey));
+
+  $effect(() => {
+    if (!field) {
+      console.warn(
+        `[HelpTip] No help found for field="${fieldKey}" section="${sectionKey}" context="${context}". Check for typos.`,
+      );
+    }
+  });
+
   let btnEl: HTMLButtonElement | undefined = $state();
   let showingPopover = $state(false);
   let popoverPosition = $state<"above" | "below">("below");
@@ -65,13 +74,19 @@
   }
 
   function handleClick() {
-    showingPopover = false;
     if (onOpenModal) {
+      showingPopover = false;
       onOpenModal(fieldKey);
     } else if (contextOpenHelp) {
+      showingPopover = false;
       contextOpenHelp(fieldKey);
     }
   }
+
+  onDestroy(() => {
+    clearTimeout(showTimer);
+    clearTimeout(hideTimer);
+  });
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter") {

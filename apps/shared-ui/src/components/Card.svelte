@@ -47,8 +47,9 @@
   }
 
   // Expose openHelp to child HelpTip components via context.
-  // Always set so HelpTip can detect presence; openHelp is a no-op if no helpSection.
-  setContext("help-open-modal", openHelp);
+  if (helpSection) {
+    setContext("help-open-modal", openHelp);
+  }
 </script>
 
 <section class="rounded-lg overflow-hidden bg-surface-1 border {borderClass}">

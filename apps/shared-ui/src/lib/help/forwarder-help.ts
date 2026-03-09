@@ -177,7 +177,7 @@ export const FORWARDER_HELP: HelpContext = {
       token_file: {
         label: "Token File Path",
         summary: "Path to a file containing the authentication token.",
-        detail: "The filesystem path to a file containing the raw authentication token. The forwarder reads this file on startup and uses the token to authenticate with the server. The token is hashed (SHA-256) before transmission. Store the token file with restricted permissions (readable only by the forwarder service user).",
+        detail: "The filesystem path to a file containing the raw authentication token. The forwarder reads this file on startup and sends it as a Bearer credential during the WebSocket handshake. Use WSS (WebSocket over TLS) to protect the token in transit. The server verifies the token by comparing its SHA-256 hash against stored credentials. Store the token file with restricted permissions (readable only by the forwarder service user).",
         default: "None (required for authenticated servers)",
         recommended: "Use a dedicated token file with restricted permissions. Do not embed tokens in the config file.",
       },

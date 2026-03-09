@@ -34,6 +34,13 @@
   $effect(() => {
     if (!dialogEl) return;
     if (open && !dialogEl.open) {
+      if (!section) {
+        console.warn(
+          `[HelpDialog] No help section found for key "${sectionKey}" in context "${context}".`,
+        );
+        onClose();
+        return;
+      }
       dialogEl.showModal();
       searchQuery = "";
     } else if (!open && dialogEl.open) {
@@ -135,7 +142,7 @@
         </div>
       {/if}
 
-      {#if section.seeAlso?.length}
+      {#if section.seeAlso?.length && onNavigate}
         <div class="mt-6 pt-4 border-t border-border">
           <h3 class="text-sm font-semibold text-text-primary mb-2">See Also</h3>
           {#each section.seeAlso as link}
