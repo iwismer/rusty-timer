@@ -144,6 +144,38 @@ describe("buildTarget", () => {
   });
 });
 
+describe("parseTarget/buildTarget round-trip", () => {
+  it("round-trips a single-IP target", () => {
+    const original = "192.168.0.50:10000";
+    const parsed = parseTarget(original);
+    expect(parsed.is_range).toBe(false);
+    if (!parsed.is_range) {
+      const reader = makeSingleReader({ ip: parsed.ip, port: parsed.port });
+      expect(buildTarget(reader)).toBe(original);
+    }
+  });
+
+  it("round-trips a range target", () => {
+    const original = "192.168.0.150-160:10000";
+    const parsed = parseTarget(original);
+    expect(parsed.is_range).toBe(true);
+    if (parsed.is_range) {
+      const reader = makeRangeReader({ ip_start: parsed.ip_start, ip_end_octet: parsed.ip_end_octet, port: parsed.port });
+      expect(buildTarget(reader)).toBe(original);
+    }
+  });
+
+  it("round-trips a non-standard port", () => {
+    const original = "10.0.0.5:9999";
+    const parsed = parseTarget(original);
+    expect(parsed.is_range).toBe(false);
+    if (!parsed.is_range) {
+      const reader = makeSingleReader({ ip: parsed.ip, port: parsed.port });
+      expect(buildTarget(reader)).toBe(original);
+    }
+  });
+});
+
 describe("fromConfig", () => {
   it("normalizes missing sections to empty form defaults", () => {
     const form = fromConfig({});
@@ -559,6 +591,31 @@ describe("validateReaders", () => {
     expect(validateReaders(makeForm({
       readers: [makeRangeReader({ ip_start: "192.168.0.100", ip_end_octet: "100" })],
     }))).toBeNull();
+  });
+
+  it("rejects reader with whitespace-only IP", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeSingleReader({ ip: "   " })],
+    }))).toBeTruthy();
+  });
+
+  it("rejects reader with non-numeric port", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeSingleReader({ port: "abc" })],
+    }))).toBeTruthy();
+  });
+
+  it("rejects reader with decimal port", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeSingleReader({ port: "80.5" })],
+    }))).toBeTruthy();
+  });
+
+  it("reports correct index for invalid second reader", () => {
+    const result = validateReaders(makeForm({
+      readers: [makeSingleReader(), makeSingleReader({ ip: "" })],
+    }));
+    expect(result).toContain("Reader 2");
   });
 });
 
