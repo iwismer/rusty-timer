@@ -56,7 +56,9 @@ describe("announcer config page", () => {
     render(AnnouncerConfigPage);
 
     const saveButton = await screen.findByTestId("announcer-save-btn");
-    const enableCheckbox = screen.getByLabelText("Enable announcer");
+    const enableCheckbox = screen.getByRole("checkbox", {
+      name: /enable announcer/i,
+    });
 
     expect(saveButton).toBeEnabled();
     await fireEvent.click(enableCheckbox);

@@ -3,7 +3,7 @@
   import { page } from "$app/stores";
   import * as api from "$lib/api";
   import type { ParticipantEntry, UnmatchedChip } from "$lib/api";
-  import { Card } from "@rusty-timer/shared-ui";
+  import { Card, HelpTip, HelpDialog } from "@rusty-timer/shared-ui";
 
   // Route param
   let raceId = $derived($page.params.raceId!);
@@ -163,7 +163,11 @@
 
   <!-- Upload section -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-    <Card title="Upload Participants (.ppl)">
+    <Card
+      title="Upload Participants (.ppl)"
+      helpSection="race_detail"
+      helpContext="server"
+    >
       <div class="flex flex-col gap-3">
         <input
           type="file"
@@ -184,7 +188,11 @@
       </div>
     </Card>
 
-    <Card title="Upload Chip Mappings (.bibchip)">
+    <Card
+      title="Upload Chip Mappings (.bibchip)"
+      helpSection="race_detail"
+      helpContext="server"
+    >
       <div class="flex flex-col gap-3">
         <input
           type="file"

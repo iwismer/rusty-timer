@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Card } from "@rusty-timer/shared-ui";
+  import { Card, HelpTip, HelpDialog } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type { SbcSetupFormData } from "$lib/sbc-setup/types";
   import {
@@ -231,12 +231,23 @@
 
   <!-- Device Identity -->
   <div class="mb-6">
-    <Card title="Device Identity">
+    <Card
+      title="Device Identity"
+      helpSection="sbc_identity"
+      helpContext="server"
+    >
       <div class="flex flex-col gap-4">
         <!-- Hostname -->
         <div>
           <label for="hostname" class="block">
-            <span class="text-sm text-text-muted">Hostname</span>
+            <span class="text-sm text-text-muted"
+              >Hostname
+              <HelpTip
+                fieldKey="hostname"
+                sectionKey="sbc_identity"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="hostname"
@@ -256,7 +267,14 @@
         <!-- Admin Username -->
         <div>
           <label for="adminUsername" class="block">
-            <span class="text-sm text-text-muted">Admin Username</span>
+            <span class="text-sm text-text-muted"
+              >Admin Username
+              <HelpTip
+                fieldKey="admin_username"
+                sectionKey="sbc_identity"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="adminUsername"
@@ -277,7 +295,14 @@
         <!-- SSH Public Key -->
         <div>
           <label for="sshPublicKey" class="block">
-            <span class="text-sm text-text-muted">SSH Public Key</span>
+            <span class="text-sm text-text-muted"
+              >SSH Public Key
+              <HelpTip
+                fieldKey="ssh_public_key"
+                sectionKey="sbc_identity"
+                context="server"
+              />
+            </span>
           </label>
           <textarea
             id="sshPublicKey"
@@ -300,12 +325,23 @@
 
   <!-- Network Configuration -->
   <div class="mb-6">
-    <Card title="Network Configuration">
+    <Card
+      title="Network Configuration"
+      helpSection="sbc_network"
+      helpContext="server"
+    >
       <div class="flex flex-col gap-4">
         <!-- Static IPv4/CIDR -->
         <div>
           <label for="staticIpv4Cidr" class="block">
-            <span class="text-sm text-text-muted">Static IPv4/CIDR</span>
+            <span class="text-sm text-text-muted"
+              >Static IPv4/CIDR
+              <HelpTip
+                fieldKey="static_ipv4"
+                sectionKey="sbc_network"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="staticIpv4Cidr"
@@ -328,7 +364,14 @@
         <!-- Gateway -->
         <div>
           <label for="gateway" class="block">
-            <span class="text-sm text-text-muted">Gateway</span>
+            <span class="text-sm text-text-muted"
+              >Gateway
+              <HelpTip
+                fieldKey="gateway"
+                sectionKey="sbc_network"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="gateway"
@@ -349,8 +392,13 @@
         <div>
           <label for="dnsServers" class="block">
             <span class="text-sm text-text-muted"
-              >DNS Servers (comma-separated)</span
-            >
+              >DNS Servers (comma-separated)
+              <HelpTip
+                fieldKey="dns_servers"
+                sectionKey="sbc_network"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="dnsServers"
@@ -377,7 +425,14 @@
               bind:checked={form.wifiEnabled}
               class="accent-accent"
             />
-            <span class="text-sm text-text-muted">Enable Wi-Fi</span>
+            <span class="text-sm text-text-muted"
+              >Enable Wi-Fi
+              <HelpTip
+                fieldKey="wifi_enabled"
+                sectionKey="sbc_network"
+                context="server"
+              />
+            </span>
           </label>
         </div>
 
@@ -385,7 +440,14 @@
           <!-- Wi-Fi SSID -->
           <div>
             <label for="wifiSsid" class="block">
-              <span class="text-sm text-text-muted">Wi-Fi SSID</span>
+              <span class="text-sm text-text-muted"
+                >Wi-Fi SSID
+                <HelpTip
+                  fieldKey="wifi_ssid"
+                  sectionKey="sbc_network"
+                  context="server"
+                />
+              </span>
             </label>
             <input
               id="wifiSsid"
@@ -406,7 +468,14 @@
           <!-- Wi-Fi Password -->
           <div>
             <label for="wifiPassword" class="block">
-              <span class="text-sm text-text-muted">Wi-Fi Password</span>
+              <span class="text-sm text-text-muted"
+                >Wi-Fi Password
+                <HelpTip
+                  fieldKey="wifi_password"
+                  sectionKey="sbc_network"
+                  context="server"
+                />
+              </span>
             </label>
             <input
               id="wifiPassword"
@@ -419,7 +488,14 @@
           <!-- Wi-Fi Country -->
           <div>
             <label for="wifiCountry" class="block">
-              <span class="text-sm text-text-muted">Wi-Fi Country Code</span>
+              <span class="text-sm text-text-muted"
+                >Wi-Fi Country Code
+                <HelpTip
+                  fieldKey="wifi_country"
+                  sectionKey="sbc_network"
+                  context="server"
+                />
+              </span>
             </label>
             <input
               id="wifiCountry"
@@ -444,12 +520,23 @@
 
   <!-- Forwarder Setup -->
   <div class="mb-6">
-    <Card title="Forwarder Setup">
+    <Card
+      title="Forwarder Setup"
+      helpSection="sbc_forwarder"
+      helpContext="server"
+    >
       <div class="flex flex-col gap-4">
         <!-- Server Base URL -->
         <div>
           <label for="serverBaseUrl" class="block">
-            <span class="text-sm text-text-muted">Server Base URL</span>
+            <span class="text-sm text-text-muted"
+              >Server Base URL
+              <HelpTip
+                fieldKey="server_base_url"
+                sectionKey="sbc_forwarder"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="serverBaseUrl"
@@ -471,7 +558,14 @@
         <!-- Auth Token -->
         <div>
           <label for="authToken" class="block">
-            <span class="text-sm text-text-muted">Auth Token</span>
+            <span class="text-sm text-text-muted"
+              >Auth Token
+              <HelpTip
+                fieldKey="auth_token"
+                sectionKey="sbc_forwarder"
+                context="server"
+              />
+            </span>
           </label>
           <div class="flex gap-2 mt-1">
             <input
@@ -507,8 +601,13 @@
         <div>
           <label for="readerTargets" class="block">
             <span class="text-sm text-text-muted"
-              >Reader Targets (one per line, IP:PORT)</span
-            >
+              >Reader Targets (one per line, IP:PORT)
+              <HelpTip
+                fieldKey="reader_targets"
+                sectionKey="sbc_forwarder"
+                context="server"
+              />
+            </span>
           </label>
           <textarea
             id="readerTargets"
@@ -530,7 +629,14 @@
         <!-- Status Bind -->
         <div>
           <label for="statusBind" class="block">
-            <span class="text-sm text-text-muted">Status Bind Address</span>
+            <span class="text-sm text-text-muted"
+              >Status Bind Address
+              <HelpTip
+                fieldKey="status_bind"
+                sectionKey="sbc_forwarder"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="statusBind"
@@ -552,7 +658,14 @@
         <!-- Display Name -->
         <div>
           <label for="displayName" class="block">
-            <span class="text-sm text-text-muted">Display Name (optional)</span>
+            <span class="text-sm text-text-muted"
+              >Display Name (optional)
+              <HelpTip
+                fieldKey="display_name"
+                sectionKey="sbc_forwarder"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="displayName"
@@ -569,12 +682,19 @@
 
   <!-- Advanced -->
   <div class="mb-6">
-    <Card title="Advanced">
+    <Card title="Advanced" helpSection="sbc_advanced" helpContext="server">
       <div class="flex flex-col gap-4">
         <!-- Setup Script URL -->
         <div>
           <label for="setupScriptUrl" class="block">
-            <span class="text-sm text-text-muted">Setup Script URL</span>
+            <span class="text-sm text-text-muted"
+              >Setup Script URL
+              <HelpTip
+                fieldKey="setup_script_url"
+                sectionKey="sbc_advanced"
+                context="server"
+              />
+            </span>
           </label>
           <input
             id="setupScriptUrl"

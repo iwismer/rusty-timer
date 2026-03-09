@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Card, ConfirmDialog } from "@rusty-timer/shared-ui";
+  import {
+    Card,
+    ConfirmDialog,
+    HelpTip,
+    HelpDialog,
+  } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import { createLatestRequestGate } from "$lib/latestRequestGate";
   import type {
@@ -336,7 +341,12 @@
 
   <!-- Streams Section -->
   <div class="mb-6">
-    <Card title="Streams" borderStatus="err">
+    <Card
+      title="Streams"
+      borderStatus="err"
+      helpSection="admin_streams"
+      helpContext="server"
+    >
       <p class="text-sm text-text-muted m-0 mb-4">
         Manage active and offline streams. Deleting a stream permanently removes
         it along with all associated events, metrics, and receiver cursors.
@@ -397,7 +407,12 @@
 
   <!-- Events Section -->
   <div class="mb-6">
-    <Card title="Events" borderStatus="err">
+    <Card
+      title="Events"
+      borderStatus="err"
+      helpSection="admin_events"
+      helpContext="server"
+    >
       <p class="text-sm text-text-muted m-0 mb-4">
         Delete stored timing events. You can clear events globally, for a
         specific stream, or for a specific epoch within a stream.
@@ -478,7 +493,12 @@
 
   <!-- Device Tokens Section -->
   <div class="mb-6">
-    <Card title="Device Tokens" borderStatus="err">
+    <Card
+      title="Device Tokens"
+      borderStatus="err"
+      helpSection="admin_tokens"
+      helpContext="server"
+    >
       <p class="text-sm text-text-muted m-0 mb-4">
         Create and manage authentication tokens for forwarders and receivers.
         Revoking a token prevents the device from connecting.
@@ -639,7 +659,12 @@
 
   <!-- Receiver Cursors Section -->
   <div class="mb-6">
-    <Card title="Receiver Cursors" borderStatus="err">
+    <Card
+      title="Receiver Cursors"
+      borderStatus="err"
+      helpSection="admin_cursors"
+      helpContext="server"
+    >
       <p class="text-sm text-text-muted m-0 mb-4">
         Manage receiver sync positions. Clearing a cursor causes the receiver to
         re-sync from the beginning on its next connection.
@@ -722,7 +747,12 @@
 
   <!-- Races Section -->
   <div class="mb-6">
-    <Card title="Races" borderStatus="err">
+    <Card
+      title="Races"
+      borderStatus="err"
+      helpSection="admin_races"
+      helpContext="server"
+    >
       <p class="text-sm text-text-muted m-0 mb-4">
         Delete all races and associated data. This removes all races,
         participants, chip mappings, and forwarder-race associations.

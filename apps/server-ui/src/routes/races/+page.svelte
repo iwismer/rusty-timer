@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import * as api from "$lib/api";
   import type { RaceEntry } from "$lib/api";
-  import { Card } from "@rusty-timer/shared-ui";
+  import { Card, HelpTip, HelpDialog } from "@rusty-timer/shared-ui";
 
   // State
   let races: RaceEntry[] = $state([]);
@@ -15,6 +15,9 @@
   let createError: string | null = $state(null);
 
   // Delete confirmation (race_id of the race being confirmed, or null)
+  let racesHelpOpen = $state(false);
+  let racesHelpField = $state<string | undefined>(undefined);
+
   let confirmingDeleteId: string | null = $state(null);
   let deleting: Record<string, boolean> = $state({});
   let deleteError: Record<string, string | null> = $state({});
@@ -72,7 +75,17 @@
 
 <main class="max-w-[1100px] mx-auto px-6 py-6">
   <div class="flex items-center justify-between mb-6">
-    <h1 class="text-xl font-bold text-text-primary m-0">Races</h1>
+    <span class="inline-flex items-center gap-2">
+      <h1 class="text-xl font-bold text-text-primary m-0">Races</h1>
+      <button
+        onclick={() => {
+          racesHelpOpen = true;
+        }}
+        class="inline-flex items-center justify-center w-5 h-5 rounded-full border border-border text-text-muted hover:text-accent hover:border-accent text-xs font-bold cursor-pointer bg-transparent transition-colors"
+        aria-label="Help for Races"
+        type="button">?</button
+      >
+    </span>
   </div>
 
   <!-- Create Race form -->
@@ -179,3 +192,14 @@
     </div>
   {/if}
 </main>
+
+<HelpDialog
+  open={racesHelpOpen}
+  sectionKey="races"
+  context="server"
+  scrollToField={racesHelpField}
+  onClose={() => {
+    racesHelpOpen = false;
+    racesHelpField = undefined;
+  }}
+/>

@@ -62,6 +62,10 @@
   let controlBusy: Record<string, boolean> = $state({});
   let readModeHelpOpen = $state(false);
   let readModeHelpField = $state<string | undefined>(undefined);
+  let readerLiveHelpOpen = $state(false);
+  let readerLiveHelpField = $state<string | undefined>(undefined);
+  let streamFiltersHelpOpen = $state(false);
+  let streamFiltersHelpField = $state<string | undefined>(undefined);
   let controlFeedback: Record<
     string,
     { kind: "ok" | "err"; message: string } | undefined
@@ -593,20 +597,30 @@
       Streams
     </h1>
     <div class="flex items-center gap-4">
-      <select
-        data-testid="race-filter-select"
-        aria-label="Filter streams by race"
-        class="text-sm px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
-        value={effectiveSelectedRaceId ?? ""}
-        onchange={(e) => {
-          selectedRaceId = e.currentTarget.value || null;
-        }}
-      >
-        <option value="">All races</option>
-        {#each $racesStore as race (race.race_id)}
-          <option value={race.race_id}>{race.name}</option>
-        {/each}
-      </select>
+      <span class="inline-flex items-center gap-1">
+        <select
+          data-testid="race-filter-select"
+          aria-label="Filter streams by race"
+          class="text-sm px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+          value={effectiveSelectedRaceId ?? ""}
+          onchange={(e) => {
+            selectedRaceId = e.currentTarget.value || null;
+          }}
+        >
+          <option value="">All races</option>
+          {#each $racesStore as race (race.race_id)}
+            <option value={race.race_id}>{race.name}</option>
+          {/each}
+        </select><HelpTip
+          fieldKey="race_filter"
+          sectionKey="stream_filters"
+          context="server"
+          onOpenModal={(fk) => {
+            streamFiltersHelpField = fk;
+            streamFiltersHelpOpen = true;
+          }}
+        />
+      </span>
       <label
         class="flex items-center gap-2 text-sm text-text-muted cursor-pointer select-none"
       >
@@ -615,7 +629,15 @@
           bind:checked={hideOffline}
           class="cursor-pointer"
         />
-        Hide offline
+        Hide offline<HelpTip
+          fieldKey="hide_offline"
+          sectionKey="stream_filters"
+          context="server"
+          onOpenModal={(fk) => {
+            streamFiltersHelpField = fk;
+            streamFiltersHelpOpen = true;
+          }}
+        />
       </label>
     </div>
   </div>
@@ -646,21 +668,31 @@
               {stats.totalRaw.toLocaleString()} reads &middot;
               {stats.totalChips.toLocaleString()} chips
             </span>
-            <select
-              data-testid={`forwarder-race-select-${group.forwarderId}`}
-              aria-label={`Assign race for ${group.displayName}`}
-              class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
-              value={$forwarderRacesStore[group.forwarderId] ?? ""}
-              onchange={(e) => {
-                const val = e.currentTarget.value;
-                handleRaceChange(group.forwarderId, val || null);
-              }}
-            >
-              <option value="">No race</option>
-              {#each $racesStore as race (race.race_id)}
-                <option value={race.race_id}>{race.name}</option>
-              {/each}
-            </select>
+            <span class="inline-flex items-center gap-1">
+              <select
+                data-testid={`forwarder-race-select-${group.forwarderId}`}
+                aria-label={`Assign race for ${group.displayName}`}
+                class="text-xs px-2 py-1 rounded-md border border-border bg-surface-0 text-text-primary"
+                value={$forwarderRacesStore[group.forwarderId] ?? ""}
+                onchange={(e) => {
+                  const val = e.currentTarget.value;
+                  handleRaceChange(group.forwarderId, val || null);
+                }}
+              >
+                <option value="">No race</option>
+                {#each $racesStore as race (race.race_id)}
+                  <option value={race.race_id}>{race.name}</option>
+                {/each}
+              </select><HelpTip
+                fieldKey="forwarder_race"
+                sectionKey="stream_filters"
+                context="server"
+                onOpenModal={(fk) => {
+                  streamFiltersHelpField = fk;
+                  streamFiltersHelpOpen = true;
+                }}
+              />
+            </span>
             <a
               href="/forwarders/{group.forwarderId}/reads"
               class="text-xs font-medium px-2.5 py-1 rounded-md text-accent no-underline bg-accent-bg hover:underline"
@@ -821,7 +853,17 @@
                         >
                       </div>
                       <div>
-                        <span class="text-text-muted">Clock Drift:</span>
+                        <span class="text-text-muted"
+                          >Clock Drift:<HelpTip
+                            fieldKey="clock_drift"
+                            sectionKey="reader_live"
+                            context="forwarder"
+                            onOpenModal={(fk) => {
+                              readerLiveHelpField = fk;
+                              readerLiveHelpOpen = true;
+                            }}
+                          /></span
+                        >
                         <span
                           class="{driftColorClass(
                             info?.clock?.drift_ms,
@@ -932,7 +974,17 @@
 
                     <!-- TTO toggle -->
                     <div class="mb-4">
-                      <span class="text-sm text-text-muted">TTO Bytes:</span>
+                      <span class="text-sm text-text-muted"
+                        >TTO Bytes:<HelpTip
+                          fieldKey="tto_bytes"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        /></span
+                      >
                       <span
                         class="ml-2 inline-flex items-center gap-2 flex-wrap"
                       >
@@ -959,62 +1011,112 @@
                     <div
                       class="flex items-center gap-3 pt-3 border-t border-border flex-wrap"
                     >
-                      <button
-                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
-                        onclick={() =>
-                          handleSyncClock(
-                            stream.forwarder_id,
-                            stream.reader_ip,
-                            key,
-                          )}
-                        {disabled}>Sync Clock</button
-                      >
-                      <button
-                        class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-                        onclick={() =>
-                          handleRefresh(
-                            stream.forwarder_id,
-                            stream.reader_ip,
-                            key,
-                          )}
-                        {disabled}>Refresh</button
-                      >
-                      <button
-                        class={info?.recording
-                          ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                          : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
-                        onclick={() =>
-                          handleSetRecording(
-                            stream.forwarder_id,
-                            stream.reader_ip,
-                            key,
-                            info,
-                          )}
-                        {disabled}
-                        >{info?.recording
-                          ? "Stop Recording"
-                          : "Start Recording"}</button
-                      >
-                      <button
-                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
-                        onclick={() =>
-                          handleStartDownload(
-                            stream.forwarder_id,
-                            stream.reader_ip,
-                            key,
-                          )}
-                        {disabled}>Download Reads</button
-                      >
-                      <button
-                        class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                        onclick={() =>
-                          handleClearRecords(
-                            stream.forwarder_id,
-                            stream.reader_ip,
-                            key,
-                          )}
-                        {disabled}>Clear Records</button
-                      >
+                      <span class="inline-flex items-center gap-1">
+                        <button
+                          class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                          onclick={() =>
+                            handleSyncClock(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                            )}
+                          {disabled}>Sync Clock</button
+                        ><HelpTip
+                          fieldKey="sync_clock"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        />
+                      </span>
+                      <span class="inline-flex items-center gap-1">
+                        <button
+                          class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={() =>
+                            handleRefresh(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                            )}
+                          {disabled}>Refresh</button
+                        ><HelpTip
+                          fieldKey="refresh_reader"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        />
+                      </span>
+                      <span class="inline-flex items-center gap-1">
+                        <button
+                          class={info?.recording
+                            ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                            : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
+                          onclick={() =>
+                            handleSetRecording(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                              info,
+                            )}
+                          {disabled}
+                          >{info?.recording
+                            ? "Stop Recording"
+                            : "Start Recording"}</button
+                        ><HelpTip
+                          fieldKey="recording"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        />
+                      </span>
+                      <span class="inline-flex items-center gap-1">
+                        <button
+                          class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+                          onclick={() =>
+                            handleStartDownload(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                            )}
+                          {disabled}>Download Reads</button
+                        ><HelpTip
+                          fieldKey="download_reads"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        />
+                      </span>
+                      <span class="inline-flex items-center gap-1">
+                        <button
+                          class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                          onclick={() =>
+                            handleClearRecords(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                            )}
+                          {disabled}>Clear Records</button
+                        ><HelpTip
+                          fieldKey="clear_records"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        />
+                      </span>
                       {#if !stream.online}
                         <button
                           class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
@@ -1105,5 +1207,27 @@
   onClose={() => {
     readModeHelpOpen = false;
     readModeHelpField = undefined;
+  }}
+/>
+
+<HelpDialog
+  open={readerLiveHelpOpen}
+  sectionKey="reader_live"
+  context="forwarder"
+  scrollToField={readerLiveHelpField}
+  onClose={() => {
+    readerLiveHelpOpen = false;
+    readerLiveHelpField = undefined;
+  }}
+/>
+
+<HelpDialog
+  open={streamFiltersHelpOpen}
+  sectionKey="stream_filters"
+  context="server"
+  scrollToField={streamFiltersHelpField}
+  onClose={() => {
+    streamFiltersHelpOpen = false;
+    streamFiltersHelpField = undefined;
   }}
 />
