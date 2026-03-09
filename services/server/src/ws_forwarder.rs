@@ -255,7 +255,15 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         {
             Ok(sid) => {
                 stream_map.insert(reader_ip.clone(), sid);
-                let _ = set_stream_online(&state.pool, sid, true).await;
+                if let Err(e) = set_stream_online(&state.pool, sid, true).await {
+                    error!(
+                        device_id = %device_id,
+                        reader_ip = %reader_ip,
+                        stream_id = %sid,
+                        error = %e,
+                        "failed to mark stream online during hello"
+                    );
+                }
                 state.get_or_create_broadcast(sid).await;
             }
             Err(e) => {
@@ -435,7 +443,15 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         && !stream_map.contains_key(reader_ip)
                                     {
                                         stream_map.insert(reader_ip.clone(), sid);
-                                        let _ = set_stream_online(&state.pool, sid, true).await;
+                                        if let Err(e) = set_stream_online(&state.pool, sid, true).await {
+                                            error!(
+                                                device_id = %device_id,
+                                                reader_ip = %reader_ip,
+                                                stream_id = %sid,
+                                                error = %e,
+                                                "failed to mark stream online during re-hello"
+                                            );
+                                        }
                                         state.get_or_create_broadcast(sid).await;
                                         publish_stream_created(&state, sid).await;
                                         state.logger.log(format!("stream created: {device_id}/{reader_ip}"));
@@ -695,7 +711,15 @@ async fn handle_event_batch(
             )
             .await?;
             stream_map.insert(event.reader_ip.clone(), sid);
-            let _ = set_stream_online(&state.pool, sid, true).await;
+            if let Err(e) = set_stream_online(&state.pool, sid, true).await {
+                error!(
+                    device_id = %device_id,
+                    reader_ip = %event.reader_ip,
+                    stream_id = %sid,
+                    error = %e,
+                    "failed to mark stream online during event batch"
+                );
+            }
             state.get_or_create_broadcast(sid).await;
             sid
         };
