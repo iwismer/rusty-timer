@@ -237,86 +237,82 @@ impl EmulatedReaderState {
     pub fn set_download_chip_ids(&mut self, ids: Vec<u64>) {
         self.download_chip_ids = ids;
     }
-}
 
-// ---------------------------------------------------------------------------
-// Download read generation
-// ---------------------------------------------------------------------------
+    /// Generate "stored reads" for download simulation.
+    ///
+    /// Produces up to `min(max_count, self.stored_reads)` chip read strings,
+    /// using the same LCG as scenario event generation. The RNG is seeded with
+    /// `self.download_seed + sum_of_ip_bytes` and advanced past already-downloaded
+    /// reads (`self.download_progress` iterations) before generating new ones.
+    ///
+    /// Each read uses `generate_read_for_chip` with `ReadType::RAW` and a past
+    /// timestamp offset by position from current time. Returns empty vec if
+    /// `stored_reads == 0` or `downloading == false`.
+    pub fn generate_download_reads(&mut self, max_count: u32) -> Vec<String> {
+        if !self.downloading || self.stored_reads == 0 {
+            return vec![];
+        }
 
-/// Generate "stored reads" for download simulation.
-///
-/// Produces up to `min(max_count, state.stored_reads)` chip read strings,
-/// using the same LCG as scenario event generation. The RNG is seeded with
-/// `state.download_seed + sum_of_ip_bytes` and advanced past already-downloaded
-/// reads (`state.download_progress` iterations) before generating new ones.
-///
-/// Each read uses `generate_read_for_chip` with `ReadType::RAW` and a past
-/// timestamp offset by position from current time. Returns empty vec if
-/// `stored_reads == 0` or `downloading == false`.
-pub fn generate_download_reads(state: &mut EmulatedReaderState, max_count: u32) -> Vec<String> {
-    if !state.downloading || state.stored_reads == 0 {
-        return vec![];
+        let count = max_count.min(self.stored_reads);
+
+        // Seed RNG the same way as generate_reader_events in scenario.rs
+        let ip_byte_sum: u64 = self.reader_ip.bytes().map(|b| b as u64).sum();
+        let mut rng_state: u64 = self.download_seed.wrapping_add(ip_byte_sum);
+
+        // Advance RNG past already-downloaded reads
+        for _ in 0..self.download_progress {
+            rng_state = lcg_next(rng_state);
+        }
+
+        let chip_ids = if self.download_chip_ids.is_empty() {
+            vec![1000u64] // fallback
+        } else {
+            self.download_chip_ids.clone()
+        };
+
+        let now = Local::now();
+        let mut reads = Vec::with_capacity(count as usize);
+
+        for i in 0..count {
+            rng_state = lcg_next(rng_state);
+            let chip_idx = (rng_state % chip_ids.len() as u64) as usize;
+            let chip_id = chip_ids[chip_idx];
+
+            // Past timestamp: offset backwards from current time by position
+            let offset_secs = (count - i) as i64;
+            let ts = now - chrono::Duration::seconds(offset_secs);
+
+            let year = (ts.year() % 100) as u8;
+            let month = ts.month() as u8;
+            let day = ts.day() as u8;
+            let hour = ts.hour() as u8;
+            let minute = ts.minute() as u8;
+            let second = ts.second() as u8;
+            let centiseconds = (ts.nanosecond() / 10_000_000) as u8;
+
+            let raw = generate_read_for_chip(
+                chip_id,
+                ReadType::RAW,
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                centiseconds,
+            );
+
+            reads.push(format!("{}\r\n", raw));
+
+            self.download_progress += 1;
+        }
+
+        // Decrement stored reads in one shot — ensures storage_state stays
+        // in sync with stored_reads (flips to Empty when reaching zero).
+        self.decrement_stored_reads(count);
+
+        reads
     }
-
-    let count = max_count.min(state.stored_reads);
-
-    // Seed RNG the same way as generate_reader_events in scenario.rs
-    let ip_byte_sum: u64 = state.reader_ip.bytes().map(|b| b as u64).sum();
-    let mut rng_state: u64 = state.download_seed.wrapping_add(ip_byte_sum);
-
-    // Advance RNG past already-downloaded reads
-    for _ in 0..state.download_progress {
-        rng_state = lcg_next(rng_state);
-    }
-
-    let chip_ids = if state.download_chip_ids.is_empty() {
-        vec![1000u64] // fallback
-    } else {
-        state.download_chip_ids.clone()
-    };
-
-    let now = Local::now();
-    let mut reads = Vec::with_capacity(count as usize);
-
-    for i in 0..count {
-        rng_state = lcg_next(rng_state);
-        let chip_idx = (rng_state % chip_ids.len() as u64) as usize;
-        let chip_id = chip_ids[chip_idx];
-
-        // Past timestamp: offset backwards from current time by position
-        let offset_secs = (count - i) as i64;
-        let ts = now - chrono::Duration::seconds(offset_secs);
-
-        let year = (ts.year() % 100) as u8;
-        let month = ts.month() as u8;
-        let day = ts.day() as u8;
-        let hour = ts.hour() as u8;
-        let minute = ts.minute() as u8;
-        let second = ts.second() as u8;
-        let centiseconds = (ts.nanosecond() / 10_000_000) as u8;
-
-        let raw = generate_read_for_chip(
-            chip_id,
-            ReadType::RAW,
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-            centiseconds,
-        );
-
-        reads.push(format!("{}\r\n", raw));
-
-        state.download_progress += 1;
-    }
-
-    // Decrement stored reads in one shot — ensures storage_state stays
-    // in sync with stored_reads (flips to Empty when reaching zero).
-    state.decrement_stored_reads(count);
-
-    reads
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,7 +1125,7 @@ mod tests {
         state.download_seed = 42;
         state.set_downloading(true);
 
-        let reads = generate_download_reads(&mut state, 3);
+        let reads = state.generate_download_reads(3);
         assert_eq!(reads.len(), 3);
         assert_eq!(state.stored_reads(), 0);
         assert_eq!(state.download_progress(), 3);
@@ -1147,7 +1143,7 @@ mod tests {
         state.set_stored_reads(2);
         state.set_downloading(true);
 
-        let reads = generate_download_reads(&mut state, 10);
+        let reads = state.generate_download_reads(10);
         assert_eq!(reads.len(), 2);
         assert_eq!(state.stored_reads(), 0);
     }
@@ -1158,7 +1154,7 @@ mod tests {
         state.set_stored_reads(100);
         // downloading is false by default from from_config
 
-        let reads = generate_download_reads(&mut state, 10);
+        let reads = state.generate_download_reads(10);
         assert!(reads.is_empty());
     }
 
@@ -1171,7 +1167,7 @@ mod tests {
         state.set_downloading(true);
         assert_eq!(state.storage_state(), StorageState::HasData);
 
-        let reads = generate_download_reads(&mut state, 3);
+        let reads = state.generate_download_reads(3);
         assert_eq!(reads.len(), 3);
         assert_eq!(state.stored_reads(), 0);
         assert_eq!(state.storage_state(), StorageState::Empty);
