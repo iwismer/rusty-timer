@@ -1,10 +1,12 @@
+<script module lang="ts">
+  export const HELP_OPEN_MODAL_KEY = "help-open-modal";
+</script>
+
 <script lang="ts">
   import { getContext, hasContext, onDestroy } from "svelte";
   import { getField } from "../lib/help/index";
   import type { HelpContextName } from "../lib/help/help-types";
   import { computePopoverStyle } from "../lib/help-tip";
-
-  export const HELP_OPEN_MODAL_KEY = "help-open-modal";
 
   let {
     fieldKey,
