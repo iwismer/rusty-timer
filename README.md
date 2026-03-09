@@ -4,85 +4,85 @@
 [![UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/ui.yml)
 [![Embed UI CI](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml/badge.svg?branch=master)](https://github.com/iwismer/rusty-timer/actions/workflows/embed-ui.yml)
 
-Timing utilities for the IPICO chip timing system, with a full remote forwarding suite for distributing race reads across a network.
+Rusty Timer forwards IPICO chip-timing reads over the internet so your
+timing software doesn't need a direct cable to each reader. Use it when
+readers are far from the timing tent, at multi-site events, or as a
+remote backup for local reads.
 
-## Architecture
+It is compatible with any software that works with IPICO readers (tested
+with IPICO Connect).
+
+## How It Works
 
 ```
-IPICO Reader ──TCP──► Streamer ──fanout──► Local Clients
-                          │
-                          └── Forwarder ──WS──► Server ──WS──► Receiver
-                                                     │
-                                               Dashboard (web)
+             ┌─── Field ───┐          ┌── Cloud ──┐        ┌── Timing Tent ──┐
+IPICO Reader ──TCP──► Forwarder ──WS──► Server ──WS──► Receiver ──TCP──► Timing Software
+                                           │
+                                      Dashboard (web)
 ```
 
-## Services
+The **[Forwarder](services/forwarder/)** runs on a small computer (e.g.
+Raspberry Pi) next to each IPICO reader. It journals every read to a
+local SQLite database for power-loss safety, then forwards reads to a
+central server over WebSocket with at-least-once delivery.
 
-**[Streamer](services/streamer/)** — Connects to one or more IPICO readers over TCP and fans out reads to any number of local TCP clients. Supports file-based backup of all reads.
+The **[Server](services/server/)** ingests reads from all forwarders,
+deduplicates them, stores them in PostgreSQL, and fans them out to
+receivers over WebSocket. It serves a web dashboard for monitoring
+streams, managing races, and exporting data.
 
-**[Emulator](services/emulator/)** — Generates synthetic IPICO reads for testing. Can emit reads at a fixed interval or replay from a pre-recorded file.
+The **[Receiver](services/receiver/)** subscribes to one or more streams
+from the server and re-exposes each as a local TCP port — so your
+existing timing software sees the data as if the reader were plugged in
+directly.
 
-**[Forwarder](services/forwarder/)** — Connects to IPICO hardware, journals reads to a local SQLite database with power-loss safety, and forwards them to a central server over WebSocket with at-least-once delivery. Includes an embedded web UI for status monitoring.
+If the internet drops, reads are safe: the forwarder journals locally
+and replays everything once the connection is restored.
 
-**[Server](services/server/)** — Central hub that ingests reads from forwarders, deduplicates, stores in PostgreSQL, and fans out to receivers over WebSocket. Serves a web dashboard and REST API for stream management, exports, and administration.
+### Other Components
 
-**[Receiver](services/receiver/)** — Subscribes to streams from the server and re-exposes them as local TCP ports, allowing existing race-management software to consume remote timing data as if it were local. Includes an embedded web UI.
+**[Streamer](services/streamer/)** — Connects to one or more IPICO
+readers over TCP and fans out reads to any number of local TCP clients.
+Useful as a standalone tool without the remote forwarding stack.
 
-## Frontend Apps
+**[Server UI](apps/server-ui/)**, **[Receiver UI](apps/receiver-ui/)**,
+**[Forwarder UI](apps/forwarder-ui/)** — Web dashboards for each
+service (the forwarder and receiver UIs are embedded in their binaries).
+Built with SvelteKit.
 
-**[Server UI](apps/server-ui/)** — SvelteKit web dashboard served by the server. Displays live streams, metrics, and provides export and administration controls.
+## Quick Demo
 
-**[Receiver UI](apps/receiver-ui/)** — SvelteKit web UI embedded in the receiver binary. Manages server connection, stream subscriptions, and displays status.
+Run the full stack locally with simulated readers — no hardware needed:
 
-**[Forwarder UI](apps/forwarder-ui/)** — SvelteKit web UI embedded in the forwarder binary. Shows reader connection status, uplink state, and recent log entries.
-
-**[Shared UI](apps/shared-ui/)** — Shared Svelte component library (`@rusty-timer/shared-ui`) used by all three frontend apps. Provides common components like `LogViewer`, `StatusBadge`, `NavBar`, `Card`, and `DataTable`.
-
-## Shared Libraries
-
-**[ipico-core](crates/ipico-core/)** — Core IPICO chip-read parsing and validation. Parses raw hex frames into structured `ChipRead` values with timestamp, tag ID, and read type.
-
-**[rt-protocol](crates/rt-protocol/)** — WebSocket message protocol definitions for the v1 protocol. Defines all message types exchanged between forwarders, server, and receivers.
-
-**[timer-core](crates/timer-core/)** — Core timing models and TCP worker types for directly connecting to IPICO hardware. Used by the streamer and emulator.
-
-**[rt-updater](crates/rt-updater/)** — Self-update checker and downloader. Checks GitHub Releases for new versions, downloads and verifies archives by SHA-256, and stages binaries for replacement.
-
-**[emulator](crates/emulator/)** — Emulator library (package `rt-emulator`) for read generation, deterministic scenario playback, and fault injection.
-
-**[rt-test-utils](crates/rt-test-utils/)** — Mock WebSocket client and server for integration testing. Provides `MockWsServer` and `MockWsClient` for testing forwarder, server, and receiver interactions.
-
-## Quick Start
-
-**Prerequisites:**
-- Rust MSRV: 1.85.0; pinned toolchain: 1.93.1 (see `rust-toolchain.toml`)
-- Docker (for server / integration tests)
-- Node.js 24.x and npm 11.x (see `.nvmrc`)
+**Prerequisites:** [Rust](https://rustup.rs/) 1.93.1 (via `rust-toolchain.toml`), [Docker](https://www.docker.com/), [Node.js](https://nodejs.org/) 24.x, Python 3.11+ with [`uv`](https://docs.astral.sh/uv/), and `tmux`.
 
 ```bash
-# Build all services
-cargo build --release --workspace
-
-# Run unit tests
-cargo test --workspace --lib
+uv run scripts/dev.py
 ```
 
-See [docs/local-testing.md](docs/local-testing.md) for full local development setup and [deploy/server/](deploy/server/) for production server deployment.
+This launches Postgres, the server, an emulator (simulated reader), a
+forwarder, and a receiver in tmux panes. The server dashboard is at
+`http://localhost:3000`. See [scripts/README.md](scripts/README.md) for
+options and details.
 
-See [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-guide.md) for race-day operations.
+## Deploying for Real
+
+| Component | Guide |
+|-----------|-------|
+| Server (Docker) | [deploy/server/](deploy/server/) |
+| Forwarder on Raspberry Pi | [deploy/sbc/](deploy/sbc/) |
+| Race-day operations | [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-guide.md) |
+
+Pre-built binaries are available on the [Releases](https://github.com/iwismer/rusty-timer/releases) page.
+
+See the [full documentation index](docs/) for all guides, runbooks, and
+reference docs.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for test commands, code quality checks, and git hook setup.
-
-## Receiver Selection Semantics (v1.1)
-
-- Default receiver selection mode is `manual`, with `resume` replay behavior as the default path.
-- `race/current` selection is available as an explicit opt-in mode and is not the default.
-- Receiver targeted replay supports explicit per-row save behavior in the receiver UI.
-- Forwarder epoch name controls support setting and clearing current epoch names through the server-backed path.
-- Design drift for this shipped behavior is tracked in `docs/design-drift/2026-02-23-rt-gxdq-design-drift-notes.md`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for building from source, running
+tests, and code quality checks.
 
 ## Licence
 
-GPL3 — see LICENCE.txt
+GPL-3.0 — see [LICENCE.txt](LICENCE.txt)
