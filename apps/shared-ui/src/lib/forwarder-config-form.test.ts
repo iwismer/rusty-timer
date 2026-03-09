@@ -752,3 +752,23 @@ describe("toReadersPayload", () => {
     expect(payload.readers[0].target).toBeNull();
   });
 });
+
+describe("fromConfig/toReadersPayload round-trip", () => {
+  it("round-trips mixed single and range readers", () => {
+    const originalConfig = {
+      readers: [
+        { target: "192.168.0.50:10000", enabled: true, local_fallback_port: 10050 },
+        { target: "192.168.0.150-160:10000", enabled: false },
+        { target: "10.0.0.1:9999", enabled: true, local_fallback_port: null },
+      ],
+    };
+    const form = fromConfig(originalConfig);
+    const payload = toReadersPayload({ readers: form.readers } as ForwarderConfigFormState);
+
+    expect(payload.readers).toEqual([
+      { target: "192.168.0.50:10000", enabled: true, local_fallback_port: 10050 },
+      { target: "192.168.0.150-160:10000", enabled: false, local_fallback_port: null },
+      { target: "10.0.0.1:9999", enabled: true, local_fallback_port: null },
+    ]);
+  });
+});
