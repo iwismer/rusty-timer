@@ -210,7 +210,7 @@ async fn emulator_handles_full_connect_sequence() {
         write_half.flush().await.expect("flush failed");
 
         let mut extra_lines = Vec::new();
-        let response = timeout(Duration::from_secs(5), async {
+        timeout(Duration::from_secs(5), async {
             loop {
                 line_buf.clear();
                 match reader.read_line(line_buf).await {
@@ -235,9 +235,7 @@ async fn emulator_handles_full_connect_sequence() {
             }
         })
         .await
-        .expect("timed out waiting for response");
-
-        response
+        .expect("timed out waiting for response")
     }
 
     // 1. GetStatistics (0x0a) — expect 14-byte data
