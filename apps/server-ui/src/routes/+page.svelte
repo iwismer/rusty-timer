@@ -970,16 +970,18 @@
                           )}
                         {disabled}>Clear Records</button
                       >
-                      <button
-                        class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-                        onclick={() =>
-                          handleReconnect(
-                            stream.forwarder_id,
-                            stream.reader_ip,
-                            key,
-                          )}
-                        disabled={busy || !stream.online}>Reconnect</button
-                      >
+                      {#if !stream.online}
+                        <button
+                          class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                          onclick={() =>
+                            handleReconnect(
+                              stream.forwarder_id,
+                              stream.reader_ip,
+                              key,
+                            )}
+                          {disabled}>Reconnect</button
+                        >
+                      {/if}
                     </div>
 
                     <!-- Download progress bar -->
