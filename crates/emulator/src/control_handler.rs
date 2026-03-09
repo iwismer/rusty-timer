@@ -9,8 +9,11 @@ use ipico_core::control::{
     INSTR_SET_DATE_TIME, INSTR_TAG_MESSAGE_FORMAT, INSTR_UNKNOWN_E0, ReadMode, from_bcd, lrc,
     to_bcd,
 };
+use ipico_core::read::ReadType;
 
 use chrono::{Datelike, Local, TimeZone, Timelike};
+
+use crate::read_gen::generate_read_for_chip;
 
 use crate::scenario::ReaderScenarioConfig;
 
@@ -92,6 +95,90 @@ impl EmulatedReaderState {
             download_seed: seed,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Download read generation
+// ---------------------------------------------------------------------------
+
+/// LCG: x_{n+1} = (a * x_n + c) mod 2^64
+fn lcg_next(state: u64) -> u64 {
+    state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407)
+}
+
+/// Generate "stored reads" for download simulation.
+///
+/// Produces up to `min(max_count, state.stored_reads)` chip read strings,
+/// using the same LCG as scenario event generation. The RNG is seeded with
+/// `state.download_seed + sum_of_ip_bytes` and advanced past already-downloaded
+/// reads (`state.download_progress` iterations) before generating new ones.
+///
+/// Each read uses `generate_read_for_chip` with `ReadType::RAW` and a past
+/// timestamp offset by position from current time. Returns empty vec if
+/// `stored_reads == 0` or `downloading == false`.
+pub fn generate_download_reads(state: &mut EmulatedReaderState, max_count: u32) -> Vec<String> {
+    if !state.downloading || state.stored_reads == 0 {
+        return vec![];
+    }
+
+    let count = max_count.min(state.stored_reads);
+
+    // Seed RNG the same way as generate_reader_events in scenario.rs
+    let ip_byte_sum: u64 = state.reader_ip.bytes().map(|b| b as u64).sum();
+    let mut rng_state: u64 = state.download_seed.wrapping_add(ip_byte_sum);
+
+    // Advance RNG past already-downloaded reads
+    for _ in 0..state.download_progress {
+        rng_state = lcg_next(rng_state);
+    }
+
+    let chip_ids = if state.download_chip_ids.is_empty() {
+        vec![1000u64] // fallback
+    } else {
+        state.download_chip_ids.clone()
+    };
+
+    let now = Local::now();
+    let mut reads = Vec::with_capacity(count as usize);
+
+    for i in 0..count {
+        rng_state = lcg_next(rng_state);
+        let chip_idx = (rng_state % chip_ids.len() as u64) as usize;
+        let chip_id = chip_ids[chip_idx];
+
+        // Past timestamp: offset backwards from current time by position
+        let offset_secs = (count - i) as i64;
+        let ts = now - chrono::Duration::seconds(offset_secs);
+
+        let year = (ts.year() % 100) as u8;
+        let month = ts.month() as u8;
+        let day = ts.day() as u8;
+        let hour = ts.hour() as u8;
+        let minute = ts.minute() as u8;
+        let second = ts.second() as u8;
+        let centiseconds = (ts.nanosecond() / 10_000_000) as u8;
+
+        let raw = generate_read_for_chip(
+            chip_id,
+            ReadType::RAW,
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            centiseconds,
+        );
+
+        reads.push(format!("{}\r\n", raw));
+
+        state.stored_reads -= 1;
+        state.download_progress += 1;
+    }
+
+    reads
 }
 
 // ---------------------------------------------------------------------------
@@ -732,5 +819,48 @@ mod tests {
             "expected clock_offset_ms ~3600000, got {}",
             state.clock_offset_ms
         );
+    }
+
+    // -- Download read generation tests --
+
+    #[test]
+    fn generate_download_reads_produces_valid_chip_reads() {
+        let mut state = make_test_state();
+        state.stored_reads = 3;
+        state.download_chip_ids = vec![1234, 5678];
+        state.download_seed = 42;
+        state.downloading = true;
+
+        let reads = generate_download_reads(&mut state, 3);
+        assert_eq!(reads.len(), 3);
+        assert_eq!(state.stored_reads, 0);
+        assert_eq!(state.download_progress, 3);
+
+        for read in &reads {
+            let trimmed = read.trim();
+            assert!(trimmed.starts_with("aa"));
+            assert!(ipico_core::read::ChipRead::try_from(trimmed).is_ok());
+        }
+    }
+
+    #[test]
+    fn generate_download_reads_stops_at_stored_reads() {
+        let mut state = make_test_state();
+        state.stored_reads = 2;
+        state.downloading = true;
+
+        let reads = generate_download_reads(&mut state, 10);
+        assert_eq!(reads.len(), 2);
+        assert_eq!(state.stored_reads, 0);
+    }
+
+    #[test]
+    fn generate_download_reads_returns_empty_when_not_downloading() {
+        let mut state = make_test_state();
+        state.stored_reads = 100;
+        state.downloading = false;
+
+        let reads = generate_download_reads(&mut state, 10);
+        assert!(reads.is_empty());
     }
 }
