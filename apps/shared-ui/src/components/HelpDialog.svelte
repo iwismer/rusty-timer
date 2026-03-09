@@ -90,7 +90,7 @@
 <dialog
   bind:this={dialogEl}
   onkeydown={handleKeydown}
-  class="fixed inset-0 m-auto max-w-2xl w-full max-h-[80vh] rounded-lg border border-border bg-surface-1 p-0 shadow-lg backdrop:bg-black/50 overflow-hidden flex flex-col"
+  class="fixed inset-0 m-auto max-w-2xl w-full max-h-[80vh] rounded-lg border border-border bg-surface-1 p-0 shadow-lg backdrop:bg-black/50 overflow-hidden open:flex open:flex-col"
 >
   {#if section}
     <div class="shrink-0 bg-surface-1 border-b border-border px-6 py-4 z-10">
@@ -137,7 +137,7 @@
 
       {#if filtered.tips.length > 0}
         <div class="mt-6 pt-4 border-t border-border">
-          <h3 class="text-sm font-semibold text-text-primary mb-2">Race-Day Tips</h3>
+          <h3 class="text-sm font-semibold text-text-primary mb-2">Race Day Tips</h3>
           <ul class="list-disc list-inside space-y-1">
             {#each filtered.tips as tip}
               <li class="text-sm text-text-secondary">{@html tip}</li>

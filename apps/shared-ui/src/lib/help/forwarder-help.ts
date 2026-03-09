@@ -40,18 +40,18 @@ export const FORWARDER_HELP = {
   },
   readers: {
     title: "Reader Devices",
-    overview: "IPICO reader devices this forwarder connects to. Each reader represents a physical timing mat or antenna.",
+    overview: "IPICO reader devices this forwarder connects to. Each entry represents a physical IPICO reader.",
     fields: {
       reader_ip: {
         label: "IP Address",
         summary: "Network address of the IPICO reader device.",
-        detailHtml: "The IP address of the IPICO reader. For a single reader, enter the full IP (e.g. 192.168.0.50). For a range of readers, enter the start IP and end octet to connect to multiple readers on the same subnet.",
+        detailHtml: "The IP address of the IPICO reader. Reader IP addresses are configured in the forwarder config file and shown here for reference. For a range of readers, the start IP and end octet define multiple readers on the same subnet.",
         recommended: "Use static IPs for readers to avoid DHCP reassignment during a race.",
       },
       reader_port: {
         label: "Reader Port",
         summary: "TCP port the reader listens on for connections.",
-        detailHtml: "The TCP port used to connect to the IPICO reader. Most IPICO readers use port 10000 by default.",
+        detailHtml: "The TCP port used to connect to the IPICO reader. Most IPICO Lite readers use port 10000 by default, while Elite readers use port 10100.",
         default: "10000",
         range: "1-65535",
       },
@@ -64,7 +64,7 @@ export const FORWARDER_HELP = {
       default_local_port: {
         label: "Default Local Port",
         summary: "Auto-calculated local port based on reader IP (10000 + last octet).",
-        detailHtml: "The default local forwarding port, calculated as 10000 + the last octet of the reader's IP address. For example, a reader at 192.168.0.50 gets local port 10050. This port is used by the receiver to forward reads to timing software.",
+        detailHtml: "The default local forwarding port, calculated as 10000 + the last octet of the reader's IP address. For example, a reader at 192.168.0.50 gets local port 10050. The forwarder listens on this port and re-broadcasts reads from the reader, so any timing software on the local network can connect to this port to receive reads directly — independent of the upstream server connection.",
       },
       local_port_override: {
         label: "Local Port Override",
@@ -74,7 +74,7 @@ export const FORWARDER_HELP = {
       },
     },
     tips: [
-      "At least one reader is required. Add all readers before race day and verify connectivity.",
+      "At least one reader is required.",
       "Use IP ranges when you have consecutive readers on the same subnet (e.g. 192.168.0.150 through 192.168.0.160).",
       "If reads aren't appearing, check that the reader IP is correct and the reader is powered on and connected to the network.",
     ],
@@ -87,7 +87,7 @@ export const FORWARDER_HELP = {
       read_mode: {
         label: "Read Mode",
         summary: "How the reader reports chip reads: Raw, Event, or First/Last Seen.",
-        detailHtml: "The read mode controls how the IPICO reader processes chip reads before sending them to the forwarder.\n\n<strong>Raw</strong>: Every individual chip detection is sent as-is. This produces the highest volume of data and is mainly useful for debugging or when you need access to every single antenna hit. Not recommended for race timing due to high volume.\n\n<strong>Event</strong>: The reader buffers reads and reports one event per chip per pass. Uses the reader's internal deduplication logic. Produces less data than Raw but the deduplication window is fixed by the reader firmware.\n\n<strong>First/Last Seen (FS/LS)</strong>: The reader reports the first and last detection of each chip within a configurable timeout window. This gives you the timestamp of when a chip first entered range and when it last left range, which is ideal for calculating split times and finish times. The timeout window controls how long the reader waits after the last detection before finalizing the read.",
+        detailHtml: "The read mode controls how the IPICO reader processes chip reads before sending them to the forwarder.<br><br><strong>Raw</strong>: Every individual chip detection is sent as-is. This produces the highest volume of data and includes extraneous reads such as repeated detections of the same chip. Mainly useful for debugging or when you need access to every single antenna hit.<br><br><strong>Event</strong>: The reader sends one read per chip detection, then resends it after a timeout period as a retry mechanism. Uses the reader's internal deduplication logic with a fixed window set by the firmware.<br><br><strong>First/Last Seen (FS/LS)</strong>: The reader reports the first and last detection of each chip within a configurable timeout window. This gives you the timestamp of when a chip first entered range and when it last left range, which is ideal for calculating split times and finish times. The timeout window controls how long the reader waits after the last detection before finalizing the read.",
         default: "Raw",
         range: "Raw, Event, First/Last Seen",
         recommended: "First/Last Seen with a 5-second timeout for most race timing scenarios. FS/LS provides clean, deduplicated data with both entry and exit timestamps.",
@@ -95,14 +95,14 @@ export const FORWARDER_HELP = {
       timeout: {
         label: "Timeout",
         summary: "Seconds the reader waits after last detection before finalizing a read (FS/LS mode only).",
-        detailHtml: "The deduplication timeout window in seconds, used only in First/Last Seen mode. After the reader detects a chip, it waits this many seconds for additional detections. If no new detections arrive within the timeout, the read is finalized and sent. A shorter timeout means faster reporting but risks splitting a single pass into multiple reads. A longer timeout ensures complete pass detection but adds latency.\n\nFor most race timing, 5 seconds provides a good balance: fast enough for timely results, long enough to capture a complete pass through the timing mat.",
+        detailHtml: "The deduplication timeout window in seconds, used only in First/Last Seen mode. After the reader detects a chip, it waits this many seconds for additional detections. If no new detections arrive within the timeout, the read is finalized and sent.<br><br>A shorter timeout means faster reporting but risks splitting a single pass into multiple reads. A longer timeout ensures complete pass detection but adds latency.<br><br>For most race timing, 5 seconds provides a good balance: fast enough for timely results, long enough to capture a complete pass through the timing mat.",
         default: "5",
         range: "1-255 seconds",
         recommended: "5 seconds for standard race timing. Use shorter (2-3s) for fast-paced events like cycling sprints. Use longer (8-10s) for crowded starts.",
       },
     },
     tips: [
-      "Always use First/Last Seen mode with a 5-second timeout for race timing. Raw mode generates too much data and Event mode's deduplication window is not configurable.",
+      "Generally use First/Last Seen mode with a 5-second timeout for race timing. Raw mode generates extraneous data (repeated detections of the same chip) and Event mode's deduplication window is not configurable.",
       "If you're seeing duplicate reads in your timing software, increase the timeout to ensure complete pass detection.",
       "Changing the read mode takes effect immediately. The reader will briefly pause reads during the mode switch.",
     ],
@@ -287,5 +287,170 @@ export const FORWARDER_HELP = {
       "After an update is applied, verify all readers reconnect and the forwarder is functioning correctly.",
     ],
     seeAlso: [{ sectionKey: "controls", label: "Forwarder Controls" }],
+  },
+  status_overview: {
+    title: "Status",
+    overview: "Live identity and health information for this forwarder. These fields are read-only and reflect the current state of the running service.",
+    fields: {
+      forwarder_id: {
+        label: "Forwarder ID",
+        summary: "Stable identifier for this forwarder, derived from its authentication token.",
+        detailHtml: "A unique identifier automatically derived from the forwarder's authentication token (e.g. <code>fwd-3a9f1c2b8e4d07f1</code>). The ID is stable across restarts and reboots as long as the token file does not change. The server uses this ID to identify the forwarder in the dashboard and in the receiver stream list.",
+      },
+      version: {
+        label: "Version",
+        summary: "Software version currently running on this forwarder.",
+        detailHtml: "The version of the forwarder service currently running. Use this to confirm that an update has been applied after a service restart. See the <strong>Update</strong> section for details on managing software updates.",
+      },
+      readiness: {
+        label: "Readiness",
+        summary: "Whether the forwarder's local subsystems have finished starting up and are operating normally.",
+        detailHtml: "Readiness reflects whether the forwarder's internal subsystems — config loading, journal initialization, and worker task startup — have all completed successfully. It does <strong>not</strong> indicate whether the uplink to the server is connected; the forwarder is considered ready as soon as its local setup is complete.<br><br><strong>Ready</strong>: All subsystems initialized. The forwarder is collecting reads from configured readers and forwarding them when the server connection is available.<br><br><strong>Not ready</strong>: The forwarder is still starting up or a subsystem failed to initialize. The reason is shown in parentheses next to the badge (e.g. <em>starting</em>). This state is normal for a few seconds after the service starts. If it persists, check the log for initialization errors.",
+      },
+    },
+    tips: [
+      "The Forwarder ID is tied to the authentication token. If you rotate the token, the ID will change and the server will treat this as a new forwarder.",
+      "'Not ready' is expected for a few seconds after the service starts or restarts. If it persists, check the Logs section for errors.",
+      "Readiness does not depend on the server connection. A forwarder can be ready and collecting reads even while the uplink is disconnected — reads accumulate in the journal and are sent when the connection is restored.",
+    ],
+    seeAlso: [
+      { sectionKey: "auth", label: "Authentication" },
+      { sectionKey: "journal", label: "Journal" },
+      { sectionKey: "server", label: "Server Connection" },
+    ],
+  },
+  service_overview: {
+    title: "Service",
+    overview: "Live status of the forwarder service and its connection to the remote server.",
+    fields: {
+      uplink: {
+        label: "Uplink",
+        summary: "Whether the forwarder is currently connected to the remote server.",
+        detailHtml: "Shows the state of the forwarder's WebSocket connection to the remote server.<br><br><strong>Connected</strong>: The forwarder has completed the handshake and is actively sending reads.<br><br><strong>Disconnected</strong>: The forwarder is not currently connected — reads continue to accumulate in the journal and will be sent automatically when the connection is restored.<br><br>Uplink state does not affect the forwarder's readiness to collect reads from readers.",
+      },
+      restart_needed: {
+        label: "Restart Needed",
+        summary: "Whether a saved configuration change is waiting to take effect.",
+        detailHtml: "Shows <strong>Pending</strong> when a configuration change has been saved but not yet applied. Configuration changes are written to the config file immediately, but the running forwarder process must restart to read them. Click <strong>Restart Now</strong> to apply the changes. Shows <strong>None</strong> when the running process reflects the current configuration.",
+      },
+    },
+    tips: [
+      "A disconnected uplink does not lose reads. The journal stores all reads and replays them to the server once the connection recovers.",
+      "If the uplink stays disconnected, verify the server URL and authentication token are correct, and that the server is reachable from the forwarder's network.",
+      "Restart Now restarts the forwarder service, not the physical device. Readers will briefly disconnect and reconnect. No reads are lost thanks to the journal.",
+      "On race day, apply any config changes and restart before the first race so the forwarder is stable during timing.",
+    ],
+    seeAlso: [
+      { sectionKey: "server", label: "Server Connection" },
+      { sectionKey: "journal", label: "Journal" },
+      { sectionKey: "dangerous_actions", label: "Dangerous Actions" },
+    ],
+  },
+  reader_live: {
+    title: "Reader Live Status",
+    overview: "Real-time statistics and controls for an active reader connection. These values update automatically while the page is open.",
+    fields: {
+      reads_session: {
+        label: "Reads (Session)",
+        summary: "Number of chip reads received from this reader since the forwarder service last started.",
+        detailHtml: "A running count of chip reads received from this reader since the forwarder service was last started (or restarted). This counter resets to zero each time the forwarder service restarts — it reflects the current service session only, not historical data. Use this to confirm reads are actively flowing from a reader during the current session.",
+      },
+      reads_total: {
+        label: "Reads (Total)",
+        summary: "Total chip reads from this reader recorded in the journal, across all sessions.",
+        detailHtml: "The cumulative count of chip reads from this reader stored in the forwarder's journal database. At startup, this value is loaded from the journal (all epochs, all sessions) and then incremented in memory as new reads arrive. This count persists across service restarts as long as a file-based journal is configured. If using an in-memory journal, this counter resets on every service restart and will match the session count. Use this to get a sense of total throughput from a reader over the course of an event.",
+      },
+      local_port: {
+        label: "Local Port",
+        summary: "Port on this device where the reader's chip reads are available for local timing software.",
+        detailHtml: "The forwarder opens a TCP listener on this port and re-broadcasts every chip read it receives from this reader. Timing software running on the same network can connect here to receive reads directly, independently of the upstream server connection. The port is either auto-calculated as 10000 + the last octet of the reader's IP address (e.g. a reader at 192.168.0.50 uses port 10050), or a fixed value when a Local Port Override is configured for this reader.",
+      },
+      last_seen: {
+        label: "Last Seen",
+        summary: "How long ago the most recent chip read was received from this reader.",
+        detailHtml: "The time elapsed since the forwarder last received a chip read from this reader. Updates automatically while the page is open — the displayed value ticks forward in real time so you can see how stale the data is without refreshing. Shows <strong>never</strong> if no reads have been received in the current session. A rapidly increasing value while the reader is connected may indicate the timing mat is idle or no chips are in range.",
+      },
+      epoch_name: {
+        label: "Epoch Name",
+        summary: "Optional label for the current epoch on this reader, e.g. 'Race 1' or 'Wave 2'.",
+        detailHtml: "Assigns a human-readable name to the reader's current epoch. The name is saved to the server and displayed above the input as the active epoch label. Clearing the field and saving removes the name. The name applies to the current epoch only — after advancing to a new epoch, set a new name to identify it.",
+      },
+      advance_epoch: {
+        label: "Advance Epoch",
+        summary: "Starts a new epoch for this reader, separating subsequent reads from previous ones.",
+        detailHtml: "Increments the reader's stream epoch counter by one and resets its sequence number to 1. All reads from this point forward are recorded under the new epoch, allowing the server and receiver to distinguish them from reads in the previous epoch. Reads already captured in earlier epochs are not deleted and will still be delivered if unacknowledged. Use this at the start of each race or wave to create a clean separation in the read stream. After advancing, set an epoch name to identify the new segment.",
+      },
+      clock_drift: {
+        label: "Clock Drift",
+        summary: "Difference between the reader's internal clock and the forwarder's local clock, in milliseconds.",
+        detailHtml:
+          "Shows how far the reader's clock deviates from the forwarder's system clock at the time of the last clock read. " +
+          "The value is computed as <em>forwarder time \u2212 reader time</em>: a positive value means the reader clock is running behind, " +
+          "a negative value means it is running ahead. The forwarder reads the reader clock automatically on connect and periodically " +
+          "during the session, so the value updates without manual intervention." +
+          "<br><br>" +
+          "The color indicates severity:" +
+          "<ul>" +
+          '<li><strong class="text-green-500">Green</strong> \u2014 less than 100\u2009ms. Normal operating range; no action needed.</li>' +
+          '<li><strong class="text-yellow-500">Yellow</strong> \u2014 100\u2009ms to 499\u2009ms. Noticeable drift; consider syncing before the next race.</li>' +
+          '<li><strong class="text-red-500">Red</strong> \u2014 500\u2009ms or more. Significant drift that will affect timestamp accuracy; sync the clock now.</li>' +
+          "</ul>" +
+          "A dash (\u2014) means the reader clock has not been read yet in the current session." +
+          "<br><br>" +
+          "Use <strong>Sync Clock</strong> to correct the drift. The sync procedure probes round-trip network latency and schedules " +
+          "the set command to land precisely on a whole-second boundary, reducing residual drift to approximately 25\u2009ms.",
+      },
+      tto_bytes: {
+        label: "TTO Bytes",
+        summary: "Adds extra timestamp data to each chip read: antenna index, page, and first/last-seen flags.",
+        detailHtml:
+          "TTO (Time To Own) is an IPICO reader feature that appends 3 extra bytes to every chip read message. When enabled, each read includes an antenna <strong>index</strong>, a <strong>page</strong> number, and a flags byte that encodes whether the detection was the <strong>first seen</strong> or <strong>last seen</strong> event within a First/Last Seen pass, plus a <strong>tamper</strong> flag.\n\n" +
+          "The setting is written directly to the reader\u2019s tag message format register using the IPICO control protocol \u2014 it takes effect immediately and persists in the reader\u2019s own memory across power cycles. Toggling TTO does not require restarting the forwarder service.\n\n" +
+          "<strong>Enabled</strong>: Each chip read message is 42 characters instead of the standard 36. The extra bytes provide per-read antenna and pass-direction metadata.\n\n" +
+          "<strong>Disabled</strong>: Standard 36-character reads with no extra bytes. Compatible with all timing software that uses the IPICO format.\n\n" +
+          "TTO is not required for normal race timing. Enable it only if your timing software or post-processing workflow specifically uses the antenna index, page, or first/last-seen flags.",
+        default: "Disabled",
+        recommended: "Leave disabled unless your timing software explicitly uses TTO metadata.",
+      },
+      sync_clock: {
+        label: "Sync Clock",
+        summary: "Synchronizes the reader's internal clock to the forwarder's local time.",
+        detailHtml: "Sends the current time from the forwarder to the reader using a latency-compensated algorithm. The forwarder first probes the round-trip time to the reader, then times the SET_DATE_TIME command so that the reader's new second takes effect precisely on a whole-second boundary. After the sync completes, the forwarder reads the clock back and reports the residual drift in milliseconds.\n\nAccurate chip-read timestamps depend on the reader's clock. Sync the clock before each race \u2014 especially after the reader has been powered on for the first time, after a long idle period, or if you notice timestamp anomalies in timing results. The button is only available while the reader is connected.",
+        recommended: "Sync the clock at the start of each race day and again before each race if high timestamp accuracy is required.",
+      },
+      refresh_reader: {
+        label: "Refresh",
+        summary: "Re-polls the reader for its current status, firmware, configuration, and clock.",
+        detailHtml: "Queries the reader over the control connection and updates all displayed reader info fields: extended status (recording state, estimated stored reads), read mode configuration, TTO reporting state, and clock. The forwarder polls this information automatically on connect, but you can use Refresh at any time to get the latest values without waiting for the next automatic poll \u2014 for example, after changing settings directly on the reader, or to confirm a previous command took effect.",
+      },
+      recording: {
+        label: "Start / Stop Recording",
+        summary: "Toggles whether the reader is internally recording chip reads to its onboard storage.",
+        detailHtml: "Controls the reader's onboard recording state. When <strong>recording is on</strong>, the reader stores each chip read in its internal EEPROM memory in addition to streaming reads live to the forwarder. When <strong>recording is off</strong>, the reader streams reads but does not write them to onboard storage.\n\nOnboard recording is independent of the live data stream: reads are forwarded to the server regardless of recording state. Use recording as a safety net \u2014 if the forwarder loses its connection mid-race, the reads are preserved on the reader and can be retrieved later with <strong>Download Reads</strong>.\n\nThe button label and color reflect the current state: green <em>Start Recording</em> when recording is off, red <em>Stop Recording</em> when recording is on.",
+        recommended: "Turn recording on before each race as a safety net. Download and clear records after each event to keep the reader's storage free for the next race.",
+      },
+      download_reads: {
+        label: "Download Reads",
+        summary: "Downloads all chip reads stored in the reader's onboard memory to the forwarder.",
+        detailHtml: "Initiates a transfer of all records currently stored in the reader's onboard EEPROM to the forwarder. The download runs as a background task \u2014 a progress bar appears below the buttons showing reads received and estimated completion percentage. The forwarder processes incoming reads and routes them through the normal journal and uplink pipeline, so downloaded reads are delivered to the server just like live reads.\n\nDownload is the primary recovery path after a connection outage: if the forwarder lost its uplink during a race and reads were captured to onboard storage, use Download Reads once connectivity is restored to retrieve them.\n\nOnly one download can run at a time per reader. After a successful download, use <strong>Clear Records</strong> to free the reader's storage for the next race.",
+      },
+      clear_records: {
+        label: "Clear Records",
+        summary: "Erases all stored records from the reader's onboard EEPROM memory.",
+        detailHtml: "Permanently erases all chip reads stored in the reader's internal memory. This is a multi-step hardware operation that takes approximately 10 seconds to complete.\n\n<strong>This action is irreversible.</strong> Always use <strong>Download Reads</strong> first if you need to recover the stored data before clearing. Clear records after each event to ensure the reader's storage is empty and ready for the next race. A full reader may not be able to store new reads.",
+        recommended: "Always download reads before clearing. Clear records at the end of each race day so stored reads are available as a backup if the live stream had any gaps.",
+      },
+    },
+    tips: [
+      "Use 'Advance Epoch' at the start of each race or wave to cleanly separate reads in the data stream.",
+      "If Reads (session) stops increasing while the reader is connected, check that chips are in range of the timing mat and that the reader is in the correct read mode.",
+      "Last Seen shows 'never' until the first chip read arrives in the current session. This is normal before a race starts.",
+      "Sync the clock before each race. Always download reads before clearing records.",
+    ],
+    seeAlso: [
+      { sectionKey: "readers", label: "Reader Devices" },
+      { sectionKey: "read_mode", label: "Read Mode" },
+      { sectionKey: "journal", label: "Journal" },
+    ],
   },
 } as const satisfies HelpContext;
