@@ -172,7 +172,9 @@ pub async fn run_with_control(
 
     if let Some(tx) = port_tx {
         let actual_port = listener.local_addr().expect("local_addr").port();
-        let _ = tx.send(actual_port);
+        if tx.send(actual_port).is_err() {
+            eprintln!("[emulator] port notification dropped: receiver already gone");
+        }
     }
 
     // Accept loop — runs until the task is aborted externally (e.g. signal or
@@ -181,7 +183,8 @@ pub async fn run_with_control(
         let (stream, _addr) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("accept error: {e}");
+                eprintln!("[emulator] accept error: {e}");
+                sleep(Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -313,7 +316,10 @@ async fn client_write_task(
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("[emulator] client lagged, skipped {n} reads");
+                        continue;
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }

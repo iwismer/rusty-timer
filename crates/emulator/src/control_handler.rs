@@ -652,6 +652,11 @@ fn handle_set_config3(state: &mut EmulatedReaderState, reader_id: u8, data: &[u8
     }
     if let Some(mode) = ReadMode::from_config3(data[0]) {
         state.set_read_mode(mode);
+    } else {
+        eprintln!(
+            "[emulator] SetConfig3: unrecognized read mode byte 0x{:02x}, keeping current mode",
+            data[0]
+        );
     }
     state.set_config3_timeout(data[1]);
     vec![build_response_frame(reader_id, INSTR_CONFIG3, &[])]
