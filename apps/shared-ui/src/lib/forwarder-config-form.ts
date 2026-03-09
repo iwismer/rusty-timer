@@ -1,17 +1,37 @@
-export interface ReaderEntry {
-  ip: string;
-  ip_start: string;
-  ip_end_octet: string;
+interface ReaderBase {
   port: string;
-  is_range: boolean;
   enabled: boolean;
+}
+
+export interface SingleReaderEntry extends ReaderBase {
+  is_range: false;
+  ip: string;
   local_fallback_port: string;
 }
 
+export interface RangeReaderEntry extends ReaderBase {
+  is_range: true;
+  ip_start: string;
+  ip_end_octet: string;
+}
+
+export type ReaderEntry = SingleReaderEntry | RangeReaderEntry;
+
+export function blankSingleReader(): SingleReaderEntry {
+  return { is_range: false, ip: "", port: "10000", enabled: true, local_fallback_port: "" };
+}
+
+export function blankRangeReader(): RangeReaderEntry {
+  return { is_range: true, ip_start: "", ip_end_octet: "", port: "10000", enabled: true };
+}
+
+type ParsedTarget =
+  | { is_range: false; ip: string; port: string }
+  | { is_range: true; ip_start: string; ip_end_octet: string; port: string };
+
 /** Parse a target string like "192.168.0.50:10000" or "192.168.0.150-160:10000" into split fields. */
-export function parseTarget(target: string): Omit<ReaderEntry, "enabled" | "local_fallback_port"> {
-  const defaults = { ip: "", ip_start: "", ip_end_octet: "", port: "10000", is_range: false };
-  if (!target) return defaults;
+export function parseTarget(target: string): ParsedTarget {
+  if (!target) return { is_range: false, ip: "", port: "10000" };
 
   const colonIdx = target.lastIndexOf(":");
   const host = colonIdx >= 0 ? target.slice(0, colonIdx) : target;
@@ -20,10 +40,10 @@ export function parseTarget(target: string): Omit<ReaderEntry, "enabled" | "loca
   // Check for range syntax: A.B.C.START-END
   const rangeMatch = host.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3})$/);
   if (rangeMatch) {
-    return { ip: "", ip_start: rangeMatch[1], ip_end_octet: rangeMatch[2], port, is_range: true };
+    return { is_range: true, ip_start: rangeMatch[1], ip_end_octet: rangeMatch[2], port };
   }
 
-  return { ip: host, ip_start: "", ip_end_octet: "", port, is_range: false };
+  return { is_range: false, ip: host, port };
 }
 
 /** Build a target string from split fields. Returns empty string if required fields are missing. */
@@ -87,11 +107,15 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
   const readers: ReaderEntry[] = rawReaders.map((reader) => {
     const parsed = asRecord(reader);
     const targetFields = parseTarget(asString(parsed.target));
+    const enabled = typeof parsed.enabled === "boolean" ? parsed.enabled : true;
+    if (targetFields.is_range) {
+      return { ...targetFields, enabled };
+    }
     return {
       ...targetFields,
-      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : true,
+      enabled,
       local_fallback_port:
-        !targetFields.is_range && parsed.local_fallback_port != null
+        parsed.local_fallback_port != null
           ? String(parsed.local_fallback_port)
           : "",
     };
@@ -188,7 +212,7 @@ export function toReadersPayload(
 ): Record<string, unknown> {
   return {
     readers: form.readers.map((reader) => {
-      const fallbackPort = reader.is_range ? "" : asTrimmedString(reader.local_fallback_port);
+      const fallbackPort = !reader.is_range ? asTrimmedString(reader.local_fallback_port) : "";
       return {
         target: buildTarget(reader) || null,
         enabled: reader.enabled,
@@ -329,17 +353,14 @@ export function validateReaders(
       const ip = asTrimmedString(r.ip);
       if (!ip) return `Reader ${i + 1}: IP is required.`;
       if (!isValidIpv4(ip)) return `Reader ${i + 1}: IP must be a valid IPv4 address.`;
-    }
 
-    // Optional fallback port
-    const fallbackPortText = asTrimmedString(r.local_fallback_port);
-    if (r.is_range && fallbackPortText) {
-      return `Reader ${i + 1}: local port override is not supported for ranges.`;
-    }
-    if (fallbackPortText) {
-      const fbPort = Number(fallbackPortText);
-      if (!Number.isInteger(fbPort) || fbPort < 1 || fbPort > 65535) {
-        return `Reader ${i + 1}: fallback port must be between 1 and 65535.`;
+      // Optional fallback port (only for single-IP readers)
+      const fallbackPortText = asTrimmedString(r.local_fallback_port);
+      if (fallbackPortText) {
+        const fbPort = Number(fallbackPortText);
+        if (!Number.isInteger(fbPort) || fbPort < 1 || fbPort > 65535) {
+          return `Reader ${i + 1}: fallback port must be between 1 and 65535.`;
+        }
       }
     }
   }

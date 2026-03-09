@@ -20,7 +20,10 @@
     validateStatusHttp,
     validateReaders,
     defaultFallbackPort,
+    blankSingleReader,
+    blankRangeReader,
     type ReaderEntry,
+    type SingleReaderEntry,
     type ForwarderConfigFormState,
   } from "../lib/forwarder-config-form";
   import {
@@ -302,16 +305,10 @@
   }
 
   function addReader() {
-    readers = [
-      ...readers,
-      { ip: "", ip_start: "", ip_end_octet: "", port: "10000", is_range: false, enabled: true, local_fallback_port: "" },
-    ];
+    readers = [...readers, blankSingleReader()];
   }
   function addRange() {
-    readers = [
-      ...readers,
-      { ip: "", ip_start: "", ip_end_octet: "", port: "10000", is_range: true, enabled: true, local_fallback_port: "" },
-    ];
+    readers = [...readers, blankRangeReader()];
   }
   function removeReader(index: number) {
     readers = readers.filter((_, i) => i !== index);
@@ -550,7 +547,7 @@
                     <td class="py-1.5 px-2" colspan="2">
                       <input
                         type="text"
-                        bind:value={reader.ip}
+                        bind:value={(reader as SingleReaderEntry).ip}
                         placeholder="192.168.0.50"
                         aria-label="Reader {i + 1} IP"
                         class={inputClass}
@@ -576,25 +573,26 @@
                     />
                   </td>
                   <td class="py-1.5 px-2 w-28">
-                    <input
-                      type="text"
-                      disabled
-                      value={reader.is_range ? "—" : (defaultFallbackPort(reader.ip) || "—")}
-                      aria-label="Reader {i + 1} default local port"
-                      class="{inputClass} opacity-50"
-                    />
+                    {#if reader.is_range}
+                      <input type="text" disabled value="—" aria-label="Reader {i + 1} default local port" class="{inputClass} opacity-50" />
+                    {:else}
+                      <input type="text" disabled value={defaultFallbackPort((reader as SingleReaderEntry).ip) || "—"} aria-label="Reader {i + 1} default local port" class="{inputClass} opacity-50" />
+                    {/if}
                   </td>
                   <td class="py-1.5 px-2 w-28">
-                    <input
-                      type="number"
-                      bind:value={reader.local_fallback_port}
-                      min="1"
-                      max="65535"
-                      placeholder={reader.is_range ? "N/A" : "None"}
-                      aria-label="Reader {i + 1} port override"
-                      class={inputClass}
-                      disabled={reader.is_range}
-                    />
+                    {#if reader.is_range}
+                      <input type="number" disabled placeholder="N/A" aria-label="Reader {i + 1} port override" class={inputClass} />
+                    {:else}
+                      <input
+                        type="number"
+                        bind:value={(reader as SingleReaderEntry).local_fallback_port}
+                        min="1"
+                        max="65535"
+                        placeholder="None"
+                        aria-label="Reader {i + 1} port override"
+                        class={inputClass}
+                      />
+                    {/if}
                   </td>
                   <td class="py-1.5 px-2 text-right">
                     <button
