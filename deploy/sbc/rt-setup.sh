@@ -701,7 +701,6 @@ EOF
 
 [[readers]]
 target = "${reader}"
-read_type = "raw"
 enabled = true
 EOF
   done

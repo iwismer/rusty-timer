@@ -86,8 +86,9 @@ IPICO readers can operate in two modes:
   and sends only the first and last time a chip was seen. Useful for
   reducing data volume in high-traffic areas, but adds latency.
 
-Set the mode per reader in the `[[readers]]` config block. The read type
-must match the mode configured on the physical IPICO reader.
+These are reader-side operating modes, not forwarder TOML settings. The
+`[[readers]]` config block does not support a `read_type` field today; the
+forwarder records whatever read type the physical IPICO reader emits.
 
 ## Usage
 

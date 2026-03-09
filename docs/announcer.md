@@ -10,26 +10,28 @@ into `rt-server` and requires no additional services.
 
 ## How It Works
 
-When enabled, the announcer listens to a selected stream and displays chip reads
-enriched with participant names (from the server's participant list). Each new
-unique chip crossing produces a row on the announcer screen with the
-participant's display name, bib number, and a running finisher count.
+When enabled, the announcer listens to one or more selected streams and
+displays chip reads enriched with participant names (from the server's
+participant list). Each new unique chip crossing produces a row on the
+announcer screen with the participant's display name, bib number, and a running
+finisher count.
 
 The public announcer page (`/announcer`) connects to a sanitized SSE endpoint
-and updates in real time. An operator configures which stream to follow via the
-dashboard at `/announcer-config` or through the REST API.
+and updates in real time. An operator configures which streams to follow via
+the dashboard at `/announcer-config` or through the REST API.
 
 ## Key Behaviors
 
-- **Requires a selected stream.** The announcer does nothing until an operator
-  picks a stream in the configuration.
+- **Requires at least one selected stream.** The announcer does nothing until
+  an operator picks one or more streams in the configuration.
 - **24-hour expiry on enable.** Once enabled, the announcer automatically
   disables itself after 24 hours. Re-enable it if the event spans multiple days.
 - **In-memory state resets on restart.** The finisher list and seen-chip set live
   in memory. Restarting `rt-server` clears them. There is no backfill from the
   database.
 - **No backfill.** The announcer only shows chip reads that arrive while it is
-  enabled and a stream is selected. Historical reads are not replayed.
+  enabled and at least one stream is selected. Historical reads are not
+  replayed.
 - **Deduplication by chip ID.** Each chip is shown at most once per session. A
   reset clears the seen set and allows the same chips to appear again.
 
@@ -41,10 +43,11 @@ persisted in Postgres and survives restarts.
 
 Settings:
 
-| Field       | Description                                  |
-|-------------|----------------------------------------------|
-| `enabled`   | Master on/off switch                         |
-| `stream_id` | UUID of the stream to follow                 |
+| Field                 | Description                               |
+|-----------------------|-------------------------------------------|
+| `enabled`             | Master on/off switch                      |
+| `selected_stream_ids` | UUIDs of the streams to follow            |
+| `max_list_size`       | Maximum number of rows kept on the screen |
 
 ## Endpoints
 
@@ -78,7 +81,7 @@ The announcer runtime state (finisher list, seen-chip set, finisher count) is
 cleared in the following situations:
 
 - **Manual reset** — `POST /api/v1/announcer/reset`
-- **Stream selection change** — switching to a different stream resets state
+- **Stream selection change** — changing the selected stream set resets state
 - **Epoch change** — a new stream epoch from the forwarder triggers a reset
 - **Server restart** — in-memory state does not survive restarts
 
@@ -88,7 +91,8 @@ page refreshes automatically.
 ## Race-Day Usage
 
 1. Upload or verify the participant list before the race.
-2. Open `/announcer-config` and select the stream for the finish line reader.
+2. Open `/announcer-config` and select the stream or streams for the finish
+   line reader(s).
 3. Enable the announcer.
 4. Point the display device at `/announcer`.
 5. After the race, disable the announcer or let the 24-hour expiry handle it.
