@@ -1053,6 +1053,37 @@ mod tests {
     }
 
     #[test]
+    fn handle_init_download_resets_progress() {
+        let mut state = make_test_state();
+        state.set_stored_reads(100);
+        state.set_downloading(true);
+        state.set_download_progress(50);
+
+        let frame = cmd_to_frame(&Command::InitDownload);
+        let responses = handle_control_frame(&mut state, &frame);
+        assert_eq!(responses.len(), 1);
+        let parsed = parse_response(responses[0].trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed.instruction(), INSTR_EXT_STATUS);
+        assert_eq!(state.download_progress(), 0);
+        assert_eq!(state.stored_reads(), 100);
+    }
+
+    #[test]
+    fn handle_set_access_mode_off_returns_empty_ack() {
+        let mut state = make_test_state();
+        state.set_stored_reads(100);
+        state.set_downloading(true);
+
+        let frame = cmd_to_frame(&Command::SetAccessMode { on: false });
+        let responses = handle_control_frame(&mut state, &frame);
+        assert_eq!(responses.len(), 1);
+        let parsed = parse_response(responses[0].trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed.instruction(), INSTR_EXT_STATUS);
+        assert!(parsed.data().is_empty(), "off ACK should have empty data");
+        assert!(!state.downloading());
+    }
+
+    #[test]
     fn handle_set_datetime_updates_clock_offset() {
         let mut state = make_test_state();
         let now = chrono::Local::now();
