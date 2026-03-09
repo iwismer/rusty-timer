@@ -465,7 +465,7 @@ pub struct ReaderDownloadProgress {
 // ---------------------------------------------------------------------------
 
 /// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
-/// status tracking extensions.
+/// status tracking and reader control extensions.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
