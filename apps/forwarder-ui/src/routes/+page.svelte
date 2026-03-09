@@ -22,6 +22,7 @@
     readerControlDisabled,
     computeDownloadPercent,
     computeTickingLastSeen,
+    driftColorClass,
   } from "$lib/status-view-model";
   import { pushLogEntry } from "$lib/log-buffer";
   import {
@@ -956,7 +957,10 @@
                     </div>
                     <div>
                       <span class="text-text-muted">Clock Drift:</span>
-                      <span class="font-mono ml-2"
+                      <span
+                        class="{driftColorClass(
+                          info?.clock?.drift_ms,
+                        )} font-mono ml-2"
                         >{formatClockDrift(info?.clock?.drift_ms)}</span
                       >
                     </div>

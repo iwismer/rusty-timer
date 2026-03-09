@@ -83,3 +83,18 @@ export function computeElapsedSecondsSince(
 ): number {
   return Math.max(0, Math.round((now - receivedAt) / 1000));
 }
+
+export function driftColorClass(ms: number | null | undefined): string {
+  if (ms == null) return "";
+  const abs = Math.abs(ms);
+  if (abs < 100) return "text-green-500";
+  if (abs < 500) return "text-yellow-500";
+  return "text-red-500";
+}
+
+export function formatLastSeen(secs: number | null): string {
+  if (secs === null) return "never";
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  return `${Math.floor(secs / 3600)}h ago`;
+}

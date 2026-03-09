@@ -8,14 +8,9 @@ export {
   computeDownloadPercent,
   computeTickingLastSeen,
   computeElapsedSecondsSince,
+  driftColorClass,
+  formatLastSeen,
 } from "@rusty-timer/shared-ui/lib/reader-view-model";
-
-export function formatLastSeen(secs: number | null): string {
-  if (secs === null) return "never";
-  if (secs < 60) return `${secs}s ago`;
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
-  return `${Math.floor(secs / 3600)}h ago`;
-}
 
 export function readerBadgeState(
   state: ReaderStatus["state"],

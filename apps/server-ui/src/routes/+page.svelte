@@ -27,6 +27,9 @@
     formatClockDrift,
     readerControlDisabled,
     computeDownloadPercent,
+    computeElapsedSecondsSince,
+    driftColorClass,
+    formatLastSeen,
   } from "@rusty-timer/shared-ui/lib/reader-view-model";
   import {
     READ_MODE_OPTIONS,
@@ -57,6 +60,54 @@
   > = $state({});
   let readModeDrafts: Record<string, string> = $state({});
   let readModeTimeoutDrafts: Record<string, string> = $state({});
+
+  // Clock ticking state
+  let localClockStr = $state("");
+  let clockTickNow = $state(Date.now());
+  let readerClockBaseTs: Record<string, number> = $state({});
+  let readerClockBaseLocal: Record<string, number> = $state({});
+  let readerInfoReceivedAt: Record<string, number> = $state({});
+
+  function updateLocalClock() {
+    const now = new Date();
+    const y = now.getFullYear();
+    const mo = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    const h = String(now.getHours()).padStart(2, "0");
+    const mi = String(now.getMinutes()).padStart(2, "0");
+    const s = String(now.getSeconds()).padStart(2, "0");
+    localClockStr = `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+    clockTickNow = Date.now();
+  }
+
+  function parseReaderClock(iso: string): number {
+    const normalized = iso.replace(" ", "T");
+    const d = new Date(normalized + (normalized.endsWith("Z") ? "" : "Z"));
+    return d.getTime();
+  }
+
+  function storeReaderClockBase(key: string, clockStr: string) {
+    const ts = parseReaderClock(clockStr);
+    if (!isNaN(ts)) {
+      readerClockBaseTs = { ...readerClockBaseTs, [key]: ts };
+      readerClockBaseLocal = { ...readerClockBaseLocal, [key]: Date.now() };
+    }
+  }
+
+  function tickingReaderClock(key: string): string {
+    const baseTs = readerClockBaseTs[key];
+    const baseLocal = readerClockBaseLocal[key];
+    if (baseTs == null || baseLocal == null) return "\u2014";
+    const elapsed = clockTickNow - baseLocal;
+    const now = new Date(baseTs + elapsed);
+    const y = now.getUTCFullYear();
+    const mo = String(now.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(now.getUTCDate()).padStart(2, "0");
+    const h = String(now.getUTCHours()).padStart(2, "0");
+    const mi = String(now.getUTCMinutes()).padStart(2, "0");
+    const s = String(now.getUTCSeconds()).padStart(2, "0");
+    return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+  }
 
   function toggleReaderExpand(key: string) {
     expandedReader = expandedReader === key ? null : key;
@@ -113,6 +164,10 @@
     controlFeedback[key] = undefined;
     try {
       const resp = await syncReaderClock(forwarderId, readerIp);
+      readerInfoReceivedAt = { ...readerInfoReceivedAt, [key]: Date.now() };
+      if (resp.reader_info?.clock?.reader_clock) {
+        storeReaderClockBase(key, resp.reader_info.clock.reader_clock);
+      }
       controlFeedback[key] = {
         kind: "ok",
         message: `Clock synced — drift: ${formatClockDrift(resp.reader_info?.clock?.drift_ms)}`,
@@ -290,6 +345,23 @@
     controlBusy[key] = false;
   }
 
+  // Track reader info timestamps reactively from store changes
+  let prevReaderStatesJson = $state("");
+  $effect(() => {
+    const currentStates = $readerStatesStore;
+    const currentJson = JSON.stringify(currentStates);
+    if (currentJson !== prevReaderStatesJson) {
+      prevReaderStatesJson = currentJson;
+      const now = Date.now();
+      for (const [key, rs] of Object.entries(currentStates)) {
+        readerInfoReceivedAt = { ...readerInfoReceivedAt, [key]: now };
+        if (rs.reader_info?.clock?.reader_clock) {
+          storeReaderClockBase(key, rs.reader_info.clock.reader_clock);
+        }
+      }
+    }
+  });
+
   // Metrics fetching state
   let requestedMetricStreamIds = $state(new Set<string>());
   let inFlightMetricStreamIds = $state(new Set<string>());
@@ -421,11 +493,9 @@
     return formatDuration(Math.max(0, elapsed));
   }
 
-  // Tick to force re-render every second for time-since-last-read
-  let tick = $state(0);
-  const timerHandle = setInterval(() => {
-    tick++;
-  }, 1000);
+  // Tick to force re-render every second for time-since-last-read and clocks
+  updateLocalClock();
+  const timerHandle = setInterval(updateLocalClock, 1000);
   onDestroy(() => {
     clearInterval(timerHandle);
     for (const timer of Object.values(metricsRetryTimers)) {
@@ -665,9 +735,7 @@
                       {lastReadDisplay(stream.stream_id)}
                     </p>
                     <p class="text-xs text-text-muted m-0">
-                      {tick !== undefined
-                        ? timeSinceLastRead(stream.stream_id)
-                        : ""}
+                      {clockTickNow ? timeSinceLastRead(stream.stream_id) : ""}
                     </p>
                   </div>
                 {:else}
@@ -703,14 +771,12 @@
                   {:else}
                     <!-- Info grid -->
                     <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-sm mb-4">
-                      {#if info?.banner}
-                        <div class="col-span-2">
-                          <span class="text-text-muted">Banner:</span>
-                          <span class="font-mono ml-2 text-xs"
-                            >{info.banner}</span
-                          >
-                        </div>
-                      {/if}
+                      <div class="col-span-2">
+                        <span class="text-text-muted">Banner:</span>
+                        <span class="font-mono ml-2 text-xs"
+                          >{info?.banner ?? "\u2014"}</span
+                        >
+                      </div>
                       <div>
                         <span class="text-text-muted">Firmware:</span>
                         <span class="font-mono ml-2"
@@ -724,51 +790,33 @@
                         >
                       </div>
                       <div>
-                        <span class="text-text-muted">Clock Drift:</span>
+                        <span class="text-text-muted">Reader Clock:</span>
                         <span class="font-mono ml-2"
+                          >{tickingReaderClock(key)}</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-text-muted">Clock Drift:</span>
+                        <span
+                          class="{driftColorClass(
+                            info?.clock?.drift_ms,
+                          )} font-mono ml-2"
                           >{formatClockDrift(info?.clock?.drift_ms)}</span
                         >
                       </div>
                       <div>
-                        <span class="text-text-muted">Reader State:</span>
-                        <span class="ml-2">
-                          <StatusBadge
-                            label={rs.state}
-                            state={rs.state === "connected"
-                              ? "ok"
-                              : rs.state === "connecting"
-                                ? "warn"
-                                : "err"}
-                          />
-                        </span>
+                        <span class="text-text-muted">Local Clock:</span>
+                        <span class="font-mono ml-2">{localClockStr}</span>
                       </div>
                       <div>
-                        <span class="text-text-muted">Read Mode:</span>
-                        <span class="font-mono ml-2"
-                          >{formatReadMode(info?.config?.mode)}</span
-                        >
-                      </div>
-                      <div>
-                        <span class="text-text-muted">TTO:</span>
-                        <span class="font-mono ml-2"
-                          >{formatTtoState(info?.tto_enabled)}</span
-                        >
-                      </div>
-                      <div>
-                        <span class="text-text-muted">Recording:</span>
-                        <span class="font-mono ml-2"
-                          >{info?.recording == null
-                            ? "\u2014"
-                            : info.recording
-                              ? "Yes"
-                              : "No"}</span
-                        >
-                      </div>
-                      <div>
-                        <span class="text-text-muted">Stored Reads:</span>
-                        <span class="font-mono ml-2"
-                          >{info?.estimated_stored_reads?.toLocaleString() ??
-                            "\u2014"}</span
+                        <span class="text-text-muted">Last Refresh:</span>
+                        <span class="ml-2"
+                          >{#if readerInfoReceivedAt[key]}{formatLastSeen(
+                              computeElapsedSecondsSince(
+                                readerInfoReceivedAt[key],
+                                clockTickNow,
+                              ),
+                            )}{:else}&mdash;{/if}</span
                         >
                       </div>
                     </div>
