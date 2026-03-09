@@ -41,12 +41,15 @@
         onClose();
         return;
       }
+      document.body.style.overflow = "hidden";
       dialogEl.showModal();
       searchQuery = "";
     } else if (!open && dialogEl.open) {
+      document.body.style.overflow = "";
       dialogEl.close();
     }
     return () => {
+      document.body.style.overflow = "";
       if (dialogEl?.open) dialogEl.close();
     };
   });
