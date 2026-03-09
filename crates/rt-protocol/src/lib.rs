@@ -91,7 +91,8 @@ pub struct ReaderStatusChanged {
 
 /// Sentinel `read_type` prefix used to tunnel control messages through the
 /// per-stream `ReadEvent` broadcast channel. The server's receiver WS handler
-/// MUST filter events with this prefix and never forward them as chip reads.
+/// MUST filter events with this prefix, never forward them as chip reads,
+/// and never advance stream cursors for them.
 pub const SENTINEL_READ_TYPE_PREFIX: &str = "__";
 
 /// Sentinel `read_type` for reader-status-changed control messages.
@@ -330,7 +331,8 @@ pub struct RestartResponse {
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
-/// All WebSocket message kinds in the v1 forwarder and v1.2 receiver protocols.
+/// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
+/// status tracking extensions.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///

@@ -507,6 +507,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                                 let _ = tx.send(ReadEvent {
                                                     forwarder_id: device_id.clone(),
                                                     reader_ip: update.reader_ip.clone(),
+                                                    // stream_epoch and seq are unused for sentinel events; set to 0 as placeholders.
                                                     stream_epoch: 0,
                                                     seq: 0,
                                                     reader_timestamp: String::new(),

@@ -184,6 +184,8 @@ pub async fn fetch_stream_ids_by_forwarder(
     Ok(rows)
 }
 
+/// Set the online status for a stream. When setting to `false`, also clears
+/// `reader_connected` to maintain the invariant: `!online => !reader_connected`.
 pub async fn set_stream_online(
     pool: &PgPool,
     stream_id: Uuid,
@@ -220,8 +222,7 @@ pub async fn set_reader_connected(
     connected: bool,
 ) -> Result<bool, sqlx::Error> {
     let result = if connected {
-        // Only set connected=true if the stream is online (forwarder WS is up).
-        // This enforces the invariant: !online => !reader_connected.
+        // Guard: only set true when online.
         sqlx::query!(
             "UPDATE streams SET reader_connected = true WHERE stream_id = $1 AND online = true",
             stream_id
