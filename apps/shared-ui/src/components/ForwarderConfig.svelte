@@ -249,7 +249,14 @@
         return;
       }
     }
-    void saveSection(section, payloadFn(form));
+    let payload: Record<string, unknown>;
+    try {
+      payload = payloadFn(form);
+    } catch (e) {
+      sectionMessages[section] = { ok: false, text: String(e) };
+      return;
+    }
+    void saveSection(section, payload);
   }
 
   function saveGeneral() {
