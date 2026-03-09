@@ -371,17 +371,17 @@ describe("payload builders", () => {
     });
   });
 
-  it("serializes reader with empty IP as null target", () => {
+  it("serializes disabled reader with empty IP as null target", () => {
     const form = {
-      readers: [makeReader({ ip: "", port: "10000" })],
+      readers: [makeReader({ ip: "", port: "10000", enabled: false })],
     } as ForwarderConfigFormState;
     const payload = toReadersPayload(form);
     expect(payload.readers[0].target).toBeNull();
   });
 
-  it("serializes reader with empty port as null target", () => {
+  it("serializes disabled reader with empty port as null target", () => {
     const form = {
-      readers: [makeReader({ ip: "192.168.0.1", port: "" })],
+      readers: [makeReader({ ip: "192.168.0.1", port: "", enabled: false })],
     } as ForwarderConfigFormState;
     const payload = toReadersPayload(form);
     expect(payload.readers[0].target).toBeNull();
@@ -716,5 +716,22 @@ describe("defaultFallbackPort", () => {
 
   it("returns empty for IP:port format (not just IP)", () => {
     expect(defaultFallbackPort("192.168.0.50:10000")).toBe("");
+  });
+});
+
+describe("toReadersPayload", () => {
+  it("throws when enabled reader has empty target", () => {
+    const form = {
+      readers: [makeReader({ ip: "", port: "10000", enabled: true })],
+    } as ForwarderConfigFormState;
+    expect(() => toReadersPayload(form)).toThrow(/empty target/i);
+  });
+
+  it("allows disabled reader with empty target", () => {
+    const form = {
+      readers: [makeReader({ ip: "", port: "10000", enabled: false })],
+    } as ForwarderConfigFormState;
+    const payload = toReadersPayload(form);
+    expect(payload.readers[0].target).toBeNull();
   });
 });

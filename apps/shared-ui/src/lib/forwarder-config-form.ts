@@ -211,10 +211,14 @@ export function toReadersPayload(
   form: ForwarderConfigFormState,
 ): Record<string, unknown> {
   return {
-    readers: form.readers.map((reader) => {
+    readers: form.readers.map((reader, i) => {
+      const target = buildTarget(reader) || null;
+      if (reader.enabled && !target) {
+        throw new Error(`Reader ${i + 1}: empty target for enabled reader. Run validateReaders first.`);
+      }
       const fallbackPort = !reader.is_range ? asTrimmedString(reader.local_fallback_port) : "";
       return {
-        target: buildTarget(reader) || null,
+        target,
         enabled: reader.enabled,
         local_fallback_port: fallbackPort ? Number(fallbackPort) : null,
       };
