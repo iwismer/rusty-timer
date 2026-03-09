@@ -1566,10 +1566,12 @@ async fn run_uplink(
                         }
                     }
                     Ok(SendBatchResult::ReaderControl(req)) => {
+                        let reader_ip = req.reader_ip.clone();
+                        let action = format!("{:?}", req.action);
                         if let Err(e) =
                             handle_reader_control_message(&mut session, req, &status).await
                         {
-                            warn!(error = %e, "reader control handler failed during replay");
+                            warn!(reader_ip = %reader_ip, action = %action, error = %e, "reader control handler failed during replay");
                             reconnect_after_replay = true;
                             break 'replay;
                         }
@@ -1708,12 +1710,14 @@ async fn run_uplink(
                         }
                         Ok(WsMessage::ReaderControlRequest(req)) => {
                             logger.log(format!("reader control request: {:?} for {}", req.action, req.reader_ip));
+                            let reader_ip = req.reader_ip.clone();
+                            let action = format!("{:?}", req.action);
                             if let Err(e) = handle_reader_control_message(
                                 &mut session,
                                 req,
                                 &status,
                             ).await {
-                                warn!(error = %e, "reader control handler failed during idle");
+                                warn!(reader_ip = %reader_ip, action = %action, error = %e, "reader control handler failed during idle");
                                 break 'uplink;
                             }
                             continue 'uplink;
@@ -1842,9 +1846,11 @@ async fn run_uplink(
                     }
                 }
                 Ok(SendBatchResult::ReaderControl(req)) => {
+                    let reader_ip = req.reader_ip.clone();
+                    let action = format!("{:?}", req.action);
                     if let Err(e) = handle_reader_control_message(&mut session, req, &status).await
                     {
-                        warn!(error = %e, "reader control handler failed");
+                        warn!(reader_ip = %reader_ip, action = %action, error = %e, "reader control handler failed");
                         break 'uplink;
                     }
                 }
