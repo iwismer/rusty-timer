@@ -29,12 +29,11 @@ async fn main() {
     db::run_migrations(&pool).await;
     info!("migrations applied");
 
-    // No forwarders are connected at startup, so mark all streams offline.
-    // This cleans up stale online=true from previous unclean shutdowns.
-    sqlx::query("UPDATE streams SET online = false WHERE online = true")
-        .execute(&pool)
+    // No forwarders are connected at startup, so clear stale connection state.
+    // This cleans up stale online/reader_connected flags from unclean shutdowns.
+    db::reset_stream_connection_state_on_startup(&pool)
         .await
-        .expect("failed to reset stream online status");
+        .expect("failed to reset stream connection state");
 
     let state = AppState::new(pool);
     let logger = state.logger.clone();

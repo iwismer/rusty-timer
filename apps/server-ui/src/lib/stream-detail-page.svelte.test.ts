@@ -60,6 +60,7 @@ const stream = {
   display_alias: "Main Stream",
   forwarder_display_name: null,
   online: true,
+  reader_connected: true,
   stream_epoch: 2,
   created_at: "2026-02-22T00:00:00Z",
 };

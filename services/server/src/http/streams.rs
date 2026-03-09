@@ -19,6 +19,7 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
                   s.forwarder_display_name,
                   s.stream_epoch,
                   s.online,
+                  s.reader_connected,
                   s.created_at,
                   em.name AS current_epoch_name
            FROM streams s
@@ -41,6 +42,7 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
                     let forwarder_display_name: Option<String> = r.get("forwarder_display_name");
                     let stream_epoch: i64 = r.get("stream_epoch");
                     let online: bool = r.get("online");
+                    let reader_connected: bool = r.get("reader_connected");
                     let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
                     let current_epoch_name: Option<String> = r.get("current_epoch_name");
                     serde_json::json!({
@@ -52,6 +54,7 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
                         "stream_epoch": stream_epoch,
                         "current_epoch_name": current_epoch_name,
                         "online": online,
+                        "reader_connected": reader_connected,
                         "created_at": created_at.to_rfc3339(),
                     })
                 })
@@ -93,6 +96,7 @@ pub async fn patch_stream(
                     .send(crate::dashboard_events::DashboardEvent::StreamUpdated {
                         stream_id,
                         online: None,
+                        reader_connected: None,
                         stream_epoch: None,
                         display_alias: Some(display_alias.clone()),
                         forwarder_display_name: None,
@@ -293,6 +297,7 @@ pub async fn put_epoch_name(
         .send(crate::dashboard_events::DashboardEvent::StreamUpdated {
             stream_id,
             online: None,
+            reader_connected: None,
             stream_epoch: None,
             display_alias: None,
             forwarder_display_name: None,

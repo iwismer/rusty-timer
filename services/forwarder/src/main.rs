@@ -159,6 +159,7 @@ async fn fail_active_download(
 // Reader task: TCP connect → parse IPICO frames → journal + fanout
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_reader(
     reader_ip: String,
     reader_port: u16,
@@ -167,6 +168,7 @@ async fn run_reader(
     mut shutdown_rx: watch::Receiver<bool>,
     status: StatusServer,
     logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
+    reader_status_tx: tokio::sync::mpsc::UnboundedSender<rt_protocol::ReaderStatusUpdate>,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
     let stream_key = format!("{}:{}", reader_ip, reader_port);
@@ -210,6 +212,15 @@ async fn run_reader(
                     ),
                 );
                 mark_reader_disconnected(&status, &stream_key).await;
+                if reader_status_tx
+                    .send(rt_protocol::ReaderStatusUpdate {
+                        reader_ip: stream_key.clone(),
+                        connected: false,
+                    })
+                    .is_err()
+                {
+                    warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                }
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -233,6 +244,15 @@ async fn run_reader(
         status
             .update_reader_state(&stream_key, ReaderConnectionState::Connected)
             .await;
+        if reader_status_tx
+            .send(rt_protocol::ReaderStatusUpdate {
+                reader_ip: stream_key.clone(),
+                connected: true,
+            })
+            .is_err()
+        {
+            warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+        }
 
         // Initialize stream state in journal on first connect
         {
@@ -453,6 +473,15 @@ async fn run_reader(
                     )
                     .await;
                     mark_reader_disconnected(&status, &stream_key).await;
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Ok(0) => {
@@ -466,6 +495,15 @@ async fn run_reader(
                     )
                     .await;
                     mark_reader_disconnected(&status, &stream_key).await;
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Ok(_) => {}
@@ -541,6 +579,15 @@ async fn run_reader(
                         format!("reader {} journal error (epoch): {}", reader_ip, e),
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Err(JournalAppendError::NextSeq(e)) => {
@@ -549,6 +596,15 @@ async fn run_reader(
                         format!("reader {} journal error (seq): {}", reader_ip, e),
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Err(JournalAppendError::Insert(e)) => {
@@ -557,6 +613,15 @@ async fn run_reader(
                         format!("reader {} journal insert failed: {}", reader_ip, e),
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
             };
@@ -742,6 +807,7 @@ async fn run_uplink(
     subsystem: Arc<Mutex<SubsystemStatus>>,
     restart_signal: Arc<Notify>,
     logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
+    mut reader_status_rx: tokio::sync::mpsc::UnboundedReceiver<rt_protocol::ReaderStatusUpdate>,
 ) {
     let ui_tx = status.ui_sender();
     let server_url = format!(
@@ -808,6 +874,45 @@ async fn run_uplink(
                     continue;
                 }
             };
+
+        // Send initial reader status burst
+        let mut burst_ok = true;
+        {
+            let ss = subsystem.lock().await;
+            for (ip, reader) in ss.readers() {
+                let connected = reader.state == ReaderConnectionState::Connected;
+                let update = WsMessage::ReaderStatusUpdate(rt_protocol::ReaderStatusUpdate {
+                    reader_ip: ip.clone(),
+                    connected,
+                });
+                if session.send_message(&update).await.is_err() {
+                    warn!(reader_ip = %ip, "failed to send reader status during initial burst; reconnecting");
+                    burst_ok = false;
+                    break;
+                }
+            }
+        }
+
+        if !burst_ok {
+            status.set_uplink_connected(false).await;
+            continue; // reconnect via outer loop
+        }
+
+        // Drain any reader status updates that arrived during connect/burst
+        let mut drain_ok = true;
+        while let Ok(update) = reader_status_rx.try_recv() {
+            let msg = WsMessage::ReaderStatusUpdate(update);
+            if session.send_message(&msg).await.is_err() {
+                warn!("failed to send reader status during drain; reconnecting");
+                drain_ok = false;
+                break;
+            }
+        }
+
+        if !drain_ok {
+            status.set_uplink_connected(false).await;
+            continue; // reconnect via outer loop
+        }
 
         // Replay unacked events from journal
         let replay_results = {
@@ -960,13 +1065,21 @@ async fn run_uplink(
                 return;
             }
 
-            // Wait for flush interval, shutdown, or incoming config messages
+            // Wait for flush interval, shutdown, reader status updates, or incoming config messages
             tokio::select! {
                 _ = sleep(flush_interval) => {}
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         return;
                     }
+                }
+                Some(update) = reader_status_rx.recv() => {
+                    let msg = WsMessage::ReaderStatusUpdate(update);
+                    if session.send_message(&msg).await.is_err() {
+                        warn!("failed to send reader status update; reconnecting");
+                        break 'uplink;
+                    }
+                    continue 'uplink;
                 }
                 result = session.recv_message() => {
                     match result {
@@ -1324,14 +1437,19 @@ async fn main() {
     }
     status_server.set_local_ip(local_ip).await;
 
+    // Create channel for reader status updates
+    let (reader_status_tx, reader_status_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
+
     // Spawn reader tasks
     for (reader_ip, reader_port, fanout_addr) in fanout_addrs {
         let j = journal.clone();
         let rx = shutdown_rx.clone();
         let ss = status_server.clone();
         let lg = logger.clone();
+        let rst = reader_status_tx.clone();
         tokio::spawn(async move {
-            run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss, lg).await;
+            run_reader(reader_ip, reader_port, fanout_addr, j, rx, ss, lg, rst).await;
         });
     }
 
@@ -1348,7 +1466,20 @@ async fn main() {
         let rs = restart_signal.clone();
         let lg = logger.clone();
         tokio::spawn(async move {
-            run_uplink(fwd_cfg, fwd_id, ips, j, rx, ss, cs, sub, rs, lg).await;
+            run_uplink(
+                fwd_cfg,
+                fwd_id,
+                ips,
+                j,
+                rx,
+                ss,
+                cs,
+                sub,
+                rs,
+                lg,
+                reader_status_rx,
+            )
+            .await;
         });
     }
 
@@ -1722,6 +1853,8 @@ mod tests {
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
         let lg = status.logger();
+        let (_reader_status_tx, reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-epoch-reconnect-test".to_string(),
@@ -1733,6 +1866,7 @@ mod tests {
             subsystem_arc,
             restart_signal,
             lg,
+            reader_status_rx,
         ));
 
         let (sent_extra_batch_on_first_session, saw_second_session) =
@@ -2041,6 +2175,8 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let lg = status.logger();
+        let (reader_status_tx, _reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
         let reader_task = tokio::spawn(run_reader(
             "127.0.0.1".to_owned(),
             reader_port,
@@ -2049,6 +2185,7 @@ mod tests {
             shutdown_rx,
             status.clone(),
             lg,
+            reader_status_tx,
         ));
 
         let (_accepted, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
@@ -2106,6 +2243,8 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let lg = status.logger();
+        let (reader_status_tx, _reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
         let reader_task = tokio::spawn(run_reader(
             "127.0.0.1".to_owned(),
             reader_port,
@@ -2114,6 +2253,7 @@ mod tests {
             shutdown_rx,
             status,
             lg,
+            reader_status_tx,
         ));
 
         let (mut reader_stream, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
@@ -2208,6 +2348,8 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let lg = status.logger();
+        let (reader_status_tx, _reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
         let reader_task = tokio::spawn(run_reader(
             "127.0.0.1".to_owned(),
             reader_port,
@@ -2216,6 +2358,7 @@ mod tests {
             shutdown_rx,
             status,
             lg,
+            reader_status_tx,
         ));
 
         let (mut reader_stream, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
@@ -2291,6 +2434,8 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let lg = status.logger();
+        let (reader_status_tx, _reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
         let reader_task = tokio::spawn(run_reader(
             "127.0.0.1".to_owned(),
             reader_port,
@@ -2299,6 +2444,7 @@ mod tests {
             shutdown_rx,
             status,
             lg,
+            reader_status_tx,
         ));
 
         let (mut reader_stream, _) = timeout(std::time::Duration::from_secs(1), listener.accept())
@@ -2535,6 +2681,8 @@ token_file = "/tmp/test-token"
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
         let lg = status.logger();
+        let (_reader_status_tx, reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-config-test".to_string(),
@@ -2546,6 +2694,7 @@ token_file = "/tmp/test-token"
             subsystem_arc,
             restart_signal,
             lg,
+            reader_status_rx,
         ));
 
         // 7. Wait for results
@@ -2772,6 +2921,8 @@ token_file = "/tmp/test-token"
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
         let lg = status.logger();
+        let (_reader_status_tx, reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
 
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
@@ -2784,6 +2935,7 @@ token_file = "/tmp/test-token"
             subsystem_arc,
             restart_signal,
             lg,
+            reader_status_rx,
         ));
 
         timeout(std::time::Duration::from_secs(2), ready_rx)
@@ -2880,6 +3032,8 @@ token_file = "/tmp/test-token"
         let subsystem_arc = status.subsystem_arc();
         let restart_signal = Arc::new(Notify::new());
         let lg = status.logger();
+        let (_reader_status_tx, reader_status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<rt_protocol::ReaderStatusUpdate>();
         let uplink_task = tokio::spawn(run_uplink(
             cfg,
             "fwd-connect-failure-test".to_string(),
@@ -2891,6 +3045,7 @@ token_file = "/tmp/test-token"
             subsystem_arc,
             restart_signal,
             lg,
+            reader_status_rx,
         ));
 
         let log_entry = timeout(std::time::Duration::from_secs(2), async {

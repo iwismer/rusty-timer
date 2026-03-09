@@ -1,10 +1,12 @@
 // rt-protocol: Remote forwarding protocol types and serialization.
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
-// deserialization. The enum variants map 1:1 to the frozen v1/v1.2 message
-// kinds.
+// deserialization. The original v1/v1.2 message kinds are preserved;
+// ReaderStatusUpdate and ReaderStatusChanged have been added for reader
+// status tracking.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Shared sub-types
@@ -71,6 +73,32 @@ pub struct ForwarderHello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }
+
+/// Forwarder-to-server: report a reader connection/disconnection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderStatusUpdate {
+    pub reader_ip: String,
+    pub connected: bool,
+}
+
+/// Server-to-receiver: a reader's connection status has changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderStatusChanged {
+    pub stream_id: Uuid,
+    pub reader_ip: String,
+    pub connected: bool,
+}
+
+/// Sentinel `read_type` prefix used to tunnel control messages through the
+/// per-stream `ReadEvent` broadcast channel. The server's receiver WS handler
+/// MUST filter events with this prefix, never forward them as chip reads,
+/// and never advance stream cursors for them.
+pub const SENTINEL_READ_TYPE_PREFIX: &str = "__";
+
+/// Sentinel `read_type` for reader-status-changed control messages.
+/// When a `ReadEvent` carries this type, its `raw_frame` contains the
+/// JSON-serialized `WsMessage::ReaderStatusChanged` payload.
+pub const READER_STATUS_CHANGED_READ_TYPE: &str = "__reader_status_changed";
 
 /// A batch of read events from a forwarder.
 ///
@@ -303,7 +331,8 @@ pub struct RestartResponse {
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
-/// All WebSocket message kinds in the v1 forwarder and v1.2 receiver protocols.
+/// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
+/// status tracking extensions.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -330,6 +359,8 @@ pub enum WsMessage {
     ConfigSetResponse(ConfigSetResponse),
     RestartRequest(RestartRequest),
     RestartResponse(RestartResponse),
+    ReaderStatusUpdate(ReaderStatusUpdate),
+    ReaderStatusChanged(ReaderStatusChanged),
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +378,10 @@ pub struct StreamInfo {
     pub stream_epoch: u64,
     /// True when the forwarder's WS session is currently connected.
     pub online: bool,
+    /// True when the forwarder reports its TCP connection to the reader hardware
+    /// is up. Invariant: `!online` implies `!reader_connected`.
+    #[serde(default)]
+    pub reader_connected: bool,
 }
 
 /// Request body for `PATCH /api/v1/streams/{stream_id}`.
@@ -387,4 +422,36 @@ pub struct HttpErrorEnvelope {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_status_update_round_trip() {
+        let msg = WsMessage::ReaderStatusUpdate(ReaderStatusUpdate {
+            reader_ip: "192.168.1.10".to_string(),
+            connected: true,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"reader_status_update\""));
+        assert!(json.contains("\"connected\":true"));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn reader_status_changed_round_trip() {
+        let msg = WsMessage::ReaderStatusChanged(ReaderStatusChanged {
+            stream_id: Uuid::nil(),
+            reader_ip: "192.168.1.10".to_string(),
+            connected: false,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"reader_status_changed\""));
+        assert!(json.contains("\"connected\":false"));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
 }

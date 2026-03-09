@@ -6,8 +6,8 @@ use crate::{
         announcer_config,
         events::{
             IngestResult, count_unique_chips, fetch_stream_ids_by_forwarder, fetch_stream_metrics,
-            fetch_stream_snapshot, set_stream_online, update_forwarder_display_name, upsert_event,
-            upsert_stream,
+            fetch_stream_snapshot, set_reader_connected, set_stream_online,
+            update_forwarder_display_name, upsert_event, upsert_stream,
         },
         races::lookup_stream_chip_participant,
     },
@@ -24,7 +24,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use rt_protocol::{AckEntry, ForwarderAck, WsMessage, error_codes};
+use rt_protocol::{AckEntry, ForwarderAck, ReadEvent, WsMessage, error_codes};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::time::{Duration, Instant};
@@ -52,17 +52,26 @@ pub async fn ws_forwarder_handler(
 }
 
 async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
-    if let Ok(Some(stream)) = fetch_stream_snapshot(&state.pool, stream_id).await {
-        let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
-            stream_id: stream.stream_id,
-            forwarder_id: stream.forwarder_id,
-            reader_ip: stream.reader_ip,
-            display_alias: stream.display_alias,
-            forwarder_display_name: stream.forwarder_display_name,
-            online: stream.online,
-            stream_epoch: stream.stream_epoch,
-            created_at: stream.created_at.to_rfc3339(),
-        });
+    match fetch_stream_snapshot(&state.pool, stream_id).await {
+        Ok(Some(stream)) => {
+            let _ = state.dashboard_tx.send(DashboardEvent::StreamCreated {
+                stream_id: stream.stream_id,
+                forwarder_id: stream.forwarder_id,
+                reader_ip: stream.reader_ip,
+                display_alias: stream.display_alias,
+                forwarder_display_name: stream.forwarder_display_name,
+                online: stream.online,
+                reader_connected: stream.reader_connected,
+                stream_epoch: stream.stream_epoch,
+                created_at: stream.created_at.to_rfc3339(),
+            });
+        }
+        Ok(None) => {
+            warn!(stream_id = %stream_id, "stream not found when publishing StreamCreated");
+        }
+        Err(e) => {
+            error!(stream_id = %stream_id, error = %e, "failed to fetch stream snapshot for dashboard");
+        }
     }
 }
 
@@ -236,7 +245,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
     let mut stream_map: HashMap<String, Uuid> = HashMap::new();
     for reader_ip in &hello.reader_ips {
-        if let Ok(sid) = upsert_stream(
+        match upsert_stream(
             &state.pool,
             &device_id,
             reader_ip,
@@ -244,9 +253,27 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         )
         .await
         {
-            stream_map.insert(reader_ip.clone(), sid);
-            let _ = set_stream_online(&state.pool, sid, true).await;
-            state.get_or_create_broadcast(sid).await;
+            Ok(sid) => {
+                stream_map.insert(reader_ip.clone(), sid);
+                if let Err(e) = set_stream_online(&state.pool, sid, true).await {
+                    error!(
+                        device_id = %device_id,
+                        reader_ip = %reader_ip,
+                        stream_id = %sid,
+                        error = %e,
+                        "failed to mark stream online during hello"
+                    );
+                }
+                state.get_or_create_broadcast(sid).await;
+            }
+            Err(e) => {
+                error!(
+                    device_id = %device_id,
+                    reader_ip = %reader_ip,
+                    error = %e,
+                    "failed to upsert stream"
+                );
+            }
         }
     }
 
@@ -279,6 +306,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id: sid,
             online: None,
+            reader_connected: None,
             stream_epoch: None,
             display_alias: None,
             forwarder_display_name: Some(initial_display_name_patch.clone()),
@@ -397,6 +425,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
                                             stream_id: sid,
                                             online: None,
+                                            reader_connected: None,
                                             stream_epoch: None,
                                             display_alias: None,
                                             forwarder_display_name: Some(display_name_patch.clone()),
@@ -414,7 +443,15 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         && !stream_map.contains_key(reader_ip)
                                     {
                                         stream_map.insert(reader_ip.clone(), sid);
-                                        let _ = set_stream_online(&state.pool, sid, true).await;
+                                        if let Err(e) = set_stream_online(&state.pool, sid, true).await {
+                                            error!(
+                                                device_id = %device_id,
+                                                reader_ip = %reader_ip,
+                                                stream_id = %sid,
+                                                error = %e,
+                                                "failed to mark stream online during re-hello"
+                                            );
+                                        }
                                         state.get_or_create_broadcast(sid).await;
                                         publish_stream_created(&state, sid).await;
                                         state.logger.log(format!("stream created: {device_id}/{reader_ip}"));
@@ -423,6 +460,79 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
+                            Ok(WsMessage::ReaderStatusUpdate(update)) => {
+                                if let Some(sid) = stream_map.get(&update.reader_ip) {
+                                    let applied = match set_reader_connected(&state.pool, *sid, update.connected).await {
+                                        Ok(applied) => applied,
+                                        Err(e) => {
+                                            error!(
+                                                device_id = %device_id,
+                                                reader_ip = %update.reader_ip,
+                                                error = %e,
+                                                "failed to persist reader_connected; SSE/broadcast will diverge from HTTP API until next update"
+                                            );
+                                            // On DB error, still broadcast for best-effort real-time updates
+                                            true
+                                        }
+                                    };
+                                    if !applied {
+                                        warn!(
+                                            device_id = %device_id,
+                                            reader_ip = %update.reader_ip,
+                                            stream_id = %sid,
+                                            "reader_connected=true rejected: stream is offline"
+                                        );
+                                    }
+                                    if applied {
+                                        let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
+                                            stream_id: *sid,
+                                            online: None,
+                                            reader_connected: Some(update.connected),
+                                            stream_epoch: None,
+                                            display_alias: None,
+                                            forwarder_display_name: None,
+                                        });
+                                        // Forward ReaderStatusChanged to connected receivers.
+                                        // The per-stream broadcast is typed ReadEvent, so we
+                                        // encode the status change as a sentinel ReadEvent that
+                                        // the receiver handler will detect and forward directly.
+                                        let changed = rt_protocol::ReaderStatusChanged {
+                                            stream_id: *sid,
+                                            reader_ip: update.reader_ip.clone(),
+                                            connected: update.connected,
+                                        };
+                                        match serde_json::to_string(&WsMessage::ReaderStatusChanged(changed)) {
+                                            Ok(json) => {
+                                                let tx = state.get_or_create_broadcast(*sid).await;
+                                                let _ = tx.send(ReadEvent {
+                                                    forwarder_id: device_id.clone(),
+                                                    reader_ip: update.reader_ip.clone(),
+                                                    // stream_epoch and seq are unused for sentinel events; set to 0 as placeholders.
+                                                    stream_epoch: 0,
+                                                    seq: 0,
+                                                    reader_timestamp: String::new(),
+                                                    raw_frame: json.into_bytes(),
+                                                    read_type: rt_protocol::READER_STATUS_CHANGED_READ_TYPE.to_owned(),
+                                                });
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    device_id = %device_id,
+                                                    reader_ip = %update.reader_ip,
+                                                    error = %e,
+                                                    "failed to serialize ReaderStatusChanged for broadcast"
+                                                );
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    warn!(
+                                        device_id = %device_id,
+                                        reader_ip = %update.reader_ip,
+                                        "reader_status_update for unknown reader_ip"
+                                    );
+                                }
+                            }
                             Ok(WsMessage::ConfigGetResponse(resp)) => {
                                 if let Some((_, reply)) = pending_config_gets.remove(&resp.request_id) {
                                     let _ = reply.send(ForwarderProxyReply::Response(resp));
@@ -506,10 +616,17 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
     }
 
     for sid in stream_map.values() {
-        let _ = set_stream_online(&state.pool, *sid, false).await;
+        if let Err(e) = set_stream_online(&state.pool, *sid, false).await {
+            error!(
+                stream_id = %sid,
+                error = %e,
+                "failed to mark stream offline during disconnect cleanup"
+            );
+        }
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id: *sid,
             online: Some(false),
+            reader_connected: Some(false),
             stream_epoch: None,
             display_alias: None,
             forwarder_display_name: None,
@@ -595,7 +712,15 @@ async fn handle_event_batch(
             )
             .await?;
             stream_map.insert(event.reader_ip.clone(), sid);
-            let _ = set_stream_online(&state.pool, sid, true).await;
+            if let Err(e) = set_stream_online(&state.pool, sid, true).await {
+                error!(
+                    device_id = %device_id,
+                    reader_ip = %event.reader_ip,
+                    stream_id = %sid,
+                    error = %e,
+                    "failed to mark stream online during event batch"
+                );
+            }
             state.get_or_create_broadcast(sid).await;
             sid
         };
@@ -732,6 +857,7 @@ async fn handle_event_batch(
         let _ = state.dashboard_tx.send(DashboardEvent::StreamUpdated {
             stream_id,
             online: None,
+            reader_connected: None,
             stream_epoch: Some(new_epoch),
             display_alias: None,
             forwarder_display_name: None,

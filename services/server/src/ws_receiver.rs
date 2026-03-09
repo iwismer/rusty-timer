@@ -251,6 +251,37 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 loop {
                     match sub.rx.try_recv() {
                         Ok(event) => {
+                            // Intercept control messages encoded as sentinel ReadEvents.
+                            // These must not reach the receiver as chip reads or advance cursors.
+                            if event.read_type.starts_with(rt_protocol::SENTINEL_READ_TYPE_PREFIX) {
+                                if event.read_type == rt_protocol::READER_STATUS_CHANGED_READ_TYPE {
+                                    match String::from_utf8(event.raw_frame) {
+                                        Ok(json) => {
+                                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                                warn!(
+                                                    stream_id = %sub.stream_id,
+                                                    "WS send failed for reader_status_changed; closing session"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                stream_id = %sub.stream_id,
+                                                error = %e,
+                                                "invalid UTF-8 in reader_status_changed payload; possible data corruption"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    warn!(
+                                        stream_id = %sub.stream_id,
+                                        read_type = %event.read_type,
+                                        "unrecognized sentinel read_type; dropping event"
+                                    );
+                                }
+                                continue;
+                            }
                             let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
                                 warn!(
                                     stream_id = %sub.stream_id,
