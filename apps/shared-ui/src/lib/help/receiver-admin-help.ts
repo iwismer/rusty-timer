@@ -8,7 +8,7 @@ export const RECEIVER_ADMIN_HELP = {
       stream_cursor: {
         label: "Stream Cursor",
         summary: "Current read position in the stream (epoch + sequence number).",
-        detail: "Each stream has a cursor that tracks the last successfully received read. When the receiver reconnects, it resumes from this position. Resetting a cursor causes the stream to replay all data from the beginning on the next connection. This is safe to do: reads are idempotent and your timing software should handle duplicates.",
+        detailHtml: "Each stream has a cursor that tracks the last successfully received read. When the receiver reconnects, it resumes from this position. Resetting a cursor causes the stream to replay all data from the beginning on the next connection. This is safe to do: reads are idempotent and your timing software should handle duplicates.",
       },
     },
     tips: [
@@ -29,7 +29,7 @@ export const RECEIVER_ADMIN_HELP = {
       epoch_override: {
         label: "Epoch Override",
         summary: "The earliest epoch the stream will deliver data from.",
-        detail: "Earliest-epoch overrides filter out data older than the specified epoch. Clearing an override causes the stream to deliver data from all available epochs instead of just recent ones. This is useful when you need access to historical data that was previously filtered out.",
+        detailHtml: "Earliest-epoch overrides filter out data older than the specified epoch. Clearing an override causes the stream to deliver data from all available epochs instead of just recent ones. This is useful when you need access to historical data that was previously filtered out.",
       },
     },
     tips: [
@@ -48,7 +48,7 @@ export const RECEIVER_ADMIN_HELP = {
       port_override: {
         label: "Port Override",
         summary: "Custom local port for forwarding reads from this stream.",
-        detail: "By default, each stream's reads are forwarded to a local port calculated as 10000 + the last octet of the reader's IP address (e.g. reader at 192.168.0.50 uses port 10050). Set a port override to use a different port. Leave empty to use the default. Common timing software ports: RunScore typically uses 10000-10010, many IPICO setups use the reader's native port mapping.",
+        detailHtml: "By default, each stream's reads are forwarded to a local port calculated as 10000 + the last octet of the reader's IP address (e.g. reader at 192.168.0.50 uses port 10050). Set a port override to use a different port. Leave empty to use the default. Common timing software ports: RunScore typically uses 10000-10010, many IPICO setups use the reader's native port mapping.",
         default: "10000 + last IP octet",
         range: "1-65535",
         recommended: "Use the default unless your timing software requires a specific port.",

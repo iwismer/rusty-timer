@@ -27,13 +27,3 @@ export function computePopoverStyle(
 
   return `top: ${top}px; left: ${left}px;`;
 }
-
-/** @deprecated Use computePopoverStyle instead. */
-export function resolvePopoverPosition(
-  buttonRect: { bottom: number; top: number },
-  viewportHeight: number,
-  popoverHeight: number = POPOVER_HEIGHT,
-): "above" | "below" {
-  const spaceBelow = viewportHeight - buttonRect.bottom;
-  return spaceBelow < popoverHeight && buttonRect.top > popoverHeight ? "above" : "below";
-}

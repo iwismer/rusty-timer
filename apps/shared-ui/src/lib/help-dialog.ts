@@ -5,8 +5,8 @@ import { fieldMatchesQuery } from "./help/field-match";
 export function filterSectionContent(
   section: SectionHelp,
   query: string,
-): { fields: [string, FieldHelp][]; tips: string[] } {
-  const entries = Object.entries(section.fields);
+): { fields: Array<{ fieldKey: string; field: FieldHelp }>; tips: string[] } {
+  const entries = Object.entries(section.fields).map(([fieldKey, field]) => ({ fieldKey, field }));
   const tips = section.tips ?? [];
 
   if (!query.trim()) {
@@ -14,7 +14,7 @@ export function filterSectionContent(
   }
 
   return {
-    fields: entries.filter(([, f]) => fieldMatchesQuery(f, query)),
+    fields: entries.filter(({ field }) => fieldMatchesQuery(field, query)),
     tips: tips.filter(t => t.toLowerCase().includes(query.toLowerCase())),
   };
 }

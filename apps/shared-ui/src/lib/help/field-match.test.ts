@@ -5,7 +5,7 @@ import type { FieldHelp } from "./help-types";
 const field: FieldHelp = {
   label: "Base URL",
   summary: "WebSocket server address.",
-  detail: "The full URL including protocol.",
+  detailHtml: "The full URL including protocol.",
   default: "ws://localhost:8080",
   range: "Valid URL",
   recommended: "Use wss:// in production",

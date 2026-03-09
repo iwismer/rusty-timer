@@ -46,10 +46,10 @@
     helpScrollToField = undefined;
   }
 
-  // Expose openHelp to child HelpTip components via context.
-  if (helpSection) {
-    setContext("help-open-modal", openHelp);
-  }
+  // Always provide context so child HelpTip components can access it.
+  setContext("help-open-modal", (fieldKey?: string) => {
+    if (helpSection) openHelp(fieldKey);
+  });
 </script>
 
 <section class="rounded-lg bg-surface-1 border {borderClass}">

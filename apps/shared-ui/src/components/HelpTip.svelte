@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getContext, onDestroy } from "svelte";
+  import { getContext, hasContext, onDestroy } from "svelte";
   import { getField } from "../lib/help/index";
   import type { HelpContextName } from "../lib/help/help-types";
   import { computePopoverStyle } from "../lib/help-tip";
@@ -16,9 +16,10 @@
     onOpenModal?: (fieldKey: string) => void;
   } = $props();
 
-  const contextOpenHelp = getContext<((fieldKey?: string) => void) | undefined>(
-    "help-open-modal",
-  );
+  // Injected by parent Card component when helpSection is set. Falls back to onOpenModal prop.
+  const contextOpenHelp = hasContext("help-open-modal")
+    ? getContext<(fieldKey?: string) => void>("help-open-modal")
+    : undefined;
 
   let field = $derived(getField(context, sectionKey, fieldKey));
 
@@ -75,6 +76,10 @@
     } else if (contextOpenHelp) {
       showingPopover = false;
       contextOpenHelp(fieldKey);
+    } else {
+      console.warn(
+        `[HelpTip] No modal handler for field="${fieldKey}". Ensure HelpTip is inside a Card with helpSection, or pass onOpenModal.`,
+      );
     }
   }
 

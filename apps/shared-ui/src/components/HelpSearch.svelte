@@ -28,7 +28,7 @@
     searchOpen = !searchOpen;
     if (searchOpen) {
       query = "";
-      // Focus the input after it renders
+      // setTimeout(0) defers focus until after Svelte conditionally renders the input element
       setTimeout(() => inputEl?.focus(), 0);
     }
   }
@@ -54,7 +54,7 @@
 
   function handleClickOutside(e: MouseEvent) {
     const target = e.target;
-    if (!(target instanceof HTMLElement)) {
+    if (!(target instanceof Element)) {
       searchOpen = false;
       return;
     }

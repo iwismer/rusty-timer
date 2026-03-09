@@ -10,10 +10,12 @@ const CONTEXTS: Record<HelpContextName, HelpContext> = {
   "receiver-admin": RECEIVER_ADMIN_HELP,
 };
 
+/** Look up a help section by context and section key. Returns undefined if not found. */
 export function getSection(context: HelpContextName, sectionKey: string): SectionHelp | undefined {
   return CONTEXTS[context]?.[sectionKey];
 }
 
+/** Look up a field's help content by context, section key, and field key. Returns undefined if not found. */
 export function getField(context: HelpContextName, sectionKey: string, fieldKey: string): FieldHelp | undefined {
   return CONTEXTS[context]?.[sectionKey]?.fields[fieldKey];
 }

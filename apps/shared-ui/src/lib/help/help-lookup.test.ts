@@ -85,7 +85,8 @@ describe("searchHelp", () => {
       (r) => r.context === "forwarder" && r.sectionKey === "server",
     );
     expect(match).toBeDefined();
-    expect(match!.matchedFields.length).toBeGreaterThan(0);
+    const sectionFieldCount = Object.keys(FORWARDER_HELP.server.fields).length;
+    expect(match!.matchedFields).toHaveLength(sectionFieldCount);
     expect(match!.matchedFields.some((f) => f.fieldKey === "base_url")).toBe(true);
   });
 
@@ -106,6 +107,85 @@ describe("searchHelp", () => {
     expect(match).toBeDefined();
     expect(match!.matchedTips.length).toBeGreaterThan(0);
   });
+});
+
+describe("template wiring validation", () => {
+  // All fieldKey+sectionKey+context triples used in HelpTip components across Svelte templates.
+  // Update this list when adding new HelpTip usages.
+  const expectedFieldLookups: Array<{ context: HelpContextName; section: string; field: string }> = [
+    // ForwarderConfig.svelte
+    { context: "forwarder", section: "general", field: "display_name" },
+    { context: "forwarder", section: "server", field: "base_url" },
+    { context: "forwarder", section: "readers", field: "reader_ip" },
+    { context: "forwarder", section: "readers", field: "reader_port" },
+    { context: "forwarder", section: "readers", field: "enabled" },
+    { context: "forwarder", section: "readers", field: "default_local_port" },
+    { context: "forwarder", section: "readers", field: "local_port_override" },
+    { context: "forwarder", section: "controls", field: "allow_power_actions" },
+    { context: "forwarder", section: "ws_path", field: "forwarders_ws_path" },
+    { context: "forwarder", section: "auth", field: "token_file" },
+    { context: "forwarder", section: "journal", field: "sqlite_path" },
+    { context: "forwarder", section: "journal", field: "prune_watermark_pct" },
+    { context: "forwarder", section: "uplink", field: "batch_mode" },
+    { context: "forwarder", section: "uplink", field: "batch_flush_ms" },
+    { context: "forwarder", section: "uplink", field: "batch_max_events" },
+    { context: "forwarder", section: "status_http", field: "bind" },
+    { context: "forwarder", section: "update", field: "update_mode" },
+    // forwarder-ui +page.svelte & server-ui +page.svelte
+    { context: "forwarder", section: "read_mode", field: "read_mode" },
+    { context: "forwarder", section: "read_mode", field: "timeout" },
+    // receiver-ui +page.svelte
+    { context: "receiver", section: "config", field: "receiver_id" },
+    { context: "receiver", section: "config", field: "server_url" },
+    { context: "receiver", section: "config", field: "token" },
+    { context: "receiver", section: "config", field: "update_mode" },
+    { context: "receiver", section: "receiver_mode", field: "mode" },
+    // receiver-ui admin/+page.svelte
+    { context: "receiver-admin", section: "port_overrides", field: "port_override" },
+  ];
+
+  it.each(expectedFieldLookups)(
+    "resolves $context/$section/$field",
+    ({ context, section, field }) => {
+      expect(getField(context, section, field)).toBeDefined();
+    },
+  );
+
+  // All helpSection+helpContext pairs used on Card components.
+  const expectedSectionLookups: Array<{ context: HelpContextName; section: string }> = [
+    // ForwarderConfig.svelte
+    { context: "forwarder", section: "general" },
+    { context: "forwarder", section: "server" },
+    { context: "forwarder", section: "readers" },
+    { context: "forwarder", section: "controls" },
+    { context: "forwarder", section: "dangerous_actions" },
+    { context: "forwarder", section: "ws_path" },
+    { context: "forwarder", section: "auth" },
+    { context: "forwarder", section: "journal" },
+    { context: "forwarder", section: "uplink" },
+    { context: "forwarder", section: "status_http" },
+    { context: "forwarder", section: "update" },
+    // forwarder-ui & server-ui +page.svelte (HelpDialog usage)
+    { context: "forwarder", section: "read_mode" },
+    // receiver-ui +page.svelte
+    { context: "receiver", section: "config" },
+    { context: "receiver", section: "receiver_mode" },
+    { context: "receiver", section: "streams" },
+    // receiver-ui admin/+page.svelte
+    { context: "receiver-admin", section: "cursor_reset" },
+    { context: "receiver-admin", section: "epoch_overrides" },
+    { context: "receiver-admin", section: "port_overrides" },
+    { context: "receiver-admin", section: "purge_subscriptions" },
+    { context: "receiver-admin", section: "reset_profile" },
+    { context: "receiver-admin", section: "factory_reset" },
+  ];
+
+  it.each(expectedSectionLookups)(
+    "resolves section $context/$section",
+    ({ context, section }) => {
+      expect(getSection(context, section)).toBeDefined();
+    },
+  );
 });
 
 describe("seeAlso cross-reference validation", () => {

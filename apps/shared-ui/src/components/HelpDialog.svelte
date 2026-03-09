@@ -38,8 +38,6 @@
         console.warn(
           `[HelpDialog] No help section found for key "${sectionKey}" in context "${context}".`,
         );
-        onClose();
-        return;
       }
       document.body.style.overflow = "hidden";
       dialogEl.showModal();
@@ -56,11 +54,14 @@
 
   $effect(() => {
     if (open && scrollToField) {
-      // Small delay to allow dialog content to render
+      // Delay scrollIntoView to the next frame so the dialog DOM has rendered the target element
       const timer = setTimeout(() => {
-        document
-          .getElementById(`help-${scrollToField}`)
-          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+        const el = document.getElementById(`help-${scrollToField}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        } else {
+          console.warn(`[HelpDialog] Could not scroll to field "${scrollToField}" — element not found.`);
+        }
       }, 50);
       return () => clearTimeout(timer);
     }
@@ -89,10 +90,10 @@
 <dialog
   bind:this={dialogEl}
   onkeydown={handleKeydown}
-  class="fixed inset-0 m-auto max-w-2xl w-full max-h-[80vh] rounded-lg border border-border bg-surface-1 p-0 shadow-lg backdrop:bg-black/50 overflow-hidden"
+  class="fixed inset-0 m-auto max-w-2xl w-full max-h-[80vh] rounded-lg border border-border bg-surface-1 p-0 shadow-lg backdrop:bg-black/50 overflow-hidden flex flex-col"
 >
   {#if section}
-    <div class="sticky top-0 bg-surface-1 border-b border-border px-6 py-4 z-10">
+    <div class="shrink-0 bg-surface-1 border-b border-border px-6 py-4 z-10">
       <div class="flex items-center justify-between">
         <h2 class="text-lg font-bold text-text-primary m-0">{section.title}</h2>
         <button
@@ -109,13 +110,13 @@
         class="mt-3 w-full px-3 py-1.5 text-sm rounded-md border border-border bg-surface-0 text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent"
       />
     </div>
-    <div class="px-6 py-4 overflow-y-auto max-h-[70vh]">
+    <div class="px-6 py-4 overflow-y-auto flex-1 min-h-0">
       <p class="text-sm text-text-secondary mb-4">{section.overview}</p>
 
-      {#each filtered.fields as [fieldKey, field]}
+      {#each filtered.fields as { fieldKey, field }}
         <div id="help-{fieldKey}" class="mb-6 scroll-mt-32">
           <h3 class="text-sm font-semibold text-text-primary mb-1">{field.label}</h3>
-          <p class="text-sm text-text-secondary mb-2">{@html field.detail}</p>
+          <p class="text-sm text-text-secondary mb-2">{@html field.detailHtml}</p>
           {#if field.default}
             <p class="text-xs text-text-muted">
               Default: <code class="bg-surface-2 px-1 rounded">{field.default}</code>
@@ -163,6 +164,19 @@
           {/each}
         </div>
       {/if}
+    </div>
+  {:else}
+    <div class="px-6 py-4">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold text-text-primary m-0">Help</h2>
+        <button
+          onclick={onClose}
+          class="text-text-muted hover:text-text-primary text-lg cursor-pointer bg-transparent border-none p-1"
+          aria-label="Close help"
+          type="button"
+        >&times;</button>
+      </div>
+      <p class="text-sm text-text-muted">Help content for this section is not yet available.</p>
     </div>
   {/if}
 </dialog>

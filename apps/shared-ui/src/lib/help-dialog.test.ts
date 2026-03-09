@@ -9,12 +9,12 @@ const testSection: SectionHelp = {
     alpha: {
       label: "Alpha Field",
       summary: "Alpha summary about widgets.",
-      detail: "Detailed info about alpha.",
+      detailHtml: "Detailed info about alpha.",
     },
     beta: {
       label: "Beta Field",
       summary: "Beta summary about gadgets.",
-      detail: "Detailed info about beta.",
+      detailHtml: "Detailed info about beta.",
       default: "42",
     },
   },
@@ -37,7 +37,7 @@ describe("filterSectionContent", () => {
   it("filters to matching fields", () => {
     const result = filterSectionContent(testSection, "widgets");
     expect(result.fields).toHaveLength(1);
-    expect(result.fields[0][0]).toBe("alpha");
+    expect(result.fields[0].fieldKey).toBe("alpha");
   });
 
   it("filters tips", () => {
@@ -49,7 +49,7 @@ describe("filterSectionContent", () => {
   it("matches case-insensitively", () => {
     const result = filterSectionContent(testSection, "WIDGETS");
     expect(result.fields).toHaveLength(1);
-    expect(result.fields[0][0]).toBe("alpha");
+    expect(result.fields[0].fieldKey).toBe("alpha");
   });
 
   it("returns empty arrays when nothing matches", () => {
@@ -61,7 +61,7 @@ describe("filterSectionContent", () => {
   it("matches on default field", () => {
     const result = filterSectionContent(testSection, "42");
     expect(result.fields).toHaveLength(1);
-    expect(result.fields[0][0]).toBe("beta");
+    expect(result.fields[0].fieldKey).toBe("beta");
   });
 
   it("handles section with no tips", () => {

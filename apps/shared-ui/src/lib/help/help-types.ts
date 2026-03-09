@@ -1,7 +1,8 @@
 export type FieldHelp = {
   label: string;
   summary: string;
-  detail: string;
+  /** Contains trusted HTML (rendered via {@html}). Must only come from static help data files — never user input. */
+  detailHtml: string;
   default?: string;
   range?: string;
   recommended?: string;
@@ -11,6 +12,7 @@ export type SectionHelp = {
   title: string;
   overview: string;
   fields: Record<string, FieldHelp>;
+  /** May contain HTML (rendered via {@html}). Must only come from static help data files. */
   tips?: string[];
   seeAlso?: { sectionKey: string; label: string }[];
 };
