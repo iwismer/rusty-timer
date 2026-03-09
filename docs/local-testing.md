@@ -9,13 +9,12 @@ single development machine and exercising the end-to-end flow manually.
 
 | Tool | Required version | Notes |
 |------|-----------------|-------|
-| Rust | 1.89.0 | Managed by `rust-toolchain.toml`; `rustup` picks it up automatically |
+| Rust | 1.93.1 | Managed by `rust-toolchain.toml`; `rustup` picks it up automatically |
 | Docker | any recent | Used to run Postgres |
 | Node.js + npm | 24.x + 11.x | Required for frontend apps; use `nvm use` from repo root |
 | jq | optional | Used by the pre-commit hook for JSON formatting checks |
 
-All Rust binaries are built from the workspace root
-`/Users/iwismer/Documents/rusty-timer` (or wherever you cloned the repo).
+All Rust binaries are built from the repository root (wherever you cloned the repo).
 
 ---
 
