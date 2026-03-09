@@ -166,6 +166,11 @@ describe("buildTarget", () => {
     const reader = makeReader({ ip: " 192.168.0.50 ", port: " 10000 " });
     expect(buildTarget(reader)).toBe("192.168.0.50:10000");
   });
+
+  it("returns empty string when port is NaN (cleared number input)", () => {
+    const reader = makeReader({ ip: "192.168.0.1", port: NaN as unknown as string });
+    expect(buildTarget(reader)).toBe("");
+  });
 });
 
 describe("parseTarget/buildTarget round-trip", () => {
@@ -674,6 +679,18 @@ describe("validateReaders", () => {
   it("rejects reader with decimal port", () => {
     expect(validateReaders(makeForm({
       readers: [makeSingleReader({ port: "80.5" })],
+    }))).toBeTruthy();
+  });
+
+  it("rejects NaN port from cleared number input", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ port: NaN as unknown as string })],
+    }))).toBeTruthy();
+  });
+
+  it("rejects NaN end octet from cleared number input", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_end_octet: NaN as unknown as string })],
     }))).toBeTruthy();
   });
 
