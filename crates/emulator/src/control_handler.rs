@@ -4,7 +4,7 @@
 //! control protocol exchanges, and helpers for building valid IPICO control
 //! response frames.
 
-use ipico_core::control::ReadMode;
+use ipico_core::control::{ReadMode, lrc};
 
 use crate::scenario::ReaderScenarioConfig;
 
@@ -89,6 +89,24 @@ impl EmulatedReaderState {
 }
 
 // ---------------------------------------------------------------------------
+// Response frame builder
+// ---------------------------------------------------------------------------
+
+/// Build a valid `ab`-prefixed IPICO control response frame.
+///
+/// The returned string includes the `\r\n` terminator and is ready to send
+/// over TCP. The frame passes `ipico_core::control::parse_response()`.
+fn build_response_frame(reader_id: u8, instruction: u8, data: &[u8]) -> String {
+    let length = data.len() as u8;
+    let mut hex_body = format!("{:02x}{:02x}{:02x}", reader_id, length, instruction);
+    for &b in data {
+        hex_body.push_str(&format!("{:02x}", b));
+    }
+    let checksum = lrc(hex_body.as_bytes());
+    format!("ab{}{:02x}\r\n", hex_body, checksum)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -134,6 +152,35 @@ mod tests {
         assert_eq!(state.hw_code, 0x05);
         assert_eq!(state.hw_identifier, 0x5905);
         assert_eq!(state.config3_timeout, 5);
+    }
+
+    // -- build_response_frame tests --
+
+    #[test]
+    fn build_ack_frame_for_set_datetime() {
+        let frame = build_response_frame(0x00, 0x01, &[]);
+        let parsed = ipico_core::control::parse_response(frame.trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed.instruction(), 0x01);
+        assert!(parsed.data().is_empty());
+    }
+
+    #[test]
+    fn build_data_frame_for_config3() {
+        let frame = build_response_frame(0x00, 0x09, &[0x00, 0x05]);
+        let parsed = ipico_core::control::parse_response(frame.trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed.instruction(), 0x09);
+        assert_eq!(parsed.data(), &[0x00, 0x05]);
+    }
+
+    #[test]
+    fn build_data_frame_for_extended_status_13_bytes() {
+        let data = [
+            0x01, 0x00, 0x0b, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x59, 0x05, 0x8f, 0x0c, 0x00,
+        ];
+        let frame = build_response_frame(0x00, 0x4b, &data);
+        let parsed = ipico_core::control::parse_response(frame.trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed.instruction(), 0x4b);
+        assert_eq!(parsed.data().len(), 13);
     }
 
     #[test]
