@@ -283,8 +283,10 @@ function isValidIpv4(ip: string): boolean {
   });
 }
 
+/** Caller must ensure ip passes isValidIpv4 first. */
 function lastOctet(ip: string): number {
   const parts = ip.split(".");
+  if (parts.length !== 4) return 0;
   return Number(parts[3]);
 }
 
