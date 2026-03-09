@@ -45,10 +45,28 @@ and replays everything once the connection is restored.
 readers over TCP and fans out reads to any number of local TCP clients.
 Useful as a standalone tool without the remote forwarding stack.
 
+**[Announcer](docs/announcer.md)** — A live public-facing screen served
+by the server that shows recent finishers. Configurable via the server
+dashboard.
+
 **[Server UI](apps/server-ui/)**, **[Receiver UI](apps/receiver-ui/)**,
 **[Forwarder UI](apps/forwarder-ui/)** — Web dashboards for each
 service (the forwarder and receiver UIs are embedded in their binaries).
 Built with SvelteKit.
+
+## Compatibility
+
+**Readers:** Tested with IPICO Lite readers. Should also work with IPICO
+Elite and Super Elite readers. Not compatible with non-IPICO hardware.
+
+**Timing software:** Compatible with any software that accepts IPICO TCP
+streams — tested with IPICO Connect.
+
+**Forwarder hardware:** Raspberry Pi 3, 4, or 5 (64-bit OS). Any Linux
+SBC with network access and an ARM64 or x86-64 CPU should work.
+
+**Performance:** Supports multiple readers and forwarders simultaneously
+with sub-second read forwarding latency.
 
 ## Quick Demo
 
@@ -62,8 +80,8 @@ uv run scripts/dev.py
 
 This launches Postgres, the server, an emulator (simulated reader), a
 forwarder, and a receiver in tmux panes. The server dashboard is at
-`http://localhost:3000`. See [scripts/README.md](scripts/README.md) for
-options and details.
+`http://localhost:8080`. See [scripts/README.md](scripts/README.md) for
+all component URLs and options.
 
 ## Deploying for Real
 
