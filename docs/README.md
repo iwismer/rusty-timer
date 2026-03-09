@@ -2,9 +2,10 @@
 
 ## Getting Started
 
-- **[Quick demo](../scripts/README.md)** — Run the full stack locally with `dev.py` (no hardware needed)
-- **[Local testing guide](local-testing.md)** — Step-by-step manual setup of each component
+- **[Quickstart (Docker, no build)](../deploy/quickstart/)** — Evaluate the server in 5 minutes
+- **[Quick demo (full dev stack)](../scripts/README.md)** — Run everything locally with `dev.py` (simulated readers, no hardware)
 - **[Receiver quickstart (Windows)](receiver-quickstart.md)** — Download, configure, and connect the receiver on Windows
+- **[Local testing guide](local-testing.md)** — Step-by-step manual setup of each component
 - **[Contributing](../CONTRIBUTING.md)** — Building from source, running tests, code quality
 
 ## Deployment
