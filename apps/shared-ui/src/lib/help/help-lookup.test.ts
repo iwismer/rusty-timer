@@ -3,6 +3,7 @@ import { getSection, getField, searchHelp } from "./index";
 import { FORWARDER_HELP } from "./forwarder-help";
 import { RECEIVER_HELP } from "./receiver-help";
 import { RECEIVER_ADMIN_HELP } from "./receiver-admin-help";
+import { SERVER_HELP } from "./server-help";
 import type { HelpContextName, HelpContext } from "./help-types";
 
 describe("getSection", () => {
@@ -142,6 +143,40 @@ describe("template wiring validation", () => {
     { context: "receiver", section: "receiver_mode", field: "mode" },
     // receiver-ui admin/+page.svelte
     { context: "receiver-admin", section: "port_overrides", field: "port_override" },
+    // server-ui +page.svelte (stream filters)
+    { context: "server", section: "stream_filters", field: "race_filter" },
+    { context: "server", section: "stream_filters", field: "hide_offline" },
+    { context: "server", section: "stream_filters", field: "forwarder_race" },
+    // server-ui +page.svelte (reader live — context is forwarder)
+    { context: "forwarder", section: "reader_live", field: "clock_drift" },
+    { context: "forwarder", section: "reader_live", field: "tto_bytes" },
+    { context: "forwarder", section: "reader_live", field: "sync_clock" },
+    { context: "forwarder", section: "reader_live", field: "refresh_reader" },
+    { context: "forwarder", section: "reader_live", field: "recording" },
+    { context: "forwarder", section: "reader_live", field: "download_reads" },
+    { context: "forwarder", section: "reader_live", field: "clear_records" },
+    // server-ui announcer-config/+page.svelte
+    { context: "server", section: "announcer", field: "enabled" },
+    { context: "server", section: "announcer", field: "streams" },
+    { context: "server", section: "announcer", field: "max_list_size" },
+    { context: "server", section: "announcer", field: "reset" },
+    // server-ui sbc-setup/+page.svelte
+    { context: "server", section: "sbc_identity", field: "hostname" },
+    { context: "server", section: "sbc_identity", field: "admin_username" },
+    { context: "server", section: "sbc_identity", field: "ssh_public_key" },
+    { context: "server", section: "sbc_network", field: "static_ipv4" },
+    { context: "server", section: "sbc_network", field: "gateway" },
+    { context: "server", section: "sbc_network", field: "dns_servers" },
+    { context: "server", section: "sbc_network", field: "wifi_enabled" },
+    { context: "server", section: "sbc_network", field: "wifi_ssid" },
+    { context: "server", section: "sbc_network", field: "wifi_password" },
+    { context: "server", section: "sbc_network", field: "wifi_country" },
+    { context: "server", section: "sbc_forwarder", field: "server_base_url" },
+    { context: "server", section: "sbc_forwarder", field: "auth_token" },
+    { context: "server", section: "sbc_forwarder", field: "reader_targets" },
+    { context: "server", section: "sbc_forwarder", field: "status_bind" },
+    { context: "server", section: "sbc_forwarder", field: "display_name" },
+    { context: "server", section: "sbc_advanced", field: "setup_script_url" },
   ];
 
   it.each(expectedFieldLookups)(
@@ -178,6 +213,26 @@ describe("template wiring validation", () => {
     { context: "receiver-admin", section: "purge_subscriptions" },
     { context: "receiver-admin", section: "reset_profile" },
     { context: "receiver-admin", section: "factory_reset" },
+    // server-ui +page.svelte
+    { context: "server", section: "stream_filters" },
+    { context: "forwarder", section: "reader_live" },
+    // server-ui announcer-config/+page.svelte
+    { context: "server", section: "announcer" },
+    // server-ui sbc-setup/+page.svelte
+    { context: "server", section: "sbc_identity" },
+    { context: "server", section: "sbc_network" },
+    { context: "server", section: "sbc_forwarder" },
+    { context: "server", section: "sbc_advanced" },
+    // server-ui admin/+page.svelte
+    { context: "server", section: "admin_streams" },
+    { context: "server", section: "admin_events" },
+    { context: "server", section: "admin_tokens" },
+    { context: "server", section: "admin_cursors" },
+    { context: "server", section: "admin_races" },
+    // server-ui races/+page.svelte
+    { context: "server", section: "races" },
+    // server-ui races/[raceId]/+page.svelte
+    { context: "server", section: "race_detail" },
   ];
 
   it.each(expectedSectionLookups)(
@@ -193,6 +248,7 @@ describe("seeAlso cross-reference validation", () => {
     forwarder: FORWARDER_HELP,
     receiver: RECEIVER_HELP,
     "receiver-admin": RECEIVER_ADMIN_HELP,
+    server: SERVER_HELP,
   };
 
   it("all seeAlso references resolve to existing sections", () => {

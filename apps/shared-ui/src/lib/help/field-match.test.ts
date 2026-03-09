@@ -37,8 +37,12 @@ describe("fieldMatchesQuery", () => {
     expect(fieldMatchesQuery(field, "zzz-no-match")).toBe(false);
   });
   it("handles field with no optional properties", () => {
-    const minimal: FieldHelp = { label: "X", summary: "Y", detail: "Z" };
+    const minimal: FieldHelp = { label: "X", summary: "Y", detailHtml: "Z" };
     expect(fieldMatchesQuery(minimal, "x")).toBe(true);
     expect(fieldMatchesQuery(minimal, "zzz")).toBe(false);
+  });
+  it("matches on detailHtml of minimal field", () => {
+    const minimal: FieldHelp = { label: "X", summary: "Y", detailHtml: "UniqueDetail" };
+    expect(fieldMatchesQuery(minimal, "uniquedetail")).toBe(true);
   });
 });
