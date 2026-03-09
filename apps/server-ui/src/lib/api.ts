@@ -746,3 +746,188 @@ export async function uploadChips(
   }
   return resp.json();
 }
+
+// ----- Reader control types -----
+
+export interface HardwareInfo {
+  fw_version: string | null;
+  hw_code: string | null;
+  reader_id: string | null;
+}
+
+export interface Config3Info {
+  mode: "raw" | "event" | "fsls";
+  timeout: number;
+}
+
+export interface ClockInfo {
+  reader_clock: string;
+  drift_ms: number;
+}
+
+export interface ReaderInfo {
+  banner?: string | null;
+  hardware?: HardwareInfo | null;
+  config?: Config3Info | null;
+  tto_enabled?: boolean | null;
+  clock?: ClockInfo | null;
+  estimated_stored_reads?: number | null;
+  recording?: boolean | null;
+  connect_failures: number;
+}
+
+export interface CachedReaderState {
+  forwarder_id: string;
+  reader_ip: string;
+  state: "connected" | "connecting" | "disconnected";
+  reader_info: ReaderInfo | null;
+}
+
+/** HTTP response shape from reader control endpoints (differs from WS protocol type). */
+export interface ReaderControlHttpResponse {
+  ok: boolean;
+  error: string | null;
+  reader_info: ReaderInfo | null;
+}
+
+export interface ReaderDownloadProgressEvent {
+  forwarder_id: string;
+  reader_ip: string;
+  state: "downloading" | "complete" | "error" | "idle";
+  reads_received: number;
+  progress: number;
+  total: number;
+  error?: string | null;
+}
+
+// ----- Reader control API -----
+
+/** GET /api/v1/reader-states */
+export async function getReaderStates(): Promise<CachedReaderState[]> {
+  const resp = await apiFetch<{ reader_states: CachedReaderState[] }>(
+    "/api/v1/reader-states",
+  );
+  return resp.reader_states;
+}
+
+/** GET /api/v1/forwarders/{forwarderId}/readers/{readerIp}/info */
+export async function getReaderInfo(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/info`,
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/readers/{readerIp}/sync-clock */
+export async function syncReaderClock(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/sync-clock`,
+    { method: "POST" },
+  );
+}
+
+/** PUT /api/v1/forwarders/{forwarderId}/readers/{readerIp}/read-mode */
+export async function setReaderReadMode(
+  forwarderId: string,
+  readerIp: string,
+  mode: "raw" | "event" | "fsls",
+  timeout: number,
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/read-mode`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ mode, timeout }),
+    },
+  );
+}
+
+/** PUT /api/v1/forwarders/{forwarderId}/readers/{readerIp}/tto */
+export async function setReaderTto(
+  forwarderId: string,
+  readerIp: string,
+  enabled: boolean,
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/tto`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    },
+  );
+}
+
+/** PUT /api/v1/forwarders/{forwarderId}/readers/{readerIp}/recording */
+export async function setReaderRecording(
+  forwarderId: string,
+  readerIp: string,
+  enabled: boolean,
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/recording`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    },
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/readers/{readerIp}/clear-records */
+export async function clearReaderRecords(
+  forwarderId: string,
+  readerIp: string,
+): Promise<void> {
+  await apiFetch(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/clear-records`,
+    { method: "POST" },
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/readers/{readerIp}/start-download */
+export async function startReaderDownload(
+  forwarderId: string,
+  readerIp: string,
+): Promise<void> {
+  await apiFetch(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/start-download`,
+    { method: "POST" },
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/readers/{readerIp}/stop-download */
+export async function stopReaderDownload(
+  forwarderId: string,
+  readerIp: string,
+): Promise<void> {
+  await apiFetch(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/stop-download`,
+    { method: "POST" },
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/readers/{readerIp}/refresh */
+export async function refreshReader(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/refresh`,
+    { method: "POST" },
+  );
+}
+
+/** POST /api/v1/forwarders/{forwarderId}/readers/{readerIp}/reconnect */
+export async function reconnectReader(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
+    `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/reconnect`,
+    { method: "POST" },
+  );
+}

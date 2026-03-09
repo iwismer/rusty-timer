@@ -22,6 +22,12 @@ pub async fn dashboard_sse(
                 crate::dashboard_events::DashboardEvent::ForwarderRaceAssigned { .. } => {
                     "forwarder_race_assigned"
                 }
+                crate::dashboard_events::DashboardEvent::ReaderInfoUpdated { .. } => {
+                    "reader_info_updated"
+                }
+                crate::dashboard_events::DashboardEvent::ReaderDownloadProgress { .. } => {
+                    "reader_download_progress"
+                }
                 crate::dashboard_events::DashboardEvent::LogEntry { .. } => "log_entry",
             };
             match serde_json::to_string(&event) {

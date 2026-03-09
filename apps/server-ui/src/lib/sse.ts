@@ -8,9 +8,18 @@ import {
   setForwarderRace,
   pushLog,
   logsStore,
+  readerStatesStore,
+  setReaderState,
+  setDownloadProgress,
 } from "./stores";
-import { getForwarderRaces, getLogs, getRaces, getStreams } from "./api";
-import type { StreamEntry, StreamMetrics } from "./api";
+import {
+  getForwarderRaces,
+  getLogs,
+  getRaces,
+  getReaderStates,
+  getStreams,
+} from "./api";
+import type { CachedReaderState, StreamEntry, StreamMetrics } from "./api";
 import { mergeLogsWithPendingLive } from "./logs-merge";
 
 type StreamUpdatedEvent = {
@@ -47,52 +56,100 @@ export function initSSE(): void {
   eventSource = new EventSource("/api/v1/events");
 
   eventSource.addEventListener("stream_created", (e: MessageEvent) => {
-    const stream: StreamEntry = JSON.parse(e.data);
-    addOrUpdateStream(stream);
+    try {
+      const stream: StreamEntry = JSON.parse(e.data);
+      addOrUpdateStream(stream);
+    } catch (err) {
+      console.error("failed to parse stream_created event:", err);
+    }
   });
 
   eventSource.addEventListener("stream_updated", (e: MessageEvent) => {
-    const update: StreamUpdatedEvent = JSON.parse(e.data);
-    const { stream_id, ...fields } = update;
-    patchStream(stream_id, fields);
-    for (const listener of streamUpdatedListeners) {
-      listener(update);
+    try {
+      const update: StreamUpdatedEvent = JSON.parse(e.data);
+      const { stream_id, ...fields } = update;
+      patchStream(stream_id, fields);
+      for (const listener of streamUpdatedListeners) {
+        listener(update);
+      }
+    } catch (err) {
+      console.error("failed to parse stream_updated event:", err);
     }
   });
 
   eventSource.addEventListener("metrics_updated", (e: MessageEvent) => {
-    const data = JSON.parse(e.data);
-    const metrics: StreamMetrics = {
-      raw_count: data.raw_count,
-      dedup_count: data.dedup_count,
-      retransmit_count: data.retransmit_count,
-      lag: data.lag_ms ?? null,
-      backlog: 0,
-      epoch_raw_count: data.epoch_raw_count,
-      epoch_dedup_count: data.epoch_dedup_count,
-      epoch_retransmit_count: data.epoch_retransmit_count,
-      epoch_lag: data.epoch_lag_ms ?? null,
-      epoch_last_received_at: data.epoch_last_received_at ?? null,
-      unique_chips: data.unique_chips,
-      last_tag_id: data.last_tag_id ?? null,
-      last_reader_timestamp: data.last_reader_timestamp ?? null,
-    };
-    setMetrics(data.stream_id, metrics);
+    try {
+      const data = JSON.parse(e.data);
+      const metrics: StreamMetrics = {
+        raw_count: data.raw_count,
+        dedup_count: data.dedup_count,
+        retransmit_count: data.retransmit_count,
+        lag: data.lag_ms ?? null,
+        backlog: 0,
+        epoch_raw_count: data.epoch_raw_count,
+        epoch_dedup_count: data.epoch_dedup_count,
+        epoch_retransmit_count: data.epoch_retransmit_count,
+        epoch_lag: data.epoch_lag_ms ?? null,
+        epoch_last_received_at: data.epoch_last_received_at ?? null,
+        unique_chips: data.unique_chips,
+        last_tag_id: data.last_tag_id ?? null,
+        last_reader_timestamp: data.last_reader_timestamp ?? null,
+      };
+      setMetrics(data.stream_id, metrics);
+    } catch (err) {
+      console.error("failed to parse metrics_updated event:", err);
+    }
   });
 
   eventSource.addEventListener("forwarder_race_assigned", (e: MessageEvent) => {
-    const data = JSON.parse(e.data);
-    setForwarderRace(data.forwarder_id, data.race_id ?? null);
+    try {
+      const data = JSON.parse(e.data);
+      setForwarderRace(data.forwarder_id, data.race_id ?? null);
+    } catch (err) {
+      console.error("failed to parse forwarder_race_assigned event:", err);
+    }
   });
 
   eventSource.addEventListener("log_entry", (e: MessageEvent) => {
-    const data = JSON.parse(e.data);
-    pushLog(data.entry);
-    if (logsResyncInFlight) {
-      const entry = String(data.entry ?? "").trim();
-      if (entry) pendingLiveLogs.push(entry);
+    try {
+      const data = JSON.parse(e.data);
+      pushLog(data.entry);
+      if (logsResyncInFlight) {
+        const entry = String(data.entry ?? "").trim();
+        if (entry) pendingLiveLogs.push(entry);
+      }
+    } catch (err) {
+      console.error("failed to parse log_entry event:", err);
     }
   });
+
+  eventSource.addEventListener("reader_info_updated", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data);
+      const key = `${data.forwarder_id}:${data.reader_ip}`;
+      setReaderState(key, {
+        forwarder_id: data.forwarder_id,
+        reader_ip: data.reader_ip,
+        state: data.state,
+        reader_info: data.reader_info,
+      });
+    } catch (err) {
+      console.error("Failed to parse reader_info_updated event:", err);
+    }
+  });
+
+  eventSource.addEventListener(
+    "reader_download_progress",
+    (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        const key = `${data.forwarder_id}:${data.reader_ip}`;
+        setDownloadProgress(key, data);
+      } catch (err) {
+        console.error("Failed to parse reader_download_progress event:", err);
+      }
+    },
+  );
 
   eventSource.addEventListener("resync", async () => {
     await resync();
@@ -127,13 +184,41 @@ async function resync(): Promise<void> {
     // Coalesce multiple resync triggers into a single follow-up fetch.
     while (true) {
       resyncQueued = false;
-      const [streamsResp, racesResp, assignmentsResp, logsResp] =
-        await Promise.allSettled([
-          getStreams(),
-          getRaces(),
-          getForwarderRaces(),
-          getLogs(),
-        ]);
+      const [
+        streamsResp,
+        racesResp,
+        assignmentsResp,
+        logsResp,
+        readerStatesResp,
+      ] = await Promise.allSettled([
+        getStreams(),
+        getRaces(),
+        getForwarderRaces(),
+        getLogs(),
+        getReaderStates(),
+      ]);
+
+      if (streamsResp.status === "rejected") {
+        console.error("resync: failed to fetch streams", streamsResp.reason);
+      }
+      if (racesResp.status === "rejected") {
+        console.error("resync: failed to fetch races", racesResp.reason);
+      }
+      if (assignmentsResp.status === "rejected") {
+        console.error(
+          "resync: failed to fetch forwarder races",
+          assignmentsResp.reason,
+        );
+      }
+      if (logsResp.status === "rejected") {
+        console.error("resync: failed to fetch logs", logsResp.reason);
+      }
+      if (readerStatesResp.status === "rejected") {
+        console.error(
+          "resync: failed to fetch reader states",
+          readerStatesResp.reason,
+        );
+      }
 
       if (streamsResp.status === "fulfilled") {
         replaceStreams(streamsResp.value.streams);
@@ -153,6 +238,13 @@ async function resync(): Promise<void> {
           ),
         );
         pendingLiveLogs = [];
+      }
+      if (readerStatesResp.status === "fulfilled") {
+        const next: Record<string, CachedReaderState> = {};
+        for (const rs of readerStatesResp.value) {
+          next[`${rs.forwarder_id}:${rs.reader_ip}`] = rs;
+        }
+        readerStatesStore.set(next);
       }
       if (!resyncQueued) break;
     }

@@ -61,6 +61,9 @@ pub async fn get_forwarder_config(
         Ok(Ok(ForwarderProxyReply::Timeout)) => {
             gateway_timeout("forwarder did not respond within timeout")
         }
+        Ok(Ok(ForwarderProxyReply::InternalError(msg))) => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg)
+        }
         Ok(Err(_)) => json_error(
             StatusCode::BAD_GATEWAY,
             "FORWARDER_DISCONNECTED",
@@ -160,6 +163,9 @@ async fn send_config_set_command(
         Ok(Ok(ForwarderProxyReply::Timeout)) => {
             gateway_timeout("forwarder did not respond within timeout")
         }
+        Ok(Ok(ForwarderProxyReply::InternalError(msg))) => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg)
+        }
         Ok(Err(_)) => json_error(
             StatusCode::BAD_GATEWAY,
             "FORWARDER_DISCONNECTED",
@@ -218,6 +224,9 @@ pub async fn restart_forwarder(
         }
         Ok(Ok(ForwarderProxyReply::Timeout)) => {
             gateway_timeout("forwarder did not respond within timeout")
+        }
+        Ok(Ok(ForwarderProxyReply::InternalError(msg))) => {
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg)
         }
         Ok(Err(_)) => json_error(
             StatusCode::BAD_GATEWAY,

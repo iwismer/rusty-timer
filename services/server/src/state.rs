@@ -1,4 +1,5 @@
 use rt_protocol::{ConfigGetResponse, ConfigSetResponse, EpochResetCommand, RestartResponse};
+use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use crate::{
 pub enum ForwarderProxyReply<T> {
     Response(T),
     Timeout,
+    InternalError(String),
 }
 
 pub enum ForwarderCommand {
@@ -31,7 +33,32 @@ pub enum ForwarderCommand {
         request_id: String,
         reply: oneshot::Sender<ForwarderProxyReply<RestartResponse>>,
     },
+    ReaderControl {
+        request_id: String,
+        reader_ip: String,
+        action: rt_protocol::ReaderControlAction,
+        reply: oneshot::Sender<ForwarderProxyReply<rt_protocol::ReaderControlResponse>>,
+    },
+    ReaderControlFireAndForget {
+        reader_ip: String,
+        action: rt_protocol::ReaderControlAction,
+    },
 }
+
+/// Composite cache key for reader state entries.
+pub fn reader_cache_key(forwarder_id: &str, reader_ip: &str) -> String {
+    format!("{}:{}", forwarder_id, reader_ip)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CachedReaderState {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub state: rt_protocol::ReaderConnectionState,
+    pub reader_info: Option<rt_protocol::ReaderInfo>,
+}
+
+pub type ReaderStateCache = Arc<RwLock<HashMap<String, CachedReaderState>>>;
 
 pub type StreamBroadcast = broadcast::Sender<rt_protocol::ReadEvent>;
 pub type BroadcastRegistry = Arc<RwLock<HashMap<Uuid, StreamBroadcast>>>;
@@ -71,6 +98,7 @@ pub struct AppState {
     pub announcer_runtime: AnnouncerRuntimeState,
     pub dashboard_tx: broadcast::Sender<DashboardEvent>,
     pub announcer_tx: broadcast::Sender<AnnouncerEvent>,
+    pub reader_states: ReaderStateCache,
     pub logger: Arc<rt_ui_log::UiLogger<DashboardEvent>>,
 }
 
@@ -90,6 +118,7 @@ impl AppState {
             forwarder_command_senders: Arc::new(RwLock::new(HashMap::new())),
             active_receiver_sessions: Arc::new(RwLock::new(HashMap::new())),
             announcer_runtime: Arc::new(RwLock::new(AnnouncerRuntime::new())),
+            reader_states: Arc::new(RwLock::new(HashMap::new())),
             dashboard_tx,
             announcer_tx,
             logger,
@@ -375,5 +404,18 @@ mod tests {
             .await;
 
         assert!(state.has_active_receiver_session_for_race(race_id).await);
+    }
+
+    #[test]
+    fn reader_cache_key_combines_forwarder_and_reader_ip() {
+        assert_eq!(
+            reader_cache_key("fwd-1", "10.0.0.1:10000"),
+            "fwd-1:10.0.0.1:10000"
+        );
+    }
+
+    #[test]
+    fn reader_cache_key_handles_empty_parts() {
+        assert_eq!(reader_cache_key("", ""), ":");
     }
 }

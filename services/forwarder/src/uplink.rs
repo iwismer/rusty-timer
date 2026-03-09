@@ -62,6 +62,8 @@ pub enum SendBatchResult {
     ConfigSet(rt_protocol::ConfigSetRequest),
     /// Server requested a graceful restart.
     Restart(rt_protocol::RestartRequest),
+    /// Server requested a reader control action.
+    ReaderControl(rt_protocol::ReaderControlRequest),
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +241,9 @@ impl UplinkSession {
                 }
                 WsMessage::RestartRequest(req) => {
                     return Ok(SendBatchResult::Restart(req));
+                }
+                WsMessage::ReaderControlRequest(req) => {
+                    return Ok(SendBatchResult::ReaderControl(req));
                 }
                 WsMessage::Error(e) => {
                     return Err(UplinkError::Protocol(format!(

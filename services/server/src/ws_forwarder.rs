@@ -11,7 +11,7 @@ use crate::{
         },
         races::lookup_stream_chip_participant,
     },
-    state::{AppState, ForwarderCommand, ForwarderProxyReply},
+    state::{AppState, CachedReaderState, ForwarderCommand, ForwarderProxyReply},
     ws_common::{
         extract_token_from_headers, recv_text_with_timeout, send_heartbeat, send_ws_error,
     },
@@ -348,11 +348,19 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
             tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::RestartResponse>>,
         ),
     > = HashMap::new();
+    let mut pending_reader_controls: HashMap<
+        String,
+        (
+            Instant,
+            tokio::sync::oneshot::Sender<ForwarderProxyReply<rt_protocol::ReaderControlResponse>>,
+        ),
+    > = HashMap::new();
 
     loop {
         expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
         expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
         expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
+        expire_pending_requests(&mut pending_reader_controls, FORWARDER_COMMAND_TIMEOUT);
 
         tokio::select! {
             msg = tokio::time::timeout(SESSION_TIMEOUT, socket.recv()) => {
@@ -548,6 +556,37 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     let _ = reply.send(ForwarderProxyReply::Response(resp));
                                 }
                             }
+                            Ok(WsMessage::ReaderControlResponse(resp)) => {
+                                if let Some((_, reply)) = pending_reader_controls.remove(&resp.request_id) {
+                                    if reply.send(ForwarderProxyReply::Response(resp)).is_err() {
+                                        warn!(device_id = %device_id, "reader control reply dropped (HTTP handler already timed out)");
+                                    }
+                                } else {
+                                    warn!(device_id = %device_id, request_id = %resp.request_id, "reader control response for unknown request_id");
+                                }
+                            }
+                            Ok(WsMessage::ReaderInfoUpdate(update)) => {
+                                let key = crate::state::reader_cache_key(&device_id, &update.reader_ip);
+                                let cached = CachedReaderState {
+                                    forwarder_id: device_id.clone(),
+                                    reader_ip: update.reader_ip.clone(),
+                                    state: update.state,
+                                    reader_info: update.reader_info.clone(),
+                                };
+                                state.reader_states.write().await.insert(key, cached);
+                                let _ = state.dashboard_tx.send(DashboardEvent::ReaderInfoUpdated {
+                                    forwarder_id: device_id.clone(),
+                                    reader_ip: update.reader_ip,
+                                    state: update.state,
+                                    reader_info: update.reader_info,
+                                });
+                            }
+                            Ok(WsMessage::ReaderDownloadProgress(progress)) => {
+                                let _ = state.dashboard_tx.send(DashboardEvent::ReaderDownloadProgress {
+                                    forwarder_id: device_id.clone(),
+                                    progress,
+                                });
+                            }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
                             Err(e) => { send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await; break; }
                         }
@@ -563,6 +602,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 expire_pending_requests(&mut pending_config_gets, FORWARDER_COMMAND_TIMEOUT);
                 expire_pending_requests(&mut pending_config_sets, FORWARDER_COMMAND_TIMEOUT);
                 expire_pending_requests(&mut pending_restarts, FORWARDER_COMMAND_TIMEOUT);
+                expire_pending_requests(&mut pending_reader_controls, FORWARDER_COMMAND_TIMEOUT);
                 if !send_heartbeat(&mut socket, &session_id, &device_id).await { break; }
             }
             Some(cmd) = cmd_rx.recv() => {
@@ -579,12 +619,20 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         let msg = WsMessage::ConfigGetRequest(rt_protocol::ConfigGetRequest {
                             request_id: request_id.clone(),
                         });
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                                pending_config_gets.insert(request_id, (Instant::now(), reply));
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize config get request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(
+                                    format!("failed to serialize config get request: {}", e),
+                                ));
+                            }
                         }
-                        pending_config_gets.insert(request_id, (Instant::now(), reply));
                     }
                     ForwarderCommand::ConfigSet { request_id, section, payload, reply } => {
                         let msg = WsMessage::ConfigSetRequest(rt_protocol::ConfigSetRequest {
@@ -592,23 +640,80 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             section,
                             payload,
                         });
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                                pending_config_sets.insert(request_id, (Instant::now(), reply));
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize config set request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(
+                                    format!("failed to serialize config set request: {}", e),
+                                ));
+                            }
                         }
-                        pending_config_sets.insert(request_id, (Instant::now(), reply));
                     }
                     ForwarderCommand::Restart { request_id, reply } => {
                         let msg = WsMessage::RestartRequest(rt_protocol::RestartRequest {
                             request_id: request_id.clone(),
                         });
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                                pending_restarts.insert(request_id, (Instant::now(), reply));
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize restart request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(
+                                    format!("failed to serialize restart request: {}", e),
+                                ));
+                            }
                         }
-                        pending_restarts.insert(request_id, (Instant::now(), reply));
+                    }
+                    ForwarderCommand::ReaderControl { request_id, reader_ip, action, reply } => {
+                        let msg = WsMessage::ReaderControlRequest(rt_protocol::ReaderControlRequest {
+                            request_id: request_id.clone(),
+                            reader_ip,
+                            action,
+                        });
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                    warn!(error = %e, "failed to send reader control request");
+                                    let _ = reply.send(ForwarderProxyReply::InternalError(
+                                        format!("failed to send to forwarder: {}", e),
+                                    ));
+                                } else {
+                                    pending_reader_controls.insert(request_id, (Instant::now(), reply));
+                                }
+                            }
+                            Err(e) => {
+                                let err_msg = format!("failed to serialize reader control request: {}", e);
+                                error!(device_id = %device_id, error = %e, "failed to serialize reader control request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(err_msg));
+                            }
+                        }
+                    }
+                    ForwarderCommand::ReaderControlFireAndForget { reader_ip, action } => {
+                        let msg = WsMessage::ReaderControlRequest(rt_protocol::ReaderControlRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            reader_ip,
+                            action,
+                        });
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if let Err(e) = socket.send(Message::Text(json.into())).await {
+                                    warn!(error = %e, "failed to send fire-and-forget reader control");
+                                }
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize fire-and-forget reader control request");
+                            }
+                        }
                     }
                 }
             }
@@ -631,6 +736,24 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
             display_alias: None,
             forwarder_display_name: None,
         });
+    }
+    {
+        let mut cache = state.reader_states.write().await;
+        let keys_to_remove: Vec<String> = cache
+            .keys()
+            .filter(|k| k.starts_with(&format!("{}:", device_id)))
+            .cloned()
+            .collect();
+        for key in &keys_to_remove {
+            if let Some(cached) = cache.remove(key) {
+                let _ = state.dashboard_tx.send(DashboardEvent::ReaderInfoUpdated {
+                    forwarder_id: device_id.clone(),
+                    reader_ip: cached.reader_ip,
+                    state: rt_protocol::ReaderConnectionState::Disconnected,
+                    reader_info: None,
+                });
+            }
+        }
     }
     {
         let mut senders = state.forwarder_command_senders.write().await;

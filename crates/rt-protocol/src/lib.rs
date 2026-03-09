@@ -1,9 +1,8 @@
 // rt-protocol: Remote forwarding protocol types and serialization.
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
-// deserialization. The original v1/v1.2 message kinds are preserved;
-// ReaderStatusUpdate and ReaderStatusChanged have been added for reader
-// status tracking.
+// deserialization. The enum covers the frozen v1/v1.2 message kinds plus
+// reader-status tracking and reader-control extensions.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -328,11 +327,145 @@ pub struct RestartResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Reader control types (server <-> forwarder)
+// ---------------------------------------------------------------------------
+
+/// IPICO reader read mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadMode {
+    #[serde(rename = "raw")]
+    Raw,
+    #[serde(rename = "event")]
+    Event,
+    #[serde(rename = "fsls")]
+    FirstLastSeen,
+}
+
+/// Reader connection state as reported by the forwarder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaderConnectionState {
+    Connected,
+    Connecting,
+    Disconnected,
+}
+
+/// State of a reader download operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    Downloading,
+    Complete,
+    Error,
+    Idle,
+}
+
+/// Hardware identity information reported by the reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareInfo {
+    pub fw_version: Option<String>,
+    pub hw_code: Option<String>,
+    pub reader_id: Option<String>,
+}
+
+/// Reader CONFIG3 settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Config3Info {
+    pub mode: ReadMode,
+    pub timeout: u8,
+}
+
+/// Reader clock state and drift estimate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClockInfo {
+    pub reader_clock: String,
+    pub drift_ms: i64,
+}
+
+/// Aggregated reader information, populated incrementally as details are discovered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<HardwareInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<Config3Info>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tto_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<ClockInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_stored_reads: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<bool>,
+    #[serde(default)]
+    pub connect_failures: u8,
+}
+
+/// Actions that can be requested on a reader via the control channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReaderControlAction {
+    GetInfo,
+    SyncClock,
+    SetReadMode { mode: ReadMode, timeout: u8 },
+    SetTto { enabled: bool },
+    SetRecording { enabled: bool },
+    ClearRecords,
+    StartDownload,
+    StopDownload,
+    Refresh,
+    Reconnect,
+}
+
+/// Server-to-forwarder: request an action on a specific reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderControlRequest {
+    pub request_id: String,
+    pub reader_ip: String,
+    pub action: ReaderControlAction,
+}
+
+/// Forwarder-to-server: result of a reader control action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderControlResponse {
+    pub request_id: String,
+    pub reader_ip: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_info: Option<ReaderInfo>,
+}
+
+/// Forwarder-to-server: unsolicited reader state/info update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderInfoUpdate {
+    pub reader_ip: String,
+    pub state: ReaderConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_info: Option<ReaderInfo>,
+}
+
+/// Forwarder-to-server: download progress notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReaderDownloadProgress {
+    pub reader_ip: String,
+    pub state: DownloadState,
+    pub reads_received: u32,
+    pub progress: u64,
+    pub total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
 /// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
-/// status tracking extensions.
+/// status tracking and reader control extensions.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -361,6 +494,10 @@ pub enum WsMessage {
     RestartResponse(RestartResponse),
     ReaderStatusUpdate(ReaderStatusUpdate),
     ReaderStatusChanged(ReaderStatusChanged),
+    ReaderControlRequest(ReaderControlRequest),
+    ReaderControlResponse(ReaderControlResponse),
+    ReaderInfoUpdate(ReaderInfoUpdate),
+    ReaderDownloadProgress(ReaderDownloadProgress),
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +561,10 @@ pub struct HttpErrorEnvelope {
     pub details: Option<serde_json::Value>,
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +594,80 @@ mod tests {
         assert!(json.contains("\"connected\":false"));
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn reader_control_request_round_trip() {
+        let msg = WsMessage::ReaderControlRequest(ReaderControlRequest {
+            request_id: "abc".into(),
+            reader_ip: "192.168.0.1:10000".into(),
+            action: ReaderControlAction::SetReadMode {
+                mode: ReadMode::Event,
+                timeout: 5,
+            },
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn reader_control_response_round_trip() {
+        let msg = WsMessage::ReaderControlResponse(ReaderControlResponse {
+            request_id: "abc".into(),
+            reader_ip: "192.168.0.1:10000".into(),
+            success: true,
+            error: None,
+            reader_info: Some(ReaderInfo {
+                banner: None,
+                hardware: Some(HardwareInfo {
+                    fw_version: Some("3.09".into()),
+                    hw_code: Some("0x1234".into()),
+                    reader_id: Some("READER01".into()),
+                }),
+                config: Some(Config3Info {
+                    mode: ReadMode::Event,
+                    timeout: 5,
+                }),
+                tto_enabled: Some(false),
+                clock: Some(ClockInfo {
+                    reader_clock: "2026-03-08T12:00:00".into(),
+                    drift_ms: 42,
+                }),
+                estimated_stored_reads: Some(100),
+                recording: Some(true),
+                connect_failures: 0,
+            }),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn reader_info_update_round_trip() {
+        let msg = WsMessage::ReaderInfoUpdate(ReaderInfoUpdate {
+            reader_ip: "192.168.0.1:10000".into(),
+            state: ReaderConnectionState::Connected,
+            reader_info: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn reader_download_progress_round_trip() {
+        let msg = WsMessage::ReaderDownloadProgress(ReaderDownloadProgress {
+            reader_ip: "192.168.0.1:10000".into(),
+            state: DownloadState::Downloading,
+            reads_received: 50,
+            progress: 1024,
+            total: 2048,
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
     }
 }

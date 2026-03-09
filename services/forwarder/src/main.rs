@@ -293,7 +293,7 @@ async fn run_reader(
             }
         });
 
-        // Spawn connect sequence + 30s status polling task.
+        // Spawn connect sequence + 10s status polling task.
         // This runs concurrently with the read loop so that control
         // responses arriving on the socket can be demuxed to the sink.
         let poll_client = control_client.clone();
@@ -792,6 +792,533 @@ async fn handle_restart_message(
 }
 
 // ---------------------------------------------------------------------------
+// Reader control message handler (used by uplink loop)
+// ---------------------------------------------------------------------------
+
+/// Convert forwarder-internal `ReaderInfo` to the protocol's `rt_protocol::ReaderInfo`.
+fn to_protocol_reader_info(
+    info: &forwarder::reader_control::ReaderInfo,
+) -> rt_protocol::ReaderInfo {
+    rt_protocol::ReaderInfo {
+        banner: info.banner.clone(),
+        hardware: info.hardware.as_ref().map(|h| rt_protocol::HardwareInfo {
+            fw_version: Some(h.fw_version.clone()),
+            hw_code: Some(format!("0x{:02X}", h.hw_code)),
+            reader_id: Some(format!("0x{:02X}", h.reader_id)),
+        }),
+        config: info.config.as_ref().map(|c| rt_protocol::Config3Info {
+            mode: match c.mode {
+                ipico_core::control::ReadMode::Raw => rt_protocol::ReadMode::Raw,
+                ipico_core::control::ReadMode::Event => rt_protocol::ReadMode::Event,
+                ipico_core::control::ReadMode::FirstLastSeen => {
+                    rt_protocol::ReadMode::FirstLastSeen
+                }
+            },
+            timeout: c.timeout,
+        }),
+        tto_enabled: info.tto_enabled,
+        clock: info.clock.as_ref().map(|c| rt_protocol::ClockInfo {
+            reader_clock: c.reader_clock.clone(),
+            drift_ms: c.drift_ms,
+        }),
+        estimated_stored_reads: info.estimated_stored_reads,
+        recording: info.recording,
+        connect_failures: info.connect_failures,
+    }
+}
+
+async fn handle_reader_control_message(
+    session: &mut UplinkSession,
+    req: rt_protocol::ReaderControlRequest,
+    status: &StatusServer,
+) -> Result<(), UplinkError> {
+    use rt_protocol::ReaderControlAction;
+
+    let request_id = req.request_id.clone();
+    let reader_ip = req.reader_ip.clone();
+
+    // Look up the ControlClient by reader_ip
+    let client = {
+        status
+            .control_clients()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&reader_ip)
+            .cloned()
+    };
+
+    let Some(client) = client else {
+        let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+            request_id,
+            reader_ip,
+            success: false,
+            error: Some("reader not connected".to_owned()),
+            reader_info: None,
+        });
+        return session.send_message(&response).await;
+    };
+
+    // Helper closures for cached info access via StatusServer
+    let get_cached_info = |status: &StatusServer, ip: &str| {
+        let status = status.clone();
+        let ip = ip.to_owned();
+        async move { status.get_reader_info(&ip).await.unwrap_or_default() }
+    };
+
+    let update_info =
+        |status: &StatusServer, ip: &str, info: forwarder::reader_control::ReaderInfo| {
+            let status = status.clone();
+            let ip = ip.to_owned();
+            async move {
+                status
+                    .update_reader_info_unless_disconnected(&ip, info)
+                    .await;
+            }
+        };
+
+    match req.action {
+        ReaderControlAction::GetInfo => {
+            let mut info = get_cached_info(status, &reader_ip).await;
+            forwarder::reader_control::run_status_poll(&client, &mut info).await;
+            update_info(status, &reader_ip, info.clone()).await;
+            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                request_id,
+                reader_ip,
+                success: true,
+                error: None,
+                reader_info: Some(to_protocol_reader_info(&info)),
+            });
+            session.send_message(&response).await
+        }
+
+        ReaderControlAction::Refresh => {
+            let mut info = get_cached_info(status, &reader_ip).await;
+            forwarder::reader_control::run_status_poll(&client, &mut info).await;
+            update_info(status, &reader_ip, info.clone()).await;
+            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                request_id,
+                reader_ip,
+                success: true,
+                error: None,
+                reader_info: Some(to_protocol_reader_info(&info)),
+            });
+            session.send_message(&response).await
+        }
+
+        ReaderControlAction::SetReadMode { mode, timeout } => {
+            let read_mode = match mode {
+                rt_protocol::ReadMode::Raw => ipico_core::control::ReadMode::Raw,
+                rt_protocol::ReadMode::Event => ipico_core::control::ReadMode::Event,
+                rt_protocol::ReadMode::FirstLastSeen => {
+                    ipico_core::control::ReadMode::FirstLastSeen
+                }
+            };
+            match client.set_config3(read_mode, timeout).await {
+                Ok(()) => {
+                    let mut info = get_cached_info(status, &reader_ip).await;
+                    info.config = Some(forwarder::reader_control::Config3Info {
+                        mode: read_mode,
+                        timeout,
+                    });
+                    info.clock = None;
+                    forwarder::reader_control::run_status_poll_merge_successes(&client, &mut info)
+                        .await;
+                    update_info(status, &reader_ip, info.clone()).await;
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: true,
+                            error: None,
+                            reader_info: Some(to_protocol_reader_info(&info)),
+                        });
+                    session.send_message(&response).await
+                }
+                Err(e) => {
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: false,
+                            error: Some(e.to_string()),
+                            reader_info: None,
+                        });
+                    session.send_message(&response).await
+                }
+            }
+        }
+
+        ReaderControlAction::SetTto { enabled } => {
+            let current = match client.get_tag_message_format().await {
+                Ok(format) => format,
+                Err(e) => {
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: false,
+                            error: Some(e.to_string()),
+                            reader_info: None,
+                        });
+                    return session.send_message(&response).await;
+                }
+            };
+            let updated = current.with_tto_enabled(enabled);
+            if let Err(e) = client.set_tag_message_format(updated).await {
+                let response =
+                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                        request_id,
+                        reader_ip,
+                        success: false,
+                        error: Some(e.to_string()),
+                        reader_info: None,
+                    });
+                return session.send_message(&response).await;
+            }
+            // Verify and update info
+            match client.get_tag_message_format().await {
+                Ok(format) => {
+                    let mut info = get_cached_info(status, &reader_ip).await;
+                    info.tto_enabled = Some(format.tto_enabled());
+                    forwarder::reader_control::run_status_poll_merge_successes(&client, &mut info)
+                        .await;
+                    update_info(status, &reader_ip, info.clone()).await;
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: true,
+                            error: None,
+                            reader_info: Some(to_protocol_reader_info(&info)),
+                        });
+                    session.send_message(&response).await
+                }
+                Err(e) => {
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: false,
+                            error: Some(format!("set ok but verify failed: {}", e)),
+                            reader_info: None,
+                        });
+                    session.send_message(&response).await
+                }
+            }
+        }
+
+        ReaderControlAction::SetRecording { enabled } => {
+            match client.set_recording(enabled).await {
+                Ok(ext) => {
+                    let mut info = get_cached_info(status, &reader_ip).await;
+                    info.recording = Some(ext.recording_state.is_recording());
+                    info.estimated_stored_reads = Some(ext.estimated_stored_reads());
+                    forwarder::reader_control::run_status_poll_merge_successes(&client, &mut info)
+                        .await;
+                    update_info(status, &reader_ip, info.clone()).await;
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: true,
+                            error: None,
+                            reader_info: Some(to_protocol_reader_info(&info)),
+                        });
+                    session.send_message(&response).await
+                }
+                Err(e) => {
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: false,
+                            error: Some(e.to_string()),
+                            reader_info: None,
+                        });
+                    session.send_message(&response).await
+                }
+            }
+        }
+
+        ReaderControlAction::ClearRecords => {
+            // Spawn background task — clear_records takes ~10s
+            let bg_client = client.clone();
+            let bg_status = status.clone();
+            let bg_reader_ip = reader_ip.clone();
+            tokio::spawn(async move {
+                match bg_client.clear_records().await {
+                    Ok(()) => {
+                        // Refresh info after clear
+                        let mut info = bg_status
+                            .get_reader_info(&bg_reader_ip)
+                            .await
+                            .unwrap_or_default();
+                        forwarder::reader_control::run_status_poll(&bg_client, &mut info).await;
+                        bg_status
+                            .update_reader_info_unless_disconnected(&bg_reader_ip, info)
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(reader_ip = %bg_reader_ip, error = %e, "clear_records failed");
+                    }
+                }
+            });
+            // Return success immediately
+            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                request_id,
+                reader_ip,
+                success: true,
+                error: None,
+                reader_info: None,
+            });
+            session.send_message(&response).await
+        }
+
+        ReaderControlAction::StartDownload => {
+            let tracker = {
+                status
+                    .download_trackers()
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&reader_ip)
+                    .cloned()
+            };
+            let Some(tracker) = tracker else {
+                let response =
+                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                        request_id,
+                        reader_ip,
+                        success: false,
+                        error: Some("reader not connected".to_owned()),
+                        reader_info: None,
+                    });
+                return session.send_message(&response).await;
+            };
+
+            // Check current state and prepare
+            {
+                let mut dt = tracker.lock().await;
+                match dt.state() {
+                    forwarder::reader_control::DownloadState::Starting
+                    | forwarder::reader_control::DownloadState::Downloading => {
+                        let response =
+                            WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                                request_id,
+                                reader_ip,
+                                success: false,
+                                error: Some("download already in progress".to_owned()),
+                                reader_info: None,
+                            });
+                        return session.send_message(&response).await;
+                    }
+                    forwarder::reader_control::DownloadState::Complete
+                    | forwarder::reader_control::DownloadState::Error(_) => {
+                        dt.reset();
+                    }
+                    forwarder::reader_control::DownloadState::Idle => {}
+                }
+                dt.begin_startup();
+            }
+
+            // Spawn background download task
+            let bg_client = client.clone();
+            let bg_tracker = tracker.clone();
+            let bg_reader_ip = reader_ip.clone();
+            tokio::spawn(async move {
+                match bg_client.start_download().await {
+                    Ok(ext) => {
+                        let mut dt = bg_tracker.lock().await;
+                        dt.start(ext.stored_data_extent);
+                    }
+                    Err(e) => {
+                        warn!(reader_ip = %bg_reader_ip, error = %e, "download start failed");
+                        let mut dt = bg_tracker.lock().await;
+                        dt.fail(format!("{}", e));
+                    }
+                }
+            });
+
+            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                request_id,
+                reader_ip,
+                success: true,
+                error: None,
+                reader_info: None,
+            });
+            session.send_message(&response).await
+        }
+
+        ReaderControlAction::StopDownload => match client.stop_download().await {
+            Ok(()) => {
+                let response =
+                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                        request_id,
+                        reader_ip,
+                        success: true,
+                        error: None,
+                        reader_info: None,
+                    });
+                session.send_message(&response).await
+            }
+            Err(e) => {
+                let response =
+                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                        request_id,
+                        reader_ip,
+                        success: false,
+                        error: Some(e.to_string()),
+                        reader_info: None,
+                    });
+                session.send_message(&response).await
+            }
+        },
+
+        ReaderControlAction::Reconnect => {
+            let notify = {
+                status
+                    .reconnect_notifies()
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&reader_ip)
+                    .cloned()
+            };
+            match notify {
+                Some(n) => {
+                    n.notify_one();
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: true,
+                            error: None,
+                            reader_info: None,
+                        });
+                    session.send_message(&response).await
+                }
+                None => {
+                    let response =
+                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: false,
+                            error: Some("reader not found".to_owned()),
+                            reader_info: None,
+                        });
+                    session.send_message(&response).await
+                }
+            }
+        }
+
+        ReaderControlAction::SyncClock => {
+            // Spawn background task — clock sync takes 3-5+ seconds (RTT probes,
+            // pre-set wait, set_date_time, verify wait, verification read).
+            let bg_client = client.clone();
+            let bg_status = status.clone();
+            let bg_reader_ip = reader_ip.clone();
+            tokio::spawn(async move {
+                const SYNC_DELAY_MS: u64 = 500;
+
+                // Step 1: estimate one-way latency via RTT probes
+                let mut rtts = Vec::with_capacity(3);
+                for i in 0..3usize {
+                    let start = std::time::Instant::now();
+                    match bg_client.get_date_time().await {
+                        Ok(_) => rtts.push(start.elapsed()),
+                        Err(e) => warn!(probe = i + 1, error = %e, "RTT probe failed"),
+                    }
+                }
+                if rtts.is_empty() {
+                    warn!(reader_ip = %bg_reader_ip, "all RTT probes failed; cannot estimate latency for clock sync");
+                    return;
+                }
+                rtts.sort();
+                let one_way = rtts[rtts.len() / 2] / 2;
+
+                // Step 2: compute sync timing
+                use chrono::{Datelike, Timelike};
+                let wall_now = chrono::Local::now();
+                let (target_boundary, pre_set_wait) =
+                    forwarder::status_http::compute_sync_timing(wall_now, one_way, SYNC_DELAY_MS);
+                if !pre_set_wait.is_zero() {
+                    sleep(pre_set_wait).await;
+                }
+
+                let year = (target_boundary.year() % 100) as u8;
+                let month = target_boundary.month() as u8;
+                let day = target_boundary.day() as u8;
+                let dow = target_boundary.weekday().num_days_from_sunday() as u8;
+                let hour = target_boundary.hour() as u8;
+                let minute = target_boundary.minute() as u8;
+                let second = target_boundary.second() as u8;
+
+                if let Err(e) = bg_client
+                    .set_date_time(year, month, day, dow, hour, minute, second)
+                    .await
+                {
+                    // Clear stale clock info
+                    let mut info = bg_status
+                        .get_reader_info(&bg_reader_ip)
+                        .await
+                        .unwrap_or_default();
+                    info.clock = None;
+                    bg_status
+                        .update_reader_info_unless_disconnected(&bg_reader_ip, info)
+                        .await;
+                    warn!(reader_ip = %bg_reader_ip, error = %e, "set_date_time failed during clock sync");
+                    return;
+                }
+
+                // Step 3: wait for sync to complete, then verify
+                let verify_wait = std::time::Duration::from_millis(SYNC_DELAY_MS) + one_way;
+                sleep(verify_wait).await;
+
+                match bg_client.get_date_time().await {
+                    Ok(dt) => {
+                        let reader_iso = dt.to_iso_string();
+                        let verify_now = chrono::Local::now();
+                        let drift_ms = chrono::NaiveDateTime::parse_from_str(
+                            &reader_iso,
+                            "%Y-%m-%dT%H:%M:%S%.3f",
+                        )
+                        .ok()
+                        .map(|reader_naive| {
+                            verify_now
+                                .naive_local()
+                                .signed_duration_since(reader_naive)
+                                .num_milliseconds()
+                        });
+
+                        let mut info = bg_status
+                            .get_reader_info(&bg_reader_ip)
+                            .await
+                            .unwrap_or_default();
+                        info.clock = drift_ms.map(|d| forwarder::reader_control::ClockInfo {
+                            reader_clock: reader_iso,
+                            drift_ms: d,
+                        });
+                        bg_status
+                            .update_reader_info_unless_disconnected(&bg_reader_ip, info)
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(reader_ip = %bg_reader_ip, error = %e, "set_date_time ok but verify failed during clock sync");
+                    }
+                }
+            });
+            // Return success immediately
+            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                request_id,
+                reader_ip,
+                success: true,
+                error: None,
+                reader_info: None,
+            });
+            session.send_message(&response).await
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Uplink task: WebSocket connect → replay → send batches → receive acks
 // ---------------------------------------------------------------------------
 
@@ -1038,6 +1565,17 @@ async fn run_uplink(
                             break 'replay;
                         }
                     }
+                    Ok(SendBatchResult::ReaderControl(req)) => {
+                        let reader_ip = req.reader_ip.clone();
+                        let action = format!("{:?}", req.action);
+                        if let Err(e) =
+                            handle_reader_control_message(&mut session, req, &status).await
+                        {
+                            warn!(reader_ip = %reader_ip, action = %action, error = %e, "reader control handler failed during replay");
+                            reconnect_after_replay = true;
+                            break 'replay;
+                        }
+                    }
                     Err(e) => {
                         logger.log_at(
                             UiLogLevel::Warn,
@@ -1058,11 +1596,78 @@ async fn run_uplink(
 
         // Main uplink loop: periodically send new events and wait for acks
         let flush_interval = Duration::from_millis(cfg.uplink.batch_flush_ms);
+        let mut ui_rx = ui_tx.subscribe();
 
         'uplink: loop {
             if *shutdown_rx.borrow() {
                 info!("uplink task stopping (shutdown)");
                 return;
+            }
+
+            // Drain UI events and forward reader state changes upstream
+            loop {
+                match ui_rx.try_recv() {
+                    Ok(ForwarderUiEvent::ReaderUpdated { ip, state, .. }) => {
+                        let proto_state = match state {
+                            forwarder::ui_events::ReaderConnectionState::Connected => {
+                                rt_protocol::ReaderConnectionState::Connected
+                            }
+                            forwarder::ui_events::ReaderConnectionState::Connecting => {
+                                rt_protocol::ReaderConnectionState::Connecting
+                            }
+                            forwarder::ui_events::ReaderConnectionState::Disconnected => {
+                                rt_protocol::ReaderConnectionState::Disconnected
+                            }
+                        };
+                        let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
+                            reader_ip: ip.clone(),
+                            state: proto_state,
+                            reader_info: None,
+                        });
+                        if let Err(e) = session.send_message(&msg).await {
+                            warn!(error = %e, reader_ip = %ip, "failed to send ReaderInfoUpdate upstream");
+                            break 'uplink;
+                        }
+                    }
+                    Ok(ForwarderUiEvent::ReaderInfoUpdated { ip, info }) => {
+                        let proto_state = {
+                            let ss = subsystem.lock().await;
+                            ss.reader_connection_state(&ip)
+                                .map(|s| match s {
+                                    ReaderConnectionState::Connected => {
+                                        rt_protocol::ReaderConnectionState::Connected
+                                    }
+                                    ReaderConnectionState::Connecting => {
+                                        rt_protocol::ReaderConnectionState::Connecting
+                                    }
+                                    ReaderConnectionState::Disconnected => {
+                                        rt_protocol::ReaderConnectionState::Disconnected
+                                    }
+                                })
+                                .unwrap_or(rt_protocol::ReaderConnectionState::Connected)
+                        };
+                        let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
+                            reader_ip: ip.clone(),
+                            state: proto_state,
+                            reader_info: Some(to_protocol_reader_info(&info)),
+                        });
+                        if let Err(e) = session.send_message(&msg).await {
+                            warn!(error = %e, reader_ip = %ip, "failed to send ReaderInfoUpdate upstream");
+                            break 'uplink;
+                        }
+                    }
+                    Ok(_) => {
+                        // Ignore other UI events (StatusChanged, LogEntry, etc.)
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                        warn!(
+                            skipped = n,
+                            "ui_rx lagged; some reader updates were not forwarded"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break 'uplink,
+                }
             }
 
             // Wait for flush interval, shutdown, reader status updates, or incoming config messages
@@ -1099,6 +1704,20 @@ async fn run_uplink(
                             logger.log("restart requested by server");
                             if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await {
                                 warn!(error = %e, "restart handler failed during idle");
+                                break 'uplink;
+                            }
+                            continue 'uplink;
+                        }
+                        Ok(WsMessage::ReaderControlRequest(req)) => {
+                            logger.log(format!("reader control request: {:?} for {}", req.action, req.reader_ip));
+                            let reader_ip = req.reader_ip.clone();
+                            let action = format!("{:?}", req.action);
+                            if let Err(e) = handle_reader_control_message(
+                                &mut session,
+                                req,
+                                &status,
+                            ).await {
+                                warn!(reader_ip = %reader_ip, action = %action, error = %e, "reader control handler failed during idle");
                                 break 'uplink;
                             }
                             continue 'uplink;
@@ -1223,6 +1842,15 @@ async fn run_uplink(
                     if let Err(e) = handle_restart_message(&mut session, req, &restart_signal).await
                     {
                         warn!(error = %e, "restart handler failed");
+                        break 'uplink;
+                    }
+                }
+                Ok(SendBatchResult::ReaderControl(req)) => {
+                    let reader_ip = req.reader_ip.clone();
+                    let action = format!("{:?}", req.action);
+                    if let Err(e) = handle_reader_control_message(&mut session, req, &status).await
+                    {
+                        warn!(reader_ip = %reader_ip, action = %action, error = %e, "reader control handler failed");
                         break 'uplink;
                     }
                 }

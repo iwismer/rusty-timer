@@ -111,6 +111,50 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             post(http::forwarder_config::restart_forwarder),
         )
         .route(
+            "/api/v1/reader-states",
+            get(http::reader_control::get_all_reader_states),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/info",
+            get(http::reader_control::get_reader_info),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/sync-clock",
+            post(http::reader_control::sync_clock),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/read-mode",
+            axum::routing::put(http::reader_control::set_read_mode),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/tto",
+            axum::routing::put(http::reader_control::set_tto),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/recording",
+            axum::routing::put(http::reader_control::set_recording),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/clear-records",
+            post(http::reader_control::clear_records),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/start-download",
+            post(http::reader_control::start_download),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/stop-download",
+            post(http::reader_control::stop_download),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/refresh",
+            post(http::reader_control::refresh),
+        )
+        .route(
+            "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/reconnect",
+            post(http::reader_control::reconnect),
+        )
+        .route(
             "/api/v1/forwarder-races",
             get(http::forwarder_races::list_forwarder_races),
         )
