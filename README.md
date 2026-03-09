@@ -74,6 +74,15 @@ Run the full stack locally with simulated readers — no hardware needed:
 
 **Prerequisites:** [Rust](https://rustup.rs/) 1.93.1 (via `rust-toolchain.toml`), [Docker](https://www.docker.com/), [Node.js](https://nodejs.org/) 24.x, Python 3.11+ with [`uv`](https://docs.astral.sh/uv/), and `tmux`.
 
+**Just want to see the server?** Run it with Docker — no Rust needed:
+
+```bash
+docker compose -f deploy/quickstart/docker-compose.yml up -d
+# Open http://localhost:8080
+```
+
+See [deploy/quickstart/](deploy/quickstart/) for details.
+
 ```bash
 uv run scripts/dev.py
 ```
@@ -87,6 +96,7 @@ all component URLs and options.
 
 | Component | Guide |
 |-----------|-------|
+| Quickstart (Docker, no build) | [deploy/quickstart/](deploy/quickstart/) |
 | Server (Docker) | [deploy/server/](deploy/server/) |
 | Forwarder on Raspberry Pi | [deploy/sbc/](deploy/sbc/) |
 | Race-day operations | [docs/runbooks/race-day-operator-guide.md](docs/runbooks/race-day-operator-guide.md) |

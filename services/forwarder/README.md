@@ -74,6 +74,21 @@ At least one `[[readers]]` entry is required.
 | `enabled`            | `bool`   | No       | `true`                           | Set to `false` to skip this reader.                        |
 | `local_fallback_port`| `u16`    | No       | `10000 + last_octet` of reader IP | Local TCP port for the fanout listener for this reader.   |
 
+#### Read types
+
+IPICO readers can operate in two modes:
+
+- **`raw`** (streaming) — The reader sends every chip detection as it
+  happens. This is the default and recommended mode for race timing.
+  Each pass of a chip past the antenna generates a separate read.
+
+- **`fsls`** (first-seen / last-seen) — The reader batches detections
+  and sends only the first and last time a chip was seen. Useful for
+  reducing data volume in high-traffic areas, but adds latency.
+
+Set the mode per reader in the `[[readers]]` config block. The read type
+must match the mode configured on the physical IPICO reader.
+
 ## Usage
 
 ```bash

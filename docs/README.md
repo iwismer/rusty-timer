@@ -20,6 +20,10 @@
 - **[Receiver operations](runbooks/receiver-operations.md)** — Subscriptions, mode switching, troubleshooting
 - **[Announcer](announcer.md)** — Live public finisher display: setup, configuration, race-day usage
 
+## Reference
+
+- **[File formats (.ppl, .bibchip)](file-formats.md)** — Participant and chip assignment file formats for race data upload
+
 ## Service Reference
 
 Each service has its own README with configuration reference and build instructions:
