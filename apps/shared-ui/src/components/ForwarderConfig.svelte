@@ -543,6 +543,7 @@
                         />
                       </span>
                     </td>
+                  <!-- Safe: guarded by {#if reader.is_range} above; Svelte doesn't narrow in {:else} -->
                   {:else}
                     <td class="py-1.5 px-2" colspan="2">
                       <input

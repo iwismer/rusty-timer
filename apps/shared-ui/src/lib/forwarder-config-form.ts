@@ -1,4 +1,5 @@
 interface ReaderBase {
+  /** May be `number` at runtime due to Svelte `<input type="number">` binding. Use `asTrimmedString` before string operations. */
   port: string;
   enabled: boolean;
 }
