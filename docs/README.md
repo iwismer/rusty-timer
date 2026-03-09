@@ -4,6 +4,7 @@
 
 - **[Quick demo](../scripts/README.md)** — Run the full stack locally with `dev.py` (no hardware needed)
 - **[Local testing guide](local-testing.md)** — Step-by-step manual setup of each component
+- **[Receiver quickstart (Windows)](receiver-quickstart.md)** — Download, configure, and connect the receiver on Windows
 - **[Contributing](../CONTRIBUTING.md)** — Building from source, running tests, code quality
 
 ## Deployment
