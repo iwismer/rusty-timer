@@ -749,21 +749,7 @@ mod tests {
 
     /// Helper to build a minimal `ReaderScenarioConfig` with defaults.
     fn base_config() -> ReaderScenarioConfig {
-        ReaderScenarioConfig {
-            ip: "192.168.1.100".to_string(),
-            port: 10000,
-            read_type: "raw".to_string(),
-            chip_ids: vec![1000],
-            events_per_second: 10,
-            total_events: 100,
-            start_delay_ms: 0,
-            faults: vec![],
-            initial_read_mode: None,
-            initial_tto_enabled: None,
-            initial_recording: None,
-            stored_reads: None,
-            clock_offset_ms: None,
-        }
+        ReaderScenarioConfig::default()
     }
 
     #[test]
