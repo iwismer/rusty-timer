@@ -105,6 +105,30 @@ describe("parseTarget", () => {
       port: "9999",
     });
   });
+
+  it("treats trailing dash as single IP (not range)", () => {
+    expect(parseTarget("192.168.0.50-:10000")).toEqual({
+      is_range: false,
+      ip: "192.168.0.50-",
+      port: "10000",
+    });
+  });
+
+  it("treats dash in wrong octet position as single IP", () => {
+    expect(parseTarget("192.168.0-50:10000")).toEqual({
+      is_range: false,
+      ip: "192.168.0-50",
+      port: "10000",
+    });
+  });
+
+  it("treats double-dash as single IP", () => {
+    expect(parseTarget("192.168.0.50--160:10000")).toEqual({
+      is_range: false,
+      ip: "192.168.0.50--160",
+      port: "10000",
+    });
+  });
 });
 
 describe("buildTarget", () => {
@@ -262,6 +286,32 @@ describe("fromConfig", () => {
       expect(r.local_fallback_port).toBe("");
     }
   });
+
+  it("handles mixed single and range readers in same config", () => {
+    const form = fromConfig({
+      readers: [
+        { target: "192.168.0.50:10000", enabled: true, local_fallback_port: 10050 },
+        { target: "192.168.0.150-160:10000", enabled: false },
+        { target: "10.0.0.1:9999", enabled: true },
+      ],
+    });
+    expect(form.readers).toHaveLength(3);
+    expect(form.readers[0].is_range).toBe(false);
+    expect(form.readers[1].is_range).toBe(true);
+    expect(form.readers[2].is_range).toBe(false);
+    if (!form.readers[0].is_range) {
+      expect(form.readers[0].ip).toBe("192.168.0.50");
+      expect(form.readers[0].local_fallback_port).toBe("10050");
+    }
+    if (form.readers[1].is_range) {
+      expect(form.readers[1].ip_start).toBe("192.168.0.150");
+      expect(form.readers[1].ip_end_octet).toBe("160");
+    }
+    if (!form.readers[2].is_range) {
+      expect(form.readers[2].ip).toBe("10.0.0.1");
+      expect(form.readers[2].port).toBe("9999");
+    }
+  });
 });
 
 describe("payload builders", () => {
@@ -319,6 +369,22 @@ describe("payload builders", () => {
         },
       ],
     });
+  });
+
+  it("serializes reader with empty IP as null target", () => {
+    const form = {
+      readers: [makeReader({ ip: "", port: "10000" })],
+    } as ForwarderConfigFormState;
+    const payload = toReadersPayload(form);
+    expect(payload.readers[0].target).toBeNull();
+  });
+
+  it("serializes reader with empty port as null target", () => {
+    const form = {
+      readers: [makeReader({ ip: "192.168.0.1", port: "" })],
+    } as ForwarderConfigFormState;
+    const payload = toReadersPayload(form);
+    expect(payload.readers[0].target).toBeNull();
   });
 
   it("serializes control allow_power_actions boolean", () => {
