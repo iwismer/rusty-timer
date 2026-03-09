@@ -312,8 +312,8 @@ pub fn generate_download_reads(state: &mut EmulatedReaderState, max_count: u32) 
         state.download_progress += 1;
     }
 
-    // Decrement stored reads in one shot — this also flips storage_state
-    // to Empty when reaching zero, fixing the drift bug.
+    // Decrement stored reads in one shot — ensures storage_state stays
+    // in sync with stored_reads (flips to Empty when reaching zero).
     state.decrement_stored_reads(count);
 
     reads

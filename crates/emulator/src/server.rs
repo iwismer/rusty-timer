@@ -234,7 +234,9 @@ async fn handle_client(
 /// Read loop: reads \r\n-delimited lines, dispatches `ab`-prefixed control
 /// frames, and ignores everything else.
 ///
-/// Lines longer than `MAX_LINE_LEN` are discarded to bound memory usage.
+/// Lines longer than `MAX_LINE_LEN` are discarded to avoid processing
+/// oversized input. Note: `read_line` reads the full line into memory
+/// before the length check; this does not bound allocation.
 async fn client_read_loop(
     read_half: tokio::net::tcp::OwnedReadHalf,
     state: Arc<Mutex<EmulatedReaderState>>,
