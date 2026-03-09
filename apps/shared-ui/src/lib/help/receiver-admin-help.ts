@@ -8,12 +8,12 @@ export const RECEIVER_ADMIN_HELP = {
       stream_cursor: {
         label: "Stream Cursor",
         summary: "Current read position in the stream (epoch + sequence number).",
-        detailHtml: "Each stream has a cursor that tracks the last successfully received read. When the receiver reconnects, it resumes from this position. Resetting a cursor causes the stream to replay all data from the beginning on the next connection. This is safe to do: reads are idempotent and your timing software should handle duplicates.",
+        detailHtml: "Each stream has a cursor that tracks the last successfully received read. When the receiver reconnects, it resumes from this position.<br><br>Resetting a cursor causes the stream to replay all data from the beginning on the next connection. This is safe to do — your timing software should handle duplicate reads.",
       },
     },
     tips: [
       "Reset a cursor when you need to replay all historical data for a specific stream.",
-      "Resetting a cursor does NOT affect the server. It only changes where the receiver starts reading on next connect.",
+      "Resetting a cursor only changes where the receiver starts reading on the next connection. It does not affect the server.",
       "After resetting, the receiver will re-deliver all reads from the start. Your timing software may see duplicate reads.",
       "Try cursor reset before more drastic actions like purge subscriptions or factory reset.",
     ],
@@ -43,12 +43,12 @@ export const RECEIVER_ADMIN_HELP = {
   },
   port_overrides: {
     title: "Local Port Overrides",
-    overview: "Customize the local TCP port used to forward reads from each stream to your timing software.",
+    overview: "Customize the local port used to forward reads from each stream to your timing software.",
     fields: {
       port_override: {
         label: "Port Override",
         summary: "Custom local port for forwarding reads from this stream.",
-        detailHtml: "By default, each stream's reads are forwarded to a local port calculated as 10000 + the last octet of the reader's IP address (e.g. reader at 192.168.0.50 uses port 10050). Set a port override to use a different port. Leave empty to use the default. Common timing software ports: RunScore typically uses 10000-10010, many IPICO setups use the reader's native port mapping.",
+        detailHtml: "By default, each stream's reads are forwarded to a local port calculated as <strong>10000 + the last octet of the reader's IP address</strong> (e.g. reader at 192.168.0.50 uses port 10050). Set a port override to use a different port. Leave empty to use the default.",
         default: "10000 + last IP octet",
         range: "1-65535",
         recommended: "Use the default unless your timing software requires a specific port.",
@@ -98,13 +98,10 @@ export const RECEIVER_ADMIN_HELP = {
     overview: "Erase ALL local data and return the receiver to a fresh state. This is irreversible.",
     fields: {},
     tips: [
-      "BEFORE factory reset, try these less destructive alternatives first:",
-      "1. Cursor Reset: if you just need to replay data from the beginning.",
-      "2. Purge Subscriptions: if streams are in a bad state and you want a clean start.",
-      "3. Reset Profile: if you just need to change the server connection.",
+      "Before factory reset, try these less destructive alternatives first:<ul><li><strong>Cursor Reset</strong> — if you just need to replay data from the beginning.</li><li><strong>Purge Subscriptions</strong> — if streams are in a bad state and you want a clean start.</li><li><strong>Reset Profile</strong> — if you just need to change the server connection.</li></ul>",
       "Factory reset deletes: profile (server URL, token, ID), all subscriptions, all cursors, all epoch overrides, and all port overrides.",
       "After factory reset, the receiver must be fully reconfigured from scratch.",
-      "This action CANNOT be undone. All local state is permanently deleted.",
+      "This action <strong>cannot be undone</strong>. All local state is permanently deleted.",
       "The receiver will disconnect immediately and return to the initial setup state.",
     ],
     seeAlso: [
