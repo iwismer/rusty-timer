@@ -9,13 +9,12 @@ single development machine and exercising the end-to-end flow manually.
 
 | Tool | Required version | Notes |
 |------|-----------------|-------|
-| Rust | 1.89.0 | Managed by `rust-toolchain.toml`; `rustup` picks it up automatically |
+| Rust | 1.93.1 | Managed by `rust-toolchain.toml`; `rustup` picks it up automatically |
 | Docker | any recent | Used to run Postgres |
 | Node.js + npm | 24.x + 11.x | Required for frontend apps; use `nvm use` from repo root |
 | jq | optional | Used by the pre-commit hook for JSON formatting checks |
 
-All Rust binaries are built from the workspace root
-`/Users/iwismer/Documents/rusty-timer` (or wherever you cloned the repo).
+All Rust binaries are built from the repository root (wherever you cloned the repo).
 
 ---
 
@@ -134,7 +133,6 @@ batch_max_events = 50
 
 [[readers]]
 target               = "127.0.0.1:10001"
-read_type            = "raw"
 enabled              = true
 # local_fallback_port is optional; defaults to 10000 + last octet of reader IP
 ```
@@ -189,6 +187,9 @@ cargo run --release -p emulator -- --port 10001 --delay 2000 --type raw
 This matches the `target = "127.0.0.1:10001"` entry in the example config above. The
 forwarder connects to the emulator; start the emulator before the forwarder (or let
 the forwarder retry on reconnect).
+
+The forwarder TOML does not have a `read_type` field. `raw` vs `fsls` comes from the
+reader or emulator output, so choose that mode on the device or emulator itself.
 
 ---
 

@@ -90,9 +90,11 @@ token_file = "/etc/rusty-timer/forwarder.token"
 
 [[readers]]
 target = "192.168.1.100"
-read_type = "raw"
 enabled = true
 ```
+
+The forwarder TOML does not support a `read_type` field. `raw` vs `fsls` is determined
+by the physical reader's operating mode.
 
 ### Token file
 

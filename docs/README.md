@@ -2,7 +2,9 @@
 
 ## Getting Started
 
-- **[Quick demo](../scripts/README.md)** — Run the full stack locally with `dev.py` (no hardware needed)
+- **[Quickstart (Docker, no build)](../deploy/quickstart/)** — Evaluate the server in 5 minutes
+- **[Quick demo (full dev stack)](../scripts/README.md)** — Run everything locally with `dev.py` (simulated readers, no hardware)
+- **[Receiver quickstart (Windows)](receiver-quickstart.md)** — Download, configure, and connect the receiver on Windows
 - **[Local testing guide](local-testing.md)** — Step-by-step manual setup of each component
 - **[Contributing](../CONTRIBUTING.md)** — Building from source, running tests, code quality
 
@@ -11,6 +13,7 @@
 - **[Server deployment](../deploy/server/)** — Docker Compose setup, reverse proxy, token provisioning
 - **[Forwarder on Raspberry Pi](../deploy/sbc/)** — SD card flashing, cloud-init, setup script
 - **[Systemd services](../deploy/systemd/)** — Service unit files for forwarder and receiver
+- **[Network architecture](network-architecture.md)** — Ports, firewall rules, and production network layout
 
 ## Operations Runbooks
 
@@ -18,6 +21,11 @@
 - **[Server operations](runbooks/server-operations.md)** — Monitoring, recovery, epoch reset, exports
 - **[Forwarder operations](runbooks/forwarder-operations.md)** — Configuration, health checks, journal management
 - **[Receiver operations](runbooks/receiver-operations.md)** — Subscriptions, mode switching, troubleshooting
+- **[Announcer](announcer.md)** — Live public finisher display: setup, configuration, race-day usage
+
+## Reference
+
+- **[File formats (.ppl, .bibchip)](file-formats.md)** — Participant and chip assignment file formats for race data upload
 
 ## Service Reference
 

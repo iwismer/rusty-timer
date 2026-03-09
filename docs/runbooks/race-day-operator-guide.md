@@ -35,6 +35,7 @@ Assumptions:
   - Open the race detail page.
   - Upload the `.ppl` file.
   - Upload the `.bibchip` file.
+  - See [file format reference](../file-formats.md) for the expected .ppl and .bibchip formats.
   - Check participant/chip counts and review unmatched chips.
   - Note: uploading participants or chips replaces the existing participants or chips for that race.
 

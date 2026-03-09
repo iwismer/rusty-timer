@@ -115,6 +115,24 @@ Default dev tokens:
 
 If these collide, startup stops with an error.
 
+## Dev Stack URLs
+
+After `dev.py` starts, these are the addresses for each component:
+
+| Component | URL | Notes |
+|-----------|-----|-------|
+| Server dashboard | `http://localhost:8080` | Streams, races, exports. Only available if dashboard was built (skipped with `--no-build` unless `apps/server-ui/build` already exists). |
+| Announcer config | `http://localhost:8080/announcer-config` | Enable/configure the live announcer |
+| Announcer screen | `http://localhost:8080/announcer` | Public-facing finisher display |
+| Server API | `http://localhost:8080/api/v1/...` | REST API for streams, races, tokens |
+| Server health | `http://localhost:8080/healthz` | Liveness check |
+| Receiver control API | `http://localhost:9090/api/v1/status` | Receiver status and subscriptions |
+| Forwarder status | `http://localhost:8081/healthz` | Forwarder health check (when running manually; dev.py uses default port) |
+
+The receiver and forwarder UIs are available at their respective status HTTP addresses
+when built with `--features embed-ui`. In the dev.py stack, the forwarder embeds its UI
+by default.
+
 ## Bibchip/PPL Behavior
 
 - `--bibchip` and `--ppl` files must exist or startup exits early.
