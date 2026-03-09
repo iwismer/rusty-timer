@@ -212,10 +212,15 @@ async fn run_reader(
                     ),
                 );
                 mark_reader_disconnected(&status, &stream_key).await;
-                let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                    reader_ip: stream_key.clone(),
-                    connected: false,
-                });
+                if reader_status_tx
+                    .send(rt_protocol::ReaderStatusUpdate {
+                        reader_ip: stream_key.clone(),
+                        connected: false,
+                    })
+                    .is_err()
+                {
+                    warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                }
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -239,10 +244,15 @@ async fn run_reader(
         status
             .update_reader_state(&stream_key, ReaderConnectionState::Connected)
             .await;
-        let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-            reader_ip: stream_key.clone(),
-            connected: true,
-        });
+        if reader_status_tx
+            .send(rt_protocol::ReaderStatusUpdate {
+                reader_ip: stream_key.clone(),
+                connected: true,
+            })
+            .is_err()
+        {
+            warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+        }
 
         // Initialize stream state in journal on first connect
         {
@@ -463,10 +473,15 @@ async fn run_reader(
                     )
                     .await;
                     mark_reader_disconnected(&status, &stream_key).await;
-                    let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: stream_key.clone(),
-                        connected: false,
-                    });
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Ok(0) => {
@@ -480,10 +495,15 @@ async fn run_reader(
                     )
                     .await;
                     mark_reader_disconnected(&status, &stream_key).await;
-                    let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: stream_key.clone(),
-                        connected: false,
-                    });
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Ok(_) => {}
@@ -559,10 +579,15 @@ async fn run_reader(
                         format!("reader {} journal error (epoch): {}", reader_ip, e),
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
-                    let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: stream_key.clone(),
-                        connected: false,
-                    });
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Err(JournalAppendError::NextSeq(e)) => {
@@ -571,10 +596,15 @@ async fn run_reader(
                         format!("reader {} journal error (seq): {}", reader_ip, e),
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
-                    let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: stream_key.clone(),
-                        connected: false,
-                    });
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
                 Err(JournalAppendError::Insert(e)) => {
@@ -583,10 +613,15 @@ async fn run_reader(
                         format!("reader {} journal insert failed: {}", reader_ip, e),
                     );
                     mark_reader_disconnected(&status, &stream_key).await;
-                    let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: stream_key.clone(),
-                        connected: false,
-                    });
+                    if reader_status_tx
+                        .send(rt_protocol::ReaderStatusUpdate {
+                            reader_ip: stream_key.clone(),
+                            connected: false,
+                        })
+                        .is_err()
+                    {
+                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+                    }
                     break;
                 }
             };
