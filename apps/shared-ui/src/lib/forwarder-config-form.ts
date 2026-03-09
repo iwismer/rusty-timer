@@ -26,8 +26,8 @@ export function blankRangeReader(): RangeReaderEntry {
 }
 
 type ParsedTarget =
-  | { is_range: false; ip: string; port: string }
-  | { is_range: true; ip_start: string; ip_end_octet: string; port: string };
+  | Omit<SingleReaderEntry, "enabled" | "local_fallback_port">
+  | Omit<RangeReaderEntry, "enabled">;
 
 /** Parse a target string like "192.168.0.50:10000" or "192.168.0.150-160:10000" into split fields. */
 export function parseTarget(target: string): ParsedTarget {
@@ -316,7 +316,7 @@ function isValidIpv4(ip: string): boolean {
 /** Caller must ensure ip passes isValidIpv4 first. */
 function lastOctet(ip: string): number {
   const parts = ip.split(".");
-  if (parts.length !== 4) return 0;
+  if (parts.length !== 4) throw new Error(`lastOctet called with invalid IP: ${ip}`);
   return Number(parts[3]);
 }
 
