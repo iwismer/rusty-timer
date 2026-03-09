@@ -11,7 +11,8 @@ use serde::Deserialize;
 use std::time::Duration;
 
 fn validate_reader_ip(reader_ip: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    if reader_ip.contains(':') && reader_ip.split(':').all(|part| !part.is_empty()) {
+    use std::net::SocketAddrV4;
+    if reader_ip.parse::<SocketAddrV4>().is_ok() {
         Ok(())
     } else {
         Err((
@@ -26,9 +27,9 @@ fn validate_reader_ip(reader_ip: &str) -> Result<(), (StatusCode, Json<serde_jso
 
 /// Timeout for reader control request/response round trips.
 ///
-/// ClearRecords, StartDownload, and SyncClock are fire-and-forget or
-/// background tasks on the forwarder, so this timeout covers only
-/// short command-response cycles (GetInfo, SetReadMode, etc.).
+/// ClearRecords and StartDownload are fire-and-forget (202 Accepted);
+/// all other actions (GetInfo, SyncClock, SetReadMode, etc.) use this
+/// timeout for the full request-response cycle through the forwarder.
 const READER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Proxy an HTTP reader-control request to a connected forwarder via its
@@ -51,6 +52,7 @@ async fn send_reader_control(
         Some(tx) => tx.clone(),
         None => return Err(not_found("forwarder not connected")),
     };
+    // Drop read lock before awaiting to avoid holding it across send/recv.
     drop(senders);
 
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -382,5 +384,25 @@ mod tests {
     fn validate_reader_ip_rejects_leading_colon() {
         let err = validate_reader_ip(":10000").unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_reader_ip_accepts_ipv4_various_ports() {
+        assert!(validate_reader_ip("192.168.1.1:80").is_ok());
+        assert!(validate_reader_ip("0.0.0.0:1").is_ok());
+        assert!(validate_reader_ip("255.255.255.255:65535").is_ok());
+    }
+
+    #[test]
+    fn validate_reader_ip_rejects_non_ip_strings() {
+        assert!(validate_reader_ip("foo:bar").is_err());
+        assert!(validate_reader_ip("hello:world").is_err());
+        assert!(validate_reader_ip("10.0.0.1:abc").is_err());
+        assert!(validate_reader_ip("10.0.0.1:99999").is_err());
+    }
+
+    #[test]
+    fn validate_reader_ip_rejects_ipv6() {
+        assert!(validate_reader_ip("[::1]:8080").is_err());
     }
 }

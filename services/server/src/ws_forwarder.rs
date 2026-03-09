@@ -619,12 +619,20 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                         let msg = WsMessage::ConfigGetRequest(rt_protocol::ConfigGetRequest {
                             request_id: request_id.clone(),
                         });
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                                pending_config_gets.insert(request_id, (Instant::now(), reply));
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize config get request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(
+                                    format!("failed to serialize config get request: {}", e),
+                                ));
+                            }
                         }
-                        pending_config_gets.insert(request_id, (Instant::now(), reply));
                     }
                     ForwarderCommand::ConfigSet { request_id, section, payload, reply } => {
                         let msg = WsMessage::ConfigSetRequest(rt_protocol::ConfigSetRequest {
@@ -632,23 +640,39 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             section,
                             payload,
                         });
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                                pending_config_sets.insert(request_id, (Instant::now(), reply));
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize config set request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(
+                                    format!("failed to serialize config set request: {}", e),
+                                ));
+                            }
                         }
-                        pending_config_sets.insert(request_id, (Instant::now(), reply));
                     }
                     ForwarderCommand::Restart { request_id, reply } => {
                         let msg = WsMessage::RestartRequest(rt_protocol::RestartRequest {
                             request_id: request_id.clone(),
                         });
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                                pending_restarts.insert(request_id, (Instant::now(), reply));
+                            }
+                            Err(e) => {
+                                error!(device_id = %device_id, error = %e, "failed to serialize restart request");
+                                let _ = reply.send(ForwarderProxyReply::InternalError(
+                                    format!("failed to serialize restart request: {}", e),
+                                ));
+                            }
                         }
-                        pending_restarts.insert(request_id, (Instant::now(), reply));
                     }
                     ForwarderCommand::ReaderControl { request_id, reader_ip, action, reply } => {
                         let msg = WsMessage::ReaderControlRequest(rt_protocol::ReaderControlRequest {
@@ -660,7 +684,9 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Ok(json) => {
                                 if let Err(e) = socket.send(Message::Text(json.into())).await {
                                     warn!(error = %e, "failed to send reader control request");
-                                    let _ = reply.send(ForwarderProxyReply::Timeout);
+                                    let _ = reply.send(ForwarderProxyReply::InternalError(
+                                        format!("failed to send to forwarder: {}", e),
+                                    ));
                                 } else {
                                     pending_reader_controls.insert(request_id, (Instant::now(), reply));
                                 }
