@@ -200,6 +200,11 @@ impl SubsystemStatus {
     pub fn set_restart_needed(&mut self) {
         self.restart_needed = true;
     }
+
+    /// Return the connection state for a given reader IP, if tracked.
+    pub fn reader_connection_state(&self, reader_ip: &str) -> Option<ReaderConnectionState> {
+        self.readers.get(reader_ip).map(|r| r.state.clone())
+    }
 }
 
 // ---------------------------------------------------------------------------

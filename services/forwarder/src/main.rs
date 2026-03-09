@@ -1145,117 +1145,110 @@ async fn handle_reader_control_message(
         }
 
         ReaderControlAction::SyncClock => {
-            const SYNC_DELAY_MS: u64 = 500;
+            // Spawn background task — clock sync takes 3-5+ seconds (RTT probes,
+            // pre-set wait, set_date_time, verify wait, verification read).
+            let bg_client = client.clone();
+            let bg_status = status.clone();
+            let bg_reader_ip = reader_ip.clone();
+            tokio::spawn(async move {
+                const SYNC_DELAY_MS: u64 = 500;
 
-            // Step 1: estimate one-way latency via RTT probes
-            let mut rtts = Vec::with_capacity(3);
-            for i in 0..3usize {
-                let start = std::time::Instant::now();
-                match client.get_date_time().await {
-                    Ok(_) => rtts.push(start.elapsed()),
-                    Err(e) => warn!(probe = i + 1, error = %e, "RTT probe failed"),
+                // Step 1: estimate one-way latency via RTT probes
+                let mut rtts = Vec::with_capacity(3);
+                for i in 0..3usize {
+                    let start = std::time::Instant::now();
+                    match bg_client.get_date_time().await {
+                        Ok(_) => rtts.push(start.elapsed()),
+                        Err(e) => warn!(probe = i + 1, error = %e, "RTT probe failed"),
+                    }
                 }
-            }
-            if rtts.is_empty() {
-                let response =
-                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                        request_id,
-                        reader_ip,
-                        success: false,
-                        error: Some(
-                            "all RTT probes failed; cannot estimate latency for clock sync"
-                                .to_owned(),
-                        ),
-                        reader_info: None,
-                    });
-                return session.send_message(&response).await;
-            }
-            rtts.sort();
-            let one_way = rtts[rtts.len() / 2] / 2;
+                if rtts.is_empty() {
+                    warn!(reader_ip = %bg_reader_ip, "all RTT probes failed; cannot estimate latency for clock sync");
+                    return;
+                }
+                rtts.sort();
+                let one_way = rtts[rtts.len() / 2] / 2;
 
-            // Step 2: compute sync timing
-            use chrono::{Datelike, Timelike};
-            let wall_now = chrono::Local::now();
-            let (target_boundary, pre_set_wait) =
-                forwarder::status_http::compute_sync_timing(wall_now, one_way, SYNC_DELAY_MS);
-            if !pre_set_wait.is_zero() {
-                sleep(pre_set_wait).await;
-            }
+                // Step 2: compute sync timing
+                use chrono::{Datelike, Timelike};
+                let wall_now = chrono::Local::now();
+                let (target_boundary, pre_set_wait) =
+                    forwarder::status_http::compute_sync_timing(wall_now, one_way, SYNC_DELAY_MS);
+                if !pre_set_wait.is_zero() {
+                    sleep(pre_set_wait).await;
+                }
 
-            let year = (target_boundary.year() % 100) as u8;
-            let month = target_boundary.month() as u8;
-            let day = target_boundary.day() as u8;
-            let dow = target_boundary.weekday().num_days_from_sunday() as u8;
-            let hour = target_boundary.hour() as u8;
-            let minute = target_boundary.minute() as u8;
-            let second = target_boundary.second() as u8;
+                let year = (target_boundary.year() % 100) as u8;
+                let month = target_boundary.month() as u8;
+                let day = target_boundary.day() as u8;
+                let dow = target_boundary.weekday().num_days_from_sunday() as u8;
+                let hour = target_boundary.hour() as u8;
+                let minute = target_boundary.minute() as u8;
+                let second = target_boundary.second() as u8;
 
-            if let Err(e) = client
-                .set_date_time(year, month, day, dow, hour, minute, second)
-                .await
-            {
-                // Clear stale clock info
-                let mut info = get_cached_info(status, &reader_ip).await;
-                info.clock = None;
-                update_info(status, &reader_ip, info).await;
-                let response =
-                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                        request_id,
-                        reader_ip,
-                        success: false,
-                        error: Some(e.to_string()),
-                        reader_info: None,
-                    });
-                return session.send_message(&response).await;
-            }
+                if let Err(e) = bg_client
+                    .set_date_time(year, month, day, dow, hour, minute, second)
+                    .await
+                {
+                    // Clear stale clock info
+                    let mut info = bg_status
+                        .get_reader_info(&bg_reader_ip)
+                        .await
+                        .unwrap_or_default();
+                    info.clock = None;
+                    bg_status
+                        .update_reader_info_unless_disconnected(&bg_reader_ip, info)
+                        .await;
+                    warn!(reader_ip = %bg_reader_ip, error = %e, "set_date_time failed during clock sync");
+                    return;
+                }
 
-            // Step 3: wait for sync to complete, then verify
-            let verify_wait = std::time::Duration::from_millis(SYNC_DELAY_MS) + one_way;
-            sleep(verify_wait).await;
+                // Step 3: wait for sync to complete, then verify
+                let verify_wait = std::time::Duration::from_millis(SYNC_DELAY_MS) + one_way;
+                sleep(verify_wait).await;
 
-            match client.get_date_time().await {
-                Ok(dt) => {
-                    let reader_iso = dt.to_iso_string();
-                    let verify_now = chrono::Local::now();
-                    let drift_ms =
-                        chrono::NaiveDateTime::parse_from_str(&reader_iso, "%Y-%m-%dT%H:%M:%S%.3f")
-                            .ok()
-                            .map(|reader_naive| {
-                                verify_now
-                                    .naive_local()
-                                    .signed_duration_since(reader_naive)
-                                    .num_milliseconds()
-                            });
-
-                    let mut info = get_cached_info(status, &reader_ip).await;
-                    info.clock = drift_ms.map(|d| forwarder::reader_control::ClockInfo {
-                        reader_clock: reader_iso,
-                        drift_ms: d,
-                    });
-                    update_info(status, &reader_ip, info.clone()).await;
-
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: true,
-                            error: None,
-                            reader_info: Some(to_protocol_reader_info(&info)),
+                match bg_client.get_date_time().await {
+                    Ok(dt) => {
+                        let reader_iso = dt.to_iso_string();
+                        let verify_now = chrono::Local::now();
+                        let drift_ms = chrono::NaiveDateTime::parse_from_str(
+                            &reader_iso,
+                            "%Y-%m-%dT%H:%M:%S%.3f",
+                        )
+                        .ok()
+                        .map(|reader_naive| {
+                            verify_now
+                                .naive_local()
+                                .signed_duration_since(reader_naive)
+                                .num_milliseconds()
                         });
-                    session.send_message(&response).await
-                }
-                Err(e) => {
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: false,
-                            error: Some(format!("set_date_time ok but verify failed: {}", e)),
-                            reader_info: None,
+
+                        let mut info = bg_status
+                            .get_reader_info(&bg_reader_ip)
+                            .await
+                            .unwrap_or_default();
+                        info.clock = drift_ms.map(|d| forwarder::reader_control::ClockInfo {
+                            reader_clock: reader_iso,
+                            drift_ms: d,
                         });
-                    session.send_message(&response).await
+                        bg_status
+                            .update_reader_info_unless_disconnected(&bg_reader_ip, info)
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(reader_ip = %bg_reader_ip, error = %e, "set_date_time ok but verify failed during clock sync");
+                    }
                 }
-            }
+            });
+            // Return success immediately
+            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+                request_id,
+                reader_ip,
+                success: true,
+                error: None,
+                reader_info: None,
+            });
+            session.send_message(&response).await
         }
     }
 }
@@ -1530,9 +1523,25 @@ async fn run_uplink(
                         }
                     }
                     Ok(ForwarderUiEvent::ReaderInfoUpdated { ip, info }) => {
+                        let proto_state = {
+                            let ss = subsystem.lock().await;
+                            ss.reader_connection_state(&ip)
+                                .map(|s| match s {
+                                    ReaderConnectionState::Connected => {
+                                        rt_protocol::ReaderConnectionState::Connected
+                                    }
+                                    ReaderConnectionState::Connecting => {
+                                        rt_protocol::ReaderConnectionState::Connecting
+                                    }
+                                    ReaderConnectionState::Disconnected => {
+                                        rt_protocol::ReaderConnectionState::Disconnected
+                                    }
+                                })
+                                .unwrap_or(rt_protocol::ReaderConnectionState::Connected)
+                        };
                         let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
                             reader_ip: ip.clone(),
-                            state: rt_protocol::ReaderConnectionState::Connected,
+                            state: proto_state,
                             reader_info: Some(to_protocol_reader_info(&info)),
                         });
                         if let Err(e) = session.send_message(&msg).await {
