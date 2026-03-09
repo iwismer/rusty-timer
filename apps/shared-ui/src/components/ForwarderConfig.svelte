@@ -590,9 +590,10 @@
                       bind:value={reader.local_fallback_port}
                       min="1"
                       max="65535"
-                      placeholder="None"
+                      placeholder={reader.is_range ? "N/A" : "None"}
                       aria-label="Reader {i + 1} port override"
                       class={inputClass}
+                      disabled={reader.is_range}
                     />
                   </td>
                   <td class="py-1.5 px-2 text-right">
@@ -609,7 +610,7 @@
           </table>
         </div>
         <p class="text-xs text-text-muted mt-2">
-          Ranges expand the last octet, e.g. Start IP <code>192.168.0.150</code> with End Octet <code>160</code> connects to .150 through .160.
+          Ranges expand the last octet, e.g. Start IP <code>192.168.0.150</code> with End Octet <code>160</code> connects to .150 through .160. Local port overrides are only supported for single-reader rows.
         </p>
         <div class="flex gap-2 mt-2">
           <button

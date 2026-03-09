@@ -195,6 +195,15 @@ describe("fromConfig", () => {
     expect(form.readers[0].enabled).toBe(false);
   });
 
+  it("drops persisted local fallback overrides for range readers", () => {
+    const form = fromConfig({
+      readers: [
+        { target: "192.168.0.150-160:10000", enabled: true, local_fallback_port: 12000 },
+      ],
+    });
+    expect(form.readers[0].local_fallback_port).toBe("");
+  });
+
   it("defaults enabled to true when not specified", () => {
     const form = fromConfig({
       readers: [{ target: "10.0.0.1:10000" }],
@@ -255,6 +264,31 @@ describe("payload builders", () => {
           port: "10000",
           is_range: true,
           local_fallback_port: "",
+        }),
+      ],
+    } as ForwarderConfigFormState;
+
+    expect(toReadersPayload(form)).toEqual({
+      readers: [
+        {
+          target: "192.168.0.150-160:10000",
+          enabled: true,
+          local_fallback_port: null,
+        },
+      ],
+    });
+  });
+
+  it("serializes range readers without local port overrides", () => {
+    const form = {
+      readers: [
+        makeReader({
+          ip: "",
+          ip_start: "192.168.0.150",
+          ip_end_octet: "160",
+          port: "10000",
+          is_range: true,
+          local_fallback_port: "12000",
         }),
       ],
     } as ForwarderConfigFormState;
@@ -434,12 +468,30 @@ describe("validateReaders", () => {
     expect(validateReaders(makeForm())).toBeNull();
   });
 
+  it("accepts numeric port values produced by number inputs", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({ port: 10000 as unknown as string })],
+    }))).toBeNull();
+  });
+
   it("passes for valid range readers", () => {
     expect(validateReaders(makeForm({
       readers: [makeReader({
         ip: "",
         ip_start: "192.168.0.100",
         ip_end_octet: "110",
+        port: "10000",
+        is_range: true,
+      })],
+    }))).toBeNull();
+  });
+
+  it("accepts numeric range end octet values produced by number inputs", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({
+        ip: "",
+        ip_start: "192.168.0.100",
+        ip_end_octet: 110 as unknown as string,
         port: "10000",
         is_range: true,
       })],
@@ -496,6 +548,19 @@ describe("validateReaders", () => {
     expect(validateReaders(makeForm({
       readers: [makeReader({ local_fallback_port: "" })],
     }))).toBeNull();
+  });
+
+  it("rejects local fallback port overrides for range readers", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeReader({
+        ip: "",
+        ip_start: "192.168.0.100",
+        ip_end_octet: "110",
+        port: "10000",
+        is_range: true,
+        local_fallback_port: "12000",
+      })],
+    }))).toBe("Reader 1: local port override is not supported for ranges.");
   });
 
   it("rejects range reader with empty start IP", () => {
