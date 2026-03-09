@@ -27,6 +27,7 @@ describe("announcer config page", () => {
           display_alias: "Main Reader",
           forwarder_display_name: null,
           online: true,
+          reader_connected: true,
           stream_epoch: 1,
           created_at: "2026-02-26T10:00:00Z",
         },

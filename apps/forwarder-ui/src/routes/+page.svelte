@@ -808,30 +808,32 @@
                   label={reader.state}
                   state={readerBadgeState(reader.state)}
                 />
-                {#if reader.state !== "connected"}
+                <div class="ml-auto flex gap-2">
+                  {#if reader.state !== "connected"}
+                    <button
+                      class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      onclick={() => handleReconnect(reader.ip)}
+                      disabled={controlBusy[reader.ip]}
+                    >
+                      Reconnect
+                    </button>
+                  {/if}
                   <button
-                    class="ml-2 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                    onclick={() => handleReconnect(reader.ip)}
-                    disabled={controlBusy[reader.ip]}
+                    class="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
+                    onclick={() => toggleReaderExpand(reader.ip)}
+                    aria-expanded={expandedReader === reader.ip}
+                    aria-controls={readerDetailsId(reader.ip)}
+                    aria-label={expandedReader === reader.ip
+                      ? "Hide details"
+                      : "Show details"}
                   >
-                    Reconnect
+                    <span
+                      class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
+                      >▾</span
+                    >
+                    <span>Details</span>
                   </button>
-                {/if}
-                <button
-                  class="ml-auto inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
-                  onclick={() => toggleReaderExpand(reader.ip)}
-                  aria-expanded={expandedReader === reader.ip}
-                  aria-controls={readerDetailsId(reader.ip)}
-                  aria-label={expandedReader === reader.ip
-                    ? "Hide details"
-                    : "Show details"}
-                >
-                  <span
-                    class={`inline-block transition-transform ${expandedReader === reader.ip ? "rotate-180" : ""}`}
-                    >▾</span
-                  >
-                  <span>Details</span>
-                </button>
+                </div>
               {/snippet}
 
               <!-- Always-visible stats row -->

@@ -34,6 +34,7 @@ const stream = {
   display_alias: "Main Stream",
   forwarder_display_name: null,
   online: true,
+  reader_connected: true,
   stream_epoch: 1,
   created_at: "2026-02-22T00:00:00Z",
 };
@@ -76,10 +77,26 @@ function deferred<T>() {
 }
 
 describe("root streams page", () => {
+  beforeEach(() => {
+    resetStores();
+  });
+
   it("renders the streams heading", () => {
     render(RootPage);
 
     expect(screen.getByTestId("streams-heading")).toHaveTextContent("Streams");
+  });
+
+  it("shows warn badge when online but reader disconnected", () => {
+    replaceStreams([{ ...stream, reader_connected: false }]);
+    render(RootPage);
+
+    const badge = screen.getByTestId("stream-online-badge");
+    const inner = badge.querySelector("span");
+    expect(inner).not.toBeNull();
+    // The badge should use warn styling, not ok styling
+    expect(inner!.className).toContain("status-warn");
+    expect(inner!.className).not.toContain("status-ok");
   });
 });
 

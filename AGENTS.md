@@ -90,7 +90,7 @@ cd apps/receiver-ui && npm run format
 - Integration tests require Docker (for Postgres via testcontainers-rs)
 - Never commit without running `bash .githooks/pre-commit` first
 - The `.sqlx/` offline cache is at `services/server/.sqlx/` — regenerate with `cargo sqlx prepare` if schema changes
-- `docs/plans/` is gitignored; all other docs (runbooks, specs, guides) are tracked
+- **Never commit plan files.** `docs/plans/` is gitignored — do not `git add -f` or force-add any files there. Plans are local working documents only and must never be tracked in git.
 - Clippy is configured with `pedantic = warn` at the workspace level (see `Cargo.toml` `[workspace.lints.clippy]`)
 - **Never commit `package-lock.json` files with registry URL `"resolved"` fields** — they leak internal registry URLs and bloat diffs. Keep local workspace path `"resolved"` fields (for workspace links). The pre-commit hook handles this automatically, but if you bypass hooks, clean manually with: `jq 'walk(if type == "object" then with_entries(select(.key != "resolved" or (.value | type) != "string" or (.value | test("^https?://") | not))) else . end)' package-lock.json > /tmp/clean.json && mv /tmp/clean.json package-lock.json`
 

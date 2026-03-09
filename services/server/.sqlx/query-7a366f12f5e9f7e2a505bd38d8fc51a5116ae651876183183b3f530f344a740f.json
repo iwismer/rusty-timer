@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE streams SET reader_connected = true WHERE stream_id = $1 AND online = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7a366f12f5e9f7e2a505bd38d8fc51a5116ae651876183183b3f530f344a740f"
+}

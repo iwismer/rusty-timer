@@ -29,6 +29,7 @@ describe("server_api client", () => {
           reader_ip: "192.168.1.100:10000",
           display_alias: "Main reader",
           online: true,
+          reader_connected: true,
           stream_epoch: 1,
           created_at: "2024-01-01T00:00:00Z",
         },
@@ -62,6 +63,7 @@ describe("server_api client", () => {
       reader_ip: "192.168.1.100:10000",
       display_alias: "New Name",
       online: true,
+      reader_connected: true,
       stream_epoch: 1,
       created_at: "2024-01-01T00:00:00Z",
     };

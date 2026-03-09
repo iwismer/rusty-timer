@@ -123,6 +123,7 @@ describe("sse", () => {
       display_alias: null,
       forwarder_display_name: null,
       online: true,
+      reader_connected: true,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
     };
@@ -143,6 +144,7 @@ describe("sse", () => {
       display_alias: null,
       forwarder_display_name: null,
       online: true,
+      reader_connected: true,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
     });
@@ -190,6 +192,7 @@ describe("sse", () => {
       display_alias: null,
       forwarder_display_name: "Start Line",
       online: true,
+      reader_connected: true,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
     });
@@ -218,6 +221,7 @@ describe("sse", () => {
       display_alias: null,
       forwarder_display_name: "Start Line",
       online: true,
+      reader_connected: true,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
     });
@@ -406,6 +410,7 @@ describe("sse", () => {
       display_alias: null,
       forwarder_display_name: null,
       online: true,
+      reader_connected: true,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
     };
@@ -451,6 +456,7 @@ describe("sse", () => {
       display_alias: null,
       forwarder_display_name: null,
       online: false,
+      reader_connected: false,
       stream_epoch: 1,
       created_at: "2026-01-01T00:00:00Z",
     };

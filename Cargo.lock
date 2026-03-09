@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "forwarder"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "receiver"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "axum",
  "bytes",
@@ -2525,6 +2525,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -2977,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

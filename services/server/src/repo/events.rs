@@ -184,19 +184,60 @@ pub async fn fetch_stream_ids_by_forwarder(
     Ok(rows)
 }
 
+/// Set the online status for a stream. When setting to `false`, also clears
+/// `reader_connected` to maintain the invariant: `!online => !reader_connected`.
 pub async fn set_stream_online(
     pool: &PgPool,
     stream_id: Uuid,
     online: bool,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        "UPDATE streams SET online = $1 WHERE stream_id = $2",
-        online,
-        stream_id
-    )
-    .execute(pool)
-    .await?;
+    if online {
+        sqlx::query!(
+            "UPDATE streams SET online = $1 WHERE stream_id = $2",
+            online,
+            stream_id
+        )
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query!(
+            "UPDATE streams SET online = false, reader_connected = false WHERE stream_id = $1",
+            stream_id
+        )
+        .execute(pool)
+        .await?;
+    }
     Ok(())
+}
+
+/// Update the `reader_connected` flag for a stream. When setting to `true`,
+/// the update is guarded by `online = true` to enforce the invariant:
+/// `!online => !reader_connected`.
+///
+/// Returns `true` if the row was actually updated, `false` if the guard
+/// prevented the update (e.g. stream is offline).
+pub async fn set_reader_connected(
+    pool: &PgPool,
+    stream_id: Uuid,
+    connected: bool,
+) -> Result<bool, sqlx::Error> {
+    let result = if connected {
+        // Guard: only set true when online.
+        sqlx::query!(
+            "UPDATE streams SET reader_connected = true WHERE stream_id = $1 AND online = true",
+            stream_id
+        )
+        .execute(pool)
+        .await?
+    } else {
+        sqlx::query!(
+            "UPDATE streams SET reader_connected = false WHERE stream_id = $1",
+            stream_id
+        )
+        .execute(pool)
+        .await?
+    };
+    Ok(result.rows_affected() > 0)
 }
 
 pub struct StreamMetricsRow {
@@ -220,6 +261,7 @@ pub struct StreamSnapshotRow {
     pub display_alias: Option<String>,
     pub forwarder_display_name: Option<String>,
     pub online: bool,
+    pub reader_connected: bool,
     pub stream_epoch: i64,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -281,7 +323,7 @@ pub async fn fetch_stream_snapshot(
     stream_id: Uuid,
 ) -> Result<Option<StreamSnapshotRow>, sqlx::Error> {
     let row = sqlx::query(
-        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, online, stream_epoch, created_at
+        r#"SELECT stream_id, forwarder_id, reader_ip, display_alias, forwarder_display_name, online, reader_connected, stream_epoch, created_at
            FROM streams WHERE stream_id = $1"#,
     )
     .bind(stream_id)
@@ -295,6 +337,7 @@ pub async fn fetch_stream_snapshot(
         display_alias: r.get("display_alias"),
         forwarder_display_name: r.get("forwarder_display_name"),
         online: r.get("online"),
+        reader_connected: r.get("reader_connected"),
         stream_epoch: r.get("stream_epoch"),
         created_at: r.get("created_at"),
     }))

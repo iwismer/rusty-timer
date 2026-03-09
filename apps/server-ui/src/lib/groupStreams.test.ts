@@ -4,6 +4,7 @@ import { groupStreamsByForwarder } from "./groupStreams";
 
 const STREAM_BASE = {
   online: true,
+  reader_connected: true,
   stream_epoch: 1,
   created_at: "2026-01-01T00:00:00Z",
 };

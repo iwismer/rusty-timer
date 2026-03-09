@@ -677,9 +677,18 @@
                   {stream.display_alias || stream.reader_ip}
                 </a>
                 {#if stream.online}
-                  <span data-testid="stream-online-badge">
-                    <StatusBadge label="online" state="ok" />
-                  </span>
+                  {#if stream.reader_connected}
+                    <span data-testid="stream-online-badge">
+                      <StatusBadge label="online" state="ok" />
+                    </span>
+                  {:else}
+                    <span data-testid="stream-online-badge">
+                      <StatusBadge label="online" state="warn" />
+                    </span>
+                    <span data-testid="stream-reader-disconnected-badge">
+                      <StatusBadge label="reader disconnected" state="warn" />
+                    </span>
+                  {/if}
                 {:else}
                   <span data-testid="stream-offline-badge">
                     <StatusBadge label="offline" state="err" />

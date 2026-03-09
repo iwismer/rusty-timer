@@ -205,6 +205,11 @@ impl SubsystemStatus {
     pub fn reader_connection_state(&self, reader_ip: &str) -> Option<ReaderConnectionState> {
         self.readers.get(reader_ip).map(|r| r.state.clone())
     }
+
+    /// Return a reference to the readers map.
+    pub fn readers(&self) -> &HashMap<String, ReaderStatus> {
+        &self.readers
+    }
 }
 
 // ---------------------------------------------------------------------------

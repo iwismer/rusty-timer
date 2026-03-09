@@ -145,6 +145,34 @@ where
                                     });
                                 }
                             }
+                            Ok(WsMessage::ReaderStatusChanged(status)) => {
+                                info!(
+                                    stream_id = %status.stream_id,
+                                    reader_ip = %status.reader_ip,
+                                    connected = status.connected,
+                                    "reader connection status changed"
+                                );
+                                if status.connected {
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
+                                        entry: format!(
+                                            "reader reconnected: {} (stream {})",
+                                            status.reader_ip, status.stream_id
+                                        ),
+                                    });
+                                } else {
+                                    warn!(
+                                        stream_id = %status.stream_id,
+                                        reader_ip = %status.reader_ip,
+                                        "reader disconnected"
+                                    );
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
+                                        entry: format!(
+                                            "reader disconnected: {} (stream {})",
+                                            status.reader_ip, status.stream_id
+                                        ),
+                                    });
+                                }
+                            }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }
                             Ok(o) => debug!(?o,"ignoring"),

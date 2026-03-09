@@ -30,7 +30,7 @@
 <section class="rounded-lg overflow-hidden bg-surface-1 border {borderClass}">
   {#if title || header}
     <div
-      class="px-4 py-3 border-b border-border flex items-center gap-3 {headerBgClass}"
+      class="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3 {headerBgClass}"
     >
       {#if header}
         {@render header()}
