@@ -1,5 +1,9 @@
+/**
+ * Fields typed as `string` that are bound to `<input type="number">` in the Svelte template
+ * (port, ip_end_octet, local_fallback_port) may be `number` at runtime.
+ * Always use `asTrimmedString` before string operations on such fields.
+ */
 interface ReaderBase {
-  /** May be `number` at runtime due to Svelte `<input type="number">` binding. Use `asTrimmedString` before string operations. */
   port: string;
   enabled: boolean;
 }
@@ -26,6 +30,8 @@ export function blankRangeReader(): RangeReaderEntry {
   return { is_range: true, ip_start: "", ip_end_octet: "", port: "10000", enabled: true };
 }
 
+/** Fields extracted from a target string. Single targets omit local_fallback_port
+ *  because that value comes from a separate config field, not the target string. */
 type ParsedTarget =
   | Omit<SingleReaderEntry, "enabled" | "local_fallback_port">
   | Omit<RangeReaderEntry, "enabled">;
@@ -38,7 +44,7 @@ export function parseTarget(target: string): ParsedTarget {
   const host = colonIdx >= 0 ? target.slice(0, colonIdx) : target;
   const port = colonIdx >= 0 ? target.slice(colonIdx + 1) : "10000";
 
-  // Check for range syntax: A.B.C.START-END
+  // Check for range syntax: A.B.C.D-END (full IP, then dash, then end octet)
   const rangeMatch = host.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3})$/);
   if (rangeMatch) {
     return { is_range: true, ip_start: rangeMatch[1], ip_end_octet: rangeMatch[2], port };
@@ -47,7 +53,8 @@ export function parseTarget(target: string): ParsedTarget {
   return { is_range: false, ip: host, port };
 }
 
-/** Build a target string from split fields. Returns empty string if required fields are missing. */
+/** Build a target string from split fields. For single readers, requires ip and port;
+ *  for range readers, requires ip_start, ip_end_octet, and port. Returns empty string if any required field is missing or blank. */
 export function buildTarget(reader: ReaderEntry): string {
   const port = asTrimmedString(reader.port);
   if (!port) return "";
@@ -372,7 +379,8 @@ export function validateReaders(
   return null;
 }
 
-/** Compute the default fallback port from a reader IP address. */
+/** Compute the default fallback port from a reader IP address (10000 + last octet).
+ *  Returns empty string if ip is empty or not a valid IPv4 address. */
 export function defaultFallbackPort(ip: string): string {
   if (!ip) return "";
   if (!isValidIpv4(ip)) return "";

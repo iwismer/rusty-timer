@@ -33,7 +33,7 @@ function makeRangeReader(overrides: Partial<RangeReaderEntry> = {}): RangeReader
   return { ...blankRangeReader(), ip_start: "192.168.0.100", ip_end_octet: "110", ...overrides };
 }
 
-// Backward-compat alias for tests that only use single-reader fields
+// Shorthand alias for makeSingleReader
 const makeReader = makeSingleReader;
 
 function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderConfigFormState {
