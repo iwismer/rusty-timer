@@ -131,9 +131,29 @@ describe("buildTarget", () => {
     expect(buildTarget(reader)).toBe("192.168.0.150-160:10000");
   });
 
-  it("returns :port when ip is empty (single mode)", () => {
+  it("returns empty string when ip is empty (single mode)", () => {
     const reader = makeReader({ ip: "", port: "10000" });
-    expect(buildTarget(reader)).toBe(":10000");
+    expect(buildTarget(reader)).toBe("");
+  });
+
+  it("returns empty string when port is empty", () => {
+    const reader = makeReader({ ip: "192.168.0.1", port: "" });
+    expect(buildTarget(reader)).toBe("");
+  });
+
+  it("returns empty string when range start IP is empty", () => {
+    const reader = makeReader({ ip: "", ip_start: "", ip_end_octet: "160", port: "10000", is_range: true });
+    expect(buildTarget(reader)).toBe("");
+  });
+
+  it("returns empty string when range end octet is empty", () => {
+    const reader = makeReader({ ip: "", ip_start: "192.168.0.150", ip_end_octet: "", port: "10000", is_range: true });
+    expect(buildTarget(reader)).toBe("");
+  });
+
+  it("trims whitespace from fields", () => {
+    const reader = makeReader({ ip: " 192.168.0.50 ", port: " 10000 " });
+    expect(buildTarget(reader)).toBe("192.168.0.50:10000");
   });
 });
 

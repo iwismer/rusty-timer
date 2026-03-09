@@ -26,13 +26,19 @@ export function parseTarget(target: string): Omit<ReaderEntry, "enabled" | "loca
   return { ip: host, ip_start: "", ip_end_octet: "", port, is_range: false };
 }
 
-/** Build a target string from split fields. */
+/** Build a target string from split fields. Returns empty string if required fields are missing. */
 export function buildTarget(reader: ReaderEntry): string {
   const port = asTrimmedString(reader.port);
+  if (!port) return "";
   if (reader.is_range) {
-    return `${asTrimmedString(reader.ip_start)}-${asTrimmedString(reader.ip_end_octet)}:${port}`;
+    const start = asTrimmedString(reader.ip_start);
+    const end = asTrimmedString(reader.ip_end_octet);
+    if (!start || !end) return "";
+    return `${start}-${end}:${port}`;
   }
-  return `${asTrimmedString(reader.ip)}:${port}`;
+  const ip = asTrimmedString(reader.ip);
+  if (!ip) return "";
+  return `${ip}:${port}`;
 }
 
 export interface ForwarderConfigFormState {
