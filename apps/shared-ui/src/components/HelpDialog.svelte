@@ -86,7 +86,7 @@
 <dialog
   bind:this={dialogEl}
   onkeydown={handleKeydown}
-  class="fixed inset-0 m-auto max-w-2xl w-full rounded-lg border border-border bg-surface-1 p-0 shadow-lg backdrop:bg-black/50"
+  class="fixed inset-0 m-auto max-w-2xl w-full max-h-[80vh] rounded-lg border border-border bg-surface-1 p-0 shadow-lg backdrop:bg-black/50 overflow-hidden"
 >
   {#if section}
     <div class="sticky top-0 bg-surface-1 border-b border-border px-6 py-4 z-10">

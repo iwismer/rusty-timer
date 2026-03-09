@@ -52,10 +52,10 @@
   }
 </script>
 
-<section class="rounded-lg overflow-hidden bg-surface-1 border {borderClass}">
+<section class="rounded-lg bg-surface-1 border {borderClass}">
   {#if title || header || helpSection}
     <div
-      class="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3 {headerBgClass}"
+      class="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3 rounded-t-lg {headerBgClass}"
     >
       {#if header}
         {@render header()}
