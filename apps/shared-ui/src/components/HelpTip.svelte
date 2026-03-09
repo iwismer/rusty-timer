@@ -128,7 +128,7 @@
           <p class="text-xs text-text-muted m-0">Valid: {field.range}</p>
         {/if}
         {#if field.recommended}
-          <p class="text-xs font-medium text-accent m-0">Recommended: {field.recommended}</p>
+          <p class="text-xs font-medium text-status-ok m-0">Recommended: {field.recommended}</p>
         {/if}
         {#if onOpenModal || contextOpenHelp}
           <button

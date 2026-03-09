@@ -125,7 +125,7 @@
             <p class="text-xs text-text-muted">Valid: {field.range}</p>
           {/if}
           {#if field.recommended}
-            <p class="text-xs font-medium text-accent">Recommended: {field.recommended}</p>
+            <p class="text-xs font-medium text-status-ok">Recommended: {field.recommended}</p>
           {/if}
         </div>
       {/each}
