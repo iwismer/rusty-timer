@@ -20,7 +20,10 @@
     validateStatusHttp,
     validateReaders,
     defaultFallbackPort,
+    blankSingleReader,
+    blankRangeReader,
     type ReaderEntry,
+    type SingleReaderEntry,
     type ForwarderConfigFormState,
   } from "../lib/forwarder-config-form";
   import {
@@ -246,7 +249,14 @@
         return;
       }
     }
-    void saveSection(section, payloadFn(form));
+    let payload: Record<string, unknown>;
+    try {
+      payload = payloadFn(form);
+    } catch (e) {
+      sectionMessages[section] = { ok: false, text: String(e) };
+      return;
+    }
+    void saveSection(section, payload);
   }
 
   function saveGeneral() {
@@ -302,10 +312,10 @@
   }
 
   function addReader() {
-    readers = [
-      ...readers,
-      { target: "", enabled: true, local_fallback_port: "" },
-    ];
+    readers = [...readers, blankSingleReader()];
+  }
+  function addRange() {
+    readers = [...readers, blankRangeReader()];
   }
   function removeReader(index: number) {
     readers = readers.filter((_, i) => i !== index);
@@ -491,22 +501,24 @@
       <!-- Readers -->
       <Card title="Readers">
         <p class={hintClass}>
-          IPICO reader devices this forwarder connects to. At least one reader is required.
+          IPICO reader devices this forwarder connects to. Reader port defaults to 10000. At least one reader is required.
         </p>
         <div class="overflow-x-auto">
           <table class="w-full text-sm border-collapse">
             <thead>
               <tr class="border-b-2 border-border">
-                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">
-                  Target
-                  <span class="font-normal block text-text-muted">IP address and port of the reader</span>
+                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted" colspan="2">
+                  IP Address
+                </th>
+                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-24">
+                  Reader Port
                 </th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">Enabled</th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
-                  Default Port
+                  Default Local Port
                 </th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
-                  Port Override
+                  Local Port Override
                 </th>
                 <th class="py-2 px-2"></th>
               </tr>
@@ -514,12 +526,49 @@
             <tbody>
               {#each readers as reader, i}
                 <tr class="border-b border-border">
-                  <td class="py-1.5 px-2">
+                  {#if reader.is_range}
+                    <td class="py-1.5 px-2">
+                      <input
+                        type="text"
+                        bind:value={reader.ip_start}
+                        placeholder="192.168.0.150"
+                        aria-label="Reader {i + 1} start IP"
+                        class={inputClass}
+                      />
+                    </td>
+                    <td class="py-1.5 px-2">
+                      <span class="inline-flex items-center gap-1">
+                        <span class="text-text-muted">-</span>
+                        <input
+                          type="number"
+                          bind:value={reader.ip_end_octet}
+                          placeholder="160"
+                          min="0"
+                          max="255"
+                          aria-label="Reader {i + 1} end octet"
+                          class={inputClass}
+                        />
+                      </span>
+                    </td>
+                  <!-- Safe: guarded by {#if reader.is_range} above; Svelte doesn't narrow in {:else} -->
+                  {:else}
+                    <td class="py-1.5 px-2" colspan="2">
+                      <input
+                        type="text"
+                        bind:value={(reader as SingleReaderEntry).ip}
+                        placeholder="192.168.0.50"
+                        aria-label="Reader {i + 1} IP"
+                        class={inputClass}
+                      />
+                    </td>
+                  {/if}
+                  <td class="py-1.5 px-2 w-24">
                     <input
-                      type="text"
-                      bind:value={reader.target}
-                      placeholder="192.168.0.50:10000"
-                      aria-label="Reader {i + 1} target"
+                      type="number"
+                      bind:value={reader.port}
+                      min="1"
+                      max="65535"
+                      aria-label="Reader {i + 1} port"
                       class={inputClass}
                     />
                   </td>
@@ -532,24 +581,26 @@
                     />
                   </td>
                   <td class="py-1.5 px-2 w-28">
-                    <input
-                      type="text"
-                      disabled
-                      value={defaultFallbackPort(reader.target) || "—"}
-                      aria-label="Reader {i + 1} default port"
-                      class="{inputClass} opacity-50"
-                    />
+                    {#if reader.is_range}
+                      <input type="text" disabled value="—" aria-label="Reader {i + 1} default local port" class="{inputClass} opacity-50" />
+                    {:else}
+                      <input type="text" disabled value={defaultFallbackPort((reader as SingleReaderEntry).ip) || "—"} aria-label="Reader {i + 1} default local port" class="{inputClass} opacity-50" />
+                    {/if}
                   </td>
                   <td class="py-1.5 px-2 w-28">
-                    <input
-                      type="number"
-                      bind:value={reader.local_fallback_port}
-                      min="1"
-                      max="65535"
-                      placeholder="None"
-                      aria-label="Reader {i + 1} port override"
-                      class={inputClass}
-                    />
+                    {#if reader.is_range}
+                      <input type="number" disabled placeholder="N/A" aria-label="Reader {i + 1} port override" class={inputClass} />
+                    {:else}
+                      <input
+                        type="number"
+                        bind:value={(reader as SingleReaderEntry).local_fallback_port}
+                        min="1"
+                        max="65535"
+                        placeholder="None"
+                        aria-label="Reader {i + 1} port override"
+                        class={inputClass}
+                      />
+                    {/if}
                   </td>
                   <td class="py-1.5 px-2 text-right">
                     <button
@@ -564,12 +615,21 @@
             </tbody>
           </table>
         </div>
+        <p class="text-xs text-text-muted mt-2">
+          Ranges expand the last octet, e.g. Start IP <code>192.168.0.150</code> with End Octet <code>160</code> connects to .150 through .160. Local port overrides are only supported for single-reader rows.
+        </p>
         <div class="flex gap-2 mt-2">
           <button
             onclick={addReader}
             class="px-3 py-1.5 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3"
           >
             + Add Reader
+          </button>
+          <button
+            onclick={addRange}
+            class="px-3 py-1.5 text-xs font-medium rounded-md bg-surface-2 border border-border text-text-secondary cursor-pointer hover:bg-surface-3"
+          >
+            + Add Range
           </button>
           <button
             class={saveBtnClass}
