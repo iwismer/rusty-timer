@@ -273,6 +273,12 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                             );
                                         }
                                     }
+                                } else {
+                                    warn!(
+                                        stream_id = %sub.stream_id,
+                                        read_type = %event.read_type,
+                                        "unrecognized sentinel read_type; dropping event"
+                                    );
                                 }
                                 continue;
                             }
