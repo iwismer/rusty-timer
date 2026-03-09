@@ -12,6 +12,7 @@
 - **[Server deployment](../deploy/server/)** — Docker Compose setup, reverse proxy, token provisioning
 - **[Forwarder on Raspberry Pi](../deploy/sbc/)** — SD card flashing, cloud-init, setup script
 - **[Systemd services](../deploy/systemd/)** — Service unit files for forwarder and receiver
+- **[Network architecture](network-architecture.md)** — Ports, firewall rules, and production network layout
 
 ## Operations Runbooks
 
