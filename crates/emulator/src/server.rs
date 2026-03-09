@@ -1,9 +1,14 @@
+use std::sync::Arc;
 use std::time::Duration;
 use timer_core::models::Message;
 use timer_core::workers::{ClientConnector, ClientPool};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{Mutex, broadcast};
 use tokio::time::sleep;
 
+use crate::control_handler::{EmulatedReaderState, handle_control_frame};
 use crate::read_gen::{generate_read, restamp_read};
 
 // Re-exports for the CLI binary
@@ -87,6 +92,241 @@ pub async fn run(config: EmulatorConfig) {
         vec![fut_sender, fut_clients, fut_conn, fut_sig];
     select_all(futures).await;
     bus_tx.send(Message::SHUTDOWN).await.unwrap();
+}
+
+/// Generate chip reads and publish them to a broadcast channel.
+///
+/// This is analogous to `send_reads` but targets a `broadcast::Sender<String>`
+/// so that multiple TCP clients can each receive a copy.
+async fn broadcast_reads(
+    delay: u64,
+    file_reads: Vec<String>,
+    tx: broadcast::Sender<String>,
+    read_type: ReadType,
+) {
+    let mut index = 0;
+    loop {
+        let mut chip_read = if file_reads.is_empty() {
+            generate_read(read_type)
+        } else {
+            let read = restamp_read(&file_reads[index]);
+            index = (index + 1) % file_reads.len();
+            read
+        };
+        chip_read.push_str("\r\n");
+        // broadcast::send fails when no receivers are subscribed; safe to ignore
+        // because reads are only relevant while a client is connected.
+        let _ = tx.send(chip_read);
+        sleep(Duration::from_millis(delay)).await;
+    }
+}
+
+/// Run the emulator with bidirectional TCP support.
+///
+/// Unlike `run()`, this function handles both outgoing chip reads **and**
+/// incoming control frames on each TCP connection.  A banner is sent to
+/// every new client on connect.
+///
+/// If `port_tx` is provided, the actual bound port is sent through it after
+/// binding.  This supports ephemeral ports (`bind_port: 0`) in tests.
+pub async fn run_with_control(
+    config: EmulatorConfig,
+    state: EmulatedReaderState,
+    port_tx: Option<tokio::sync::oneshot::Sender<u16>>,
+) {
+    let file_reads: Vec<String> = config
+        .file_path
+        .as_ref()
+        .and_then(|p| {
+            std::fs::File::open(std::path::Path::new(p))
+                .map_err(|e| {
+                    println!("Error opening file: {e}");
+                    e
+                })
+                .ok()
+        })
+        .map(|f| {
+            std::io::BufRead::lines(std::io::BufReader::new(f))
+                .map_while(Result::ok)
+                .map(|line| line.trim().to_owned())
+                .filter(|line| !line.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let (read_tx, _) = broadcast::channel::<String>(1000);
+    let shared_state = Arc::new(Mutex::new(state));
+
+    // Spawn the read-generation task.
+    let read_tx_clone = read_tx.clone();
+    let _read_gen_handle = tokio::spawn(broadcast_reads(
+        config.delay,
+        file_reads,
+        read_tx_clone,
+        config.read_type,
+    ));
+
+    let listener = TcpListener::bind(("0.0.0.0", config.bind_port))
+        .await
+        .expect("failed to bind TCP listener");
+
+    if let Some(tx) = port_tx {
+        let actual_port = listener.local_addr().expect("local_addr").port();
+        if tx.send(actual_port).is_err() {
+            eprintln!("[emulator] port notification dropped: receiver already gone");
+        }
+    }
+
+    // Accept loop — runs until the task is aborted externally (e.g. signal or
+    // test harness calling `abort()`).
+    loop {
+        let (stream, _addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("[emulator] accept error: {e}");
+                sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        let state = Arc::clone(&shared_state);
+        let read_rx = read_tx.subscribe();
+
+        tokio::spawn(async move {
+            handle_client(stream, state, read_rx).await;
+        });
+    }
+}
+
+/// Handle a single bidirectional TCP client connection.
+async fn handle_client(
+    stream: tokio::net::TcpStream,
+    state: Arc<Mutex<EmulatedReaderState>>,
+    read_rx: broadcast::Receiver<String>,
+) {
+    let (read_half, write_half) = stream.into_split();
+
+    // Per-client channel for control responses and the initial banner.
+    let (client_tx, client_rx) = tokio::sync::mpsc::channel::<String>(256);
+
+    // Send the banner through the per-client channel.
+    {
+        let st = state.lock().await;
+        for line in st.banner().lines() {
+            if client_tx.send(format!("{}\r\n", line)).await.is_err() {
+                eprintln!("[emulator] banner send failed: client channel closed");
+                return;
+            }
+        }
+    }
+
+    // Spawn the write task.
+    let write_handle = tokio::spawn(client_write_task(write_half, client_rx, read_rx));
+
+    // Run the read loop inline — when it finishes the client disconnected.
+    client_read_loop(read_half, state, client_tx).await;
+
+    // Client disconnected; clean up the write task.
+    write_handle.abort();
+    let _ = write_handle.await;
+}
+
+/// Read loop: reads \r\n-delimited lines, dispatches `ab`-prefixed control
+/// frames, and ignores everything else.
+///
+/// Lines longer than `MAX_LINE_LEN` are discarded to avoid processing
+/// oversized input. Note: `read_line` reads the full line into memory
+/// before the length check; this does not bound allocation.
+async fn client_read_loop(
+    read_half: tokio::net::tcp::OwnedReadHalf,
+    state: Arc<Mutex<EmulatedReaderState>>,
+    client_tx: tokio::sync::mpsc::Sender<String>,
+) {
+    const MAX_LINE_LEN: usize = 4096;
+
+    let mut reader = BufReader::new(read_half);
+    let mut line_buf = String::new();
+
+    loop {
+        line_buf.clear();
+        match reader.read_line(&mut line_buf).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if line_buf.len() > MAX_LINE_LEN {
+                    eprintln!(
+                        "[emulator] dropping oversized line ({} bytes)",
+                        line_buf.len()
+                    );
+                    continue;
+                }
+                let trimmed = line_buf.trim_end();
+                if trimmed.starts_with("ab") {
+                    let mut st = state.lock().await;
+                    let responses = handle_control_frame(&mut st, trimmed);
+                    drop(st);
+                    for resp in responses {
+                        if client_tx.send(resp).await.is_err() {
+                            return; // write side gone
+                        }
+                    }
+                }
+                // Non-ab lines are silently ignored.
+            }
+            Err(e) => {
+                eprintln!("[emulator] client read error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Write task: multiplexes control responses (from per-client mpsc) and
+/// chip reads (from broadcast) onto the TCP write half.
+async fn client_write_task(
+    write_half: tokio::net::tcp::OwnedWriteHalf,
+    mut client_rx: tokio::sync::mpsc::Receiver<String>,
+    mut read_rx: broadcast::Receiver<String>,
+) {
+    let mut writer = BufWriter::new(write_half);
+
+    loop {
+        tokio::select! {
+            msg = client_rx.recv() => {
+                match msg {
+                    Some(data) => {
+                        if let Err(e) = writer.write_all(data.as_bytes()).await {
+                            eprintln!("[emulator] client write error: {e}");
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            eprintln!("[emulator] client flush error: {e}");
+                            break;
+                        }
+                    }
+                    None => break, // sender dropped
+                }
+            }
+            result = read_rx.recv() => {
+                match result {
+                    Ok(data) => {
+                        if let Err(e) = writer.write_all(data.as_bytes()).await {
+                            eprintln!("[emulator] client write error: {e}");
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            eprintln!("[emulator] client flush error: {e}");
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("[emulator] client lagged, skipped {n} reads");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

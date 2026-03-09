@@ -18,5 +18,9 @@ serde_yaml = "0.9"
 timer-core = { path = "../timer-core" }
 ipico-core = { path = "../ipico-core" }
 
+[features]
+test-helpers = []
+
 [dev-dependencies]
+rt-emulator = { path = ".", features = ["test-helpers"] }
 tokio = { version = "1", features = ["full"] }

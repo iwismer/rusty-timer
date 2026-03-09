@@ -19,6 +19,12 @@
 //!       - type: jitter | disconnect | reconnect_delay
 //!         after_events: 100
 //!         duration_ms: 2000
+//!     # Optional control state (example values, not defaults):
+//!     initial_read_mode: "event"   # "raw" | "event" | "fsls"; defaults to read_type
+//!     initial_tto_enabled: true    # default: false
+//!     initial_recording: false     # default: false
+//!     stored_reads: 100            # default: 0
+//!     clock_offset_ms: 0           # default: 0
 //!
 //! # Forwarder mode adds:
 //! server_url: "wss://timing.example.com/ws/v1/forwarders"
@@ -29,6 +35,7 @@
 use ipico_core::read::ReadType;
 use serde::{Deserialize, Serialize};
 
+use crate::lcg_next;
 use crate::read_gen::generate_read_for_chip;
 
 /// Base date for deterministic scenario timestamps (IPICO two-digit year, month, day).
@@ -91,6 +98,42 @@ pub struct ReaderScenarioConfig {
     /// Fault injection schedule for this reader.
     #[serde(default)]
     pub faults: Vec<FaultConfig>,
+    /// Initial read mode override ("raw", "event", "fsls"). Defaults to read_type value.
+    #[serde(default)]
+    pub initial_read_mode: Option<String>,
+    /// Initial TTO enabled state. Defaults to false.
+    #[serde(default)]
+    pub initial_tto_enabled: Option<bool>,
+    /// Initial recording state. Defaults to false.
+    #[serde(default)]
+    pub initial_recording: Option<bool>,
+    /// Number of stored reads for download simulation. Defaults to 0.
+    #[serde(default)]
+    pub stored_reads: Option<u32>,
+    /// Clock offset from system time in milliseconds. Defaults to 0.
+    #[serde(default)]
+    pub clock_offset_ms: Option<i64>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Default for ReaderScenarioConfig {
+    fn default() -> Self {
+        Self {
+            ip: "192.168.1.100".to_string(),
+            port: 10000,
+            read_type: "raw".to_string(),
+            chip_ids: vec![1000],
+            events_per_second: 10,
+            total_events: 100,
+            start_delay_ms: 0,
+            faults: vec![],
+            initial_read_mode: None,
+            initial_tto_enabled: None,
+            initial_recording: None,
+            stored_reads: None,
+            clock_offset_ms: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +203,20 @@ fn validate_scenario(cfg: &ScenarioConfig) -> Result<(), ScenarioError> {
                 reader.ip, reader.read_type
             ))
         })?;
+
+        if let Some(ref mode_str) = reader.initial_read_mode {
+            // initial_read_mode accepts both ReadType values ("raw", "fsls")
+            // and ReadMode values ("event") since it maps to the control
+            // protocol's ReadMode enum, not just the wire ReadType.
+            let valid = ReadType::try_from(mode_str.as_str()).is_ok()
+                || matches!(mode_str.as_str(), "event");
+            if !valid {
+                return Err(ScenarioError::Invalid(format!(
+                    "reader '{}' has invalid initial_read_mode '{}'",
+                    reader.ip, mode_str
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -306,13 +363,6 @@ pub fn generate_reader_events(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
-
-/// LCG: x_{n+1} = (a * x_n + c) mod 2^64
-fn lcg_next(state: u64) -> u64 {
-    state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407)
-}
 
 /// Convert milliseconds offset to a time string "HH:MM:SS.mmm".
 fn ms_to_time_str(ms: u64) -> String {
