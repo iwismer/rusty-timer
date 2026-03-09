@@ -353,6 +353,57 @@ readers:
 }
 
 #[test]
+fn parse_scenario_with_control_fields() {
+    let yaml = r#"
+mode: reader
+seed: 42
+readers:
+  - ip: "192.168.1.100:9001"
+    port: 9001
+    read_type: raw
+    chip_ids: [1234]
+    events_per_second: 10
+    total_events: 5
+    start_delay_ms: 0
+    initial_read_mode: "fsls"
+    initial_tto_enabled: true
+    initial_recording: true
+    stored_reads: 500
+    clock_offset_ms: -1000
+"#;
+    let cfg = load_scenario_from_str(yaml).unwrap();
+    let r = &cfg.readers[0];
+    assert_eq!(r.initial_read_mode.as_deref(), Some("fsls"));
+    assert_eq!(r.initial_tto_enabled, Some(true));
+    assert_eq!(r.initial_recording, Some(true));
+    assert_eq!(r.stored_reads, Some(500));
+    assert_eq!(r.clock_offset_ms, Some(-1000));
+}
+
+#[test]
+fn parse_scenario_without_control_fields_uses_defaults() {
+    let yaml = r#"
+mode: reader
+seed: 42
+readers:
+  - ip: "192.168.1.100:9001"
+    port: 9001
+    read_type: raw
+    chip_ids: [1234]
+    events_per_second: 10
+    total_events: 5
+    start_delay_ms: 0
+"#;
+    let cfg = load_scenario_from_str(yaml).unwrap();
+    let r = &cfg.readers[0];
+    assert_eq!(r.initial_read_mode, None);
+    assert_eq!(r.initial_tto_enabled, None);
+    assert_eq!(r.initial_recording, None);
+    assert_eq!(r.stored_reads, None);
+    assert_eq!(r.clock_offset_ms, None);
+}
+
+#[test]
 fn generate_reader_events_returns_error_for_invalid_read_type() {
     use emulator::scenario::generate_reader_events;
 
@@ -365,6 +416,11 @@ fn generate_reader_events_returns_error_for_invalid_read_type() {
         total_events: 1,
         start_delay_ms: 0,
         faults: Vec::new(),
+        initial_read_mode: None,
+        initial_tto_enabled: None,
+        initial_recording: None,
+        stored_reads: None,
+        clock_offset_ms: None,
     };
 
     let result = generate_reader_events(&reader, 1);

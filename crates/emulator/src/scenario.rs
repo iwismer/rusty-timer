@@ -91,6 +91,21 @@ pub struct ReaderScenarioConfig {
     /// Fault injection schedule for this reader.
     #[serde(default)]
     pub faults: Vec<FaultConfig>,
+    /// Initial read mode override ("raw", "event", "fsls"). Defaults to read_type value.
+    #[serde(default)]
+    pub initial_read_mode: Option<String>,
+    /// Initial TTO enabled state. Defaults to false.
+    #[serde(default)]
+    pub initial_tto_enabled: Option<bool>,
+    /// Initial recording state. Defaults to false.
+    #[serde(default)]
+    pub initial_recording: Option<bool>,
+    /// Number of stored reads for download simulation. Defaults to 0.
+    #[serde(default)]
+    pub stored_reads: Option<u32>,
+    /// Clock offset from system time in milliseconds. Defaults to 0.
+    #[serde(default)]
+    pub clock_offset_ms: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +175,15 @@ fn validate_scenario(cfg: &ScenarioConfig) -> Result<(), ScenarioError> {
                 reader.ip, reader.read_type
             ))
         })?;
+
+        if let Some(ref mode_str) = reader.initial_read_mode {
+            ReadType::try_from(mode_str.as_str()).map_err(|_| {
+                ScenarioError::Invalid(format!(
+                    "reader '{}' has invalid initial_read_mode '{}'",
+                    reader.ip, mode_str
+                ))
+            })?;
+        }
     }
     Ok(())
 }
