@@ -87,6 +87,28 @@ pub struct EmulatedReaderState {
 }
 
 impl EmulatedReaderState {
+    /// Build default state for a given read mode (used by the CLI emulator).
+    pub fn new(read_mode: ReadMode) -> Self {
+        Self {
+            reader_ip: "127.0.0.1".to_owned(),
+            fw_version: 0x42,
+            hw_code: 0x05,
+            hw_identifier: 0x5905,
+            banner: "IPICO Emulator v2.0.0\r\nS/N: EMU-CLI\r\n".to_owned(),
+            read_mode,
+            config3_timeout: 5,
+            tto_enabled: false,
+            recording: false,
+            clock_offset_ms: 0,
+            stored_reads: 0,
+            downloading: false,
+            storage_state: StorageState::Empty,
+            download_progress: 0,
+            download_chip_ids: Vec::new(),
+            download_seed: 42,
+        }
+    }
+
     /// Build initial state from a scenario config and a deterministic seed.
     ///
     /// Precedence for read mode: `initial_read_mode` > `read_type` > Raw.

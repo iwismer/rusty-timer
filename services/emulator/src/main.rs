@@ -1,5 +1,7 @@
 use clap::{Arg, Command};
+use emulator::control_handler::EmulatedReaderState;
 use emulator::server::{EmulatorConfig, ReadType, is_delay, is_file, is_port};
+use ipico_core::control::ReadMode;
 use std::convert::TryFrom;
 use tracing::info;
 
@@ -85,5 +87,11 @@ async fn main() {
             .expect("read_type has a default"),
     };
 
-    emulator::server::run(config).await;
+    let read_mode = match config.read_type {
+        ReadType::RAW => ReadMode::Raw,
+        ReadType::FSLS => ReadMode::FirstLastSeen,
+    };
+    let state = EmulatedReaderState::new(read_mode);
+
+    emulator::server::run_with_control(config, state, None).await;
 }
