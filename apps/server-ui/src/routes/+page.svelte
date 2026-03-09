@@ -173,6 +173,7 @@
         message: `Clock synced — drift: ${formatClockDrift(resp.reader_info?.clock?.drift_ms)}`,
       };
     } catch (e: any) {
+      console.error("handleSyncClock failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "Failed to sync clock",
@@ -211,6 +212,7 @@
           : `Mode set to ${formatReadMode(mode)}`,
       };
     } catch (e: any) {
+      console.error("handleSetReadMode failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "Set mode failed",
@@ -237,6 +239,7 @@
           : "TTO reporting enabled",
       };
     } catch (e: any) {
+      console.error("handleSetTto failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "TTO toggle failed",
@@ -261,6 +264,7 @@
         message: currentlyRecording ? "Recording stopped" : "Recording started",
       };
     } catch (e: any) {
+      console.error("handleSetRecording failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "Toggle recording failed",
@@ -280,6 +284,7 @@
       await refreshReader(forwarderId, readerIp);
       controlFeedback[key] = { kind: "ok", message: "Reader info refreshed" };
     } catch (e: any) {
+      console.error("handleRefresh failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "Refresh failed",
@@ -299,6 +304,7 @@
       await clearReaderRecords(forwarderId, readerIp);
       controlFeedback[key] = { kind: "ok", message: "Records cleared" };
     } catch (e: any) {
+      console.error("handleClearRecords failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "Clear failed",
@@ -318,6 +324,7 @@
       await startReaderDownload(forwarderId, readerIp);
       controlFeedback[key] = { kind: "ok", message: "Download started" };
     } catch (e: any) {
+      console.error("handleStartDownload failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "Download failed",
@@ -337,6 +344,7 @@
       await reconnectReader(forwarderId, readerIp);
       controlFeedback[key] = { kind: "ok", message: "Reconnect requested" };
     } catch (e: any) {
+      console.error("handleReconnect failed:", e);
       controlFeedback[key] = {
         kind: "err",
         message: e.message ?? "Reconnect failed",

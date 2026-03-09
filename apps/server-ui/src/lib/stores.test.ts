@@ -18,6 +18,8 @@ import {
   setAnnouncerConfigError,
   resetStores,
   replaceStreams,
+  readerStatesStore,
+  removeReaderStatesForForwarder,
 } from "./stores";
 import type { StreamEntry, StreamMetrics, RaceEntry } from "./api";
 
@@ -181,5 +183,50 @@ describe("stores", () => {
     expect(get(announcerConfigStore)).toBeNull();
     expect(get(announcerConfigSavingStore)).toBe(false);
     expect(get(announcerConfigErrorStore)).toBeNull();
+  });
+
+  it("removeReaderStatesForForwarder removes only matching entries", () => {
+    readerStatesStore.set({
+      "fwd-1:10.0.0.1:10000": {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        state: "connected",
+        reader_info: null,
+      },
+      "fwd-1:10.0.0.2:10000": {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.2:10000",
+        state: "disconnected",
+        reader_info: null,
+      },
+      "fwd-2:10.0.0.3:10000": {
+        forwarder_id: "fwd-2",
+        reader_ip: "10.0.0.3:10000",
+        state: "connected",
+        reader_info: null,
+      },
+    });
+
+    removeReaderStatesForForwarder("fwd-1");
+
+    const result = get(readerStatesStore);
+    expect(Object.keys(result)).toEqual(["fwd-2:10.0.0.3:10000"]);
+    expect(result["fwd-2:10.0.0.3:10000"].forwarder_id).toBe("fwd-2");
+  });
+
+  it("removeReaderStatesForForwarder is a no-op when no match", () => {
+    readerStatesStore.set({
+      "fwd-1:10.0.0.1:10000": {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        state: "connected",
+        reader_info: null,
+      },
+    });
+
+    removeReaderStatesForForwarder("fwd-nonexistent");
+
+    const result = get(readerStatesStore);
+    expect(Object.keys(result)).toEqual(["fwd-1:10.0.0.1:10000"]);
   });
 });

@@ -835,7 +835,7 @@ export async function syncReaderClock(
 export async function setReaderReadMode(
   forwarderId: string,
   readerIp: string,
-  mode: string,
+  mode: "raw" | "event" | "fsls",
   timeout: number,
 ): Promise<ReaderControlHttpResponse> {
   return apiFetch<ReaderControlHttpResponse>(

@@ -198,6 +198,28 @@ async function resync(): Promise<void> {
         getReaderStates(),
       ]);
 
+      if (streamsResp.status === "rejected") {
+        console.error("resync: failed to fetch streams", streamsResp.reason);
+      }
+      if (racesResp.status === "rejected") {
+        console.error("resync: failed to fetch races", racesResp.reason);
+      }
+      if (assignmentsResp.status === "rejected") {
+        console.error(
+          "resync: failed to fetch forwarder races",
+          assignmentsResp.reason,
+        );
+      }
+      if (logsResp.status === "rejected") {
+        console.error("resync: failed to fetch logs", logsResp.reason);
+      }
+      if (readerStatesResp.status === "rejected") {
+        console.error(
+          "resync: failed to fetch reader states",
+          readerStatesResp.reason,
+        );
+      }
+
       if (streamsResp.status === "fulfilled") {
         replaceStreams(streamsResp.value.streams);
       }
