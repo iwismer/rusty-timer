@@ -755,7 +755,7 @@ export interface HardwareInfo {
 }
 
 export interface Config3Info {
-  mode: string;
+  mode: "raw" | "event" | "fsls";
   timeout: number;
 }
 
@@ -778,22 +778,21 @@ export interface ReaderInfo {
 export interface CachedReaderState {
   forwarder_id: string;
   reader_ip: string;
-  state: string;
+  state: "connected" | "connecting" | "disconnected";
   reader_info: ReaderInfo | null;
 }
 
-export interface ReaderControlResponse {
-  request_id: string;
-  reader_ip: string;
-  success: boolean;
-  error?: string | null;
-  reader_info?: ReaderInfo | null;
+/** HTTP response shape from reader control endpoints (differs from WS protocol type). */
+export interface ReaderControlHttpResponse {
+  ok: boolean;
+  error: string | null;
+  reader_info: ReaderInfo | null;
 }
 
 export interface ReaderDownloadProgressEvent {
   forwarder_id: string;
   reader_ip: string;
-  state: string;
+  state: "downloading" | "complete" | "error" | "idle";
   reads_received: number;
   progress: number;
   total: number;
@@ -814,8 +813,8 @@ export async function getReaderStates(): Promise<CachedReaderState[]> {
 export async function getReaderInfo(
   forwarderId: string,
   readerIp: string,
-): Promise<ReaderControlResponse> {
-  return apiFetch<ReaderControlResponse>(
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/info`,
   );
 }
@@ -824,8 +823,8 @@ export async function getReaderInfo(
 export async function syncReaderClock(
   forwarderId: string,
   readerIp: string,
-): Promise<ReaderControlResponse> {
-  return apiFetch<ReaderControlResponse>(
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/sync-clock`,
     { method: "POST" },
   );
@@ -837,8 +836,8 @@ export async function setReaderReadMode(
   readerIp: string,
   mode: string,
   timeout: number,
-): Promise<ReaderControlResponse> {
-  return apiFetch<ReaderControlResponse>(
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/read-mode`,
     {
       method: "PUT",
@@ -852,8 +851,8 @@ export async function setReaderTto(
   forwarderId: string,
   readerIp: string,
   enabled: boolean,
-): Promise<ReaderControlResponse> {
-  return apiFetch<ReaderControlResponse>(
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/tto`,
     {
       method: "PUT",
@@ -867,8 +866,8 @@ export async function setReaderRecording(
   forwarderId: string,
   readerIp: string,
   enabled: boolean,
-): Promise<ReaderControlResponse> {
-  return apiFetch<ReaderControlResponse>(
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/recording`,
     {
       method: "PUT",
@@ -914,8 +913,8 @@ export async function stopReaderDownload(
 export async function refreshReader(
   forwarderId: string,
   readerIp: string,
-): Promise<ReaderControlResponse> {
-  return apiFetch<ReaderControlResponse>(
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/refresh`,
     { method: "POST" },
   );
@@ -925,8 +924,8 @@ export async function refreshReader(
 export async function reconnectReader(
   forwarderId: string,
   readerIp: string,
-): Promise<ReaderControlResponse> {
-  return apiFetch<ReaderControlResponse>(
+): Promise<ReaderControlHttpResponse> {
+  return apiFetch<ReaderControlHttpResponse>(
     `/api/v1/forwarders/${encodeURIComponent(forwarderId)}/readers/${encodeURIComponent(readerIp)}/reconnect`,
     { method: "POST" },
   );

@@ -12,7 +12,7 @@ export function formatTtoState(enabled: boolean | null | undefined): string {
 }
 
 export function readerControlDisabled(
-  state: string,
+  state: "connected" | "connecting" | "disconnected",
   busy: boolean | null | undefined,
 ): boolean {
   return Boolean(busy) || state !== "connected";

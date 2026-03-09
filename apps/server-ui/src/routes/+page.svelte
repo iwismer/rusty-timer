@@ -70,9 +70,11 @@
     key: string,
     info: api.ReaderInfo | null | undefined,
   ): "raw" | "event" | "fsls" {
-    return ((readModeDrafts[key] as "raw" | "event" | "fsls" | undefined) ??
+    return (
+      (readModeDrafts[key] as "raw" | "event" | "fsls" | undefined) ??
       info?.config?.mode ??
-      "raw") as "raw" | "event" | "fsls";
+      "raw"
+    );
   }
 
   function readModeTimeoutDraftValue(
@@ -928,7 +930,7 @@
                             stream.reader_ip,
                             key,
                           )}
-                        disabled={busy}>Reconnect</button
+                        disabled={busy || !stream.online}>Reconnect</button
                       >
                     </div>
 
