@@ -114,7 +114,8 @@ async fn broadcast_reads(
             read
         };
         chip_read.push_str("\r\n");
-        // If there are no subscribers the send will error — that is fine.
+        // broadcast::send fails when no receivers are subscribed; safe to ignore
+        // because reads are only relevant while a client is connected.
         let _ = tx.send(chip_read);
         sleep(Duration::from_millis(delay)).await;
     }
@@ -125,7 +126,14 @@ async fn broadcast_reads(
 /// Unlike `run()`, this function handles both outgoing chip reads **and**
 /// incoming control frames on each TCP connection.  A banner is sent to
 /// every new client on connect.
-pub async fn run_with_control(config: EmulatorConfig, state: EmulatedReaderState) {
+///
+/// If `port_tx` is provided, the actual bound port is sent through it after
+/// binding.  This supports ephemeral ports (`bind_port: 0`) in tests.
+pub async fn run_with_control(
+    config: EmulatorConfig,
+    state: EmulatedReaderState,
+    port_tx: Option<tokio::sync::oneshot::Sender<u16>>,
+) {
     let file_reads: Vec<String> = config
         .file_path
         .as_ref()
@@ -162,6 +170,11 @@ pub async fn run_with_control(config: EmulatorConfig, state: EmulatedReaderState
         .await
         .expect("failed to bind TCP listener");
 
+    if let Some(tx) = port_tx {
+        let actual_port = listener.local_addr().expect("local_addr").port();
+        let _ = tx.send(actual_port);
+    }
+
     // Accept loop — runs until the task is aborted externally (e.g. signal or
     // test harness calling `abort()`).
     loop {
@@ -180,13 +193,6 @@ pub async fn run_with_control(config: EmulatorConfig, state: EmulatedReaderState
             handle_client(stream, state, read_rx).await;
         });
     }
-
-    // The compiler needs this to be reachable for type-checking even though
-    // `loop` above is infinite.
-    #[allow(unreachable_code)]
-    {
-        _read_gen_handle.abort();
-    }
 }
 
 /// Handle a single bidirectional TCP client connection.
@@ -203,8 +209,11 @@ async fn handle_client(
     // Send the banner through the per-client channel.
     {
         let st = state.lock().await;
-        for line in st.banner.lines() {
-            let _ = client_tx.send(format!("{}\r\n", line)).await;
+        for line in st.banner().lines() {
+            if client_tx.send(format!("{}\r\n", line)).await.is_err() {
+                eprintln!("[emulator] banner send failed: client channel closed");
+                return;
+            }
         }
     }
 
@@ -221,11 +230,15 @@ async fn handle_client(
 
 /// Read loop: reads \r\n-delimited lines, dispatches `ab`-prefixed control
 /// frames, and ignores everything else.
+///
+/// Lines longer than `MAX_LINE_LEN` are discarded to bound memory usage.
 async fn client_read_loop(
     read_half: tokio::net::tcp::OwnedReadHalf,
     state: Arc<Mutex<EmulatedReaderState>>,
     client_tx: tokio::sync::mpsc::Sender<String>,
 ) {
+    const MAX_LINE_LEN: usize = 4096;
+
     let mut reader = BufReader::new(read_half);
     let mut line_buf = String::new();
 
@@ -234,6 +247,13 @@ async fn client_read_loop(
         match reader.read_line(&mut line_buf).await {
             Ok(0) => break, // EOF
             Ok(_) => {
+                if line_buf.len() > MAX_LINE_LEN {
+                    eprintln!(
+                        "[emulator] dropping oversized line ({} bytes)",
+                        line_buf.len()
+                    );
+                    continue;
+                }
                 let trimmed = line_buf.trim_end();
                 if trimmed.starts_with("ab") {
                     let mut st = state.lock().await;
@@ -247,7 +267,10 @@ async fn client_read_loop(
                 }
                 // Non-ab lines are silently ignored.
             }
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("[emulator] client read error: {e}");
+                break;
+            }
         }
     }
 }
@@ -266,10 +289,12 @@ async fn client_write_task(
             msg = client_rx.recv() => {
                 match msg {
                     Some(data) => {
-                        if writer.write_all(data.as_bytes()).await.is_err() {
+                        if let Err(e) = writer.write_all(data.as_bytes()).await {
+                            eprintln!("[emulator] client write error: {e}");
                             break;
                         }
-                        if writer.flush().await.is_err() {
+                        if let Err(e) = writer.flush().await {
+                            eprintln!("[emulator] client flush error: {e}");
                             break;
                         }
                     }
@@ -279,10 +304,12 @@ async fn client_write_task(
             result = read_rx.recv() => {
                 match result {
                     Ok(data) => {
-                        if writer.write_all(data.as_bytes()).await.is_err() {
+                        if let Err(e) = writer.write_all(data.as_bytes()).await {
+                            eprintln!("[emulator] client write error: {e}");
                             break;
                         }
-                        if writer.flush().await.is_err() {
+                        if let Err(e) = writer.flush().await {
+                            eprintln!("[emulator] client flush error: {e}");
                             break;
                         }
                     }

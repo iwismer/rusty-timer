@@ -19,6 +19,12 @@
 //!       - type: jitter | disconnect | reconnect_delay
 //!         after_events: 100
 //!         duration_ms: 2000
+//!     # Optional control state (defaults shown):
+//!     initial_read_mode: "event"   # "raw" | "event" | "fsls"; defaults to read_type
+//!     initial_tto_enabled: true    # default: false
+//!     initial_recording: false     # default: false
+//!     stored_reads: 100            # default: 0
+//!     clock_offset_ms: 0           # default: 0
 //!
 //! # Forwarder mode adds:
 //! server_url: "wss://timing.example.com/ws/v1/forwarders"
@@ -29,6 +35,7 @@
 use ipico_core::read::ReadType;
 use serde::{Deserialize, Serialize};
 
+use crate::lcg_next;
 use crate::read_gen::generate_read_for_chip;
 
 /// Base date for deterministic scenario timestamps (IPICO two-digit year, month, day).
@@ -335,13 +342,6 @@ pub fn generate_reader_events(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
-
-/// LCG: x_{n+1} = (a * x_n + c) mod 2^64
-fn lcg_next(state: u64) -> u64 {
-    state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407)
-}
 
 /// Convert milliseconds offset to a time string "HH:MM:SS.mmm".
 fn ms_to_time_str(ms: u64) -> String {

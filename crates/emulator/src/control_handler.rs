@@ -13,8 +13,8 @@ use ipico_core::read::ReadType;
 
 use chrono::{Datelike, Local, TimeZone, Timelike};
 
+use crate::lcg_next;
 use crate::read_gen::generate_read_for_chip;
-
 use crate::scenario::ReaderScenarioConfig;
 
 // ---------------------------------------------------------------------------
@@ -23,14 +23,35 @@ use crate::scenario::ReaderScenarioConfig;
 
 /// Parse a read mode string into `ReadMode`.
 ///
-/// The `ReadMode` enum lacks a `from_str` method, so we provide a local helper
-/// that maps the YAML-friendly strings to enum variants.
+/// The `ReadMode` enum has serde deserialization but no standalone `FromStr`
+/// implementation. We provide a lightweight local helper to avoid pulling in
+/// a serde deserializer for a single string match.
 fn read_mode_from_str(s: &str) -> Option<ReadMode> {
     match s {
         "raw" => Some(ReadMode::Raw),
         "event" => Some(ReadMode::Event),
         "fsls" => Some(ReadMode::FirstLastSeen),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Storage state
+// ---------------------------------------------------------------------------
+
+/// Storage state byte for extended status responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageState {
+    Empty,
+    HasData,
+}
+
+impl StorageState {
+    pub fn wire_byte(self) -> u8 {
+        match self {
+            StorageState::Empty => 0x01,
+            StorageState::HasData => 0x0c,
+        }
     }
 }
 
@@ -43,23 +64,27 @@ fn read_mode_from_str(s: &str) -> Option<ReadMode> {
 /// Constructed from `ReaderScenarioConfig` with deterministic defaults.
 /// Fields mirror the values that a real IPICO reader exposes through its
 /// control protocol (CONFIG3, statistics, extended status, etc.).
+///
+/// Invariant-bearing fields (`stored_reads`/`storage_state`,
+/// `recording`/`downloading`) are private and must be mutated through
+/// dedicated methods that maintain coherence.
 pub struct EmulatedReaderState {
-    pub reader_ip: String,
-    pub fw_version: u8,
-    pub hw_code: u8,
-    pub hw_identifier: u16,
-    pub banner: String,
-    pub read_mode: ReadMode,
-    pub config3_timeout: u8,
-    pub tto_enabled: bool,
-    pub recording: bool,
-    pub clock_offset_ms: i64,
-    pub stored_reads: u32,
-    pub downloading: bool,
-    pub storage_state: u8,
-    pub download_progress: u32,
-    pub download_chip_ids: Vec<u64>,
-    pub download_seed: u64,
+    reader_ip: String,
+    fw_version: u8,
+    hw_code: u8,
+    hw_identifier: u16,
+    banner: String,
+    read_mode: ReadMode,
+    config3_timeout: u8,
+    tto_enabled: bool,
+    recording: bool,
+    clock_offset_ms: i64,
+    stored_reads: u32,
+    downloading: bool,
+    storage_state: StorageState,
+    download_progress: u32,
+    download_chip_ids: Vec<u64>,
+    download_seed: u64,
 }
 
 impl EmulatedReaderState {
@@ -89,24 +114,135 @@ impl EmulatedReaderState {
             clock_offset_ms: cfg.clock_offset_ms.unwrap_or(0),
             stored_reads,
             downloading: false,
-            storage_state: if stored_reads > 0 { 0x0c } else { 0x01 },
+            storage_state: if stored_reads > 0 {
+                StorageState::HasData
+            } else {
+                StorageState::Empty
+            },
             download_progress: 0,
             download_chip_ids: Vec::new(),
             download_seed: seed,
         }
+    }
+
+    // -- Getters --
+
+    pub fn reader_ip(&self) -> &str {
+        &self.reader_ip
+    }
+    pub fn fw_version(&self) -> u8 {
+        self.fw_version
+    }
+    pub fn hw_code(&self) -> u8 {
+        self.hw_code
+    }
+    pub fn hw_identifier(&self) -> u16 {
+        self.hw_identifier
+    }
+    pub fn banner(&self) -> &str {
+        &self.banner
+    }
+    pub fn read_mode(&self) -> ReadMode {
+        self.read_mode
+    }
+    pub fn config3_timeout(&self) -> u8 {
+        self.config3_timeout
+    }
+    pub fn tto_enabled(&self) -> bool {
+        self.tto_enabled
+    }
+    pub fn recording(&self) -> bool {
+        self.recording
+    }
+    pub fn clock_offset_ms(&self) -> i64 {
+        self.clock_offset_ms
+    }
+    pub fn stored_reads(&self) -> u32 {
+        self.stored_reads
+    }
+    pub fn downloading(&self) -> bool {
+        self.downloading
+    }
+    pub fn storage_state(&self) -> StorageState {
+        self.storage_state
+    }
+    pub fn download_progress(&self) -> u32 {
+        self.download_progress
+    }
+
+    // -- Mutation methods (invariant-enforcing) --
+
+    /// Set recording state. Clears downloading when turning recording on,
+    /// since a real reader cannot record and download simultaneously.
+    pub fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+        if on {
+            self.downloading = false;
+        }
+    }
+
+    /// Set downloading state. Clears recording when turning downloading on,
+    /// since a real reader cannot record and download simultaneously.
+    pub fn set_downloading(&mut self, on: bool) {
+        self.downloading = on;
+        if on {
+            self.recording = false;
+        }
+    }
+
+    /// Set the stored read count, updating storage_state to match.
+    pub fn set_stored_reads(&mut self, count: u32) {
+        self.stored_reads = count;
+        self.storage_state = if count > 0 {
+            StorageState::HasData
+        } else {
+            StorageState::Empty
+        };
+    }
+
+    /// Decrement stored reads by `count`, updating storage_state when empty.
+    pub fn decrement_stored_reads(&mut self, count: u32) {
+        self.stored_reads = self.stored_reads.saturating_sub(count);
+        if self.stored_reads == 0 {
+            self.storage_state = StorageState::Empty;
+        }
+    }
+
+    /// Reset storage after erase: zero stored reads and download progress.
+    pub fn reset_storage(&mut self) {
+        self.stored_reads = 0;
+        self.download_progress = 0;
+        self.storage_state = StorageState::Empty;
+    }
+
+    pub fn set_read_mode(&mut self, mode: ReadMode) {
+        self.read_mode = mode;
+    }
+
+    pub fn set_config3_timeout(&mut self, timeout: u8) {
+        self.config3_timeout = timeout;
+    }
+
+    pub fn set_tto_enabled(&mut self, enabled: bool) {
+        self.tto_enabled = enabled;
+    }
+
+    pub fn set_clock_offset_ms(&mut self, offset: i64) {
+        self.clock_offset_ms = offset;
+    }
+
+    pub fn set_download_progress(&mut self, progress: u32) {
+        self.download_progress = progress;
+    }
+
+    pub fn set_download_chip_ids(&mut self, ids: Vec<u64>) {
+        self.download_chip_ids = ids;
     }
 }
 
 // ---------------------------------------------------------------------------
 // Download read generation
 // ---------------------------------------------------------------------------
-
-/// LCG: x_{n+1} = (a * x_n + c) mod 2^64
-fn lcg_next(state: u64) -> u64 {
-    state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407)
-}
 
 /// Generate "stored reads" for download simulation.
 ///
@@ -174,9 +310,12 @@ pub fn generate_download_reads(state: &mut EmulatedReaderState, max_count: u32) 
 
         reads.push(format!("{}\r\n", raw));
 
-        state.stored_reads -= 1;
         state.download_progress += 1;
     }
+
+    // Decrement stored reads in one shot — this also flips storage_state
+    // to Empty when reaching zero, fixing the drift bug.
+    state.decrement_stored_reads(count);
 
     reads
 }
@@ -207,33 +346,65 @@ fn build_response_frame(reader_id: u8, instruction: u8, data: &[u8]) -> String {
 /// appropriate handler. Returns zero or more response strings (each
 /// terminated with `\r\n`).
 ///
-/// Unknown instructions are silently ignored (empty vec returned).
+/// Malformed frames and unknown instructions are rejected with a warning log.
 pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec<String> {
     // Minimum valid frame: ab + RR + LL + II + CC = 10 hex chars
     if frame.len() < 10 || !frame.starts_with("ab") {
+        eprintln!(
+            "[emulator] rejecting frame: too short or missing 'ab' prefix ({} chars): {:?}",
+            frame.len(),
+            &frame[..frame.len().min(20)]
+        );
         return vec![];
     }
 
     let reader_id = match u8::from_str_radix(&frame[2..4], 16) {
         Ok(v) => v,
-        Err(_) => return vec![],
+        Err(_) => {
+            eprintln!(
+                "[emulator] rejecting frame: invalid reader_id hex: {:?}",
+                &frame[2..4]
+            );
+            return vec![];
+        }
     };
     let length_byte = match u8::from_str_radix(&frame[4..6], 16) {
         Ok(v) => v,
-        Err(_) => return vec![],
+        Err(_) => {
+            eprintln!(
+                "[emulator] rejecting frame: invalid length hex: {:?}",
+                &frame[4..6]
+            );
+            return vec![];
+        }
     };
     let instruction = match u8::from_str_radix(&frame[6..8], 16) {
         Ok(v) => v,
-        Err(_) => return vec![],
+        Err(_) => {
+            eprintln!(
+                "[emulator] rejecting frame: invalid instruction hex: {:?}",
+                &frame[6..8]
+            );
+            return vec![];
+        }
     };
 
-    // Parse data bytes (between instruction and checksum)
+    // Parse data bytes (between instruction and checksum).
+    // Reject the entire frame if any data byte has invalid hex.
     let data_hex = &frame[8..frame.len().saturating_sub(2)]; // strip trailing checksum
     let mut data = Vec::new();
     let mut i = 0;
     while i + 1 < data_hex.len() {
-        if let Ok(b) = u8::from_str_radix(&data_hex[i..i + 2], 16) {
-            data.push(b);
+        match u8::from_str_radix(&data_hex[i..i + 2], 16) {
+            Ok(b) => data.push(b),
+            Err(_) => {
+                eprintln!(
+                    "[emulator] rejecting frame: invalid hex at data offset {}: {:?}",
+                    i,
+                    &data_hex[i..i + 2]
+                );
+                return vec![];
+            }
         }
         i += 2;
     }
@@ -252,7 +423,13 @@ pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec
         INSTR_EXT_STATUS if is_query => handle_get_extended_status(state, reader_id),
         INSTR_EXT_STATUS => handle_ext_status_write(state, reader_id, &data),
         INSTR_UNKNOWN_E0 => vec![build_response_frame(reader_id, INSTR_UNKNOWN_E0, &[])],
-        _ => vec![],
+        _ => {
+            eprintln!(
+                "[emulator] ignoring unknown instruction: 0x{:02x}",
+                instruction
+            );
+            vec![]
+        }
     }
 }
 
@@ -265,8 +442,8 @@ fn handle_get_date_time(state: &EmulatedReaderState, reader_id: u8) -> Vec<Strin
     let year = (now.year() % 100) as u8;
     let month = now.month() as u8;
     let day = now.day() as u8;
-    let dow = now.weekday().num_days_from_monday() as u8; // Mon=1..Sun=0 needs adjustment
-    // chrono: Mon=0, Tue=1, ..., Sun=6  but IPICO: Mon=1, Tue=2, ..., Sat=6, Sun=0
+    let dow = now.weekday().num_days_from_monday() as u8; // chrono: Mon=0..Sun=6
+    // IPICO expects Mon=1, Tue=2, ..., Sat=6, Sun=0
     let day_of_week = match dow {
         6 => 0u8, // Sunday
         d => d + 1,
@@ -277,13 +454,13 @@ fn handle_get_date_time(state: &EmulatedReaderState, reader_id: u8) -> Vec<Strin
     let centisecond = (now.nanosecond() / 10_000_000) as u8;
 
     let data = [
-        to_bcd(year).unwrap_or(0),
-        to_bcd(month).unwrap_or(0),
-        to_bcd(day).unwrap_or(0),
+        to_bcd(year).expect("year % 100 is always in BCD range"),
+        to_bcd(month).expect("month 1-12 is always in BCD range"),
+        to_bcd(day).expect("day 1-31 is always in BCD range"),
         day_of_week,
-        to_bcd(hour).unwrap_or(0),
-        to_bcd(minute).unwrap_or(0),
-        to_bcd(second).unwrap_or(0),
+        to_bcd(hour).expect("hour 0-23 is always in BCD range"),
+        to_bcd(minute).expect("minute 0-59 is always in BCD range"),
+        to_bcd(second).expect("second 0-59 is always in BCD range"),
         centisecond,
         0x27,
     ];
@@ -318,8 +495,8 @@ fn build_extended_status_data(state: &EmulatedReaderState) -> [u8; 13] {
     } else {
         0x00
     };
-    let stored_extent = state.stored_reads * 32;
-    let dl_progress = state.download_progress * 32;
+    let stored_extent = state.stored_reads.saturating_mul(32);
+    let dl_progress = state.download_progress.saturating_mul(32);
     let hw_be = state.hw_identifier.to_be_bytes();
     [
         recording_state,
@@ -333,7 +510,7 @@ fn build_extended_status_data(state: &EmulatedReaderState) -> [u8; 13] {
         hw_be[0],
         hw_be[1],
         0x8f,
-        state.storage_state,
+        state.storage_state.wire_byte(),
         0x00,
     ]
 }
@@ -378,6 +555,10 @@ fn handle_set_date_time(
     data: &[u8],
 ) -> Vec<String> {
     if data.len() < 7 {
+        eprintln!(
+            "[emulator] SetDateTime: insufficient data ({} bytes, need 7)",
+            data.len()
+        );
         return vec![];
     }
     let year = from_bcd(data[0]).unwrap_or(0) as i32;
@@ -389,24 +570,36 @@ fn handle_set_date_time(
     let second = from_bcd(data[6]).unwrap_or(0) as u32;
 
     let full_year = 2000 + year;
-    if let Some(target) = Local
+    match Local
         .with_ymd_and_hms(full_year, month, day, hour, minute, second)
         .single()
     {
-        let now = Local::now();
-        let diff = target - now;
-        state.clock_offset_ms = diff.num_milliseconds();
+        Some(target) => {
+            let now = Local::now();
+            let diff = target - now;
+            state.set_clock_offset_ms(diff.num_milliseconds());
+        }
+        None => {
+            eprintln!(
+                "[emulator] SetDateTime: invalid date {full_year}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+            );
+        }
     }
     vec![build_response_frame(reader_id, INSTR_SET_DATE_TIME, &[])]
 }
 
 fn handle_set_config3(state: &mut EmulatedReaderState, reader_id: u8, data: &[u8]) -> Vec<String> {
-    if data.len() >= 2 {
-        if let Some(mode) = ReadMode::from_config3(data[0]) {
-            state.read_mode = mode;
-        }
-        state.config3_timeout = data[1];
+    if data.len() < 2 {
+        eprintln!(
+            "[emulator] SetConfig3: insufficient data ({} bytes)",
+            data.len()
+        );
+        return vec![];
     }
+    if let Some(mode) = ReadMode::from_config3(data[0]) {
+        state.set_read_mode(mode);
+    }
+    state.set_config3_timeout(data[1]);
     vec![build_response_frame(reader_id, INSTR_CONFIG3, &[])]
 }
 
@@ -415,9 +608,11 @@ fn handle_set_tag_message_format(
     reader_id: u8,
     data: &[u8],
 ) -> Vec<String> {
-    if !data.is_empty() {
-        state.tto_enabled = data[0] & 0x80 != 0;
+    if data.is_empty() {
+        eprintln!("[emulator] SetTagMessageFormat: no data bytes");
+        return vec![];
     }
+    state.set_tto_enabled(data[0] & 0x80 != 0);
     vec![build_response_frame(
         reader_id,
         INSTR_TAG_MESSAGE_FORMAT,
@@ -431,21 +626,32 @@ fn handle_ext_status_write(
     data: &[u8],
 ) -> Vec<String> {
     if data.is_empty() {
+        eprintln!("[emulator] ExtStatusWrite: no data bytes");
         return vec![];
     }
     match data[0] {
         0x00 => {
             // SetRecordingState
-            if data.len() >= 2 {
-                state.recording = data[1] != 0;
+            if data.len() < 2 {
+                eprintln!(
+                    "[emulator] SetRecordingState: insufficient data ({} bytes)",
+                    data.len()
+                );
+                return vec![];
             }
+            state.set_recording(data[1] != 0);
             vec![build_response_frame(reader_id, INSTR_EXT_STATUS, &[])]
         }
         0x01 => {
             // SetAccessMode
-            if data.len() >= 2 {
-                state.downloading = data[1] != 0;
+            if data.len() < 2 {
+                eprintln!(
+                    "[emulator] SetAccessMode: insufficient data ({} bytes)",
+                    data.len()
+                );
+                return vec![];
             }
+            state.set_downloading(data[1] != 0);
             if state.downloading {
                 let ext_data = build_extended_status_data(state);
                 vec![build_response_frame(reader_id, INSTR_EXT_STATUS, &ext_data)]
@@ -455,7 +661,7 @@ fn handle_ext_status_write(
         }
         0x02 => {
             // InitDownload
-            state.download_progress = 0;
+            state.set_download_progress(0);
             vec![build_response_frame(reader_id, INSTR_EXT_STATUS, &[])]
         }
         0x07 => {
@@ -464,12 +670,16 @@ fn handle_ext_status_write(
         }
         0xd0 => {
             // TriggerErase
-            state.stored_reads = 0;
-            state.download_progress = 0;
-            state.storage_state = 0x01;
+            state.reset_storage();
             vec![build_response_frame(reader_id, INSTR_EXT_STATUS, &[])]
         }
-        _ => vec![],
+        _ => {
+            eprintln!(
+                "[emulator] ExtStatusWrite: unknown sub-command 0x{:02x}",
+                data[0]
+            );
+            vec![]
+        }
     }
 }
 
@@ -506,19 +716,19 @@ mod tests {
         let cfg = base_config();
         let state = EmulatedReaderState::from_config(&cfg, 42);
 
-        assert_eq!(state.read_mode, ReadMode::Raw);
-        assert!(!state.tto_enabled);
-        assert!(!state.recording);
-        assert_eq!(state.stored_reads, 0);
-        assert_eq!(state.clock_offset_ms, 0);
-        assert!(state.banner.contains("EMU"));
-        assert_eq!(state.storage_state, 0x01);
-        assert!(!state.downloading);
-        assert_eq!(state.download_progress, 0);
-        assert_eq!(state.fw_version, 0x42);
-        assert_eq!(state.hw_code, 0x05);
-        assert_eq!(state.hw_identifier, 0x5905);
-        assert_eq!(state.config3_timeout, 5);
+        assert_eq!(state.read_mode(), ReadMode::Raw);
+        assert!(!state.tto_enabled());
+        assert!(!state.recording());
+        assert_eq!(state.stored_reads(), 0);
+        assert_eq!(state.clock_offset_ms(), 0);
+        assert!(state.banner().contains("EMU"));
+        assert_eq!(state.storage_state(), StorageState::Empty);
+        assert!(!state.downloading());
+        assert_eq!(state.download_progress(), 0);
+        assert_eq!(state.fw_version(), 0x42);
+        assert_eq!(state.hw_code(), 0x05);
+        assert_eq!(state.hw_identifier(), 0x5905);
+        assert_eq!(state.config3_timeout(), 5);
     }
 
     // -- build_response_frame tests --
@@ -561,12 +771,12 @@ mod tests {
 
         let state = EmulatedReaderState::from_config(&cfg, 99);
 
-        assert_eq!(state.read_mode, ReadMode::FirstLastSeen);
-        assert!(state.tto_enabled);
-        assert!(state.recording);
-        assert_eq!(state.stored_reads, 500);
-        assert_eq!(state.clock_offset_ms, -1500);
-        assert_eq!(state.storage_state, 0x0c);
+        assert_eq!(state.read_mode(), ReadMode::FirstLastSeen);
+        assert!(state.tto_enabled());
+        assert!(state.recording());
+        assert_eq!(state.stored_reads(), 500);
+        assert_eq!(state.clock_offset_ms(), -1500);
+        assert_eq!(state.storage_state(), StorageState::HasData);
         assert_eq!(state.download_seed, 99);
     }
 
@@ -621,9 +831,8 @@ mod tests {
     #[test]
     fn handle_get_extended_status_returns_13_byte_response() {
         let mut state = make_test_state();
-        state.recording = true;
-        state.stored_reads = 500;
-        state.storage_state = 0x0c;
+        state.set_recording(true);
+        state.set_stored_reads(500);
         let frame = cmd_to_frame(&Command::GetExtendedStatus);
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
@@ -633,14 +842,14 @@ mod tests {
         assert_eq!(ext.stored_data_extent, 500 * 32);
         assert_eq!(ext.hw_identifier, 0x5905);
         assert_eq!(ext.hw_config, 0x8f);
-        assert_eq!(ext.storage_state, 0x0c);
+        assert_eq!(ext.storage_state, StorageState::HasData.wire_byte());
     }
 
     #[test]
     fn handle_get_config3_returns_current_mode() {
         let mut state = make_test_state();
-        state.read_mode = ReadMode::Event;
-        state.config3_timeout = 8;
+        state.set_read_mode(ReadMode::Event);
+        state.set_config3_timeout(8);
         let frame = cmd_to_frame(&Command::GetConfig3);
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
@@ -653,7 +862,7 @@ mod tests {
     #[test]
     fn handle_get_tag_message_format_reflects_tto() {
         let mut state = make_test_state();
-        state.tto_enabled = true;
+        state.set_tto_enabled(true);
         let frame = cmd_to_frame(&Command::GetTagMessageFormat);
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
@@ -703,7 +912,7 @@ mod tests {
     #[test]
     fn handle_set_config3_updates_mode() {
         let mut state = make_test_state();
-        assert_eq!(state.read_mode, ReadMode::Raw);
+        assert_eq!(state.read_mode(), ReadMode::Raw);
         let frame = cmd_to_frame(&Command::SetConfig3 {
             mode: ReadMode::Event,
             timeout: 8,
@@ -712,14 +921,14 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let parsed = parse_response(responses[0].trim_end().as_bytes()).unwrap();
         assert_eq!(parsed.instruction(), INSTR_CONFIG3);
-        assert_eq!(state.read_mode, ReadMode::Event);
-        assert_eq!(state.config3_timeout, 8);
+        assert_eq!(state.read_mode(), ReadMode::Event);
+        assert_eq!(state.config3_timeout(), 8);
     }
 
     #[test]
     fn handle_set_tag_message_format_updates_tto() {
         let mut state = make_test_state();
-        assert!(!state.tto_enabled);
+        assert!(!state.tto_enabled());
         let fmt = control::TagMessageFormat {
             field_mask: 0x80,
             id_byte_mask: 0x3f,
@@ -734,35 +943,35 @@ mod tests {
         let frame = cmd_to_frame(&Command::SetTagMessageFormat { format: fmt });
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
-        assert!(state.tto_enabled);
+        assert!(state.tto_enabled());
     }
 
     #[test]
     fn handle_set_recording_on_and_off() {
         let mut state = make_test_state();
-        assert!(!state.recording);
+        assert!(!state.recording());
 
         let frame = cmd_to_frame(&Command::SetRecordingState { on: true });
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
-        assert!(state.recording);
+        assert!(state.recording());
 
         let frame = cmd_to_frame(&Command::SetRecordingState { on: false });
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
-        assert!(!state.recording);
+        assert!(!state.recording());
     }
 
     #[test]
     fn handle_set_access_mode_on_sets_downloading() {
         let mut state = make_test_state();
-        state.recording = true;
-        state.stored_reads = 100;
+        state.set_recording(true);
+        state.set_stored_reads(100);
 
         let frame = cmd_to_frame(&Command::SetAccessMode { on: true });
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
-        assert!(state.downloading);
+        assert!(state.downloading());
 
         // Response should be 13-byte extended status with recording_state=Downloading
         let parsed = parse_response(responses[0].trim_end().as_bytes()).unwrap();
@@ -773,16 +982,15 @@ mod tests {
     #[test]
     fn handle_trigger_erase_clears_stored_reads() {
         let mut state = make_test_state();
-        state.stored_reads = 500;
-        state.storage_state = 0x0c;
-        state.download_progress = 100;
+        state.set_stored_reads(500);
+        state.set_download_progress(100);
 
         let frame = cmd_to_frame(&Command::TriggerErase);
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
-        assert_eq!(state.stored_reads, 0);
-        assert_eq!(state.storage_state, 0x01);
-        assert_eq!(state.download_progress, 0);
+        assert_eq!(state.stored_reads(), 0);
+        assert_eq!(state.storage_state(), StorageState::Empty);
+        assert_eq!(state.download_progress(), 0);
     }
 
     #[test]
@@ -813,11 +1021,11 @@ mod tests {
         let responses = handle_control_frame(&mut state, &frame);
         assert_eq!(responses.len(), 1);
         // clock_offset should be approximately 3600000ms (1 hour), within 2s tolerance
-        let diff = (state.clock_offset_ms - 3_600_000).unsigned_abs();
+        let diff = (state.clock_offset_ms() - 3_600_000).unsigned_abs();
         assert!(
             diff < 2000,
             "expected clock_offset_ms ~3600000, got {}",
-            state.clock_offset_ms
+            state.clock_offset_ms()
         );
     }
 
@@ -826,15 +1034,15 @@ mod tests {
     #[test]
     fn generate_download_reads_produces_valid_chip_reads() {
         let mut state = make_test_state();
-        state.stored_reads = 3;
-        state.download_chip_ids = vec![1234, 5678];
+        state.set_stored_reads(3);
+        state.set_download_chip_ids(vec![1234, 5678]);
         state.download_seed = 42;
-        state.downloading = true;
+        state.set_downloading(true);
 
         let reads = generate_download_reads(&mut state, 3);
         assert_eq!(reads.len(), 3);
-        assert_eq!(state.stored_reads, 0);
-        assert_eq!(state.download_progress, 3);
+        assert_eq!(state.stored_reads(), 0);
+        assert_eq!(state.download_progress(), 3);
 
         for read in &reads {
             let trimmed = read.trim();
@@ -846,21 +1054,108 @@ mod tests {
     #[test]
     fn generate_download_reads_stops_at_stored_reads() {
         let mut state = make_test_state();
-        state.stored_reads = 2;
-        state.downloading = true;
+        state.set_stored_reads(2);
+        state.set_downloading(true);
 
         let reads = generate_download_reads(&mut state, 10);
         assert_eq!(reads.len(), 2);
-        assert_eq!(state.stored_reads, 0);
+        assert_eq!(state.stored_reads(), 0);
     }
 
     #[test]
     fn generate_download_reads_returns_empty_when_not_downloading() {
         let mut state = make_test_state();
-        state.stored_reads = 100;
-        state.downloading = false;
+        state.set_stored_reads(100);
+        // downloading is false by default from from_config
 
         let reads = generate_download_reads(&mut state, 10);
         assert!(reads.is_empty());
+    }
+
+    // -- Invariant enforcement tests --
+
+    #[test]
+    fn storage_state_flips_to_empty_after_full_download() {
+        let mut state = make_test_state();
+        state.set_stored_reads(3);
+        state.set_downloading(true);
+        assert_eq!(state.storage_state(), StorageState::HasData);
+
+        let reads = generate_download_reads(&mut state, 3);
+        assert_eq!(reads.len(), 3);
+        assert_eq!(state.stored_reads(), 0);
+        assert_eq!(state.storage_state(), StorageState::Empty);
+    }
+
+    #[test]
+    fn set_downloading_clears_recording() {
+        let mut state = make_test_state();
+        state.set_recording(true);
+        assert!(state.recording());
+
+        state.set_downloading(true);
+        assert!(state.downloading());
+        assert!(!state.recording());
+    }
+
+    #[test]
+    fn set_recording_clears_downloading() {
+        let mut state = make_test_state();
+        state.set_downloading(true);
+        assert!(state.downloading());
+
+        state.set_recording(true);
+        assert!(state.recording());
+        assert!(!state.downloading());
+    }
+
+    // -- Malformed frame tests --
+
+    #[test]
+    fn handle_control_frame_rejects_empty_frame() {
+        let mut state = make_test_state();
+        assert!(handle_control_frame(&mut state, "").is_empty());
+    }
+
+    #[test]
+    fn handle_control_frame_rejects_short_frame() {
+        let mut state = make_test_state();
+        assert!(handle_control_frame(&mut state, "ab01").is_empty());
+    }
+
+    #[test]
+    fn handle_control_frame_rejects_non_ab_prefix() {
+        let mut state = make_test_state();
+        assert!(handle_control_frame(&mut state, "cd00ff0a00").is_empty());
+    }
+
+    #[test]
+    fn handle_control_frame_rejects_invalid_hex_in_data() {
+        let mut state = make_test_state();
+        // Valid header (reader=00, len=02, instr=09) but "ZZ" in data
+        assert!(handle_control_frame(&mut state, "ab00020900ZZ00").is_empty());
+    }
+
+    #[test]
+    fn handle_control_frame_ignores_unknown_instruction() {
+        let mut state = make_test_state();
+        // Valid frame structure with unknown instruction 0xAA
+        assert!(handle_control_frame(&mut state, "ab00ffaa00").is_empty());
+    }
+
+    #[test]
+    fn handle_set_config3_rejects_short_data() {
+        let mut state = make_test_state();
+        let original_mode = state.read_mode();
+        // Build a frame with instruction=CONFIG3 but only 1 data byte
+        let frame = build_response_frame(0x00, INSTR_CONFIG3, &[0x01]);
+        let trimmed = frame.trim_end();
+        let responses = handle_control_frame(&mut state, trimmed);
+        assert!(responses.is_empty());
+        assert_eq!(
+            state.read_mode(),
+            original_mode,
+            "state should not be mutated"
+        );
     }
 }
