@@ -171,6 +171,11 @@ describe("buildTarget", () => {
     const reader = makeReader({ ip: "192.168.0.1", port: NaN as unknown as string });
     expect(buildTarget(reader)).toBe("");
   });
+
+  it("handles numeric port from Svelte number input", () => {
+    const reader = makeReader({ ip: "192.168.0.50", port: 10000 as unknown as string });
+    expect(buildTarget(reader)).toBe("192.168.0.50:10000");
+  });
 });
 
 describe("parseTarget/buildTarget round-trip", () => {
@@ -694,6 +699,18 @@ describe("validateReaders", () => {
     }))).toBeTruthy();
   });
 
+  it("rejects range reader with negative end octet", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.100", ip_end_octet: "-1" })],
+    }))).toBeTruthy();
+  });
+
+  it("passes range reader with start and end octet both 0", () => {
+    expect(validateReaders(makeForm({
+      readers: [makeRangeReader({ ip_start: "192.168.0.0", ip_end_octet: "0" })],
+    }))).toBeNull();
+  });
+
   it("reports correct index for invalid second reader", () => {
     const result = validateReaders(makeForm({
       readers: [makeSingleReader(), makeSingleReader({ ip: "" })],
@@ -734,6 +751,10 @@ describe("defaultFallbackPort", () => {
   it("returns empty for IP:port format (not just IP)", () => {
     expect(defaultFallbackPort("192.168.0.50:10000")).toBe("");
   });
+
+  it("computes 10255 for last octet 255", () => {
+    expect(defaultFallbackPort("192.168.0.255")).toBe("10255");
+  });
 });
 
 describe("toReadersPayload", () => {
@@ -750,6 +771,14 @@ describe("toReadersPayload", () => {
     } as ForwarderConfigFormState;
     const payload = toReadersPayload(form);
     expect(payload.readers[0].target).toBeNull();
+  });
+
+  it("handles numeric local_fallback_port from number input", () => {
+    const form = {
+      readers: [makeReader({ ip: "192.168.0.1", port: "10000", local_fallback_port: 12345 as unknown as string })],
+    } as ForwarderConfigFormState;
+    const payload = toReadersPayload(form);
+    expect(payload.readers[0].local_fallback_port).toBe(12345);
   });
 });
 
