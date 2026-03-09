@@ -886,6 +886,7 @@ async fn run_uplink(
                     connected,
                 });
                 if session.send_message(&update).await.is_err() {
+                    warn!(reader_ip = %ip, "failed to send reader status during initial burst; reconnecting");
                     burst_ok = false;
                     break;
                 }
@@ -902,6 +903,7 @@ async fn run_uplink(
         while let Ok(update) = reader_status_rx.try_recv() {
             let msg = WsMessage::ReaderStatusUpdate(update);
             if session.send_message(&msg).await.is_err() {
+                warn!("failed to send reader status during drain; reconnecting");
                 drain_ok = false;
                 break;
             }
@@ -1074,6 +1076,7 @@ async fn run_uplink(
                 Some(update) = reader_status_rx.recv() => {
                     let msg = WsMessage::ReaderStatusUpdate(update);
                     if session.send_message(&msg).await.is_err() {
+                        warn!("failed to send reader status update; reconnecting");
                         break 'uplink;
                     }
                     continue 'uplink;
