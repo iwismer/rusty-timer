@@ -1,6 +1,7 @@
 import type { FieldHelp, SectionHelp } from "./help/help-types";
+import { fieldMatchesQuery } from "./help/field-match";
 
-/** Filter section fields and tips by search query. Returns all if query is empty. */
+/** Filter section fields and tips by search query. Returns all if query is empty or whitespace-only. */
 export function filterSectionContent(
   section: SectionHelp,
   query: string,
@@ -12,12 +13,8 @@ export function filterSectionContent(
     return { fields: entries, tips };
   }
 
-  const q = query.toLowerCase();
   return {
-    fields: entries.filter(([, f]) =>
-      [f.label, f.summary, f.detail, f.default, f.range, f.recommended]
-        .some(text => text?.toLowerCase().includes(q))
-    ),
-    tips: tips.filter(t => t.toLowerCase().includes(q)),
+    fields: entries.filter(([, f]) => fieldMatchesQuery(f, query)),
+    tips: tips.filter(t => t.toLowerCase().includes(query.toLowerCase())),
   };
 }

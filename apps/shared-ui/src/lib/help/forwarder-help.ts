@@ -1,6 +1,6 @@
 import type { HelpContext } from "./help-types";
 
-export const FORWARDER_HELP: HelpContext = {
+export const FORWARDER_HELP = {
   general: {
     title: "General Settings",
     overview: "Core forwarder identity settings.",
@@ -288,4 +288,4 @@ export const FORWARDER_HELP: HelpContext = {
     ],
     seeAlso: [{ sectionKey: "controls", label: "Forwarder Controls" }],
   },
-};
+} as const satisfies HelpContext;

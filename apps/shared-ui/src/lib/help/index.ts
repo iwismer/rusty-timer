@@ -1,7 +1,8 @@
-import type { HelpContext, HelpContextName, SectionHelp, FieldHelp } from "./help-types";
+import type { HelpContext, HelpContextName, SectionHelp, FieldHelp, HelpSearchResult } from "./help-types";
 import { FORWARDER_HELP } from "./forwarder-help";
 import { RECEIVER_HELP } from "./receiver-help";
 import { RECEIVER_ADMIN_HELP } from "./receiver-admin-help";
+import { fieldMatchesQuery } from "./field-match";
 
 const CONTEXTS: Record<HelpContextName, HelpContext> = {
   forwarder: FORWARDER_HELP,
@@ -17,25 +18,17 @@ export function getField(context: HelpContextName, sectionKey: string, fieldKey:
   return CONTEXTS[context]?.[sectionKey]?.fields[fieldKey];
 }
 
-/** Search all help content across all contexts. Returns matches grouped by context+section. */
-export function searchHelp(query: string): Array<{
-  context: HelpContextName;
-  sectionKey: string;
-  section: SectionHelp;
-  matchedFields: Array<{ fieldKey: string; field: FieldHelp }>;
-  matchedTips: string[];
-}> {
+/** Search all help content across all contexts. Returns matches grouped by context+section.
+ *  When a section title/overview matches but no individual fields match, all fields from that section are included. */
+export function searchHelp(query: string): HelpSearchResult[] {
   if (!query.trim()) return [];
   const q = query.toLowerCase();
-  const results: ReturnType<typeof searchHelp> = [];
+  const results: HelpSearchResult[] = [];
 
   for (const [contextName, context] of Object.entries(CONTEXTS) as [HelpContextName, HelpContext][]) {
     for (const [sectionKey, section] of Object.entries(context)) {
       const matchedFields = Object.entries(section.fields)
-        .filter(([, f]) =>
-          [f.label, f.summary, f.detail, f.default, f.range, f.recommended]
-            .some(text => text?.toLowerCase().includes(q))
-        )
+        .filter(([, f]) => fieldMatchesQuery(f, query))
         .map(([fieldKey, field]) => ({ fieldKey, field }));
 
       const matchedTips = (section.tips ?? []).filter(t => t.toLowerCase().includes(q));
@@ -58,4 +51,4 @@ export function searchHelp(query: string): Array<{
   return results;
 }
 
-export type { HelpContext, HelpContextName, SectionHelp, FieldHelp } from "./help-types";
+export type { HelpContext, HelpContextName, SectionHelp, FieldHelp, HelpSearchResult } from "./help-types";

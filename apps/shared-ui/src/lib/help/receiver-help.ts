@@ -1,6 +1,6 @@
 import type { HelpContext } from "./help-types";
 
-export const RECEIVER_HELP: HelpContext = {
+export const RECEIVER_HELP = {
   config: {
     title: "Receiver Configuration",
     overview: "Core connection settings for the receiver. These determine how the receiver identifies itself and connects to the remote server.",
@@ -108,4 +108,4 @@ export const RECEIVER_HELP: HelpContext = {
     ],
     seeAlso: [{ sectionKey: "receiver_mode", label: "Receiver Mode" }],
   },
-};
+} as const satisfies HelpContext;

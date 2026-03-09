@@ -1,6 +1,6 @@
 import type { HelpContext } from "./help-types";
 
-export const RECEIVER_ADMIN_HELP: HelpContext = {
+export const RECEIVER_ADMIN_HELP = {
   cursor_reset: {
     title: "Cursor Reset",
     overview: "Reset resume cursors to replay data from the beginning. Cursors track the receiver's position in each stream so it can resume where it left off after a disconnect.",
@@ -113,4 +113,4 @@ export const RECEIVER_ADMIN_HELP: HelpContext = {
       { sectionKey: "cursor_reset", label: "Cursor Reset" },
     ],
   },
-};
+} as const satisfies HelpContext;
