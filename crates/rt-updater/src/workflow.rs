@@ -164,3 +164,234 @@ pub async fn run_download(
         other => Err(other),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct MockChecker {
+        check_result: Result<UpdateStatus, String>,
+        download_result: Result<PathBuf, String>,
+    }
+
+    impl Checker for MockChecker {
+        fn check<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<UpdateStatus, String>> + Send + 'a>> {
+            Box::pin(async { self.check_result.clone() })
+        }
+
+        fn download<'a>(
+            &'a self,
+            _version: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<PathBuf, String>> + Send + 'a>> {
+            Box::pin(async { self.download_result.clone() })
+        }
+    }
+
+    struct MockState {
+        status: Mutex<UpdateStatus>,
+        downloaded_path: Mutex<Option<PathBuf>>,
+        emitted: Mutex<Vec<UpdateStatus>>,
+    }
+
+    impl MockState {
+        fn new() -> Self {
+            Self {
+                status: Mutex::new(UpdateStatus::UpToDate),
+                downloaded_path: Mutex::new(None),
+                emitted: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl WorkflowState for MockState {
+        fn current_status<'a>(&'a self) -> Pin<Box<dyn Future<Output = UpdateStatus> + Send + 'a>> {
+            Box::pin(async { self.status.lock().unwrap().clone() })
+        }
+
+        fn set_status<'a>(
+            &'a self,
+            status: UpdateStatus,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                *self.status.lock().unwrap() = status;
+            })
+        }
+
+        fn set_downloaded<'a>(
+            &'a self,
+            status: UpdateStatus,
+            path: PathBuf,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                *self.status.lock().unwrap() = status;
+                *self.downloaded_path.lock().unwrap() = Some(path);
+            })
+        }
+
+        fn emit_status_changed<'a>(
+            &'a self,
+            status: UpdateStatus,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                self.emitted.lock().unwrap().push(status);
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn check_only_available() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::Available {
+                version: "1.2.0".into(),
+            }),
+            download_result: Ok(PathBuf::from("/tmp/staged")),
+        };
+        let state = MockState::new();
+        let result = run_check(&state, &checker, UpdateMode::CheckOnly).await;
+        assert_eq!(
+            result,
+            UpdateStatus::Available {
+                version: "1.2.0".into()
+            }
+        );
+        assert!(state.downloaded_path.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn check_and_download_available() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::Available {
+                version: "1.2.0".into(),
+            }),
+            download_result: Ok(PathBuf::from("/tmp/staged")),
+        };
+        let state = MockState::new();
+        let result = run_check(&state, &checker, UpdateMode::CheckAndDownload).await;
+        assert_eq!(
+            result,
+            UpdateStatus::Downloaded {
+                version: "1.2.0".into()
+            }
+        );
+        assert_eq!(
+            *state.downloaded_path.lock().unwrap(),
+            Some(PathBuf::from("/tmp/staged"))
+        );
+    }
+
+    #[tokio::test]
+    async fn check_up_to_date() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(PathBuf::from("/tmp/staged")),
+        };
+        let state = MockState::new();
+        let result = run_check(&state, &checker, UpdateMode::CheckAndDownload).await;
+        assert_eq!(result, UpdateStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn check_failure() {
+        let checker = MockChecker {
+            check_result: Err("network error".into()),
+            download_result: Ok(PathBuf::from("/tmp/staged")),
+        };
+        let state = MockState::new();
+        let result = run_check(&state, &checker, UpdateMode::CheckAndDownload).await;
+        assert_eq!(
+            result,
+            UpdateStatus::Failed {
+                error: "network error".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn download_failure() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::Available {
+                version: "1.2.0".into(),
+            }),
+            download_result: Err("checksum mismatch".into()),
+        };
+        let state = MockState::new();
+        let result = run_check(&state, &checker, UpdateMode::CheckAndDownload).await;
+        assert_eq!(
+            result,
+            UpdateStatus::Failed {
+                error: "checksum mismatch".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn run_download_when_available() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(PathBuf::from("/tmp/staged")),
+        };
+        let state = MockState::new();
+        *state.status.lock().unwrap() = UpdateStatus::Available {
+            version: "2.0.0".into(),
+        };
+        let result = run_download(&state, &checker).await;
+        assert_eq!(
+            result,
+            Ok(UpdateStatus::Downloaded {
+                version: "2.0.0".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn run_download_when_already_downloaded() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(PathBuf::from("/tmp/staged")),
+        };
+        let state = MockState::new();
+        *state.status.lock().unwrap() = UpdateStatus::Downloaded {
+            version: "2.0.0".into(),
+        };
+        let result = run_download(&state, &checker).await;
+        assert_eq!(
+            result,
+            Ok(UpdateStatus::Downloaded {
+                version: "2.0.0".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn run_download_when_up_to_date_returns_err() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Ok(PathBuf::from("/tmp/staged")),
+        };
+        let state = MockState::new();
+        let result = run_download(&state, &checker).await;
+        assert_eq!(result, Err(UpdateStatus::UpToDate));
+    }
+
+    #[tokio::test]
+    async fn run_download_failure() {
+        let checker = MockChecker {
+            check_result: Ok(UpdateStatus::UpToDate),
+            download_result: Err("disk full".into()),
+        };
+        let state = MockState::new();
+        *state.status.lock().unwrap() = UpdateStatus::Available {
+            version: "2.0.0".into(),
+        };
+        let result = run_download(&state, &checker).await;
+        assert_eq!(
+            result,
+            Err(UpdateStatus::Failed {
+                error: "disk full".into()
+            })
+        );
+    }
+}
