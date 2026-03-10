@@ -56,10 +56,12 @@
     const target = e.target;
     if (!(target instanceof Element)) {
       searchOpen = false;
+      query = "";
       return;
     }
     if (!target.closest("[data-help-search]")) {
       searchOpen = false;
+      query = "";
     }
   }
 

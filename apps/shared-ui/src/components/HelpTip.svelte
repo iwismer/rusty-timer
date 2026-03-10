@@ -20,7 +20,7 @@
     onOpenModal?: (fieldKey: string) => void;
   } = $props();
 
-  // Injected by parent Card component when helpSection is set. Falls back to onOpenModal prop.
+  // Injected by parent Card component when helpSection is set. Used as fallback when onOpenModal prop is not provided.
   const contextOpenHelp = hasContext(HELP_OPEN_MODAL_KEY)
     ? getContext<(fieldKey?: string) => void>(HELP_OPEN_MODAL_KEY)
     : undefined;

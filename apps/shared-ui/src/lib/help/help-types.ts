@@ -12,7 +12,7 @@ export type SectionHelp = {
   title: string;
   overview: string;
   fields: Record<string, FieldHelp>;
-  /** May contain HTML (rendered via {@html}). Must only come from static help data files. */
+  /** Contains trusted HTML (rendered via {@html}). Must only come from static help data files — never user input. */
   tips?: string[];
   seeAlso?: { sectionKey: string; label: string }[];
 };

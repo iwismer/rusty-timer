@@ -1,4 +1,4 @@
-// Estimated max height for positioning; if popover content exceeds this, the above/below logic may misplace the popover.
+// Default estimated height for above/below positioning. Callers can pass an actual measured height via the popoverHeight parameter.
 const POPOVER_HEIGHT = 200;
 const POPOVER_WIDTH = 288; // w-72 = 18rem = 288px
 const GAP = 8;
