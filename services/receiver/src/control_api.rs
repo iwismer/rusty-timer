@@ -390,7 +390,7 @@ pub struct StreamEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream_epoch: Option<u64>,
+    pub stream_epoch: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_epoch_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,9 +398,9 @@ pub struct StreamEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_epoch: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor_epoch: Option<u64>,
+    pub cursor_epoch: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor_seq: Option<u64>,
+    pub cursor_seq: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -494,7 +494,7 @@ pub struct UpstreamStreamInfo {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub display_alias: Option<String>,
-    pub stream_epoch: u64,
+    pub stream_epoch: i64,
     pub online: bool,
     pub current_epoch_name: Option<String>,
 }

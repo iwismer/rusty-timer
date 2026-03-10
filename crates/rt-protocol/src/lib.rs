@@ -20,8 +20,8 @@ use uuid::Uuid;
 pub struct ResumeCursor {
     pub forwarder_id: String,
     pub reader_ip: String,
-    pub stream_epoch: u64,
-    pub last_seq: u64,
+    pub stream_epoch: i64,
+    pub last_seq: i64,
 }
 
 /// A single read event carried in event batch messages.
@@ -30,8 +30,8 @@ pub struct ReadEvent {
     /// Redundant for self-describing messages.
     pub forwarder_id: String,
     pub reader_ip: String,
-    pub stream_epoch: u64,
-    pub seq: u64,
+    pub stream_epoch: i64,
+    pub seq: i64,
     /// Device-reported timestamp; accepted as-is, no server adjustment.
     pub reader_timestamp: String,
     /// Exact bytes received from the reader frame.
@@ -47,8 +47,8 @@ pub struct AckEntry {
     /// Redundant for self-describing messages.
     pub forwarder_id: String,
     pub reader_ip: String,
-    pub stream_epoch: u64,
-    pub last_seq: u64,
+    pub stream_epoch: i64,
+    pub last_seq: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +270,7 @@ pub struct EpochResetCommand {
     pub session_id: String,
     pub forwarder_id: String,
     pub reader_ip: String,
-    pub new_stream_epoch: u64,
+    pub new_stream_epoch: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -512,7 +512,7 @@ pub struct StreamInfo {
     pub reader_ip: String,
     /// Human-readable label e.g. "Start", "Finish", "CP-1".
     pub display_alias: Option<String>,
-    pub stream_epoch: u64,
+    pub stream_epoch: i64,
     /// True when the forwarder's WS session is currently connected.
     pub online: bool,
     /// True when the forwarder reports its TCP connection to the reader hardware
@@ -549,7 +549,7 @@ pub struct StreamMetrics {
 /// Response body for `POST /api/v1/streams/{stream_id}/reset-epoch` on success.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResetEpochResponse {
-    pub new_stream_epoch: u64,
+    pub new_stream_epoch: i64,
 }
 
 /// Frozen HTTP error envelope used by all non-2xx responses.

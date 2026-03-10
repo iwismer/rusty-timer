@@ -199,22 +199,22 @@ async fn test_export_epoch_csv_filters_to_requested_epoch_and_includes_chip_id()
     for (batch_id, stream_epoch, seq, reader_timestamp, raw_frame) in [
         (
             "b-epoch-1",
-            1_u64,
-            1_u64,
+            1_i64,
+            1_i64,
             "2026-02-17T10:00:00.000Z",
             b"IGNORED_EPOCH_1".to_vec(),
         ),
         (
             "b-epoch-2-1",
-            2_u64,
-            1_u64,
+            2_i64,
+            1_i64,
             "2026-02-17T10:00:01.000Z",
             "aa400000000123450a2a01123018455927a7".as_bytes().to_vec(),
         ),
         (
             "b-epoch-2-2",
-            2_u64,
-            2_u64,
+            2_i64,
+            2_i64,
             "2026-02-17T10:00:02.000Z",
             b"NOT_IPICO_FRAME".to_vec(),
         ),

@@ -124,7 +124,7 @@ async fn read_events_from_emulator(
             forwarder_id: FORWARDER_DEVICE_ID.to_owned(),
             reader_ip: READER_IP.to_owned(),
             stream_epoch: 1,
-            seq: seq as u64,
+            seq: seq as i64,
             reader_timestamp: chip.timestamp.to_string(),
             raw_frame: raw_line.into_bytes(),
             read_type: READ_TYPE.to_owned(),
@@ -178,7 +178,7 @@ async fn e2e_export_txt_and_csv() {
     match session.send_batch(events).await.expect("send_batch failed") {
         SendBatchResult::Ack(ack) => {
             assert_eq!(ack.entries.len(), 1);
-            assert_eq!(ack.entries[0].last_seq, read_count as u64);
+            assert_eq!(ack.entries[0].last_seq, read_count as i64);
         }
         other => panic!("expected Ack, got {:?}", other),
     }

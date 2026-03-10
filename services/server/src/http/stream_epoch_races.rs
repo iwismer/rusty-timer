@@ -220,7 +220,7 @@ pub async fn activate_next_stream_epoch_for_race(
         session_id: String::new(),
         forwarder_id,
         reader_ip,
-        new_stream_epoch: next_epoch as u64,
+        new_stream_epoch: next_epoch,
     };
 
     match tokio::time::timeout(

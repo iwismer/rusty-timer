@@ -50,7 +50,7 @@ async fn test_metrics_invariant_maintained() {
         WsMessage::Heartbeat(h) => h.session_id,
         other => panic!("{:?}", other),
     };
-    let make_event = |seq: u64| ReadEvent {
+    let make_event = |seq: i64| ReadEvent {
         forwarder_id: "fwd-metrics".to_owned(),
         reader_ip: "10.1.1.1:10000".to_owned(),
         stream_epoch: 1,
@@ -59,7 +59,7 @@ async fn test_metrics_invariant_maintained() {
         raw_frame: format!("LINE_{}", seq).into_bytes(),
         read_type: "RAW".to_owned(),
     };
-    for seq in 1..=3u64 {
+    for seq in 1..=3i64 {
         client
             .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
                 session_id: session_id.clone(),
@@ -137,7 +137,7 @@ async fn test_multi_stream_metrics_independent() {
         WsMessage::Heartbeat(h) => h.session_id,
         other => panic!("{:?}", other),
     };
-    for seq in 1..=2u64 {
+    for seq in 1..=2i64 {
         client
             .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
                 session_id: session_id.clone(),

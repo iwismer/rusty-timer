@@ -37,8 +37,8 @@ pub struct Subscription {
 pub struct CursorRecord {
     pub forwarder_id: String,
     pub reader_ip: String,
-    pub stream_epoch: u64,
-    pub last_seq: u64,
+    pub stream_epoch: i64,
+    pub last_seq: i64,
 }
 pub struct Db {
     conn: Connection,
@@ -206,13 +206,13 @@ impl Db {
             Ok(CursorRecord {
                 forwarder_id: r.get(0)?,
                 reader_ip: r.get(1)?,
-                stream_epoch: r.get::<_, i64>(2)? as u64,
-                last_seq: r.get::<_, i64>(3)? as u64,
+                stream_epoch: r.get::<_, i64>(2)?,
+                last_seq: r.get::<_, i64>(3)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-    pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: u64, seq: u64) -> DbResult<()> {
+    pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: i64, seq: i64) -> DbResult<()> {
         let existing: Option<(i64, i64)> = self
             .conn
             .query_row(
@@ -223,16 +223,13 @@ impl Db {
             .optional()?;
 
         if let Some((current_epoch, current_seq)) = existing {
-            let new_epoch = epoch as i64;
-            let new_seq = seq as i64;
-            let is_stale =
-                new_epoch < current_epoch || (new_epoch == current_epoch && new_seq < current_seq);
+            let is_stale = epoch < current_epoch || (epoch == current_epoch && seq < current_seq);
             if is_stale {
                 return Ok(());
             }
         }
 
-        self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch as i64, seq as i64])?;
+        self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch, seq])?;
         Ok(())
     }
     pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {

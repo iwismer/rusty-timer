@@ -57,7 +57,7 @@ async fn test_export_raw_canonical_events_ordered() {
     };
 
     // Send 3 events + 1 retransmit (should not appear in export)
-    for seq in 1..=3u64 {
+    for seq in 1..=3i64 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: session.clone(),
             batch_id: format!("b{}", seq),
@@ -152,9 +152,9 @@ async fn test_export_epoch_raw_filters_to_requested_epoch() {
     };
 
     for (batch_id, stream_epoch, seq, line) in [
-        ("b-epoch-1", 1_u64, 1_u64, "EPOCH_1_LINE_1"),
-        ("b-epoch-2-1", 2_u64, 1_u64, "EPOCH_2_LINE_1"),
-        ("b-epoch-2-2", 2_u64, 2_u64, "EPOCH_2_LINE_2"),
+        ("b-epoch-1", 1_i64, 1_i64, "EPOCH_1_LINE_1"),
+        ("b-epoch-2-1", 2_i64, 1_i64, "EPOCH_2_LINE_1"),
+        ("b-epoch-2-2", 2_i64, 2_i64, "EPOCH_2_LINE_2"),
     ] {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: session.clone(),

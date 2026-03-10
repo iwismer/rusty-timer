@@ -54,10 +54,10 @@ async fn send_events(
     session_id: &str,
     forwarder_id: &str,
     reader_ip: &str,
-    stream_epoch: u64,
-    start_seq: u64,
-    count: u64,
-) -> u64 {
+    stream_epoch: i64,
+    start_seq: i64,
+    count: i64,
+) -> i64 {
     for i in 0..count {
         let seq = start_seq + i;
         client
@@ -185,7 +185,7 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
     .await;
 
     // Drain events until we have seq 1..5 and ack them.
-    let mut max_seq_seen: u64 = 0;
+    let mut max_seq_seen: i64 = 0;
     for _ in 0..10 {
         match tokio::time::timeout(Duration::from_secs(3), rcv1.recv_message()).await {
             Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
@@ -335,7 +335,7 @@ async fn e2e_replay_fresh_receiver_gets_all_events() {
     .await;
 
     let mut total_events = 0usize;
-    let mut min_seq = u64::MAX;
+    let mut min_seq = i64::MAX;
     for _ in 0..10 {
         match tokio::time::timeout(Duration::from_secs(3), rcv.recv_message()).await {
             Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
@@ -553,7 +553,7 @@ async fn e2e_receiver_ack_advances_cursor() {
     )
     .await;
 
-    let mut max_acked = 0_u64;
+    let mut max_acked = 0_i64;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline && max_acked < 3 {
         match tokio::time::timeout(Duration::from_millis(500), rcv1.recv_message()).await {

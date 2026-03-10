@@ -10,8 +10,8 @@ const CAP: usize = 256;
 pub struct Counts {
     pub total: u64,
     pub epoch: u64,
-    pub current_epoch: u64,
-    max_seen_seq_by_epoch: HashMap<u64, u64>,
+    pub current_epoch: i64,
+    max_seen_seq_by_epoch: HashMap<i64, i64>,
 }
 
 /// Thread-safe container for per-stream read counts.
@@ -28,16 +28,16 @@ impl StreamCounts {
     }
 
     /// Record one observed sequence number for a given stream/epoch.
-    pub fn record(&self, key: &StreamKey, stream_epoch: u64, seq: u64) {
+    pub fn record(&self, key: &StreamKey, stream_epoch: i64, seq: i64) {
         self.record_batch(key, stream_epoch, std::iter::once(seq));
     }
 
     /// Record a batch of observed sequence numbers for a given stream/epoch.
-    pub fn record_batch<I>(&self, key: &StreamKey, stream_epoch: u64, seqs: I)
+    pub fn record_batch<I>(&self, key: &StreamKey, stream_epoch: i64, seqs: I)
     where
-        I: IntoIterator<Item = u64>,
+        I: IntoIterator<Item = i64>,
     {
-        let unique_seqs: HashSet<u64> = seqs.into_iter().collect();
+        let unique_seqs: HashSet<i64> = seqs.into_iter().collect();
         if unique_seqs.is_empty() {
             return;
         }
@@ -53,7 +53,7 @@ impl StreamCounts {
         let new_unique = unique_seqs
             .iter()
             .filter(|&&seq| seq > previous_max)
-            .count() as u64;
+            .count() as u64; // count of unique items, always fits u64
 
         let batch_max = unique_seqs.iter().copied().max().unwrap_or(previous_max);
         counts
@@ -164,7 +164,7 @@ impl Default for EventBus {
 mod tests {
     use super::*;
     use rt_protocol::ReadEvent;
-    fn ev(f: &str, i: &str, s: u64) -> ReadEvent {
+    fn ev(f: &str, i: &str, s: i64) -> ReadEvent {
         ReadEvent {
             forwarder_id: f.to_owned(),
             reader_ip: i.to_owned(),

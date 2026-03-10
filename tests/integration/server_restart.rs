@@ -88,7 +88,7 @@ async fn server_restart_events_survive_in_postgres() {
     };
 
     // Send 4 events.
-    for seq in 1u64..=4 {
+    for seq in 1i64..=4 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd_session.clone(),
             batch_id: format!("pre-restart-batch-{}", seq),
@@ -214,7 +214,7 @@ async fn server_restart_new_forwarder_connection_works() {
         other => panic!("{:?}", other),
     };
 
-    for seq in 1u64..=2 {
+    for seq in 1i64..=2 {
         fwd1.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd1_session.clone(),
             batch_id: format!("pre-{}", seq),
@@ -253,7 +253,7 @@ async fn server_restart_new_forwarder_connection_works() {
         other => panic!("{:?}", other),
     };
 
-    for seq in 3u64..=4 {
+    for seq in 3i64..=4 {
         fwd2.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd2_session.clone(),
             batch_id: format!("post-{}", seq),

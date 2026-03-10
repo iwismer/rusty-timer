@@ -65,7 +65,7 @@ async fn test_reset_only_takes_effect_on_first_new_epoch_read() {
         other => panic!("{:?}", other),
     };
 
-    for (seq, raw_frame) in [(1u64, RAW_TAG_1), (2u64, RAW_TAG_2)] {
+    for (seq, raw_frame) in [(1i64, RAW_TAG_1), (2i64, RAW_TAG_2)] {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: session.clone(),
             batch_id: format!("e1-{}", seq),
