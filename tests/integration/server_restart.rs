@@ -10,43 +10,15 @@
 //! against the same Postgres pool — equivalent to stopping and restarting
 //! the server binary while the DB remains intact.
 
+#[path = "helpers/mod.rs"]
+mod helpers;
+use helpers::{insert_token, start_server as start_server_instance};
+
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
-
-// ---------------------------------------------------------------------------
-// Harness helpers
-// ---------------------------------------------------------------------------
-
-async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, raw_token: &[u8]) {
-    let hash = Sha256::digest(raw_token);
-    let hash_bytes: Vec<u8> = hash.as_slice().to_vec();
-    sqlx::query(
-        "INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3)",
-    )
-    .bind(hash_bytes)
-    .bind(device_type)
-    .bind(device_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-/// Start a new in-process server instance on a fresh random port.
-async fn start_server_instance(pool: sqlx::PgPool) -> std::net::SocketAddr {
-    let state = server::AppState::new(pool);
-    let router = server::build_router(state, None);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("server error");
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    addr
-}
 
 // ---------------------------------------------------------------------------
 // Test: Events survive server restart — data in DB is durable.

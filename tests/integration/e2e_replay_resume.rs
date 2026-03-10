@@ -7,45 +7,15 @@
 //!
 //! Uses testcontainers-rs for a live Postgres container and an in-process server.
 
+#[path = "helpers/mod.rs"]
+mod helpers;
+use helpers::{insert_token, receiver_handshake, start_server};
+
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
-use sha2::{Digest, Sha256};
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
-
-// ---------------------------------------------------------------------------
-// Harness helpers (shared with e2e_forwarder_server_receiver but duplicated
-// here to keep each test file self-contained and independently runnable).
-// ---------------------------------------------------------------------------
-
-async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, raw_token: &[u8]) {
-    let hash = Sha256::digest(raw_token);
-    let hash_bytes: Vec<u8> = hash.as_slice().to_vec();
-    sqlx::query(
-        "INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3)",
-    )
-    .bind(hash_bytes)
-    .bind(device_type)
-    .bind(device_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-async fn start_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
-    let state = server::AppState::new(pool);
-    let router = server::build_router(state, None);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind server");
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("server error");
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    addr
-}
 
 /// Send N sequential events starting at `start_seq` on the given stream and
 /// drain all ack messages. Returns the final seq that was acked.
@@ -80,47 +50,6 @@ async fn send_events(
         client.recv_message().await.unwrap();
     }
     start_seq + count - 1
-}
-
-async fn receiver_handshake(
-    client: &mut MockWsClient,
-    receiver_id: &str,
-    resume: Vec<ResumeCursor>,
-) -> String {
-    let mut seen = HashSet::new();
-    let streams: Vec<StreamRef> = resume
-        .iter()
-        .filter_map(|cursor| {
-            let key = (cursor.forwarder_id.clone(), cursor.reader_ip.clone());
-            if seen.insert(key.clone()) {
-                Some(StreamRef {
-                    forwarder_id: key.0,
-                    reader_ip: key.1,
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-    client
-        .send_message(&WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
-            receiver_id: receiver_id.to_owned(),
-            mode: ReceiverMode::Live {
-                streams,
-                earliest_epochs: vec![],
-            },
-            resume,
-        }))
-        .await
-        .unwrap();
-
-    loop {
-        match client.recv_message().await.unwrap() {
-            WsMessage::Heartbeat(hb) => break hb.session_id,
-            WsMessage::ReceiverModeApplied(_) => {}
-            other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
