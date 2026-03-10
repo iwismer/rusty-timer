@@ -31,6 +31,8 @@
     section ? filterSectionContent(section, searchQuery) : { fields: [], tips: [] },
   );
 
+  let previousOverflow = "";
+
   $effect(() => {
     if (!dialogEl) return;
     if (open && !dialogEl.open) {
@@ -39,15 +41,16 @@
           `[HelpDialog] No help section found for key "${sectionKey}" in context "${context}".`,
         );
       }
+      previousOverflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       dialogEl.showModal();
       searchQuery = "";
     } else if (!open && dialogEl.open) {
-      document.body.style.overflow = "";
+      document.body.style.overflow = previousOverflow;
       dialogEl.close();
     }
     return () => {
-      document.body.style.overflow = "";
+      document.body.style.overflow = previousOverflow;
       if (dialogEl?.open) dialogEl.close();
     };
   });

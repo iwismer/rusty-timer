@@ -47,19 +47,15 @@
     helpScrollToField = undefined;
   }
 
-  // Provide context for child HelpTip components. The callback is a no-op if helpSection is not set on this Card.
-  setContext(HELP_OPEN_MODAL_KEY, (fieldKey?: string) => {
-    if (helpSection) {
+  // Only provide help context when this Card is configured for help.
+  if (helpSection) {
+    setContext(HELP_OPEN_MODAL_KEY, (fieldKey?: string) => {
       openHelp(fieldKey);
-    } else {
-      console.warn(
-        `[Card] HelpTip clicked for field="${fieldKey}", but this Card has no helpSection configured.`,
-      );
-    }
-  });
+    });
+  }
 </script>
 
-<section class="rounded-lg bg-surface-1 border {borderClass}">
+<section class="overflow-hidden rounded-lg bg-surface-1 border {borderClass}">
   {#if title || header || helpSection}
     <div
       class="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3 rounded-t-lg {headerBgClass}"
