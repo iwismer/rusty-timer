@@ -9,6 +9,8 @@
     Card,
     AlertBanner,
     LogViewer,
+    HelpTip,
+    HelpDialog,
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
@@ -44,6 +46,10 @@
 
   let status = $state<ForwarderStatus | null>(null);
   let error = $state<string | null>(null);
+  let readModeHelpOpen = $state(false);
+  let readModeHelpField = $state<string | undefined>(undefined);
+  let readerLiveHelpOpen = $state(false);
+  let readerLiveHelpField = $state<string | undefined>(undefined);
   let updateVersion = $state<string | null>(null);
   let updateStatus = $state<"available" | "downloaded" | null>(null);
   let updateBusy = $state(false);
@@ -733,7 +739,11 @@
 
   {#if status}
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-      <Card title="Status">
+      <Card
+        title="Status"
+        helpSection="status_overview"
+        helpContext="forwarder"
+      >
         <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
           <dt class="text-text-muted">Forwarder ID</dt>
           <dd class="font-mono text-text-primary">{status.forwarder_id}</dd>
@@ -753,7 +763,11 @@
           </dd>
         </dl>
       </Card>
-      <Card title="Service">
+      <Card
+        title="Service"
+        helpSection="service_overview"
+        helpContext="forwarder"
+      >
         <dl class="grid gap-2 text-sm" style="grid-template-columns: auto 1fr;">
           <dt class="text-text-muted">Uplink</dt>
           <dd>
@@ -785,10 +799,10 @@
       </Card>
     </div>
 
-    <Card headerBg>
+    <Card headerBg helpSection="readers" helpContext="forwarder">
       {#snippet header()}
         <h2 class="text-sm font-semibold text-text-primary m-0">Readers</h2>
-        <span class="ml-auto text-xs text-text-muted">
+        <span class="ml-auto text-xs text-text-muted mr-1">
           {readersSummary.label}
         </span>
       {/snippet}
@@ -839,25 +853,65 @@
               <!-- Always-visible stats row -->
               <div class="flex flex-wrap gap-x-6 gap-y-2 text-sm mb-3">
                 <div>
-                  <span class="text-text-muted">Reads (session):</span>
+                  <span class="text-text-muted"
+                    >Reads (session):<HelpTip
+                      fieldKey="reads_session"
+                      sectionKey="reader_live"
+                      context="forwarder"
+                      onOpenModal={(fk) => {
+                        readerLiveHelpField = fk;
+                        readerLiveHelpOpen = true;
+                      }}
+                    /></span
+                  >
                   <span class="font-mono ml-1 text-text-primary"
                     >{reader.reads_session.toLocaleString()}</span
                   >
                 </div>
                 <div>
-                  <span class="text-text-muted">Reads (total):</span>
+                  <span class="text-text-muted"
+                    >Reads (total):<HelpTip
+                      fieldKey="reads_total"
+                      sectionKey="reader_live"
+                      context="forwarder"
+                      onOpenModal={(fk) => {
+                        readerLiveHelpField = fk;
+                        readerLiveHelpOpen = true;
+                      }}
+                    /></span
+                  >
                   <span class="font-mono ml-1 text-text-primary"
                     >{reader.reads_total.toLocaleString()}</span
                   >
                 </div>
                 <div>
-                  <span class="text-text-muted">Local Port:</span>
+                  <span class="text-text-muted"
+                    >Local Port:<HelpTip
+                      fieldKey="local_port"
+                      sectionKey="reader_live"
+                      context="forwarder"
+                      onOpenModal={(fk) => {
+                        readerLiveHelpField = fk;
+                        readerLiveHelpOpen = true;
+                      }}
+                    /></span
+                  >
                   <span class="font-mono ml-1 text-text-primary"
                     >{reader.local_port}</span
                   >
                 </div>
                 <div>
-                  <span class="text-text-muted">Last seen:</span>
+                  <span class="text-text-muted"
+                    >Last seen:<HelpTip
+                      fieldKey="last_seen"
+                      sectionKey="reader_live"
+                      context="forwarder"
+                      onOpenModal={(fk) => {
+                        readerLiveHelpField = fk;
+                        readerLiveHelpOpen = true;
+                      }}
+                    /></span
+                  >
                   <span class="ml-1 text-text-secondary"
                     >{formatLastSeen(tickingLastSeen(reader.ip))}</span
                   >
@@ -872,6 +926,17 @@
                   </span>
                 {/if}
                 <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-xs text-text-muted"
+                    >Epoch Name:<HelpTip
+                      fieldKey="epoch_name"
+                      sectionKey="reader_live"
+                      context="forwarder"
+                      onOpenModal={(fk) => {
+                        readerLiveHelpField = fk;
+                        readerLiveHelpOpen = true;
+                      }}
+                    /></span
+                  >
                   <input
                     type="text"
                     class="w-48 px-2 py-1 text-xs rounded-md bg-surface-0 text-text-primary border border-border"
@@ -895,6 +960,17 @@
                   >
                     Save
                   </button>
+                  <span class="text-xs text-text-muted"
+                    ><HelpTip
+                      fieldKey="advance_epoch"
+                      sectionKey="reader_live"
+                      context="forwarder"
+                      onOpenModal={(fk) => {
+                        readerLiveHelpField = fk;
+                        readerLiveHelpOpen = true;
+                      }}
+                    /></span
+                  >
                   <button
                     onclick={() => handleResetEpoch(reader.ip)}
                     class="px-2 py-1 text-xs rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2"
@@ -958,7 +1034,17 @@
                       >
                     </div>
                     <div>
-                      <span class="text-text-muted">Clock Drift:</span>
+                      <span class="text-text-muted"
+                        >Clock Drift:<HelpTip
+                          fieldKey="clock_drift"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        /></span
+                      >
                       <span
                         class="{driftColorClass(
                           info?.clock?.drift_ms,
@@ -982,7 +1068,17 @@
                       >
                     </div>
                     <div class="col-span-2">
-                      <span class="text-text-muted">Read Mode:</span>
+                      <span class="text-text-muted"
+                        >Read Mode: <HelpTip
+                          fieldKey="read_mode"
+                          sectionKey="read_mode"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readModeHelpField = fk;
+                            readModeHelpOpen = true;
+                          }}
+                        /></span
+                      >
                       <span
                         class="ml-2 inline-flex items-center gap-2 flex-wrap"
                       >
@@ -1011,7 +1107,17 @@
                           <label
                             class="inline-flex items-center gap-1 text-xs text-text-secondary"
                           >
-                            <span>Timeout</span>
+                            <span
+                              >Timeout <HelpTip
+                                fieldKey="timeout"
+                                sectionKey="read_mode"
+                                context="forwarder"
+                                onOpenModal={(fk) => {
+                                  readModeHelpField = fk;
+                                  readModeHelpOpen = true;
+                                }}
+                              /></span
+                            >
                             <input
                               class="w-16 px-2 py-0.5 text-sm rounded-md bg-surface-0 text-text-primary border border-border"
                               type="number"
@@ -1048,7 +1154,17 @@
                       </span>
                     </div>
                     <div class="col-span-2">
-                      <span class="text-text-muted">TTO Bytes:</span>
+                      <span class="text-text-muted"
+                        >TTO Bytes:<HelpTip
+                          fieldKey="tto_bytes"
+                          sectionKey="reader_live"
+                          context="forwarder"
+                          onOpenModal={(fk) => {
+                            readerLiveHelpField = fk;
+                            readerLiveHelpOpen = true;
+                          }}
+                        /></span
+                      >
                       <span
                         class="ml-2 inline-flex items-center gap-2 flex-wrap"
                       >
@@ -1074,56 +1190,106 @@
                   <div
                     class="flex items-center gap-3 pt-3 border-t border-border flex-wrap"
                   >
-                    <button
-                      class={btnPrimary}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        handleSyncClock(reader.ip);
-                      }}
-                      disabled={controlBusy[reader.ip] ||
-                        reader.state !== "connected"}>Sync Clock</button
-                    >
-                    <button
-                      class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        handleRefreshReader(reader.ip);
-                      }}
-                      disabled={controlBusy[reader.ip] ||
-                        reader.state !== "connected"}>Refresh</button
-                    >
-                    <button
-                      class={info?.recording
-                        ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                        : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        handleToggleRecording(reader.ip);
-                      }}
-                      disabled={controlBusy[reader.ip] ||
-                        reader.state !== "connected"}
-                      >{info?.recording
-                        ? "Stop Recording"
-                        : "Start Recording"}</button
-                    >
-                    <button
-                      class={btnPrimary}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        handleDownloadReads(reader.ip);
-                      }}
-                      disabled={controlBusy[reader.ip] ||
-                        reader.state !== "connected"}>Download Reads</button
-                    >
-                    <button
-                      class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        handleClearRecords(reader.ip);
-                      }}
-                      disabled={controlBusy[reader.ip] ||
-                        reader.state !== "connected"}>Clear Records</button
-                    >
+                    <span class="inline-flex items-center gap-1">
+                      <button
+                        class={btnPrimary}
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          handleSyncClock(reader.ip);
+                        }}
+                        disabled={controlBusy[reader.ip] ||
+                          reader.state !== "connected"}>Sync Clock</button
+                      ><HelpTip
+                        fieldKey="sync_clock"
+                        sectionKey="reader_live"
+                        context="forwarder"
+                        onOpenModal={(fk) => {
+                          readerLiveHelpField = fk;
+                          readerLiveHelpOpen = true;
+                        }}
+                      />
+                    </span>
+                    <span class="inline-flex items-center gap-1">
+                      <button
+                        class="px-3 py-1.5 text-sm rounded-md bg-surface-0 text-text-secondary border border-border cursor-pointer hover:bg-surface-2 disabled:opacity-50"
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          handleRefreshReader(reader.ip);
+                        }}
+                        disabled={controlBusy[reader.ip] ||
+                          reader.state !== "connected"}>Refresh</button
+                      ><HelpTip
+                        fieldKey="refresh_reader"
+                        sectionKey="reader_live"
+                        context="forwarder"
+                        onOpenModal={(fk) => {
+                          readerLiveHelpField = fk;
+                          readerLiveHelpOpen = true;
+                        }}
+                      />
+                    </span>
+                    <span class="inline-flex items-center gap-1">
+                      <button
+                        class={info?.recording
+                          ? "px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                          : "px-3 py-1.5 text-sm rounded-md bg-green-600 text-white border-none cursor-pointer hover:bg-green-700 disabled:opacity-50"}
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          handleToggleRecording(reader.ip);
+                        }}
+                        disabled={controlBusy[reader.ip] ||
+                          reader.state !== "connected"}
+                        >{info?.recording
+                          ? "Stop Recording"
+                          : "Start Recording"}</button
+                      ><HelpTip
+                        fieldKey="recording"
+                        sectionKey="reader_live"
+                        context="forwarder"
+                        onOpenModal={(fk) => {
+                          readerLiveHelpField = fk;
+                          readerLiveHelpOpen = true;
+                        }}
+                      />
+                    </span>
+                    <span class="inline-flex items-center gap-1">
+                      <button
+                        class={btnPrimary}
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          handleDownloadReads(reader.ip);
+                        }}
+                        disabled={controlBusy[reader.ip] ||
+                          reader.state !== "connected"}>Download Reads</button
+                      ><HelpTip
+                        fieldKey="download_reads"
+                        sectionKey="reader_live"
+                        context="forwarder"
+                        onOpenModal={(fk) => {
+                          readerLiveHelpField = fk;
+                          readerLiveHelpOpen = true;
+                        }}
+                      />
+                    </span>
+                    <span class="inline-flex items-center gap-1">
+                      <button
+                        class="px-3 py-1.5 text-sm rounded-md bg-red-600 text-white border-none cursor-pointer hover:bg-red-700 disabled:opacity-50"
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          handleClearRecords(reader.ip);
+                        }}
+                        disabled={controlBusy[reader.ip] ||
+                          reader.state !== "connected"}>Clear Records</button
+                      ><HelpTip
+                        fieldKey="clear_records"
+                        sectionKey="reader_live"
+                        context="forwarder"
+                        onOpenModal={(fk) => {
+                          readerLiveHelpField = fk;
+                          readerLiveHelpOpen = true;
+                        }}
+                      />
+                    </span>
                   </div>
                   {#if downloadState[reader.ip]?.state === "downloading"}
                     {@const dl = downloadState[reader.ip]}
@@ -1187,3 +1353,25 @@
     <p class="text-sm text-text-muted">Loading...</p>
   {/if}
 </main>
+
+<HelpDialog
+  open={readModeHelpOpen}
+  sectionKey="read_mode"
+  context="forwarder"
+  scrollToField={readModeHelpField}
+  onClose={() => {
+    readModeHelpOpen = false;
+    readModeHelpField = undefined;
+  }}
+/>
+
+<HelpDialog
+  open={readerLiveHelpOpen}
+  sectionKey="reader_live"
+  context="forwarder"
+  scrollToField={readerLiveHelpField}
+  onClose={() => {
+    readerLiveHelpOpen = false;
+    readerLiveHelpField = undefined;
+  }}
+/>

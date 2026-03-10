@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Card } from "@rusty-timer/shared-ui";
+  import { Card, HelpTip, HelpDialog } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
   import type { StreamEntry } from "$lib/api";
 
@@ -119,7 +119,11 @@
   {:else if loadError}
     <p class="text-sm text-status-err">{loadError}</p>
   {:else}
-    <Card>
+    <Card
+      title="Announcer Configuration"
+      helpSection="announcer"
+      helpContext="server"
+    >
       <div class="space-y-5">
         <div class="flex items-center gap-2">
           <input
@@ -130,11 +134,23 @@
           />
           <label for="announcer-enabled" class="text-sm text-text-primary">
             Enable announcer
+            <HelpTip
+              fieldKey="enabled"
+              sectionKey="announcer"
+              context="server"
+            />
           </label>
         </div>
 
         <div>
-          <p class="text-sm font-medium text-text-primary m-0 mb-2">Streams</p>
+          <p class="text-sm font-medium text-text-primary m-0 mb-2">
+            Streams
+            <HelpTip
+              fieldKey="streams"
+              sectionKey="announcer"
+              context="server"
+            />
+          </p>
           {#if streams.length === 0}
             <p class="text-sm text-text-muted m-0">
               No streams available yet. Connect a forwarder first.
@@ -166,6 +182,11 @@
             class="text-sm text-text-primary"
           >
             Max list size
+            <HelpTip
+              fieldKey="max_list_size"
+              sectionKey="announcer"
+              context="server"
+            />
           </label>
           <input
             id="announcer-max-list-size"
@@ -192,14 +213,20 @@
           >
             {saving ? "Saving..." : "Save"}
           </button>
-          <button
-            data-testid="announcer-reset-btn"
-            onclick={() => void handleReset()}
-            disabled={resetting}
-            class="px-3 py-1 text-xs font-medium rounded-md bg-status-warn-bg border border-status-warn-border text-status-warn cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {resetting ? "Resetting..." : "Reset announcer"}
-          </button>
+          <span class="inline-flex items-center gap-1">
+            <button
+              data-testid="announcer-reset-btn"
+              onclick={() => void handleReset()}
+              disabled={resetting}
+              class="px-3 py-1 text-xs font-medium rounded-md bg-status-warn-bg border border-status-warn-border text-status-warn cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {resetting ? "Resetting..." : "Reset announcer"}
+            </button><HelpTip
+              fieldKey="reset"
+              sectionKey="announcer"
+              context="server"
+            />
+          </span>
         </div>
 
         {#if enabledUntil}

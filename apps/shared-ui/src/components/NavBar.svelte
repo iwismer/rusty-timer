@@ -1,15 +1,19 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { cycleTheme, themeMode } from "../lib/dark-mode";
+  import type { HelpContextName } from "../lib/help/help-types";
+  import HelpSearch from "./HelpSearch.svelte";
 
   let {
     appName = "",
     links = [],
     status,
+    helpContext = undefined,
   }: {
     appName?: string;
     links?: Array<{ href: string; label: string; active?: boolean }>;
     status?: Snippet;
+    helpContext?: HelpContextName;
   } = $props();
 
   const labels = { light: "Day", dark: "Night", auto: "Auto" } as const;
@@ -47,6 +51,10 @@
 
       {#if appName}
         <span class="text-xs text-text-muted font-mono">{appName}</span>
+      {/if}
+
+      {#if helpContext}
+        <HelpSearch context={helpContext} />
       {/if}
 
       <button

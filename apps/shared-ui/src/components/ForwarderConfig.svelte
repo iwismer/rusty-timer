@@ -34,6 +34,7 @@
   import AlertBanner from "./AlertBanner.svelte";
   import StatusBadge from "./StatusBadge.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
+  import HelpTip from "./HelpTip.svelte";
 
   let {
     configApi,
@@ -446,9 +447,9 @@
       <!-- Basic Settings -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <!-- General -->
-        <Card title="General">
+        <Card title="General" helpSection="general" helpContext="forwarder">
           <label class="block text-sm font-medium text-text-secondary">
-            Display Name
+            Display Name <HelpTip fieldKey="display_name" sectionKey="general" context="forwarder" />
             <input type="text" bind:value={generalDisplayName} class="mt-1 {inputClass}" />
             <p class={hintClass}>Optional. Used to identify this forwarder.</p>
           </label>
@@ -471,10 +472,10 @@
         </Card>
 
         <!-- Server -->
-        <Card title="Server">
+        <Card title="Server" helpSection="server" helpContext="forwarder">
           <div class="space-y-3">
             <label class="block text-sm font-medium text-text-secondary">
-              Base URL
+              Base URL <HelpTip fieldKey="base_url" sectionKey="server" context="forwarder" />
               <input type="text" bind:value={serverBaseUrl} class="mt-1 {inputClass}" />
               <p class={hintClass}>HTTP or HTTPS URL of the server. (Automatically converted to WebSocket for communication.)</p>
             </label>
@@ -499,7 +500,7 @@
       </div>
 
       <!-- Readers -->
-      <Card title="Readers">
+      <Card title="Readers" helpSection="readers" helpContext="forwarder">
         <p class={hintClass}>
           IPICO reader devices this forwarder connects to. Reader port defaults to 10000. At least one reader is required.
         </p>
@@ -508,17 +509,17 @@
             <thead>
               <tr class="border-b-2 border-border">
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted" colspan="2">
-                  IP Address
+                  IP Address <HelpTip fieldKey="reader_ip" sectionKey="readers" context="forwarder" />
                 </th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-24">
-                  Reader Port
+                  Reader Port <HelpTip fieldKey="reader_port" sectionKey="readers" context="forwarder" />
                 </th>
-                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">Enabled</th>
+                <th class="text-left py-2 px-2 text-xs font-medium text-text-muted">Enabled <HelpTip fieldKey="enabled" sectionKey="readers" context="forwarder" /></th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
-                  Default Local Port
+                  Default Local Port <HelpTip fieldKey="default_local_port" sectionKey="readers" context="forwarder" />
                 </th>
                 <th class="text-left py-2 px-2 text-xs font-medium text-text-muted w-28">
-                  Local Port Override
+                  Local Port Override <HelpTip fieldKey="local_port_override" sectionKey="readers" context="forwarder" />
                 </th>
                 <th class="py-2 px-2"></th>
               </tr>
@@ -650,7 +651,7 @@
         {/if}
       </Card>
 
-      <Card title="Forwarder Controls">
+      <Card title="Forwarder Controls" helpSection="controls" helpContext="forwarder">
         <p class={hintClass}>
           These actions affect service/process availability and device power state.
         </p>
@@ -662,7 +663,7 @@
               bind:checked={controlAllowPowerActions}
               class="accent-accent"
             />
-            Allow restart/shutdown actions for the forwarder device
+            Allow restart/shutdown actions for the forwarder device <HelpTip fieldKey="allow_power_actions" sectionKey="controls" context="forwarder" />
           </span>
           <p class={hintClass}>
             Required for "Restart Forwarder Device" and "Shutdown Forwarder Device".
@@ -686,7 +687,7 @@
         {/if}
       </Card>
 
-      <Card title="Dangerous Actions">
+      <Card title="Dangerous Actions" helpSection="dangerous_actions" helpContext="forwarder">
         <p class="{hintClass} mt-0">
           Confirm before using these actions in production.
         </p>
@@ -737,11 +738,11 @@
       {#if showAdvanced}
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <!-- Server WS Path -->
-          <Card title="Forwarders WebSocket Path">
+          <Card title="Connection Path" helpSection="ws_path" helpContext="forwarder">
             <label class="block text-sm font-medium text-text-secondary">
-              WebSocket Path
+              Connection Path <HelpTip fieldKey="forwarders_ws_path" sectionKey="ws_path" context="forwarder" />
               <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
-              <p class={hintClass}>Optional. WebSocket endpoint path. Default if unset: auto-detected.</p>
+              <p class={hintClass}>Optional. Connection path on the server. Default if unset: auto-detected.</p>
             </label>
             <button
               class={saveBtnClass}
@@ -762,9 +763,9 @@
           </Card>
 
           <!-- Auth -->
-          <Card title="Auth">
+          <Card title="Auth" helpSection="auth" helpContext="forwarder">
             <label class="block text-sm font-medium text-text-secondary">
-              Token File Path
+              Token File Path <HelpTip fieldKey="token_file" sectionKey="auth" context="forwarder" />
               <input type="text" bind:value={authTokenFile} class="mt-1 {inputClass}" />
               <p class={hintClass}>Path to file containing authentication token.</p>
             </label>
@@ -789,15 +790,15 @@
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
           <!-- Journal -->
-          <Card title="Journal">
+          <Card title="Journal" helpSection="journal" helpContext="forwarder">
             <div class="space-y-3">
               <label class="block text-sm font-medium text-text-secondary">
-                SQLite Path
+                SQLite Path <HelpTip fieldKey="sqlite_path" sectionKey="journal" context="forwarder" />
                 <input type="text" bind:value={journalSqlitePath} class="mt-1 {inputClass}" />
                 <p class={hintClass}>Optional. Path to SQLite journal. Default if unset: in-memory.</p>
               </label>
               <label class="block text-sm font-medium text-text-secondary">
-                Prune Watermark %
+                Prune Watermark % <HelpTip fieldKey="prune_watermark_pct" sectionKey="journal" context="forwarder" />
                 <input type="number" bind:value={journalPruneWatermarkPct} min="0" max="100" class="mt-1 {inputClass}" />
                 <p class={hintClass}>Trigger journal pruning at this percentage full. Default if unset: 80%.</p>
               </label>
@@ -821,10 +822,10 @@
           </Card>
 
           <!-- Uplink -->
-          <Card title="Uplink">
+          <Card title="Uplink" helpSection="uplink" helpContext="forwarder">
             <div class="space-y-3">
               <label class="block text-sm font-medium text-text-secondary">
-                Batch Mode
+                Batch Mode <HelpTip fieldKey="batch_mode" sectionKey="uplink" context="forwarder" />
                 <select bind:value={uplinkBatchMode} class="mt-1 {selectClass}">
                   <option value="">Default (immediate)</option>
                   <option value="immediate">Immediate</option>
@@ -833,12 +834,12 @@
                 <p class={hintClass}>How to send events to server. Default if unset: immediate.</p>
               </label>
               <label class="block text-sm font-medium text-text-secondary">
-                Batch Flush (ms)
+                Batch Flush (ms) <HelpTip fieldKey="batch_flush_ms" sectionKey="uplink" context="forwarder" />
                 <input type="number" bind:value={uplinkBatchFlushMs} min="0" class="mt-1 {inputClass}" />
                 <p class={hintClass}>Max time to wait before sending batch. Default if unset: 100ms.</p>
               </label>
               <label class="block text-sm font-medium text-text-secondary">
-                Batch Max Events
+                Batch Max Events <HelpTip fieldKey="batch_max_events" sectionKey="uplink" context="forwarder" />
                 <input type="number" bind:value={uplinkBatchMaxEvents} min="0" class="mt-1 {inputClass}" />
                 <p class={hintClass}>Max events per batch. Default if unset: 1000.</p>
               </label>
@@ -862,9 +863,9 @@
           </Card>
 
           <!-- Status HTTP -->
-          <Card title="Status HTTP">
+          <Card title="Status HTTP" helpSection="status_http" helpContext="forwarder">
             <label class="block text-sm font-medium text-text-secondary">
-              Bind Address
+              Bind Address <HelpTip fieldKey="bind" sectionKey="status_http" context="forwarder" />
               <input type="text" bind:value={statusHttpBind} class="mt-1 {inputClass}" />
               <p class={hintClass}>IP:port to listen on for status HTTP server. Example: 0.0.0.0:8080. Default if unset: 0.0.0.0:8080.</p>
             </label>
@@ -887,9 +888,9 @@
           </Card>
 
           <!-- Update -->
-          <Card title="Update">
+          <Card title="Update" helpSection="update" helpContext="forwarder">
             <label class="block text-sm font-medium text-text-secondary">
-              Update Mode
+              Update Mode <HelpTip fieldKey="update_mode" sectionKey="update" context="forwarder" />
               <select bind:value={updateMode} class="mt-1 {selectClass}">
                 <option value="">Default (automatic)</option>
                 <option value="check-and-download">Automatic (check and download)</option>
