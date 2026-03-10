@@ -7,7 +7,7 @@ export const RECEIVER_ADMIN_HELP = {
     fields: {
       stream_cursor: {
         label: "Stream Cursor",
-        summary: "Current read position in the stream (epoch + sequence number).",
+        summary: "Current read position in the stream.",
         detailHtml: "Each stream has a cursor that tracks the last successfully received read. When the receiver reconnects, it resumes from this position.<br><br>Resetting a cursor causes the stream to replay all data from the beginning on the next connection. This is safe to do — your timing software should handle duplicate reads.",
       },
     },

@@ -34,7 +34,7 @@ export const FORWARDER_HELP = {
       "The forwarder will automatically reconnect if the connection drops. Check the log for connection status.",
     ],
     seeAlso: [
-      { sectionKey: "ws_path", label: "WebSocket Path" },
+      { sectionKey: "ws_path", label: "Connection Path" },
       { sectionKey: "auth", label: "Authentication" },
     ],
   },
@@ -64,7 +64,7 @@ export const FORWARDER_HELP = {
       default_local_port: {
         label: "Default Local Port",
         summary: "Auto-calculated local port based on reader IP (10000 + last octet).",
-        detailHtml: "The default local forwarding port, calculated as <strong>10000 + the last octet of the reader's IP address</strong>. For example, a reader at 192.168.0.50 gets local port 10050.<br><br>The forwarder makes reads available on this port so timing software on the local network can receive reads directly — independent of the server connection.",
+        detailHtml: "The default local forwarding port, calculated as <strong>10000 + the last octet of the reader's IP address</strong>. For example, a reader at 192.168.0.50 gets local port 10050.<br><br>Timing software on the local network can connect to this port to receive reads directly.",
       },
       local_port_override: {
         label: "Local Port Override",
@@ -87,7 +87,12 @@ export const FORWARDER_HELP = {
       read_mode: {
         label: "Read Mode",
         summary: "How the reader reports chip reads: Raw, Event, or First/Last Seen.",
-        detailHtml: "The read mode controls how the IPICO reader processes chip reads before sending them to the forwarder.<br><br><strong>Raw</strong>: Every individual chip detection is sent as-is. This produces the highest volume of data and includes repeated detections of the same chip. Mainly useful for debugging.<br><br><strong>Event</strong>: The reader sends one read per chip detection, then resends it after a timeout as a retry. Uses the reader's built-in deduplication with a fixed window.<br><br><strong>First/Last Seen (FS/LS)</strong>: The reader reports the first and last detection of each chip within a configurable timeout window. This gives you the timestamp of when a chip first entered range and when it last left range — ideal for calculating split times and finish times.",
+        detailHtml: "The read mode controls how the IPICO reader processes chip reads before sending them to the forwarder." +
+          "<ul>" +
+          "<li><strong>Raw</strong>: Every individual chip detection is sent as-is. Produces the highest data volume and includes repeated detections. Mainly useful for debugging.</li>" +
+          "<li><strong>Event</strong>: One read per chip detection, resent after a timeout as a retry. Uses the reader's built-in deduplication.</li>" +
+          "<li><strong>First/Last Seen (FS/LS)</strong>: Reports the first and last detection of each chip within a configurable timeout window — ideal for split times and finish times.</li>" +
+          "</ul>",
         default: "Raw",
         range: "Raw, Event, First/Last Seen",
         recommended: "First/Last Seen with a 5-second timeout for most race timing scenarios.",
@@ -154,13 +159,13 @@ export const FORWARDER_HELP = {
     seeAlso: [{ sectionKey: "controls", label: "Forwarder Controls" }],
   },
   ws_path: {
-    title: "WebSocket Path",
-    overview: "Advanced setting for the connection endpoint path used to connect to the server.",
+    title: "Connection Path",
+    overview: "Advanced setting for the connection path used to connect to the server.",
     fields: {
       forwarders_ws_path: {
-        label: "WebSocket Path",
-        summary: "Custom endpoint path on the server. Usually auto-detected.",
-        detailHtml: "The URL path appended to the server base URL for the connection. In most setups this is auto-detected and does not need to be changed. Only modify this if your server administrator has provided a custom path.",
+        label: "Connection Path",
+        summary: "Custom connection path on the server. Usually auto-detected.",
+        detailHtml: "The path appended to the server base URL for the connection. In most setups this is auto-detected and does not need to be changed. Only modify this if your server administrator has provided a custom path.",
         default: "Auto-detected",
         recommended: "Leave empty unless your server admin has provided a custom path.",
       },
@@ -193,16 +198,16 @@ export const FORWARDER_HELP = {
     overview: "The journal provides durable storage for chip reads, ensuring no data is lost if the server connection drops.",
     fields: {
       sqlite_path: {
-        label: "SQLite Path",
-        summary: "File path for the journal database. Leave empty for in-memory.",
-        detailHtml: "Path to the database file used for the forwarder's durable journal. When the server connection drops, reads accumulate in the journal and are sent when the connection is restored.<br><br>An in-memory journal (empty path) is faster but loses data if the forwarder restarts. A file-based journal persists reads across restarts.",
+        label: "Journal File Path",
+        summary: "File path for the journal storage. Leave empty for in-memory.",
+        detailHtml: "Path to the file used for the forwarder's durable journal.<br><br>An in-memory journal (empty path) is faster but loses data if the forwarder restarts. A file-based journal persists reads across restarts.",
         default: "In-memory (empty path)",
         recommended: "Always use a file path for race day (e.g. /var/lib/rusty-timer/journal.db). In-memory is only acceptable for testing.",
       },
       prune_watermark_pct: {
-        label: "Prune Watermark %",
+        label: "Storage Cleanup Threshold",
         summary: "Triggers journal cleanup when storage reaches this fullness percentage.",
-        detailHtml: "The journal prunes already-sent reads when storage reaches this percentage of its capacity. Lower values prune more aggressively (freeing space sooner), higher values allow the journal to grow larger before cleaning up. Unsent reads are always preserved.",
+        detailHtml: "The journal cleans up already-sent reads when storage reaches this percentage of its capacity. Lower values free space sooner, higher values allow the journal to grow larger before cleaning up. Unsent reads are always preserved.",
         default: "80%",
         range: "0-100%",
         recommended: "80% works well for most scenarios. Lower to 50% if running on storage-constrained devices.",
@@ -228,7 +233,7 @@ export const FORWARDER_HELP = {
         recommended: "Immediate for most race setups. Use Batched only if you have many readers producing very high read volumes.",
       },
       batch_flush_ms: {
-        label: "Batch Flush (ms)",
+        label: "Send Delay (ms)",
         summary: "Maximum time in milliseconds to wait before sending a batch.",
         detailHtml: "In batched mode, this is the maximum time the forwarder waits before sending a batch, even if it isn't full. Lower values reduce latency; higher values allow larger, more efficient batches. Only applies when Batch Mode is set to Batched.",
         default: "100ms",
@@ -236,7 +241,7 @@ export const FORWARDER_HELP = {
         recommended: "100ms provides a good balance. Increase to 500ms if bandwidth is very limited.",
       },
       batch_max_events: {
-        label: "Batch Max Events",
+        label: "Max Reads per Batch",
         summary: "Maximum number of reads per batch before it's sent immediately.",
         detailHtml: "In batched mode, a batch is sent as soon as it reaches this many reads, regardless of the flush timer. Only applies when Batch Mode is set to Batched.",
         default: "1000",
@@ -257,10 +262,10 @@ export const FORWARDER_HELP = {
       bind: {
         label: "Bind Address",
         summary: "IP:port the status HTTP server listens on.",
-        detailHtml: "The network address and port for the forwarder's built-in status endpoint. Bind to <code>0.0.0.0</code> to allow access from any device on the network, or <code>127.0.0.1</code> to restrict to local access only.",
+        detailHtml: "The network address and port for the forwarder's built-in status endpoint. Use <code>0.0.0.0</code> to allow access from other devices on the network, or <code>127.0.0.1</code> to restrict access to this device only.",
         default: "0.0.0.0:8080",
         range: "Valid IP:port combination",
-        recommended: "0.0.0.0:8080 for standard setups. Use 127.0.0.1:8080 if you don't need remote status access.",
+        recommended: "0.0.0.0:8080 for standard setups. Use 127.0.0.1:8080 if you don't need to check status from other devices.",
       },
     },
     tips: [
@@ -305,7 +310,12 @@ export const FORWARDER_HELP = {
       readiness: {
         label: "Readiness",
         summary: "Whether the forwarder has finished starting up and is operating normally.",
-        detailHtml: "<strong>Ready</strong>: All subsystems initialized. The forwarder is collecting reads from configured readers and forwarding them when the server connection is available.<br><br><strong>Not ready</strong>: The forwarder is still starting up or encountered an initialization error. The reason is shown next to the badge. This is normal for a few seconds after the service starts. If it persists, check the log for errors.<br><br>Readiness does not depend on the server connection — a forwarder can be ready and collecting reads even while the server is unreachable.",
+        detailHtml:
+          "<ul>" +
+          "<li><strong>Ready</strong>: The forwarder is collecting reads from configured readers and forwarding them when the server connection is available.</li>" +
+          "<li><strong>Not ready</strong>: The forwarder is still starting up or encountered an initialization error. The reason is shown next to the badge. This is normal for a few seconds after the service starts. If it persists, check the log for errors.</li>" +
+          "</ul>" +
+          "Readiness does not depend on the server connection — a forwarder can be ready and collecting reads even while the server is unreachable.",
       },
     },
     tips: [
@@ -400,12 +410,15 @@ export const FORWARDER_HELP = {
       },
       tto_bytes: {
         label: "TTO Bytes",
-        summary: "Adds extra data to each chip read: antenna index, page, and first/last-seen flags.",
+        summary: "Adds extra metadata to each chip read for compatible timing software.",
         detailHtml:
-          "TTO (Time To Own) is an IPICO reader feature that appends extra metadata to every chip read. When enabled, each read includes an antenna index, a page number, and flags indicating whether the detection was the first or last seen event within a pass.\n\n" +
-          "<strong>Enabled</strong>: Each chip read includes antenna and pass-direction metadata.\n\n" +
-          "<strong>Disabled</strong>: Standard reads with no extra metadata. Compatible with all timing software.\n\n" +
-          "TTO is not required for normal race timing. Enable it only if your timing software uses the antenna index or first/last-seen flags.",
+          "TTO (Time To Own) is an IPICO reader feature that appends extra metadata to every chip read, including antenna index and pass-direction flags." +
+          "<br><br>" +
+          "<strong>Enabled</strong>: Each chip read includes antenna and pass-direction metadata." +
+          "<br><br>" +
+          "<strong>Disabled</strong>: Standard reads with no extra metadata. Compatible with all timing software." +
+          "<br><br>" +
+          "TTO is not required for normal race timing. Enable it only if your timing software uses TTO metadata.",
         default: "Disabled",
         recommended: "Leave disabled unless your timing software explicitly uses TTO metadata.",
       },
@@ -423,7 +436,12 @@ export const FORWARDER_HELP = {
       recording: {
         label: "Start / Stop Recording",
         summary: "Toggles whether the reader is recording chip reads to its onboard storage.",
-        detailHtml: "Controls the reader's onboard recording state.<br><br><strong>Recording on</strong>: The reader stores each chip read in its internal memory in addition to streaming reads live to the forwarder.<br><br><strong>Recording off</strong>: The reader streams reads but does not save them to onboard storage.<br><br>Onboard recording is independent of the live data stream — reads are forwarded to the server regardless. Use recording as a safety net: if the forwarder loses its connection mid-race, reads are preserved on the reader and can be retrieved later with <strong>Download Reads</strong>.",
+        detailHtml: "Controls the reader's onboard recording state." +
+          "<ul>" +
+          "<li><strong>Recording on</strong>: The reader stores each chip read in its internal memory in addition to streaming reads live to the forwarder.</li>" +
+          "<li><strong>Recording off</strong>: The reader streams reads but does not save them to onboard storage.</li>" +
+          "</ul>" +
+          "Onboard recording is independent of the live data stream — reads are forwarded to the server regardless. Use recording as a safety net: if the forwarder loses its connection mid-race, reads are preserved on the reader and can be retrieved later with <strong>Download Reads</strong>.",
         recommended: "Turn recording on before each race as a safety net. Download and clear records after each event.",
       },
       download_reads: {

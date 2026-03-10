@@ -15,7 +15,7 @@ export const RECEIVER_HELP = {
       server_url: {
         label: "Server URL",
         summary: "URL of the remote timing server.",
-        detailHtml: "The full URL of the server to connect to (e.g. <code>wss://server.example.com:8080/ws/receivers</code>). The receiver maintains a persistent connection to the server for real-time data streaming. Use <code>wss://</code> for encrypted connections.",
+        detailHtml: "The full URL of the server to connect to (e.g. <code>wss://server.example.com:8080</code>). The receiver maintains a persistent connection to the server for real-time data streaming. Use <code>wss://</code> for encrypted connections.",
         default: "None (required)",
         recommended: "Use wss:// for production to encrypt data in transit.",
       },
@@ -48,7 +48,12 @@ export const RECEIVER_HELP = {
       mode: {
         label: "Mode",
         summary: "Operating mode: Live, Race, or Targeted Replay.",
-        detailHtml: "The receiver supports three operating modes:<br><br><strong>Live</strong>: Auto-subscribes to all available streams from the server. New streams are automatically added as forwarders connect. You can set earliest-epoch overrides per stream to skip historical data. This is the default mode for standard race timing.<br><br><strong>Race</strong>: Follows server-defined stream assignments based on a selected race configuration. The server determines which streams belong to the race. Use this when the server operator has set up race definitions.<br><br><strong>Targeted Replay</strong>: Allows per-stream epoch selection for replaying historical data. Use this to re-send timing data to your timing software, for example to recover from a timing software crash.",
+        detailHtml: "The receiver supports three operating modes:" +
+          "<ul>" +
+          "<li><strong>Live</strong>: Auto-subscribes to all available streams. New streams are added automatically as forwarders connect. This is the default for standard race timing.</li>" +
+          "<li><strong>Race</strong>: Follows server-defined stream assignments for a selected race. Use this when the server operator has set up race definitions.</li>" +
+          "<li><strong>Targeted Replay</strong>: Allows per-stream epoch selection for replaying historical data. Use this to re-send timing data to your timing software, for example after a crash.</li>" +
+          "</ul>",
         default: "Live",
         range: "Live, Race, Targeted Replay",
         recommended: "Use Live mode for standard race timing. Switch to Targeted Replay only when you need to re-send historical data.",

@@ -738,11 +738,11 @@
       {#if showAdvanced}
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <!-- Server WS Path -->
-          <Card title="Forwarders WebSocket Path" helpSection="ws_path" helpContext="forwarder">
+          <Card title="Connection Path" helpSection="ws_path" helpContext="forwarder">
             <label class="block text-sm font-medium text-text-secondary">
-              WebSocket Path <HelpTip fieldKey="forwarders_ws_path" sectionKey="ws_path" context="forwarder" />
+              Connection Path <HelpTip fieldKey="forwarders_ws_path" sectionKey="ws_path" context="forwarder" />
               <input type="text" bind:value={serverForwardersWsPath} class="mt-1 {inputClass}" />
-              <p class={hintClass}>Optional. WebSocket endpoint path. Default if unset: auto-detected.</p>
+              <p class={hintClass}>Optional. Connection path on the server. Default if unset: auto-detected.</p>
             </label>
             <button
               class={saveBtnClass}

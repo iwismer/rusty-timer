@@ -25,8 +25,7 @@ export const SERVER_HELP = {
           "When checked, forwarders that are not currently connected are hidden from the stream list. " +
           "This keeps the view clean during active timing so you can focus on the equipment that is live and reporting reads." +
           "<br><br>" +
-          "Offline forwarders are not lost — uncheck this to see them again. " +
-          "An offline forwarder will reappear automatically once it reconnects.",
+          "Offline forwarders are not lost — they reappear automatically once they reconnect, or you can uncheck this filter to see them.",
         default: "Unchecked (all streams shown)",
         recommended:
           "Enable during active racing to reduce clutter. Disable during setup to verify all forwarders are accounted for.",
@@ -197,7 +196,7 @@ export const SERVER_HELP = {
   sbc_identity: {
     title: "Device Identity",
     overview:
-      "Core identity and access settings for the SBC device. These values are written into the cloud-init user-data file used during first boot.",
+      "Core identity and access settings for the SBC device. These values are used during first boot to configure the device.",
     fields: {
       hostname: {
         label: "Hostname",
@@ -240,7 +239,7 @@ export const SERVER_HELP = {
   sbc_network: {
     title: "Network Configuration",
     overview:
-      "Network settings written to the cloud-init network-config file. These configure the SBC's static IP address, gateway, DNS, and optional Wi-Fi connection.",
+      "Network settings applied during first boot. These configure the SBC's static IP address, gateway, DNS, and optional Wi-Fi connection.",
     fields: {
       static_ipv4: {
         label: "Static IPv4/CIDR",
@@ -312,7 +311,7 @@ export const SERVER_HELP = {
   sbc_forwarder: {
     title: "Forwarder Setup",
     overview:
-      "Configure how the forwarder software on the SBC connects to the timing server and IPICO readers. These settings are written into the forwarder configuration file during provisioning.",
+      "Configure how the forwarder software on the SBC connects to the timing server and IPICO readers. These settings are applied during first boot.",
     fields: {
       server_base_url: {
         label: "Server Base URL",
@@ -364,25 +363,29 @@ export const SERVER_HELP = {
       download_user_data: {
         label: "Download user-data",
         summary:
-          "Downloads the cloud-init user-data file for flashing onto the SBC's SD card.",
+          "Downloads the setup file for flashing onto the SBC's SD card.",
         detailHtml:
-          "Generates and downloads the <code>user-data</code> file based on the current form values. This file is placed on the SD card's boot partition and runs during the SBC's first boot to install and configure the forwarder software.",
+          "Generates and downloads the provisioning file based on the current form values. This file is placed on the SD card's boot partition and runs during the SBC's first boot to install and configure the forwarder software.",
       },
       download_network_config: {
         label: "Download network-config",
         summary:
-          "Downloads the cloud-init network-config file for flashing onto the SBC's SD card.",
+          "Downloads the network configuration file for flashing onto the SBC's SD card.",
         detailHtml:
-          "Generates and downloads the <code>network-config</code> file based on the current network settings. This file is placed on the SD card's boot partition and configures the SBC's network interfaces (Ethernet and optionally Wi-Fi) during first boot.",
+          "Generates and downloads the network configuration file based on the current network settings. This file is placed on the SD card's boot partition and configures the SBC's network interfaces (Ethernet and optionally Wi-Fi) during first boot.",
       },
       save_next_device: {
         label: "Save & Next Device",
         summary:
           "Saves the current settings and auto-increments the hostname and IP for the next device.",
         detailHtml:
-          "Saves the current form values to your browser's local storage, then auto-increments the hostname number and IP address for the next SBC." +
+          "Saves the current form values to your browser's local storage, then auto-increments the hostname number and IP address for the next SBC. The auth token is cleared so you generate a fresh one for the next device." +
           "<br><br>" +
-          "For example, <code>rt-fwd-01</code> becomes <code>rt-fwd-02</code>, and <code>192.168.1.51/24</code> becomes <code>192.168.1.52/24</code>. The auth token is cleared so you generate a fresh one for the next device.",
+          "For example:" +
+          "<ul>" +
+          "<li><code>rt-fwd-01</code> becomes <code>rt-fwd-02</code></li>" +
+          "<li><code>192.168.1.51/24</code> becomes <code>192.168.1.52/24</code></li>" +
+          "</ul>",
       },
     },
     tips: [
@@ -456,7 +459,7 @@ export const SERVER_HELP = {
   admin_events: {
     title: "Events",
     overview:
-      "Delete stored timing events. You can scope the deletion to all events, a specific stream, or a specific epoch within a stream.",
+      "Delete stored timing events. You can delete all events, or narrow it to a specific stream or epoch.",
     fields: {
       event_stream_select: {
         label: "Stream",
