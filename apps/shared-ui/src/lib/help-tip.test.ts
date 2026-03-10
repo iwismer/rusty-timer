@@ -36,4 +36,11 @@ describe("computePopoverStyle", () => {
     const style = computePopoverStyle(nearLeft, 1024, 800);
     expect(style).toContain("left: 8px");
   });
+
+  it("uses custom popoverHeight for above/below calculation", () => {
+    const nearBottom = { top: 600, bottom: 620, left: 50, right: 66 };
+    // viewport 660px: spaceBelow=40 < 50+8=58, spaceAbove=600 > 58 → shows above
+    const style = computePopoverStyle(nearBottom, 1024, 660, 50);
+    expect(style).toContain("top: 542px"); // 600 - 50 - 8
+  });
 });
