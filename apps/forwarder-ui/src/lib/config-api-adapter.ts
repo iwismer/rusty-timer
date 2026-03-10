@@ -1,4 +1,8 @@
-export function mapSaveSectionResult(result: { ok: boolean; error?: string; restart_needed?: boolean }) {
+export function mapSaveSectionResult(result: {
+  ok: boolean;
+  error?: string;
+  restart_needed?: boolean;
+}) {
   return {
     ok: result.ok,
     error: result.error,
