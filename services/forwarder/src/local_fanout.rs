@@ -76,6 +76,8 @@ pub struct FanoutServer {
     listener: TcpListener,
     /// Broadcast channel: every push goes to all active consumers.
     tx: BroadcastSender,
+    /// The bound local address, stored so that Drop can clean up the registry.
+    local_addr: SocketAddr,
 }
 
 impl FanoutServer {
@@ -96,14 +98,16 @@ impl FanoutServer {
             .expect("local_addr always succeeds after bind");
         registry().lock().await.insert(local_addr, tx.clone());
 
-        Ok(FanoutServer { listener, tx })
+        Ok(FanoutServer {
+            listener,
+            tx,
+            local_addr,
+        })
     }
 
     /// Return the bound local address (useful when port 0 was used).
     pub fn local_addr(&self) -> SocketAddr {
-        self.listener
-            .local_addr()
-            .expect("local_addr always succeeds after bind")
+        self.local_addr
     }
 
     /// Broadcast `data` to all consumers currently subscribed to `addr`.
@@ -133,6 +137,17 @@ impl FanoutServer {
     }
 }
 
+impl Drop for FanoutServer {
+    fn drop(&mut self) {
+        // `registry()` uses tokio::sync::Mutex; Drop cannot be async so we use
+        // try_lock().  If the lock is contended at drop time we accept the leak
+        // rather than blocking or panicking — this is best-effort cleanup.
+        if let Ok(mut reg) = registry().try_lock() {
+            reg.remove(&self.local_addr);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-consumer writer task
 // ---------------------------------------------------------------------------
@@ -157,5 +172,39 @@ async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<Vec<u
                 break;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that dropping a FanoutServer removes its entry from the registry.
+    #[tokio::test]
+    async fn drop_removes_registry_entry() {
+        let server = FanoutServer::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr();
+
+        // Entry must be present right after bind.
+        assert!(
+            registry().lock().await.contains_key(&addr),
+            "registry should contain entry after bind"
+        );
+
+        // Drop the server synchronously.
+        drop(server);
+
+        // Give the async runtime a moment in case of any scheduling nuances.
+        tokio::task::yield_now().await;
+
+        // Entry must be gone after drop.
+        assert!(
+            !registry().lock().await.contains_key(&addr),
+            "registry should not contain entry after drop"
+        );
     }
 }
