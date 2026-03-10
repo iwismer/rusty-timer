@@ -347,11 +347,17 @@ async fn fallback_404() -> impl IntoResponse {
 }
 
 mod health {
-    use axum::response::IntoResponse;
+    use crate::AppState;
+    use axum::{extract::State, http::StatusCode, response::IntoResponse};
+
     pub async fn healthz() -> impl IntoResponse {
         "ok"
     }
-    pub async fn readyz() -> impl IntoResponse {
-        "ok"
+
+    pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+        match sqlx::query("SELECT 1").execute(&state.pool).await {
+            Ok(_) => (StatusCode::OK, "ok").into_response(),
+            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response(),
+        }
     }
 }
