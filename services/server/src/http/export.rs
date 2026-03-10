@@ -52,7 +52,7 @@ pub async fn export_raw(
                 line.push('\n');
                 axum::body::Bytes::from(line.into_bytes())
             })
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     });
 
     Response::builder()
@@ -95,7 +95,7 @@ pub async fn export_csv(
     .map(|row_result| {
         row_result
             .map(|row| axum::body::Bytes::from(format_csv_row(&row)))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     });
 
     let stream = header_row.chain(data_stream);
@@ -141,7 +141,7 @@ pub async fn export_epoch_csv(
     .map(|row_result| {
         row_result
             .map(|row| axum::body::Bytes::from(format_csv_row(&row)))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     });
 
     let stream = header_row.chain(data_stream);
@@ -182,7 +182,7 @@ pub async fn export_epoch_raw(
                 line.push('\n');
                 axum::body::Bytes::from(line.into_bytes())
             })
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     });
 
     Response::builder()
