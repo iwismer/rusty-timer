@@ -169,6 +169,7 @@ async fn e2e_export_txt_and_csv() {
         display_name: None,
         batch_flush_ms: 100,
         batch_max_events: 50,
+        ack_timeout_secs: 30,
     };
     let mut session = UplinkSession::connect_with_readers(uplink_cfg, vec![READER_IP.to_owned()])
         .await

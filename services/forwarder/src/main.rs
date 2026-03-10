@@ -1358,6 +1358,7 @@ async fn run_uplink(
         display_name: cfg.display_name.clone(),
         batch_flush_ms: cfg.uplink.batch_flush_ms,
         batch_max_events: cfg.uplink.batch_max_events,
+        ack_timeout_secs: cfg.uplink.ack_timeout_secs,
     };
 
     let mut backoff_secs: u64 = 1;
@@ -2454,6 +2455,7 @@ mod tests {
             uplink: forwarder::config::UplinkConfig {
                 batch_flush_ms: 50,
                 batch_max_events: 50,
+                ack_timeout_secs: 30,
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
@@ -3288,6 +3290,7 @@ token_file = "/tmp/test-token"
             uplink: forwarder::config::UplinkConfig {
                 batch_flush_ms: 50,
                 batch_max_events: 50,
+                ack_timeout_secs: 30,
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
@@ -3522,6 +3525,7 @@ token_file = "/tmp/test-token"
             uplink: forwarder::config::UplinkConfig {
                 batch_flush_ms: 50,
                 batch_max_events: 50,
+                ack_timeout_secs: 30,
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,
@@ -3635,6 +3639,7 @@ token_file = "/tmp/test-token"
             uplink: forwarder::config::UplinkConfig {
                 batch_flush_ms: 50,
                 batch_max_events: 50,
+                ack_timeout_secs: 30,
             },
             control: forwarder::config::ControlConfig {
                 allow_power_actions: false,

@@ -14,6 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{
     EpochResetCommand, ForwarderAck, ForwarderEventBatch, ForwarderHello, ReadEvent, WsMessage,
 };
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -37,6 +38,8 @@ pub struct UplinkConfig {
     pub batch_flush_ms: u64,
     /// Max events per batch.
     pub batch_max_events: u32,
+    /// Seconds to wait for an ack before treating the session as stalled.
+    pub ack_timeout_secs: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +83,7 @@ pub struct UplinkSession {
     session_id: String,
     device_id: String,
     _forwarder_id: String,
+    ack_timeout_secs: u64,
 }
 
 impl UplinkSession {
@@ -98,6 +102,7 @@ impl UplinkSession {
             session_id: String::new(),
             device_id: String::new(),
             _forwarder_id: cfg.forwarder_id.clone(),
+            ack_timeout_secs: cfg.ack_timeout_secs,
         };
 
         // Send ForwarderHello
@@ -154,6 +159,7 @@ impl UplinkSession {
             session_id: String::new(),
             device_id: String::new(),
             _forwarder_id: cfg.forwarder_id.clone(),
+            ack_timeout_secs: cfg.ack_timeout_secs,
         };
 
         let hello = WsMessage::ForwarderHello(ForwarderHello {
@@ -201,6 +207,9 @@ impl UplinkSession {
     /// Returns [`SendBatchResult::Ack`] on normal ack, or
     /// [`SendBatchResult::EpochReset`] if the server sends an epoch-reset
     /// command before the ack arrives.  The caller must handle both.
+    ///
+    /// Returns [`UplinkError::Timeout`] if no response arrives within
+    /// `ack_timeout_secs`.
     pub async fn send_batch(
         &mut self,
         events: Vec<ReadEvent>,
@@ -213,7 +222,14 @@ impl UplinkSession {
         });
         self.send_ws_message(&batch).await?;
 
-        // Wait for ack or epoch reset
+        let timeout_duration = Duration::from_secs(self.ack_timeout_secs);
+        tokio::time::timeout(timeout_duration, self.recv_batch_response())
+            .await
+            .map_err(|_| UplinkError::Timeout)?
+    }
+
+    /// Inner loop that receives messages until a terminal batch response arrives.
+    async fn recv_batch_response(&mut self) -> Result<SendBatchResult, UplinkError> {
         loop {
             let msg = self.recv_ws_message().await?;
             match msg {
@@ -316,6 +332,8 @@ pub enum UplinkError {
     Protocol(String),
     Serialization(String),
     Disconnected,
+    /// No ack received within the configured timeout.
+    Timeout,
 }
 
 impl std::fmt::Display for UplinkError {
@@ -326,6 +344,7 @@ impl std::fmt::Display for UplinkError {
             UplinkError::Protocol(s) => write!(f, "Protocol error: {}", s),
             UplinkError::Serialization(s) => write!(f, "Serialization error: {}", s),
             UplinkError::Disconnected => write!(f, "WebSocket disconnected"),
+            UplinkError::Timeout => write!(f, "Timed out waiting for server ack"),
         }
     }
 }

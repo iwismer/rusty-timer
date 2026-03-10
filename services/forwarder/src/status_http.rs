@@ -976,6 +976,7 @@ pub async fn apply_section_update(
                 raw.uplink = Some(crate::config::RawUplinkConfig {
                     batch_flush_ms,
                     batch_max_events,
+                    ack_timeout_secs: None,
                 });
                 Ok(())
             })

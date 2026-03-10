@@ -57,6 +57,8 @@ pub struct StatusHttpConfig {
 pub struct UplinkConfig {
     pub batch_flush_ms: u64,
     pub batch_max_events: u32,
+    /// Seconds to wait for an ack before treating the session as stalled.
+    pub ack_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +123,7 @@ pub struct RawStatusHttpConfig {
 pub struct RawUplinkConfig {
     pub batch_flush_ms: Option<u64>,
     pub batch_max_events: Option<u32>,
+    pub ack_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,10 +230,12 @@ pub fn load_config_from_str(
         Some(u) => UplinkConfig {
             batch_flush_ms: u.batch_flush_ms.unwrap_or(100),
             batch_max_events: u.batch_max_events.unwrap_or(50),
+            ack_timeout_secs: u.ack_timeout_secs.unwrap_or(30),
         },
         None => UplinkConfig {
             batch_flush_ms: 100,
             batch_max_events: 50,
+            ack_timeout_secs: 30,
         },
     };
 

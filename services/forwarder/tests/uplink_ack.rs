@@ -25,6 +25,7 @@ async fn uplink_sends_forwarder_hello_on_connect() {
         display_name: None,
         batch_flush_ms: 100,
         batch_max_events: 50,
+        ack_timeout_secs: 30,
     };
 
     let session = UplinkSession::connect(cfg).await.expect("connect");
@@ -52,6 +53,7 @@ async fn uplink_device_id_matches_hello_forwarder_id() {
         display_name: None,
         batch_flush_ms: 100,
         batch_max_events: 50,
+        ack_timeout_secs: 30,
     };
 
     let session = UplinkSession::connect(cfg).await.expect("connect");
@@ -75,6 +77,7 @@ async fn uplink_receives_ack_for_event_batch() {
         display_name: None,
         batch_flush_ms: 100,
         batch_max_events: 50,
+        ack_timeout_secs: 30,
     };
 
     let mut session = UplinkSession::connect(cfg).await.expect("connect");
@@ -113,6 +116,7 @@ async fn uplink_ack_contains_high_water_marks() {
         display_name: None,
         batch_flush_ms: 100,
         batch_max_events: 50,
+        ack_timeout_secs: 30,
     };
 
     let mut session = UplinkSession::connect(cfg).await.expect("connect");
@@ -233,6 +237,7 @@ async fn send_batch_surfaces_epoch_reset_command() {
         display_name: None,
         batch_flush_ms: 100,
         batch_max_events: 50,
+        ack_timeout_secs: 30,
     };
 
     let mut session = UplinkSession::connect(cfg).await.expect("connect");
