@@ -191,10 +191,11 @@ async fn main() {
 
     // Dedicated ctrl-c handler — works even when the main select loop is
     // blocked inside connect_async or do_handshake.
-    tokio::spawn(async {
+    let shutdown_for_ctrlc = Arc::clone(&state);
+    tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
-        info!("received ctrl-c, shutting down");
-        std::process::exit(0);
+        info!("received ctrl-c, signaling shutdown");
+        let _ = shutdown_for_ctrlc.shutdown_tx.send(true);
     });
 
     // Spawn background update check
