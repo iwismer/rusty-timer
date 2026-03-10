@@ -26,10 +26,11 @@ pub(crate) fn json_error(
 }
 
 pub fn internal_error(err: impl Display) -> HttpResponse {
+    tracing::error!(%err, "internal server error");
     json_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "INTERNAL_ERROR",
-        err.to_string(),
+        "An internal error occurred",
     )
 }
 
@@ -98,7 +99,7 @@ mod tests {
             response,
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
-            "database unavailable",
+            "An internal error occurred",
         )
         .await;
     }

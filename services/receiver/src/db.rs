@@ -130,7 +130,9 @@ impl Db {
         )?;
         if updated == 0 {
             self.conn.execute(
-                "INSERT INTO profile (server_url, token, update_mode, receiver_id) VALUES ('', '', ?1, ?2)",
+                "INSERT INTO profile (server_url, token, update_mode, receiver_id)
+                 SELECT '', '', ?1, ?2
+                 WHERE NOT EXISTS (SELECT 1 FROM profile)",
                 rusqlite::params![DEFAULT_UPDATE_MODE, receiver_id],
             )?;
         }
@@ -215,23 +217,16 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: i64, seq: i64) -> DbResult<()> {
-        let existing: Option<(i64, i64)> = self
-            .conn
-            .query_row(
-                "SELECT stream_epoch, acked_through_seq FROM cursors WHERE forwarder_id = ?1 AND reader_ip = ?2",
-                rusqlite::params![fwd, ip],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?;
-
-        if let Some((current_epoch, current_seq)) = existing {
-            let is_stale = epoch < current_epoch || (epoch == current_epoch && seq < current_seq);
-            if is_stale {
-                return Ok(());
-            }
-        }
-
-        self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch, seq])?;
+        self.conn.execute(
+            "INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (forwarder_id, reader_ip) DO UPDATE SET
+                 stream_epoch = ?3,
+                 acked_through_seq = ?4
+             WHERE excluded.stream_epoch > cursors.stream_epoch
+                OR (excluded.stream_epoch = cursors.stream_epoch AND excluded.acked_through_seq > cursors.acked_through_seq)",
+            rusqlite::params![fwd, ip, epoch, seq],
+        )?;
         Ok(())
     }
     pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {
@@ -630,5 +625,34 @@ mod tests {
             .update_subscription_port("f1", "10.0.0.1", Some(9000))
             .unwrap();
         assert!(!updated);
+    }
+
+    #[test]
+    fn save_receiver_id_on_empty_db_does_not_create_duplicate_rows() {
+        let db = Db::open_in_memory().unwrap();
+        // First call on empty DB creates exactly one row.
+        db.save_receiver_id("id-1").unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM profile", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "expected exactly 1 profile row after first save_receiver_id"
+        );
+
+        // Second call must update the existing row, not insert another.
+        db.save_receiver_id("id-2").unwrap();
+        let count2: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM profile", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count2, 1,
+            "expected still exactly 1 profile row after second save_receiver_id"
+        );
+
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.receiver_id, Some("id-2".to_owned()));
     }
 }

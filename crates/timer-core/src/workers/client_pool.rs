@@ -140,7 +140,7 @@ impl ClientPool {
                         write!(
                             file_writer,
                             "{}{}",
-                            r.replace(|c: char| !c.is_alphanumeric(), ""),
+                            r.replace(|c: char| c == '\r' || c == '\n', ""),
                             line_ending
                         )
                         .unwrap_or_else(|e| {
@@ -183,7 +183,10 @@ impl ClientPool {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::io::Read as IoRead;
+    use tempfile::NamedTempFile;
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
 
     async fn make_client() -> Client {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -255,6 +258,67 @@ mod tests {
         assert_eq!(
             output,
             "Total Reads: 12 Last Read: 99 Ada Lovelace 18:45:59.390"
+        );
+    }
+
+    /// Verifies that chip reads written to file preserve structural characters
+    /// (colons, dots, spaces, hyphens, etc.) and only strip \r and \n control chars.
+    #[tokio::test]
+    async fn chip_read_file_output_preserves_structural_characters() {
+        let tmp = NamedTempFile::new().unwrap();
+        let tmp_path = tmp.path().to_str().unwrap().to_owned();
+
+        let (tx, rx) = mpsc::channel(16);
+        let pool = ClientPool::new(rx, None, Some(tmp_path.clone()), true);
+
+        // A chip read string that contains structural characters: colons, dots, spaces, hyphens.
+        // This simulates a real IPICO-style read line that must not be mangled.
+        let raw_read = "aa40 00:00:00:12:34:56 18:45:59.390 192.168.1.10".to_owned();
+
+        tx.send(Message::CHIP_READ(raw_read.clone())).await.unwrap();
+        tx.send(Message::SHUTDOWN).await.unwrap();
+        pool.begin().await;
+
+        let mut file = std::fs::File::open(&tmp_path).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+
+        // The written line should contain the full raw read with structural chars intact.
+        // Only \r and \n should be stripped, not colons, dots, spaces, etc.
+        let written_line = contents.trim_end_matches('\n').trim_end_matches('\r');
+        assert_eq!(
+            written_line, raw_read,
+            "File output mangled structural characters: got {:?}, expected {:?}",
+            written_line, raw_read
+        );
+    }
+
+    /// Verifies that \r and \n within a chip read string are stripped when written to file.
+    #[tokio::test]
+    async fn chip_read_file_output_strips_control_chars() {
+        let tmp = NamedTempFile::new().unwrap();
+        let tmp_path = tmp.path().to_str().unwrap().to_owned();
+
+        let (tx, rx) = mpsc::channel(16);
+        let pool = ClientPool::new(rx, None, Some(tmp_path.clone()), true);
+
+        // A read containing embedded \r and \n that must be stripped.
+        let raw_read = "aa40\r\n00:00:00:12:34:56\r18:45:59.390".to_owned();
+
+        tx.send(Message::CHIP_READ(raw_read.clone())).await.unwrap();
+        tx.send(Message::SHUTDOWN).await.unwrap();
+        pool.begin().await;
+
+        let mut file = std::fs::File::open(&tmp_path).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+
+        let written_line = contents.trim_end_matches('\n').trim_end_matches('\r');
+        let expected = "aa4000:00:00:12:34:5618:45:59.390";
+        assert_eq!(
+            written_line, expected,
+            "\\r and \\n were not stripped: got {:?}, expected {:?}",
+            written_line, expected
         );
     }
 

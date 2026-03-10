@@ -2,8 +2,12 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 pub async fn create_pool(database_url: &str) -> PgPool {
+    let max_conn: u32 = std::env::var("DATABASE_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
     PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(max_conn)
         .connect(database_url)
         .await
         .expect("failed to connect to Postgres")

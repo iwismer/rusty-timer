@@ -59,6 +59,9 @@ pub struct FaultEntry {
     pub fault_type: FaultType,
     pub after_events: u64,
     pub duration_ms: u64,
+    /// Optional exclusive upper bound. When `Some(n)`, the fault only fires
+    /// for `event_num` in `[after_events, n)`. When `None`, fires forever.
+    pub until_events: Option<u64>,
 }
 
 /// Internal fault type enum (parsed from string).
@@ -84,6 +87,7 @@ impl FaultSchedule {
                 fault_type: parse_fault_type(&f.fault_type),
                 after_events: f.after_events,
                 duration_ms: f.duration_ms,
+                until_events: f.until_events,
             })
             .collect();
         FaultSchedule { entries }
@@ -106,7 +110,9 @@ impl FaultSchedule {
 pub fn apply_fault_to_event_emission(schedule: &FaultSchedule, event_num: u64) -> FaultOutcome {
     // Walk entries in definition order; return first match.
     for entry in &schedule.entries {
-        if event_num >= entry.after_events {
+        let in_range = event_num >= entry.after_events
+            && entry.until_events.map_or(true, |until| event_num < until);
+        if in_range {
             return match &entry.fault_type {
                 FaultType::Jitter => FaultOutcome::Jitter {
                     delay_ms: entry.duration_ms,
