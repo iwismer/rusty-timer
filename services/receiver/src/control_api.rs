@@ -73,7 +73,10 @@ pub enum ShutdownSignal {
 
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
-    pub connection_state: Arc<RwLock<ConnectionState>>,
+    pub connection_state: watch::Sender<ConnectionState>,
+    // Keepalive receiver so that `connection_state.send()` never fails due
+    // to "no receivers" even when no external subscriber is active.
+    _conn_state_keepalive: watch::Receiver<ConnectionState>,
     pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
     pub shutdown_tx: watch::Sender<ShutdownSignal>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
@@ -100,9 +103,11 @@ impl AppState {
     ) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
+        let (conn_tx, conn_keepalive_rx) = watch::channel(ConnectionState::Disconnected);
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
-            connection_state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            connection_state: conn_tx,
+            _conn_state_keepalive: conn_keepalive_rx,
             logger: Arc::new(rt_ui_log::UiLogger::with_buffer(
                 ui_tx.clone(),
                 |entry| ReceiverUiEvent::LogEntry { entry },
@@ -121,6 +126,11 @@ impl AppState {
             retry_streak: AtomicU64::new(0),
         });
         (state, shutdown_rx)
+    }
+
+    /// Subscribe to connection state changes.
+    pub fn conn_rx(&self) -> watch::Receiver<ConnectionState> {
+        self.connection_state.subscribe()
     }
 
     pub fn request_disconnect_shutdown(&self) {
@@ -156,15 +166,19 @@ impl AppState {
     }
 
     pub async fn request_reconnect_if_connected(&self) -> bool {
-        {
-            let mut connection_state = self.connection_state.write().await;
-            if *connection_state != ConnectionState::Connected {
-                return false;
+        let was_connected = self.connection_state.send_if_modified(|state| {
+            if *state == ConnectionState::Connected {
+                *state = ConnectionState::Connecting;
+                true
+            } else {
+                false
             }
-            self.retry_streak.fetch_add(1, Ordering::SeqCst);
-            self.connect_attempt.fetch_add(1, Ordering::SeqCst);
-            *connection_state = ConnectionState::Connecting;
+        });
+        if !was_connected {
+            return false;
         }
+        self.retry_streak.fetch_add(1, Ordering::SeqCst);
+        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
         self.emit_connection_state_side_effects(ConnectionState::Connecting)
             .await;
         true
@@ -192,7 +206,7 @@ impl AppState {
 
     /// Update connection state, broadcast status change, and emit a log entry.
     pub async fn set_connection_state(&self, new_state: ConnectionState) {
-        *self.connection_state.write().await = new_state.clone();
+        let _ = self.connection_state.send(new_state.clone());
         self.emit_connection_state_side_effects(new_state).await;
     }
 
@@ -230,7 +244,7 @@ impl AppState {
             .collect();
 
         let upstream_url = self.upstream_url.read().await.clone();
-        let conn_state = self.connection_state.read().await.clone();
+        let conn_state = self.connection_state.borrow().clone();
 
         let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
             (None, _) => (None, Some("no profile configured".to_owned())),
@@ -1016,7 +1030,7 @@ async fn put_subscriptions(
     match db.replace_subscriptions(&subs) {
         Ok(()) => {
             drop(db);
-            let conn_for_status = state.connection_state.read().await.clone();
+            let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
             let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
@@ -1027,7 +1041,7 @@ async fn put_subscriptions(
             });
             drop(db);
             state.emit_streams_snapshot().await;
-            let conn_for_reconnect = state.connection_state.read().await.clone();
+            let conn_for_reconnect = state.connection_state.borrow().clone();
             if matches!(
                 conn_for_reconnect,
                 ConnectionState::Connected
@@ -1062,7 +1076,7 @@ async fn get_subscriptions(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let receiver_id = state.receiver_id.read().await.clone();
-    let conn = state.connection_state.read().await.clone();
+    let conn = state.connection_state.borrow().clone();
     let db = state.db.lock().await;
     let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = state.db_integrity_ok;
@@ -1086,7 +1100,7 @@ async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let current = state.connection_state.read().await.clone();
+    let current = state.connection_state.borrow().clone();
     if current == ConnectionState::Disconnected {
         return StatusCode::OK.into_response();
     }
@@ -1174,7 +1188,7 @@ async fn post_admin_purge_subscriptions(
     match db.delete_all_subscriptions() {
         Ok(count) => {
             drop(db);
-            let conn_for_status = state.connection_state.read().await.clone();
+            let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
             let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
@@ -1185,7 +1199,7 @@ async fn post_admin_purge_subscriptions(
             });
             drop(db);
             state.emit_streams_snapshot().await;
-            let conn_for_reconnect = state.connection_state.read().await.clone();
+            let conn_for_reconnect = state.connection_state.borrow().clone();
             if matches!(
                 conn_for_reconnect,
                 ConnectionState::Connected
@@ -1207,7 +1221,7 @@ async fn post_admin_reset_profile(
     if !check_admin_intent(&headers, ADMIN_RESET_PROFILE_INTENT) {
         return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
     }
-    let current = state.connection_state.read().await.clone();
+    let current = state.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
             .set_connection_state(ConnectionState::Disconnecting)
@@ -1235,7 +1249,7 @@ async fn post_admin_factory_reset(
     if !check_admin_intent(&headers, ADMIN_FACTORY_RESET_INTENT) {
         return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
     }
-    let current = state.connection_state.read().await.clone();
+    let current = state.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
             .set_connection_state(ConnectionState::Disconnecting)

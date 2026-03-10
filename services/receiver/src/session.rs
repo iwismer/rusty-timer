@@ -33,7 +33,7 @@ pub struct SessionLoopDeps {
     pub stream_counts: crate::cache::StreamCounts,
     pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     pub shutdown: watch::Receiver<bool>,
-    pub connection_state: Arc<tokio::sync::RwLock<ConnectionState>>,
+    pub connection_state: watch::Receiver<ConnectionState>,
 }
 
 fn apply_batch_counts(
@@ -109,7 +109,7 @@ where
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
                                 let reconnect_pending =
-                                    deps.connection_state.read().await.clone()
+                                    deps.connection_state.borrow().clone()
                                         != ConnectionState::Connected;
                                 if reconnect_pending {
                                     continue;

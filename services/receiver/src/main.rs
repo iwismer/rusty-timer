@@ -315,6 +315,9 @@ async fn main() {
     let mut session_cancel_tx: Option<watch::Sender<bool>> = None;
     let mut session_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Watch receiver for connection state changes (replaces 50ms polling).
+    let mut conn_state_rx = state.conn_rx();
+
     // Interval for subscription reconciliation polling.
     let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_millis(500));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -375,7 +378,7 @@ async fn main() {
             // ------------------------------------------------------------------
             // Connection state changes
             // ------------------------------------------------------------------
-            result = watch_connection_state(Arc::clone(&state)) => {
+            result = watch_connection_state(&mut conn_state_rx) => {
                 match result {
                     ConnectionState::Connecting => {
                         let attempt = state.current_connect_attempt();
@@ -482,9 +485,7 @@ async fn main() {
                                                         stream_counts: counts,
                                                         ui_tx,
                                                         shutdown: cancel_rx,
-                                                        connection_state: Arc::clone(
-                                                            &st.connection_state,
-                                                        ),
+                                                        connection_state: st.conn_rx(),
                                                     };
                                                     let result = receiver::session::run_session_loop(
                                                         ws, session_id, deps,
@@ -505,7 +506,7 @@ async fn main() {
                                                         // Unexpected drop — auto-reconnect.
                                                         st.logger.log("Connection lost, will reconnect");
                                                         st.emit_streams_snapshot().await;
-                                                    } else if *st.connection_state.read().await
+                                                    } else if *st.connection_state.borrow()
                                                         == ConnectionState::Disconnecting
                                                     {
                                                         // User-initiated disconnect.
@@ -569,11 +570,10 @@ fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
 // ---------------------------------------------------------------------------
 // Helper: watch connection_state and return the new value when it changes.
 // ---------------------------------------------------------------------------
-async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
-    // Poll until the state changes from its "idle" values.
+async fn watch_connection_state(rx: &mut watch::Receiver<ConnectionState>) -> ConnectionState {
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let cs = state.connection_state.read().await.clone();
+        rx.changed().await.expect("watch sender dropped");
+        let cs = rx.borrow().clone();
         if cs == ConnectionState::Connecting || cs == ConnectionState::Disconnecting {
             return cs;
         }
@@ -582,7 +582,7 @@ async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
 
 async fn is_current_connect_attempt(state: &Arc<AppState>, attempt: u64) -> bool {
     state.current_connect_attempt() == attempt
-        && *state.connection_state.read().await == ConnectionState::Connecting
+        && *state.connection_state.borrow() == ConnectionState::Connecting
 }
 
 fn compute_reconnect_delay_secs(retries: u64) -> u64 {
@@ -676,7 +676,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
     };
 
     loop {
-        if *state.connection_state.read().await != ConnectionState::Connected {
+        if *state.connection_state.borrow() != ConnectionState::Connected {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
         }
@@ -707,7 +707,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
         {
             Ok(()) => {}
             Err(e) => {
-                if *state.connection_state.read().await == ConnectionState::Connected {
+                if *state.connection_state.borrow() == ConnectionState::Connected {
                     state.logger.log_at(
                         UiLogLevel::Warn,
                         format!("upstream dashboard SSE refresh disconnected: {e}"),
@@ -741,7 +741,7 @@ async fn consume_upstream_dashboard_events(
     let mut pending_event: Option<String> = None;
 
     loop {
-        if *state.connection_state.read().await != ConnectionState::Connected {
+        if *state.connection_state.borrow() != ConnectionState::Connected {
             return Ok(());
         }
 
@@ -1386,7 +1386,7 @@ mod tests {
         assert!(!reissued);
         assert_eq!(state.current_connect_attempt(), before_attempt);
         assert_eq!(
-            *state.connection_state.read().await,
+            *state.connection_state.borrow(),
             ConnectionState::Disconnecting
         );
     }
@@ -1404,7 +1404,7 @@ mod tests {
         assert!(retried);
         assert!(state.current_connect_attempt() > attempt);
         assert_eq!(
-            *state.connection_state.read().await,
+            *state.connection_state.borrow(),
             ConnectionState::Connecting
         );
     }
@@ -1703,7 +1703,7 @@ mod tests {
         let transitioned = set_disconnected_if_attempt_current(&state, stale_attempt).await;
         assert!(!transitioned);
         assert_eq!(
-            *state.connection_state.read().await,
+            *state.connection_state.borrow(),
             ConnectionState::Connecting
         );
     }

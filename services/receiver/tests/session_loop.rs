@@ -8,7 +8,7 @@ use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, ReceiverModeAppli
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock, oneshot, watch};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -112,7 +112,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
+            connection_state: watch::channel(ConnectionState::Connected).1,
         },
     )
     .await
@@ -194,7 +194,7 @@ async fn run_session_loop_drops_events_while_reconnect_is_pending() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connecting)),
+            connection_state: watch::channel(ConnectionState::Connecting).1,
         },
     )
     .await
@@ -237,7 +237,7 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
+            connection_state: watch::channel(ConnectionState::Connected).1,
         },
     )
     .await;
@@ -276,7 +276,7 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
+            connection_state: watch::channel(ConnectionState::Connected).1,
         },
     )
     .await;
@@ -317,7 +317,7 @@ async fn run_session_loop_replies_to_ping_with_pong() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
+            connection_state: watch::channel(ConnectionState::Connected).1,
         },
     )
     .await;
@@ -351,7 +351,7 @@ async fn run_session_loop_stops_on_shutdown_signal() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
+            connection_state: watch::channel(ConnectionState::Connected).1,
         },
     ));
 
@@ -397,7 +397,7 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
-            connection_state: Arc::new(RwLock::new(ConnectionState::Connected)),
+            connection_state: watch::channel(ConnectionState::Connected).1,
         },
     )
     .await;
