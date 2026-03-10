@@ -55,7 +55,6 @@ pub struct StatusHttpConfig {
 
 #[derive(Debug, Clone)]
 pub struct UplinkConfig {
-    pub batch_mode: String,
     pub batch_flush_ms: u64,
     pub batch_max_events: u32,
 }
@@ -120,7 +119,6 @@ pub struct RawStatusHttpConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawUplinkConfig {
-    pub batch_mode: Option<String>,
     pub batch_flush_ms: Option<u64>,
     pub batch_max_events: Option<u32>,
 }
@@ -227,12 +225,10 @@ pub fn load_config_from_str(
     // Uplink defaults
     let uplink = match raw.uplink {
         Some(u) => UplinkConfig {
-            batch_mode: u.batch_mode.unwrap_or_else(|| "immediate".to_owned()),
             batch_flush_ms: u.batch_flush_ms.unwrap_or(100),
             batch_max_events: u.batch_max_events.unwrap_or(50),
         },
         None => UplinkConfig {
-            batch_mode: "immediate".to_owned(),
             batch_flush_ms: 100,
             batch_max_events: 50,
         },

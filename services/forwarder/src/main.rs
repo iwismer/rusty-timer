@@ -1356,7 +1356,6 @@ async fn run_uplink(
         token: cfg.token.clone(),
         forwarder_id: forwarder_id.clone(),
         display_name: cfg.display_name.clone(),
-        batch_mode: cfg.uplink.batch_mode.clone(),
         batch_flush_ms: cfg.uplink.batch_flush_ms,
         batch_max_events: cfg.uplink.batch_max_events,
     };
@@ -2447,7 +2446,6 @@ mod tests {
                 bind: "127.0.0.1:0".to_string(),
             },
             uplink: forwarder::config::UplinkConfig {
-                batch_mode: "immediate".to_string(),
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
@@ -3282,7 +3280,6 @@ token_file = "/tmp/test-token"
                 bind: "127.0.0.1:0".to_string(),
             },
             uplink: forwarder::config::UplinkConfig {
-                batch_mode: "immediate".to_string(),
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
@@ -3517,7 +3514,6 @@ token_file = "/tmp/test-token"
                 bind: "127.0.0.1:0".to_string(),
             },
             uplink: forwarder::config::UplinkConfig {
-                batch_mode: "immediate".to_string(),
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },
@@ -3631,7 +3627,6 @@ token_file = "/tmp/test-token"
                 bind: "127.0.0.1:0".to_string(),
             },
             uplink: forwarder::config::UplinkConfig {
-                batch_mode: "immediate".to_string(),
                 batch_flush_ms: 50,
                 batch_max_events: 50,
             },

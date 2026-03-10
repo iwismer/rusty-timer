@@ -23,7 +23,6 @@ async fn uplink_sends_forwarder_hello_on_connect() {
         token: "test-token".to_owned(),
         forwarder_id: "fwd-test-001".to_owned(),
         display_name: None,
-        batch_mode: "immediate".to_owned(),
         batch_flush_ms: 100,
         batch_max_events: 50,
     };
@@ -51,7 +50,6 @@ async fn uplink_device_id_matches_hello_forwarder_id() {
         token: "test-token".to_owned(),
         forwarder_id: "fwd-device-check".to_owned(),
         display_name: None,
-        batch_mode: "immediate".to_owned(),
         batch_flush_ms: 100,
         batch_max_events: 50,
     };
@@ -75,7 +73,6 @@ async fn uplink_receives_ack_for_event_batch() {
         token: "test-token".to_owned(),
         forwarder_id: "fwd-ack-test".to_owned(),
         display_name: None,
-        batch_mode: "immediate".to_owned(),
         batch_flush_ms: 100,
         batch_max_events: 50,
     };
@@ -114,7 +111,6 @@ async fn uplink_ack_contains_high_water_marks() {
         token: "test-token".to_owned(),
         forwarder_id: "fwd-hwm".to_owned(),
         display_name: None,
-        batch_mode: "immediate".to_owned(),
         batch_flush_ms: 100,
         batch_max_events: 50,
     };
@@ -235,7 +231,6 @@ async fn send_batch_surfaces_epoch_reset_command() {
         token: "test-token".to_owned(),
         forwarder_id: "fwd-epoch-test".to_owned(),
         display_name: None,
-        batch_mode: "immediate".to_owned(),
         batch_flush_ms: 100,
         batch_max_events: 50,
     };

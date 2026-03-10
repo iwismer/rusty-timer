@@ -33,11 +33,9 @@ pub struct UplinkConfig {
     pub forwarder_id: String,
     /// Optional human-readable name for this forwarder.
     pub display_name: Option<String>,
-    /// `"immediate"` or `"batched"`.
-    pub batch_mode: String,
-    /// Flush interval in ms when `batch_mode = "batched"`.
+    /// Flush interval in ms between batches.
     pub batch_flush_ms: u64,
-    /// Max events per batch when `batch_mode = "batched"`.
+    /// Max events per batch.
     pub batch_max_events: u32,
 }
 

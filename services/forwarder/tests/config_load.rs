@@ -307,30 +307,6 @@ target = "192.168.2.156:10000"
 }
 
 #[test]
-fn default_uplink_batch_mode() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert_eq!(cfg.uplink.batch_mode, "immediate");
-    assert_eq!(cfg.uplink.batch_flush_ms, 100);
-    assert_eq!(cfg.uplink.batch_max_events, 50);
-}
-
-#[test]
 fn control_allow_power_actions_defaults_to_false() {
     let token_file = write_token_file("tok");
     let toml = format!(
