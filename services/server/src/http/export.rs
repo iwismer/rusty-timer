@@ -78,8 +78,11 @@ pub async fn export_csv(
         return response;
     }
 
-    let header_row =
-        futures_util::stream::once(async { Ok(axum::body::Bytes::from_static(b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n")) });
+    let header_row = futures_util::stream::once(async {
+        Ok(axum::body::Bytes::from_static(
+            b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n",
+        ))
+    });
 
     let data_stream = sqlx::query(
         r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id
@@ -120,8 +123,11 @@ pub async fn export_epoch_csv(
         return response;
     }
 
-    let header_row =
-        futures_util::stream::once(async { Ok(axum::body::Bytes::from_static(b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n")) });
+    let header_row = futures_util::stream::once(async {
+        Ok(axum::body::Bytes::from_static(
+            b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n",
+        ))
+    });
 
     let data_stream = sqlx::query(
         r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id

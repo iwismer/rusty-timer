@@ -83,18 +83,20 @@ impl Db {
         Ok(rows.next().transpose()?)
     }
     pub fn save_profile(
-        &self,
+        &mut self,
         url: &str,
         tok: &str,
         update_mode: &str,
         receiver_id: Option<&str>,
     ) -> DbResult<()> {
         let receiver_mode_json = self.load_receiver_mode_json_raw()?;
-        self.conn.execute_batch("DELETE FROM profile")?;
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM profile")?;
+        tx.execute(
             "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -356,7 +358,7 @@ mod tests {
 
     #[test]
     fn profile_round_trip_with_update_mode() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-only", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
@@ -365,7 +367,7 @@ mod tests {
 
     #[test]
     fn profile_update_mode_defaults_for_existing_db() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
@@ -386,7 +388,7 @@ mod tests {
 
     #[test]
     fn receiver_mode_round_trip() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let mode = ReceiverMode::Live {
@@ -401,7 +403,7 @@ mod tests {
 
     #[test]
     fn targeted_replay_mode_round_trips_with_targets() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let targeted = ReceiverMode::TargetedReplay {
@@ -419,7 +421,7 @@ mod tests {
 
     #[test]
     fn save_profile_tolerates_invalid_stored_receiver_mode_json() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         db.conn
@@ -476,7 +478,7 @@ mod tests {
 
     #[test]
     fn save_receiver_id_on_existing_profile_updates_only_receiver_id() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-only", Some("recv-old"))
             .unwrap();
         db.save_receiver_id("recv-new").unwrap();
@@ -489,7 +491,7 @@ mod tests {
 
     #[test]
     fn save_profile_round_trips_receiver_id() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
             "wss://s.com",
             "t",
@@ -503,7 +505,7 @@ mod tests {
 
     #[test]
     fn save_profile_with_none_receiver_id_stores_null() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://s.com", "t", "check-and-download", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
@@ -556,7 +558,7 @@ mod tests {
 
     #[test]
     fn reset_profile_clears_to_defaults() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
             "wss://example.com",
             "secret-tok",

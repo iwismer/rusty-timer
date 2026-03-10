@@ -10,7 +10,7 @@ fn db_integrity_check_passes_on_fresh_db() {
 }
 #[test]
 fn profile_save_and_load() {
-    let db = Db::open_in_memory().unwrap();
+    let mut db = Db::open_in_memory().unwrap();
     db.save_profile("wss://e.com", "t", "check-and-download", None)
         .unwrap();
     let p = db.load_profile().unwrap().unwrap();
@@ -19,7 +19,7 @@ fn profile_save_and_load() {
 }
 #[test]
 fn profile_update_replaces_existing() {
-    let db = Db::open_in_memory().unwrap();
+    let mut db = Db::open_in_memory().unwrap();
     db.save_profile("wss://old", "old", "check-and-download", None)
         .unwrap();
     db.save_profile("wss://new", "new", "check-and-download", None)
@@ -159,7 +159,7 @@ fn db_profile_persists_to_file() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("r.sqlite3");
     {
-        let db = Db::open(&p).unwrap();
+        let mut db = Db::open(&p).unwrap();
         db.save_profile("wss://p.com", "t", "check-and-download", None)
             .unwrap();
         db.save_cursor("f", "i", 5, 200).unwrap();

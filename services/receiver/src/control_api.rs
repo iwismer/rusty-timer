@@ -609,7 +609,7 @@ async fn put_profile(
             .into_response();
     }
 
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
     let mut effective_update_mode = body.update_mode.clone().unwrap_or_else(|| {
         db.load_profile()
             .ok()

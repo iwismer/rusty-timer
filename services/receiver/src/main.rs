@@ -1335,7 +1335,7 @@ mod tests {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .expect("connect");
-        let db = Db::open_in_memory().expect("db");
+        let mut db = Db::open_in_memory().expect("db");
         db.save_profile("ws://server.example", "token", "check-and-download", None)
             .expect("save profile");
         let initial_mode = ReceiverMode::TargetedReplay {
