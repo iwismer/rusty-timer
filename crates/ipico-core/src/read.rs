@@ -224,12 +224,12 @@ impl TryFrom<&str> for ChipRead {
         };
         let read_month = match chip_read[22..24].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
-            Ok(month) if month < 1 || month > 12 => return Err("Invalid Chip Read"),
+            Ok(month) if !(1..=12).contains(&month) => return Err("Invalid Chip Read"),
             Ok(month) => month,
         };
         let read_day = match chip_read[24..26].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
-            Ok(day) if day < 1 || day > 31 => return Err("Invalid Chip Read"),
+            Ok(day) if !(1..=31).contains(&day) => return Err("Invalid Chip Read"),
             Ok(day) => day,
         };
         let read_hour = match chip_read[26..28].parse::<u8>() {
