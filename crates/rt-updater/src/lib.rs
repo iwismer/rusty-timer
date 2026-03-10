@@ -578,8 +578,7 @@ mod tests {
         let result = find_extracted_binary(temp.path(), "my-service");
         assert!(
             result.is_err(),
-            "expected error when no file matches service name, but got: {:?}",
-            result
+            "expected error when no file matches service name, but got: {result:?}"
         );
         let msg = result.unwrap_err().to_string();
         assert!(

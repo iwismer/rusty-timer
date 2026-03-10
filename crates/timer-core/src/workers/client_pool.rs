@@ -140,7 +140,7 @@ impl ClientPool {
                         write!(
                             file_writer,
                             "{}{}",
-                            r.replace(|c: char| c == '\r' || c == '\n', ""),
+                            r.replace(['\r', '\n'], ""),
                             line_ending
                         )
                         .unwrap_or_else(|e| {
