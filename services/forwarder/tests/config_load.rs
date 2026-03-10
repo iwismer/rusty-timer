@@ -303,7 +303,7 @@ target = "192.168.2.156:10000"
         token_file.path().display()
     );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert_eq!(cfg.status_http.bind, "0.0.0.0:8080");
+    assert_eq!(cfg.status_http.bind, "127.0.0.1:8080");
 }
 
 #[test]
