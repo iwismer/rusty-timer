@@ -100,6 +100,27 @@ fn find_stream<'a>(streams: &'a [serde_json::Value], reader_ip: &str) -> &'a ser
 }
 
 // ---------------------------------------------------------------------------
+// Polling helper
+// ---------------------------------------------------------------------------
+
+async fn poll_until<F, Fut>(mut f: F, timeout: Duration)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if f().await {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("poll_until timed out after {:?}", timeout);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test: Reader status propagation through the pipeline
 // ---------------------------------------------------------------------------
 
@@ -134,8 +155,17 @@ async fn reader_status_propagation_through_api() {
     )
     .await;
 
-    // Allow server to register the stream.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Poll until the server has registered the stream.
+    poll_until(
+        || async {
+            let streams = get_streams(addr).await;
+            streams
+                .iter()
+                .any(|s| s["reader_ip"].as_str() == Some("192.168.1.10:9999"))
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Verify initial state: stream exists, online=true, reader_connected=false.
     let streams = get_streams(addr).await;
@@ -160,15 +190,14 @@ async fn reader_status_propagation_through_api() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let streams = get_streams(addr).await;
-    let stream = find_stream(&streams, "192.168.1.10:9999");
-    assert_eq!(
-        stream["reader_connected"].as_bool(),
-        Some(true),
-        "reader_connected should be true after connected status update"
-    );
+    poll_until(
+        || async {
+            let streams = get_streams(addr).await;
+            find_stream(&streams, "192.168.1.10:9999")["reader_connected"].as_bool() == Some(true)
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     // --- Step 3: Send ReaderStatusUpdate(connected=false) ---
     fwd_client
@@ -179,32 +208,27 @@ async fn reader_status_propagation_through_api() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let streams = get_streams(addr).await;
-    let stream = find_stream(&streams, "192.168.1.10:9999");
-    assert_eq!(
-        stream["reader_connected"].as_bool(),
-        Some(false),
-        "reader_connected should be false after disconnected status update"
-    );
+    poll_until(
+        || async {
+            let streams = get_streams(addr).await;
+            find_stream(&streams, "192.168.1.10:9999")["reader_connected"].as_bool() == Some(false)
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     // --- Step 4: Disconnect forwarder, verify both online and reader_connected are false ---
     fwd_client.close().await.unwrap();
 
-    // Give the server time to process the disconnection.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let streams = get_streams(addr).await;
-    let stream = find_stream(&streams, "192.168.1.10:9999");
-    assert_eq!(
-        stream["online"].as_bool(),
-        Some(false),
-        "online should be false after forwarder disconnect"
-    );
-    assert_eq!(
-        stream["reader_connected"].as_bool(),
-        Some(false),
-        "reader_connected should be false after forwarder disconnect"
-    );
+    // Poll until the server processes the disconnection.
+    poll_until(
+        || async {
+            let streams = get_streams(addr).await;
+            let stream = find_stream(&streams, "192.168.1.10:9999");
+            stream["online"].as_bool() == Some(false)
+                && stream["reader_connected"].as_bool() == Some(false)
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 }

@@ -75,6 +75,10 @@ path = "tests/integration/e2e_export.rs"
 name = "reader_status_propagation"
 path = "tests/integration/reader_status_propagation.rs"
 
+[[test]]
+name = "auth_failures"
+path = "tests/integration/auth_failures.rs"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
