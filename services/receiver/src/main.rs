@@ -1,7 +1,7 @@
 use clap::Parser;
 use receiver::Subscription;
 use receiver::cache::EventBus;
-use receiver::control_api::{AppState, ConnectionState};
+use receiver::control_api::{AppState, ConnectionState, ShutdownSignal};
 use receiver::db::Db;
 use receiver::local_proxy::LocalProxy;
 use receiver::ports::{PortAssignment, resolve_ports, stream_key};
@@ -189,7 +189,7 @@ async fn main() {
             error!(error = %e, "control API exited");
         }
         // If the control API exits unexpectedly, signal shutdown.
-        let _ = api_state.shutdown_tx.send(true);
+        api_state.request_process_shutdown();
     });
 
     // Dedicated ctrl-c handler — works even when the main select loop is
@@ -198,7 +198,7 @@ async fn main() {
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
         info!("received ctrl-c, signaling shutdown");
-        let _ = shutdown_for_ctrlc.shutdown_tx.send(true);
+        shutdown_for_ctrlc.request_process_shutdown();
     });
 
     // Spawn background update check
@@ -345,12 +345,10 @@ async fn main() {
                     info!("shutdown channel closed, exiting");
                     break;
                 }
-                // The shutdown_tx is also used by post_disconnect to cancel the
-                // WS session; we don't terminate the process on every send.
-                // We only terminate if the connection state is truly shutting
-                // down the process (handled via ctrl-c above) — so this branch
-                // intentionally does nothing extra here; the connection-state
-                // watcher below takes care of Disconnecting.
+                if should_exit_on_shutdown_signal(&shutdown_rx.borrow()) {
+                    info!("process shutdown requested");
+                    break;
+                }
             }
 
             // ------------------------------------------------------------------
@@ -562,6 +560,10 @@ async fn main() {
         proxy.shutdown();
     }
     info!("receiver stopped");
+}
+
+fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
+    matches!(signal, ShutdownSignal::Terminate)
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,6 +1433,16 @@ mod tests {
         assert_eq!(compute_reconnect_delay_secs(5), 16);
         assert_eq!(compute_reconnect_delay_secs(6), 30);
         assert_eq!(compute_reconnect_delay_secs(10), 30);
+    }
+
+    #[test]
+    fn shutdown_signal_exit_helper_only_exits_for_terminate() {
+        assert!(!should_exit_on_shutdown_signal(
+            &receiver::control_api::ShutdownSignal::Disconnect
+        ));
+        assert!(should_exit_on_shutdown_signal(
+            &receiver::control_api::ShutdownSignal::Terminate
+        ));
     }
 
     #[tokio::test]

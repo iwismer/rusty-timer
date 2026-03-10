@@ -64,11 +64,18 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownSignal {
+    None,
+    Disconnect,
+    Terminate,
+}
+
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
     pub connection_state: Arc<RwLock<ConnectionState>>,
     pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
-    pub shutdown_tx: watch::Sender<bool>,
+    pub shutdown_tx: watch::Sender<ShutdownSignal>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
     pub update_status: Arc<RwLock<UpdateStatus>>,
@@ -82,7 +89,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<bool>) {
+    pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
         Self::with_integrity(db, receiver_id, true)
     }
 
@@ -90,8 +97,8 @@ impl AppState {
         db: Db,
         receiver_id: String,
         db_integrity_ok: bool,
-    ) -> (Arc<Self>, watch::Receiver<bool>) {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    ) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
@@ -114,6 +121,14 @@ impl AppState {
             retry_streak: AtomicU64::new(0),
         });
         (state, shutdown_rx)
+    }
+
+    pub fn request_disconnect_shutdown(&self) {
+        let _ = self.shutdown_tx.send(ShutdownSignal::Disconnect);
+    }
+
+    pub fn request_process_shutdown(&self) {
+        let _ = self.shutdown_tx.send(ShutdownSignal::Terminate);
     }
 
     pub fn current_connect_attempt(&self) -> u64 {
@@ -1078,7 +1093,7 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
     state
         .set_connection_state(ConnectionState::Disconnecting)
         .await;
-    let _ = state.shutdown_tx.send(true);
+    state.request_disconnect_shutdown();
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -1197,7 +1212,7 @@ async fn post_admin_reset_profile(
         state
             .set_connection_state(ConnectionState::Disconnecting)
             .await;
-        let _ = state.shutdown_tx.send(true);
+        state.request_disconnect_shutdown();
     }
     let db = state.db.lock().await;
     match db.reset_profile() {
@@ -1225,7 +1240,7 @@ async fn post_admin_factory_reset(
         state
             .set_connection_state(ConnectionState::Disconnecting)
             .await;
-        let _ = state.shutdown_tx.send(true);
+        state.request_disconnect_shutdown();
     }
     let mut db = state.db.lock().await;
     match db.factory_reset() {
@@ -1304,7 +1319,7 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 .await
                 {
                     Ok(Ok(())) => {
-                        let _ = state_clone.shutdown_tx.send(true);
+                        state_clone.request_process_shutdown();
                     }
                     Ok(Err(e)) => {
                         tracing::error!(error = %e, "update apply failed");
@@ -1513,6 +1528,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
 
     #[test]
     fn http_base_url_ws_with_port() {
@@ -1536,5 +1552,19 @@ mod tests {
             normalize_server_url("127.0.0.1:4000/"),
             "ws://127.0.0.1:4000".to_owned()
         );
+    }
+
+    #[tokio::test]
+    async fn app_state_emits_distinct_disconnect_and_terminate_shutdown_signals() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, mut shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        state.request_disconnect_shutdown();
+        shutdown_rx.changed().await.unwrap();
+        assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Disconnect);
+
+        state.request_process_shutdown();
+        shutdown_rx.changed().await.unwrap();
+        assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Terminate);
     }
 }

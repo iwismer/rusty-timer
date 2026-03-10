@@ -49,14 +49,29 @@ pub async fn export_raw(
         return response;
     }
 
-    let stream = sqlx::query(
+    let pool = state.pool.clone();
+    let mut rows = sqlx::query(
         r#"SELECT raw_frame FROM events
            WHERE stream_id = $1
            ORDER BY stream_epoch ASC, seq ASC"#,
     )
     .bind(stream_id)
-    .fetch(&state.pool)
-    .map(|row_result| {
+    .fetch(&pool);
+
+    let first_row = match rows.next().await {
+        Some(Ok(row)) => Some(row),
+        Some(Err(e)) => return internal_error(e),
+        None => None,
+    };
+
+    let first_row_stream = first_row.into_iter().map(|row| {
+        let raw_frame: Vec<u8> = row.get("raw_frame");
+        let mut line = render_export_line(&raw_frame);
+        line.push('\n');
+        Ok(axum::body::Bytes::from(line.into_bytes()))
+    });
+
+    let stream = futures_util::stream::iter(first_row_stream).chain(rows.map(|row_result| {
         row_result
             .map(|row| {
                 let raw_frame: Vec<u8> = row.get("raw_frame");
@@ -68,7 +83,7 @@ pub async fn export_raw(
                 tracing::error!(error = %e, "database error during export stream");
                 std::io::Error::other(e)
             })
-    });
+    }));
 
     streaming_response("text/plain; charset=utf-8", stream)
 }
@@ -88,28 +103,40 @@ pub async fn export_csv(
         return response;
     }
 
-    let header_row = futures_util::stream::once(async {
-        Ok(axum::body::Bytes::from_static(
-            b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n",
-        ))
-    });
-
-    let data_stream = sqlx::query(
+    let pool = state.pool.clone();
+    let mut rows = sqlx::query(
         r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id
            FROM events
            WHERE stream_id = $1
            ORDER BY stream_epoch ASC, seq ASC"#,
     )
     .bind(stream_id)
-    .fetch(&state.pool)
-    .map(|row_result| {
+    .fetch(&pool);
+
+    let first_row = match rows.next().await {
+        Some(Ok(row)) => Some(row),
+        Some(Err(e)) => return internal_error(e),
+        None => None,
+    };
+
+    let header_row = futures_util::stream::once(async {
+        Ok(axum::body::Bytes::from_static(
+            b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n",
+        ))
+    });
+
+    let first_row_stream = first_row
+        .into_iter()
+        .map(|row| Ok(axum::body::Bytes::from(format_csv_row(&row))));
+
+    let data_stream = futures_util::stream::iter(first_row_stream).chain(rows.map(|row_result| {
         row_result
             .map(|row| axum::body::Bytes::from(format_csv_row(&row)))
             .map_err(|e| {
                 tracing::error!(error = %e, "database error during export stream");
                 std::io::Error::other(e)
             })
-    });
+    }));
 
     let stream = header_row.chain(data_stream);
 
@@ -131,13 +158,8 @@ pub async fn export_epoch_csv(
         return response;
     }
 
-    let header_row = futures_util::stream::once(async {
-        Ok(axum::body::Bytes::from_static(
-            b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n",
-        ))
-    });
-
-    let data_stream = sqlx::query(
+    let pool = state.pool.clone();
+    let mut rows = sqlx::query(
         r#"SELECT stream_epoch, seq, reader_timestamp, raw_frame, read_type, tag_id
            FROM events
            WHERE stream_id = $1 AND stream_epoch = $2
@@ -145,15 +167,32 @@ pub async fn export_epoch_csv(
     )
     .bind(stream_id)
     .bind(epoch)
-    .fetch(&state.pool)
-    .map(|row_result| {
+    .fetch(&pool);
+
+    let first_row = match rows.next().await {
+        Some(Ok(row)) => Some(row),
+        Some(Err(e)) => return internal_error(e),
+        None => None,
+    };
+
+    let header_row = futures_util::stream::once(async {
+        Ok(axum::body::Bytes::from_static(
+            b"stream_epoch,seq,reader_timestamp,raw_frame,read_type,chip_id\n",
+        ))
+    });
+
+    let first_row_stream = first_row
+        .into_iter()
+        .map(|row| Ok(axum::body::Bytes::from(format_csv_row(&row))));
+
+    let data_stream = futures_util::stream::iter(first_row_stream).chain(rows.map(|row_result| {
         row_result
             .map(|row| axum::body::Bytes::from(format_csv_row(&row)))
             .map_err(|e| {
                 tracing::error!(error = %e, "database error during export stream");
                 std::io::Error::other(e)
             })
-    });
+    }));
 
     let stream = header_row.chain(data_stream);
 
@@ -172,15 +211,30 @@ pub async fn export_epoch_raw(
         return response;
     }
 
-    let stream = sqlx::query(
+    let pool = state.pool.clone();
+    let mut rows = sqlx::query(
         r#"SELECT raw_frame FROM events
            WHERE stream_id = $1 AND stream_epoch = $2
            ORDER BY seq ASC"#,
     )
     .bind(stream_id)
     .bind(epoch)
-    .fetch(&state.pool)
-    .map(|row_result| {
+    .fetch(&pool);
+
+    let first_row = match rows.next().await {
+        Some(Ok(row)) => Some(row),
+        Some(Err(e)) => return internal_error(e),
+        None => None,
+    };
+
+    let first_row_stream = first_row.into_iter().map(|row| {
+        let raw_frame: Vec<u8> = row.get("raw_frame");
+        let mut line = render_export_line(&raw_frame);
+        line.push('\n');
+        Ok(axum::body::Bytes::from(line.into_bytes()))
+    });
+
+    let stream = futures_util::stream::iter(first_row_stream).chain(rows.map(|row_result| {
         row_result
             .map(|row| {
                 let raw_frame: Vec<u8> = row.get("raw_frame");
@@ -192,7 +246,7 @@ pub async fn export_epoch_raw(
                 tracing::error!(error = %e, "database error during export stream");
                 std::io::Error::other(e)
             })
-    });
+    }));
 
     streaming_response("text/plain; charset=utf-8", stream)
 }

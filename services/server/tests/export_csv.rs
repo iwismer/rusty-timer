@@ -18,6 +18,29 @@ async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, r
     .unwrap();
 }
 
+async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
+    let app_state = server::AppState::new(pool);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, server::build_router(app_state, None))
+            .await
+            .unwrap();
+    });
+    addr
+}
+
+async fn insert_stream(pool: &sqlx::PgPool, forwarder_id: &str, reader_ip: &str) -> uuid::Uuid {
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO streams (forwarder_id, reader_ip) VALUES ($1, $2) RETURNING stream_id",
+    )
+    .bind(forwarder_id)
+    .bind(reader_ip)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn test_export_csv_header_and_rows() {
     let container = Postgres::default().start().await.unwrap();
@@ -26,14 +49,7 @@ async fn test_export_csv_header_and_rows() {
     let pool = server::db::create_pool(&db_url).await;
     server::db::run_migrations(&pool).await;
 
-    let app_state = server::AppState::new(pool.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state, None))
-            .await
-            .unwrap();
-    });
+    let addr = make_server(pool.clone()).await;
 
     insert_token(&pool, "fwd-csv", "forwarder", b"fwd-csv-token").await;
     let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
@@ -144,14 +160,7 @@ async fn test_export_csv_not_found() {
     let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
     let pool = server::db::create_pool(&db_url).await;
     server::db::run_migrations(&pool).await;
-    let app_state = server::AppState::new(pool);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state, None))
-            .await
-            .unwrap();
-    });
+    let addr = make_server(pool).await;
 
     let resp = reqwest::get(format!(
         "http://{}/api/v1/streams/00000000-0000-0000-0000-000000000000/export.csv",
@@ -170,14 +179,7 @@ async fn test_export_epoch_csv_filters_to_requested_epoch_and_includes_chip_id()
     let pool = server::db::create_pool(&db_url).await;
     server::db::run_migrations(&pool).await;
 
-    let app_state = server::AppState::new(pool.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, server::build_router(app_state, None))
-            .await
-            .unwrap();
-    });
+    let addr = make_server(pool.clone()).await;
 
     insert_token(&pool, "fwd-epoch-csv", "forwarder", b"fwd-epoch-csv-token").await;
     let fwd_url = format!("ws://{}/ws/v1/forwarders", addr);
@@ -329,4 +331,29 @@ async fn test_export_epoch_csv_not_found() {
     .await
     .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_export_csv_returns_500_when_initial_query_fails_after_stream_exists_check() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-export-csv-broken", "10.60.0.2:10000").await;
+    sqlx::query("DROP TABLE events")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/export.csv",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 500);
 }
