@@ -111,7 +111,7 @@ pub fn apply_fault_to_event_emission(schedule: &FaultSchedule, event_num: u64) -
     // Walk entries in definition order; return first match.
     for entry in &schedule.entries {
         let in_range = event_num >= entry.after_events
-            && entry.until_events.map_or(true, |until| event_num < until);
+            && entry.until_events.is_none_or(|until| event_num < until);
         if in_range {
             return match &entry.fault_type {
                 FaultType::Jitter => FaultOutcome::Jitter {
