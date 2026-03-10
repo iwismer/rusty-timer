@@ -1,7 +1,7 @@
 use clap::Parser;
 use receiver::Subscription;
 use receiver::cache::EventBus;
-use receiver::control_api::{AppState, ConnectionState};
+use receiver::control_api::{AppState, ConnectionState, ShutdownSignal};
 use receiver::db::Db;
 use receiver::local_proxy::LocalProxy;
 use receiver::ports::{PortAssignment, resolve_ports, stream_key};
@@ -99,10 +99,13 @@ async fn main() {
         eprintln!("FATAL: failed to open DB: {e}");
         std::process::exit(1);
     });
-    db.integrity_check().unwrap_or_else(|e| {
-        eprintln!("FATAL: integrity_check failed: {e}");
-        std::process::exit(1);
-    });
+    let db_integrity_ok = match db.integrity_check() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("FATAL: integrity_check failed: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // -------------------------------------------------------------------------
     // 1b. Resolve receiver ID: CLI flag > DB > auto-generate
@@ -113,7 +116,7 @@ async fn main() {
     // -------------------------------------------------------------------------
     // 2. Create AppState
     // -------------------------------------------------------------------------
-    let (state, mut shutdown_rx) = AppState::new(db, receiver_id);
+    let (state, mut shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok);
     state.logger.log("Receiver started");
 
     // -------------------------------------------------------------------------
@@ -186,15 +189,16 @@ async fn main() {
             error!(error = %e, "control API exited");
         }
         // If the control API exits unexpectedly, signal shutdown.
-        let _ = api_state.shutdown_tx.send(true);
+        api_state.request_process_shutdown();
     });
 
     // Dedicated ctrl-c handler — works even when the main select loop is
     // blocked inside connect_async or do_handshake.
-    tokio::spawn(async {
+    let shutdown_for_ctrlc = Arc::clone(&state);
+    tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
-        info!("received ctrl-c, shutting down");
-        std::process::exit(0);
+        info!("received ctrl-c, signaling shutdown");
+        shutdown_for_ctrlc.request_process_shutdown();
     });
 
     // Spawn background update check
@@ -341,12 +345,10 @@ async fn main() {
                     info!("shutdown channel closed, exiting");
                     break;
                 }
-                // The shutdown_tx is also used by post_disconnect to cancel the
-                // WS session; we don't terminate the process on every send.
-                // We only terminate if the connection state is truly shutting
-                // down the process (handled via ctrl-c above) — so this branch
-                // intentionally does nothing extra here; the connection-state
-                // watcher below takes care of Disconnecting.
+                if should_exit_on_shutdown_signal(&shutdown_rx.borrow()) {
+                    info!("process shutdown requested");
+                    break;
+                }
             }
 
             // ------------------------------------------------------------------
@@ -558,6 +560,10 @@ async fn main() {
         proxy.shutdown();
     }
     info!("receiver stopped");
+}
+
+fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
+    matches!(signal, ShutdownSignal::Terminate)
 }
 
 // ---------------------------------------------------------------------------
@@ -891,12 +897,7 @@ where
         {
             let server_epoch_by_stream: HashMap<(String, String), i64> = server_streams
                 .into_iter()
-                .map(|stream| {
-                    (
-                        (stream.forwarder_id, stream.reader_ip),
-                        i64::try_from(stream.stream_epoch).unwrap_or(i64::MAX),
-                    )
-                })
+                .map(|stream| ((stream.forwarder_id, stream.reader_ip), stream.stream_epoch))
                 .collect();
 
             for stream in streams.iter() {
@@ -1339,7 +1340,7 @@ mod tests {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .expect("connect");
-        let db = Db::open_in_memory().expect("db");
+        let mut db = Db::open_in_memory().expect("db");
         db.save_profile("ws://server.example", "token", "check-and-download", None)
             .expect("save profile");
         let initial_mode = ReceiverMode::TargetedReplay {
@@ -1432,6 +1433,16 @@ mod tests {
         assert_eq!(compute_reconnect_delay_secs(5), 16);
         assert_eq!(compute_reconnect_delay_secs(6), 30);
         assert_eq!(compute_reconnect_delay_secs(10), 30);
+    }
+
+    #[test]
+    fn shutdown_signal_exit_helper_only_exits_for_terminate() {
+        assert!(!should_exit_on_shutdown_signal(
+            &receiver::control_api::ShutdownSignal::Disconnect
+        ));
+        assert!(should_exit_on_shutdown_signal(
+            &receiver::control_api::ShutdownSignal::Terminate
+        ));
     }
 
     #[tokio::test]

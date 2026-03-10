@@ -64,11 +64,18 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownSignal {
+    None,
+    Disconnect,
+    Terminate,
+}
+
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
     pub connection_state: Arc<RwLock<ConnectionState>>,
     pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
-    pub shutdown_tx: watch::Sender<bool>,
+    pub shutdown_tx: watch::Sender<ShutdownSignal>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
     pub update_status: Arc<RwLock<UpdateStatus>>,
@@ -76,13 +83,22 @@ pub struct AppState {
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
     pub receiver_id: Arc<RwLock<String>>,
+    pub db_integrity_ok: bool,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
 
 impl AppState {
-    pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<bool>) {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
+        Self::with_integrity(db, receiver_id, true)
+    }
+
+    pub fn with_integrity(
+        db: Db,
+        receiver_id: String,
+        db_integrity_ok: bool,
+    ) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
@@ -100,10 +116,19 @@ impl AppState {
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
+            db_integrity_ok,
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
         (state, shutdown_rx)
+    }
+
+    pub fn request_disconnect_shutdown(&self) {
+        let _ = self.shutdown_tx.send(ShutdownSignal::Disconnect);
+    }
+
+    pub fn request_process_shutdown(&self) {
+        let _ = self.shutdown_tx.send(ShutdownSignal::Terminate);
     }
 
     pub fn current_connect_attempt(&self) -> u64 {
@@ -390,7 +415,7 @@ pub struct StreamEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream_epoch: Option<u64>,
+    pub stream_epoch: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_epoch_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,9 +423,9 @@ pub struct StreamEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reads_epoch: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor_epoch: Option<u64>,
+    pub cursor_epoch: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor_seq: Option<u64>,
+    pub cursor_seq: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -494,7 +519,7 @@ pub struct UpstreamStreamInfo {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub display_alias: Option<String>,
-    pub stream_epoch: u64,
+    pub stream_epoch: i64,
     pub online: bool,
     pub current_epoch_name: Option<String>,
 }
@@ -607,7 +632,7 @@ async fn put_profile(
             .into_response();
     }
 
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
     let mut effective_update_mode = body.update_mode.clone().unwrap_or_else(|| {
         db.load_profile()
             .ok()
@@ -1040,7 +1065,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = state.connection_state.read().await.clone();
     let db = state.db.lock().await;
     let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
-    let local_ok = db.integrity_check().is_ok();
+    let local_ok = state.db_integrity_ok;
     Json(StatusResponse {
         receiver_id,
         connection_state: conn,
@@ -1068,7 +1093,7 @@ async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoRespons
     state
         .set_connection_state(ConnectionState::Disconnecting)
         .await;
-    let _ = state.shutdown_tx.send(true);
+    state.request_disconnect_shutdown();
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -1187,7 +1212,7 @@ async fn post_admin_reset_profile(
         state
             .set_connection_state(ConnectionState::Disconnecting)
             .await;
-        let _ = state.shutdown_tx.send(true);
+        state.request_disconnect_shutdown();
     }
     let db = state.db.lock().await;
     match db.reset_profile() {
@@ -1215,7 +1240,7 @@ async fn post_admin_factory_reset(
         state
             .set_connection_state(ConnectionState::Disconnecting)
             .await;
-        let _ = state.shutdown_tx.send(true);
+        state.request_disconnect_shutdown();
     }
     let mut db = state.db.lock().await;
     match db.factory_reset() {
@@ -1289,11 +1314,13 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 match tokio::task::spawn_blocking(move || {
-                    rt_updater::UpdateChecker::apply_and_exit(&path)
+                    rt_updater::UpdateChecker::apply_update(&path)
                 })
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        state_clone.request_process_shutdown();
+                    }
                     Ok(Err(e)) => {
                         tracing::error!(error = %e, "update apply failed");
                         *state_clone.update_status.write().await =
@@ -1501,6 +1528,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
 
     #[test]
     fn http_base_url_ws_with_port() {
@@ -1524,5 +1552,19 @@ mod tests {
             normalize_server_url("127.0.0.1:4000/"),
             "ws://127.0.0.1:4000".to_owned()
         );
+    }
+
+    #[tokio::test]
+    async fn app_state_emits_distinct_disconnect_and_terminate_shutdown_signals() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, mut shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        state.request_disconnect_shutdown();
+        shutdown_rx.changed().await.unwrap();
+        assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Disconnect);
+
+        state.request_process_shutdown();
+        shutdown_rx.changed().await.unwrap();
+        assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Terminate);
     }
 }

@@ -76,7 +76,7 @@ use tracing::Instrument;
 /// Configuration for the status HTTP server.
 #[derive(Debug, Clone)]
 pub struct StatusConfig {
-    /// Bind address, e.g. `"0.0.0.0:8080"`.
+    /// Bind address, e.g. `"127.0.0.1:8080"`.
     pub bind: String,
     /// Forwarder software version (shown in status page).
     pub forwarder_version: String,
@@ -1294,7 +1294,7 @@ fn validate_token_file(token_file: &str) -> Result<(), String> {
 fn validate_status_bind(bind: &str) -> Result<(), String> {
     bind.parse::<SocketAddrV4>()
         .map(|_| ())
-        .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 0.0.0.0:8080)".to_owned())
+        .map_err(|_| "bind must be a valid IPv4 address with port (e.g. 127.0.0.1:8080)".to_owned())
 }
 
 fn config_not_available() -> Response {
@@ -3015,13 +3015,18 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
                 json_response(StatusCode::OK, r#"{"status":"restarting"}"#.to_owned())
             } else {
                 let sub = state.subsystem.clone();
+                let restart = state.restart_signal.clone();
                 tokio::spawn(async move {
                     match tokio::task::spawn_blocking(move || {
-                        rt_updater::UpdateChecker::apply_and_exit(&path)
+                        rt_updater::UpdateChecker::apply_update(&path)
                     })
                     .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            if let Some(notify) = restart.as_ref() {
+                                notify.notify_one();
+                            }
+                        }
                         Ok(Err(e)) => {
                             tracing::error!(error = %e, "update apply failed");
                             sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {

@@ -108,7 +108,7 @@ async fn chaos_network_flap_events_not_lost() {
         )
         .await;
 
-        for seq in 1u64..=3 {
+        for seq in 1i64..=3 {
             client
                 .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
                     session_id: session_id.clone(),
@@ -151,7 +151,7 @@ async fn chaos_network_flap_events_not_lost() {
         )
         .await;
 
-        for seq in 1u64..=3 {
+        for seq in 1i64..=3 {
             client
                 .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
                     session_id: session_id.clone(),
@@ -224,7 +224,7 @@ async fn chaos_network_rapid_reconnects_no_duplication() {
         )
         .await;
 
-        for seq in 1u64..=3 {
+        for seq in 1i64..=3 {
             client
                 .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
                     session_id: session_id.clone(),
@@ -303,7 +303,7 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
     )
     .await;
 
-    for seq in 1u64..=5 {
+    for seq in 1i64..=5 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd_session.clone(),
             batch_id: format!("batch-{}", seq),
@@ -324,7 +324,7 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
 
     // Receiver session 1: subscribes and gets events 1..3, then "drops".
     let rcv_url = format!("ws://{}/ws/v1.2/receivers", addr);
-    let mut max_seq_session1: u64 = 0;
+    let mut max_seq_session1: i64 = 0;
     {
         let mut rcv = MockWsClient::connect_with_token(&rcv_url, "rcv-chaos-token-03")
             .await
@@ -410,7 +410,7 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
         "rcv-chaos-03",
         stream_id,
         1,
-        i64::try_from(max_seq_session1).unwrap(),
+        max_seq_session1,
     )
     .await
     .unwrap();
@@ -509,7 +509,7 @@ async fn chaos_two_streams_independent_under_flap() {
         )
         .await;
 
-        for seq in 1u64..=3 {
+        for seq in 1i64..=3 {
             client
                 .send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
                     session_id: session_id.clone(),

@@ -148,7 +148,7 @@ impl MockWsServer {
     /// (forwarder_id, reader_ip, stream_epoch) key.
     fn build_forwarder_ack(session_id: &str, batch: &ForwarderEventBatch) -> WsMessage {
         // Group events by (forwarder_id, reader_ip, stream_epoch) and find max seq
-        let mut high_water: HashMap<(String, String, u64), u64> = HashMap::new();
+        let mut high_water: HashMap<(String, String, i64), i64> = HashMap::new();
 
         for event in &batch.events {
             let key = (

@@ -98,7 +98,7 @@ async fn test_receiver_resume_from_cursor() {
         other => panic!("{:?}", other),
     };
 
-    for seq in 1..=3u64 {
+    for seq in 1..=3i64 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd_session.clone(),
             batch_id: format!("b{}", seq),
@@ -206,7 +206,7 @@ async fn test_receiver_v12_prefers_persisted_cursor_over_hello_resume() {
         other => panic!("{:?}", other),
     };
 
-    for seq in 1..=3u64 {
+    for seq in 1..=3i64 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd_session.clone(),
             batch_id: format!("legacy-resume-{}", seq),
@@ -311,7 +311,7 @@ async fn test_receiver_no_cursor_gets_all() {
         other => panic!("{:?}", other),
     };
 
-    for seq in 1..=2u64 {
+    for seq in 1..=2i64 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: fwd_session.clone(),
             batch_id: format!("b{}", seq),
@@ -399,7 +399,7 @@ async fn test_receiver_large_backlog_replay_is_chunked() {
         other => panic!("{:?}", other),
     };
 
-    let events: Vec<ReadEvent> = (1..=600u64)
+    let events: Vec<ReadEvent> = (1..=600i64)
         .map(|seq| ReadEvent {
             forwarder_id: "fwd-chunk".to_owned(),
             reader_ip: "10.4.0.1:10000".to_owned(),
@@ -437,7 +437,7 @@ async fn test_receiver_large_backlog_replay_is_chunked() {
     .await;
 
     let mut batch_count = 0usize;
-    let mut seqs: Vec<u64> = Vec::new();
+    let mut seqs: Vec<i64> = Vec::new();
     while seqs.len() < 600 {
         match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message()).await {
             Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
@@ -496,7 +496,7 @@ async fn test_receiver_tail_at_cursor_gets_no_replay() {
         other => panic!("{:?}", other),
     };
 
-    let events: Vec<ReadEvent> = (1..=5u64)
+    let events: Vec<ReadEvent> = (1..=5i64)
         .map(|seq| ReadEvent {
             forwarder_id: "fwd-tail".to_owned(),
             reader_ip: "10.5.0.1:10000".to_owned(),
@@ -591,7 +591,7 @@ async fn test_receiver_replay_lower_bound_is_exclusive() {
         other => panic!("{:?}", other),
     };
 
-    let events: Vec<ReadEvent> = (1..=4u64)
+    let events: Vec<ReadEvent> = (1..=4i64)
         .map(|seq| ReadEvent {
             forwarder_id: "fwd-lower".to_owned(),
             reader_ip: "10.6.0.1:10000".to_owned(),
@@ -685,7 +685,7 @@ async fn test_receiver_handoff_remains_monotonic() {
         other => panic!("{:?}", other),
     };
 
-    let backlog: Vec<ReadEvent> = (1..=20u64)
+    let backlog: Vec<ReadEvent> = (1..=20i64)
         .map(|seq| ReadEvent {
             forwarder_id: "fwd-mono".to_owned(),
             reader_ip: "10.7.0.1:10000".to_owned(),
@@ -721,7 +721,7 @@ async fn test_receiver_handoff_remains_monotonic() {
     )
     .await;
 
-    let live: Vec<ReadEvent> = (21..=30u64)
+    let live: Vec<ReadEvent> = (21..=30i64)
         .map(|seq| ReadEvent {
             forwarder_id: "fwd-mono".to_owned(),
             reader_ip: "10.7.0.1:10000".to_owned(),
@@ -741,7 +741,7 @@ async fn test_receiver_handoff_remains_monotonic() {
     .unwrap();
     fwd.recv_message().await.unwrap();
 
-    let mut seqs: Vec<u64> = Vec::new();
+    let mut seqs: Vec<i64> = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline && seqs.len() < 30 {
         match tokio::time::timeout(Duration::from_secs(1), rcv.recv_message()).await {
@@ -818,7 +818,7 @@ async fn test_receiver_live_mode_progresses_under_heavy_replay() {
         other => panic!("{:?}", other),
     };
 
-    let heavy_backlog: Vec<ReadEvent> = (1..=10_000u64)
+    let heavy_backlog: Vec<ReadEvent> = (1..=10_000i64)
         .map(|seq| ReadEvent {
             forwarder_id: "fwd-main".to_owned(),
             reader_ip: "10.8.0.1:10000".to_owned(),
@@ -839,7 +839,7 @@ async fn test_receiver_live_mode_progresses_under_heavy_replay() {
         .unwrap();
     fwd_main.recv_message().await.unwrap();
 
-    let side_events: Vec<ReadEvent> = (1..=3u64)
+    let side_events: Vec<ReadEvent> = (1..=3i64)
         .map(|seq| ReadEvent {
             forwarder_id: "fwd-side".to_owned(),
             reader_ip: "10.8.0.2:10000".to_owned(),

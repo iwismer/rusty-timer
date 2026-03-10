@@ -135,13 +135,24 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
         }
     };
     let claims = match validate_token(&state.pool, &token_str).await {
-        Some(c) => c,
-        None => {
+        Ok(Some(c)) => c,
+        Ok(None) => {
             send_ws_error(
                 &mut socket,
                 error_codes::INVALID_TOKEN,
                 "unknown or revoked token",
                 false,
+            )
+            .await;
+            return;
+        }
+        Err(e) => {
+            error!(error = %e, "database error during token validation");
+            send_ws_error(
+                &mut socket,
+                error_codes::INTERNAL_ERROR,
+                "internal server error",
+                true,
             )
             .await;
             return;
@@ -804,7 +815,7 @@ async fn handle_event_batch(
     forwarder_display_name: Option<&str>,
     batch: rt_protocol::ForwarderEventBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut high_water: HashMap<(String, u64), u64> = HashMap::new();
+    let mut high_water: HashMap<(String, i64), i64> = HashMap::new();
     let mut epoch_transitions: HashMap<Uuid, i64> = HashMap::new();
     let config = announcer_config::get_config(&state.pool).await.ok();
     let now = chrono::Utc::now();
@@ -851,8 +862,8 @@ async fn handle_event_batch(
         let result = upsert_event(
             &state.pool,
             stream_id,
-            event.stream_epoch as i64,
-            event.seq as i64,
+            event.stream_epoch,
+            event.seq,
             &event.reader_timestamp,
             &event.raw_frame,
             &event.read_type,
@@ -913,7 +924,7 @@ async fn handle_event_batch(
                     if let Some(delta) = runtime.ingest(
                         AnnouncerInputEvent {
                             stream_id,
-                            seq: event.seq as i64,
+                            seq: event.seq,
                             chip_id,
                             bib,
                             display_name,

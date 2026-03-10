@@ -37,8 +37,8 @@ pub struct Subscription {
 pub struct CursorRecord {
     pub forwarder_id: String,
     pub reader_ip: String,
-    pub stream_epoch: u64,
-    pub last_seq: u64,
+    pub stream_epoch: i64,
+    pub last_seq: i64,
 }
 pub struct Db {
     conn: Connection,
@@ -83,18 +83,20 @@ impl Db {
         Ok(rows.next().transpose()?)
     }
     pub fn save_profile(
-        &self,
+        &mut self,
         url: &str,
         tok: &str,
         update_mode: &str,
         receiver_id: Option<&str>,
     ) -> DbResult<()> {
         let receiver_mode_json = self.load_receiver_mode_json_raw()?;
-        self.conn.execute_batch("DELETE FROM profile")?;
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM profile")?;
+        tx.execute(
             "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -206,13 +208,13 @@ impl Db {
             Ok(CursorRecord {
                 forwarder_id: r.get(0)?,
                 reader_ip: r.get(1)?,
-                stream_epoch: r.get::<_, i64>(2)? as u64,
-                last_seq: r.get::<_, i64>(3)? as u64,
+                stream_epoch: r.get::<_, i64>(2)?,
+                last_seq: r.get::<_, i64>(3)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-    pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: u64, seq: u64) -> DbResult<()> {
+    pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: i64, seq: i64) -> DbResult<()> {
         let existing: Option<(i64, i64)> = self
             .conn
             .query_row(
@@ -223,16 +225,13 @@ impl Db {
             .optional()?;
 
         if let Some((current_epoch, current_seq)) = existing {
-            let new_epoch = epoch as i64;
-            let new_seq = seq as i64;
-            let is_stale =
-                new_epoch < current_epoch || (new_epoch == current_epoch && new_seq < current_seq);
+            let is_stale = epoch < current_epoch || (epoch == current_epoch && seq < current_seq);
             if is_stale {
                 return Ok(());
             }
         }
 
-        self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch as i64, seq as i64])?;
+        self.conn.execute("INSERT OR REPLACE INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![fwd, ip, epoch, seq])?;
         Ok(())
     }
     pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {
@@ -359,7 +358,7 @@ mod tests {
 
     #[test]
     fn profile_round_trip_with_update_mode() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-only", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
@@ -368,7 +367,7 @@ mod tests {
 
     #[test]
     fn profile_update_mode_defaults_for_existing_db() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
@@ -389,7 +388,7 @@ mod tests {
 
     #[test]
     fn receiver_mode_round_trip() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let mode = ReceiverMode::Live {
@@ -404,7 +403,7 @@ mod tests {
 
     #[test]
     fn targeted_replay_mode_round_trips_with_targets() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         let targeted = ReceiverMode::TargetedReplay {
@@ -422,7 +421,7 @@ mod tests {
 
     #[test]
     fn save_profile_tolerates_invalid_stored_receiver_mode_json() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-and-download", None)
             .unwrap();
         db.conn
@@ -479,7 +478,7 @@ mod tests {
 
     #[test]
     fn save_receiver_id_on_existing_profile_updates_only_receiver_id() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-only", Some("recv-old"))
             .unwrap();
         db.save_receiver_id("recv-new").unwrap();
@@ -492,7 +491,7 @@ mod tests {
 
     #[test]
     fn save_profile_round_trips_receiver_id() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
             "wss://s.com",
             "t",
@@ -506,7 +505,7 @@ mod tests {
 
     #[test]
     fn save_profile_with_none_receiver_id_stores_null() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://s.com", "t", "check-and-download", None)
             .unwrap();
         let p = db.load_profile().unwrap().unwrap();
@@ -559,7 +558,7 @@ mod tests {
 
     #[test]
     fn reset_profile_clears_to_defaults() {
-        let db = Db::open_in_memory().unwrap();
+        let mut db = Db::open_in_memory().unwrap();
         db.save_profile(
             "wss://example.com",
             "secret-tok",

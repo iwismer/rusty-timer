@@ -39,7 +39,7 @@ async fn validate_token_returns_claims_for_known_active_token() {
     let (_container, pool) = test_pool().await;
     insert_token(&pool, "fwd-auth-001", "forwarder", "good-token").await;
 
-    let claims = validate_token(&pool, "good-token").await;
+    let claims = validate_token(&pool, "good-token").await.unwrap();
 
     assert!(claims.is_some());
     let claims = claims.unwrap();
@@ -53,7 +53,7 @@ async fn validate_token_returns_none_for_revoked_token() {
     insert_token(&pool, "rcv-auth-001", "receiver", "revoked-token").await;
     revoke_token(&pool, "revoked-token").await;
 
-    let claims = validate_token(&pool, "revoked-token").await;
+    let claims = validate_token(&pool, "revoked-token").await.unwrap();
 
     assert!(claims.is_none());
 }
@@ -63,7 +63,7 @@ async fn validate_token_returns_none_for_unknown_token() {
     let (_container, pool) = test_pool().await;
     insert_token(&pool, "fwd-auth-002", "forwarder", "existing-token").await;
 
-    let claims = validate_token(&pool, "missing-token").await;
+    let claims = validate_token(&pool, "missing-token").await.unwrap();
 
     assert!(claims.is_none());
 }
@@ -73,7 +73,7 @@ async fn validate_token_returns_none_for_hash_mismatch() {
     let (_container, pool) = test_pool().await;
     insert_token(&pool, "fwd-auth-003", "forwarder", "stored-token").await;
 
-    let claims = validate_token(&pool, "stored-token-typo").await;
+    let claims = validate_token(&pool, "stored-token-typo").await.unwrap();
 
     assert!(claims.is_none());
 }

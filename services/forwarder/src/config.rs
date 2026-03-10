@@ -217,10 +217,10 @@ pub fn load_config_from_str(
     // Status HTTP defaults
     let status_http = match raw.status_http {
         Some(s) => StatusHttpConfig {
-            bind: s.bind.unwrap_or_else(|| "0.0.0.0:8080".to_owned()),
+            bind: s.bind.unwrap_or_else(|| "127.0.0.1:8080".to_owned()),
         },
         None => StatusHttpConfig {
-            bind: "0.0.0.0:8080".to_owned(),
+            bind: "127.0.0.1:8080".to_owned(),
         },
     };
 

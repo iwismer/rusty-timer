@@ -13,7 +13,7 @@ Release tags follow the format `{service}-v{semver}` (e.g. `forwarder-v0.2.0`).
 - **`UpdateChecker`** -- Main entry point. Constructed with a GitHub repo, service name, and current version. Provides:
   - `check()` -- Query GitHub Releases for a newer version.
   - `download(version)` -- Download, verify, and stage the release binary.
-  - `apply_and_exit(staged_path)` -- Atomically replace the running binary and exit.
+  - `apply_update(staged_path)` -- Atomically replace the running binary. Caller handles shutdown.
 - **`UpdateStatus`** -- Tagged enum representing the result of an update cycle:
   - `UpToDate` -- No newer version available.
   - `Available { version }` -- A newer version exists.

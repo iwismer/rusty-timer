@@ -54,7 +54,7 @@ overrides are supported for config fields.
 
 | Field  | Type     | Required | Default        | Description                              |
 | ------ | -------- | -------- | -------------- | ---------------------------------------- |
-| `bind` | `String` | No       | `0.0.0.0:8080` | Address and port for the status HTTP server. |
+| `bind` | `String` | No       | `127.0.0.1:8080` | Address and port for the status HTTP server. |
 
 ### `[uplink]`
 
@@ -126,7 +126,7 @@ sqlite_path = "/var/lib/rusty-timer/forwarder.sqlite3"
 prune_watermark_pct = 80
 
 [status_http]
-bind = "0.0.0.0:8080"
+bind = "127.0.0.1:8080"
 
 [uplink]
 batch_mode = "immediate"

@@ -4,7 +4,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-fn make_event(fwd: &str, ip: &str, seq: u64, raw: &[u8]) -> ReadEvent {
+fn make_event(fwd: &str, ip: &str, seq: i64, raw: &[u8]) -> ReadEvent {
     ReadEvent {
         forwarder_id: fwd.to_owned(),
         reader_ip: ip.to_owned(),
@@ -126,7 +126,7 @@ async fn proxy_multiple_events_in_sequence() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    for i in 1u64..=3 {
+    for i in 1i64..=3 {
         tx.send(make_event(
             "f",
             "192.168.1.100:10000",

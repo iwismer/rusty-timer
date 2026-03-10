@@ -127,13 +127,24 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     };
 
     let claims = match validate_token(&state.pool, &token_str).await {
-        Some(c) => c,
-        None => {
+        Ok(Some(c)) => c,
+        Ok(None) => {
             send_ws_error(
                 &mut socket,
                 error_codes::INVALID_TOKEN,
                 "unknown or revoked token",
                 false,
+            )
+            .await;
+            return;
+        }
+        Err(e) => {
+            error!(error = %e, "database error during token validation");
+            send_ws_error(
+                &mut socket,
+                error_codes::INTERNAL_ERROR,
+                "internal server error",
+                true,
             )
             .await;
             return;
@@ -282,27 +293,11 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                 }
                                 continue;
                             }
-                            let Ok(event_epoch) = i64::try_from(event.stream_epoch) else {
-                                warn!(
-                                    stream_id = %sub.stream_id,
-                                    stream_epoch = event.stream_epoch,
-                                    "dropping live event with out-of-range stream_epoch"
-                                );
-                                continue;
-                            };
-                            let Ok(event_seq) = i64::try_from(event.seq) else {
-                                warn!(
-                                    stream_id = %sub.stream_id,
-                                    seq = event.seq,
-                                    "dropping live event with out-of-range seq"
-                                );
-                                continue;
-                            };
-                            if !cursor_gt(event_epoch, event_seq, sub.last_epoch, sub.last_seq) {
+                            if !cursor_gt(event.stream_epoch, event.seq, sub.last_epoch, sub.last_seq) {
                                 continue;
                             }
-                            sub.last_epoch = event_epoch;
-                            sub.last_seq = event_seq;
+                            sub.last_epoch = event.stream_epoch;
+                            sub.last_seq = event.seq;
                             events_to_send.push(event);
                         }
                         Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -704,8 +699,8 @@ fn resume_cursor_map(
     let mut map: HashMap<(String, String), (i64, i64)> = HashMap::new();
     for c in cursors {
         let key = (c.forwarder_id.clone(), c.reader_ip.clone());
-        let epoch = c.stream_epoch as i64;
-        let seq = c.last_seq as i64;
+        let epoch = c.stream_epoch;
+        let seq = c.last_seq;
         map.entry(key)
             .and_modify(|existing| {
                 if cursor_gt(epoch, seq, existing.0, existing.1) {
@@ -970,8 +965,8 @@ async fn replay_backlog(
             .map(|event| ReadEvent {
                 forwarder_id: event.forwarder_id.clone(),
                 reader_ip: event.reader_ip.clone(),
-                stream_epoch: event.stream_epoch as u64,
-                seq: event.seq as u64,
+                stream_epoch: event.stream_epoch,
+                seq: event.seq,
                 reader_timestamp: event.reader_timestamp.clone().unwrap_or_default(),
                 raw_frame: event.raw_frame.clone(),
                 read_type: event.read_type.clone(),
@@ -1029,8 +1024,8 @@ async fn replay_targeted_backlog(
                 .map(|event| ReadEvent {
                     forwarder_id: event.forwarder_id.clone(),
                     reader_ip: event.reader_ip.clone(),
-                    stream_epoch: event.stream_epoch as u64,
-                    seq: event.seq as u64,
+                    stream_epoch: event.stream_epoch,
+                    seq: event.seq,
                     reader_timestamp: event.reader_timestamp.clone().unwrap_or_default(),
                     raw_frame: event.raw_frame.clone(),
                     read_type: event.read_type.clone(),
@@ -1091,8 +1086,8 @@ async fn handle_receiver_ack(
                 &state.pool,
                 device_id,
                 r.stream_id,
-                entry.stream_epoch as i64,
-                entry.last_seq as i64,
+                entry.stream_epoch,
+                entry.last_seq,
             )
             .await?;
         }

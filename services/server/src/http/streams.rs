@@ -131,7 +131,7 @@ pub async fn reset_epoch(
                     session_id: String::new(),
                     forwarder_id: s.forwarder_id.clone(),
                     reader_ip: s.reader_ip.clone(),
-                    new_stream_epoch: (s.stream_epoch + 1) as u64,
+                    new_stream_epoch: s.stream_epoch + 1,
                 };
                 if tx.send(ForwarderCommand::EpochReset(cmd)).await.is_ok() {
                     if let Ok(config) = announcer_config::get_config(&state.pool).await

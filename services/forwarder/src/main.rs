@@ -1476,8 +1476,8 @@ async fn run_uplink(
                 .map(|ev| ReadEvent {
                     forwarder_id: forwarder_id.clone(),
                     reader_ip: ev.stream_key.clone(),
-                    stream_epoch: ev.stream_epoch as u64,
-                    seq: ev.seq as u64,
+                    stream_epoch: ev.stream_epoch,
+                    seq: ev.seq,
                     reader_timestamp: ev.reader_timestamp.clone().unwrap_or_default(),
                     raw_frame: ev.raw_frame.clone(),
                     read_type: ev.read_type.clone(),
@@ -1503,8 +1503,8 @@ async fn run_uplink(
                         for entry in &ack.entries {
                             if let Err(e) = j.update_ack_cursor(
                                 &entry.reader_ip,
-                                entry.stream_epoch as i64,
-                                entry.last_seq as i64,
+                                entry.stream_epoch,
+                                entry.last_seq,
                             ) {
                                 warn!(error = %e, "failed to update ack cursor");
                             }
@@ -1516,7 +1516,7 @@ async fn run_uplink(
                             cmd.reader_ip
                         ));
                         let mut j = journal.lock().await;
-                        if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                        if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch) {
                             logger.log_at(
                                 UiLogLevel::Warn,
                                 format!("failed to bump epoch in journal: {}", e),
@@ -1726,7 +1726,7 @@ async fn run_uplink(
                         Ok(WsMessage::EpochResetCommand(cmd)) => {
                             info!(reader_ip = %cmd.reader_ip, new_epoch = cmd.new_stream_epoch, "epoch reset during idle");
                             let mut j = journal.lock().await;
-                            if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                            if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch) {
                                 warn!(error = %e, "failed to bump epoch");
                             }
                             break 'uplink;
@@ -1757,8 +1757,8 @@ async fn run_uplink(
                                     batch.push(ReadEvent {
                                         forwarder_id: forwarder_id.clone(),
                                         reader_ip: ev.stream_key.clone(),
-                                        stream_epoch: ev.stream_epoch as u64,
-                                        seq: ev.seq as u64,
+                                        stream_epoch: ev.stream_epoch,
+                                        seq: ev.seq,
                                         reader_timestamp: ev
                                             .reader_timestamp
                                             .clone()
@@ -1795,8 +1795,8 @@ async fn run_uplink(
                     for entry in &ack.entries {
                         if let Err(e) = j.update_ack_cursor(
                             &entry.reader_ip,
-                            entry.stream_epoch as i64,
-                            entry.last_seq as i64,
+                            entry.stream_epoch,
+                            entry.last_seq,
                         ) {
                             warn!(error = %e, "failed to update ack cursor");
                         }
@@ -1808,7 +1808,7 @@ async fn run_uplink(
                         cmd.reader_ip
                     ));
                     let mut j = journal.lock().await;
-                    if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch as i64) {
+                    if let Err(e) = j.bump_epoch(&cmd.reader_ip, cmd.new_stream_epoch) {
                         logger.log_at(
                             UiLogLevel::Warn,
                             format!("failed to bump epoch in journal: {}", e),

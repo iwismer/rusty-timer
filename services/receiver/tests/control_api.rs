@@ -497,7 +497,7 @@ async fn admin_purge_subscriptions_requests_reconnect_when_connected() {
 async fn admin_reset_profile_clears_credentials() {
     let (app, state) = setup_with_state();
     {
-        let db = state.db.lock().await;
+        let mut db = state.db.lock().await;
         db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
     }
@@ -514,7 +514,7 @@ async fn admin_reset_profile_clears_credentials() {
 async fn admin_reset_profile_disconnects_when_connected() {
     let (app, state) = setup_with_state();
     {
-        let db = state.db.lock().await;
+        let mut db = state.db.lock().await;
         db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
     }
@@ -558,7 +558,7 @@ async fn admin_reset_profile_resets_runtime_update_mode_to_default() {
 async fn admin_factory_reset_clears_everything() {
     let (app, state) = setup_with_state();
     {
-        let db = state.db.lock().await;
+        let mut db = state.db.lock().await;
         db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
         db.save_subscription("f1", "10.0.0.1", None).unwrap();

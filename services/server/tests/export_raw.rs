@@ -30,6 +30,17 @@ async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
     addr
 }
 
+async fn insert_stream(pool: &sqlx::PgPool, forwarder_id: &str, reader_ip: &str) -> uuid::Uuid {
+    sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO streams (forwarder_id, reader_ip) VALUES ($1, $2) RETURNING stream_id",
+    )
+    .bind(forwarder_id)
+    .bind(reader_ip)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn test_export_raw_canonical_events_ordered() {
     let container = Postgres::default().start().await.unwrap();
@@ -57,7 +68,7 @@ async fn test_export_raw_canonical_events_ordered() {
     };
 
     // Send 3 events + 1 retransmit (should not appear in export)
-    for seq in 1..=3u64 {
+    for seq in 1..=3i64 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: session.clone(),
             batch_id: format!("b{}", seq),
@@ -152,9 +163,9 @@ async fn test_export_epoch_raw_filters_to_requested_epoch() {
     };
 
     for (batch_id, stream_epoch, seq, line) in [
-        ("b-epoch-1", 1_u64, 1_u64, "EPOCH_1_LINE_1"),
-        ("b-epoch-2-1", 2_u64, 1_u64, "EPOCH_2_LINE_1"),
-        ("b-epoch-2-2", 2_u64, 2_u64, "EPOCH_2_LINE_2"),
+        ("b-epoch-1", 1_i64, 1_i64, "EPOCH_1_LINE_1"),
+        ("b-epoch-2-1", 2_i64, 1_i64, "EPOCH_2_LINE_1"),
+        ("b-epoch-2-2", 2_i64, 2_i64, "EPOCH_2_LINE_2"),
     ] {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: session.clone(),
@@ -251,4 +262,29 @@ async fn test_export_epoch_raw_not_found() {
     .await
     .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_export_raw_returns_500_when_initial_query_fails_after_stream_exists_check() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-export-broken", "10.60.0.1:10000").await;
+    sqlx::query("DROP TABLE events")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = reqwest::get(format!(
+        "http://{}/api/v1/streams/{}/export.txt",
+        addr, stream_id
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 500);
 }

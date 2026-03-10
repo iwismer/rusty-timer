@@ -40,7 +40,7 @@ fn apply_batch_counts(
     stream_counts: &crate::cache::StreamCounts,
     events: &[ReadEvent],
 ) -> Vec<crate::ui_events::StreamCountUpdate> {
-    let mut per_epoch_seqs: HashMap<(String, String, u64), HashSet<u64>> = HashMap::new();
+    let mut per_epoch_seqs: HashMap<(String, String, i64), HashSet<i64>> = HashMap::new();
     for event in events {
         let seqs = per_epoch_seqs
             .entry((
@@ -123,7 +123,7 @@ where
                                         updates,
                                     });
                                 }
-                                let mut hw: HashMap<(String,String,u64),u64> = HashMap::new();
+                                let mut hw: HashMap<(String,String,i64),i64> = HashMap::new();
                                 for e in &forwarded_events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();
                                 { let d=deps.db.lock().await; for((f,i,ep),ls) in &hw { if let Err(e)=d.save_cursor(f,i,*ep,*ls){error!(error=%e);} acks.push(AckEntry{forwarder_id:f.clone(),reader_ip:i.clone(),stream_epoch:*ep,last_seq:*ls}); } }
@@ -193,7 +193,7 @@ where
 mod tests {
     use super::*;
 
-    fn read_event(forwarder_id: &str, reader_ip: &str, stream_epoch: u64, seq: u64) -> ReadEvent {
+    fn read_event(forwarder_id: &str, reader_ip: &str, stream_epoch: i64, seq: i64) -> ReadEvent {
         ReadEvent {
             forwarder_id: forwarder_id.to_owned(),
             reader_ip: reader_ip.to_owned(),

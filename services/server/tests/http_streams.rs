@@ -386,7 +386,7 @@ async fn test_get_metrics_for_stream() {
     };
 
     // Send 2 events, retransmit 1
-    for seq in 1..=2u64 {
+    for seq in 1..=2i64 {
         fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
             session_id: session.clone(),
             batch_id: format!("b{}", seq),

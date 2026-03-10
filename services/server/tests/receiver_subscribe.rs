@@ -87,8 +87,8 @@ async fn send_forwarder_event(
     session_id: &str,
     forwarder_id: &str,
     reader_ip: &str,
-    stream_epoch: u64,
-    seq: u64,
+    stream_epoch: i64,
+    seq: i64,
     raw_line: &str,
 ) {
     fwd.send_message(&WsMessage::ForwarderEventBatch(ForwarderEventBatch {
@@ -311,7 +311,7 @@ async fn receiver_v12_live_uses_persisted_then_earliest_then_current_precedence(
 
     let replay = recv_first_event_batch(&mut rcv, Duration::from_secs(5)).await;
 
-    let seqs: Vec<(u64, u64)> = replay
+    let seqs: Vec<(i64, i64)> = replay
         .events
         .iter()
         .map(|event| (event.stream_epoch, event.seq))
