@@ -76,6 +76,7 @@ pub struct AppState {
     pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
     pub receiver_id: Arc<RwLock<String>>,
+    pub db_integrity_ok: bool,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -100,6 +101,7 @@ impl AppState {
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
+            db_integrity_ok: true,
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -1040,7 +1042,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let conn = state.connection_state.read().await.clone();
     let db = state.db.lock().await;
     let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
-    let local_ok = db.integrity_check().is_ok();
+    let local_ok = state.db_integrity_ok;
     Json(StatusResponse {
         receiver_id,
         connection_state: conn,
