@@ -87,6 +87,7 @@ pub struct AppState {
     pub stream_counts: crate::cache::StreamCounts,
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
+    pub http_client: reqwest::Client,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -104,6 +105,10 @@ impl AppState {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
         let (conn_tx, conn_keepalive_rx) = watch::channel(ConnectionState::Disconnected);
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
             connection_state: conn_tx,
@@ -122,6 +127,7 @@ impl AppState {
             stream_counts: crate::cache::StreamCounts::new(),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
+            http_client,
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -251,7 +257,7 @@ impl AppState {
             (_, cs) if *cs != ConnectionState::Connected => {
                 (None, Some(format!("connection state: {cs:?}")))
             }
-            (Some(url), _) => match fetch_server_streams(url).await {
+            (Some(url), _) => match fetch_server_streams(&self.http_client, url).await {
                 Ok(streams) => (Some(streams), None),
                 Err(e) => {
                     warn!(error = %e, "failed to fetch server streams");
@@ -567,14 +573,12 @@ pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
 }
 
 /// Fetch available streams from the upstream server.
-pub async fn fetch_server_streams(ws_url: &str) -> Result<Vec<UpstreamStreamInfo>, String> {
+pub async fn fetch_server_streams(
+    client: &reqwest::Client,
+    ws_url: &str,
+) -> Result<Vec<UpstreamStreamInfo>, String> {
     let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
     let url = format!("{base}/api/v1/streams");
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
 
     let resp = client
         .get(&url)
@@ -779,21 +783,13 @@ async fn get_races(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
     let url = format!("{base}/api/v1/races");
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
+    let response = match state
+        .http_client
+        .get(&url)
+        .bearer_auth(profile.token)
+        .send()
+        .await
     {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("HTTP client error: {e}"),
-            )
-                .into_response();
-        }
-    };
-
-    let response = match client.get(&url).bearer_auth(profile.token).send().await {
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
     };
@@ -827,22 +823,9 @@ async fn get_replay_target_epochs(
         return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("HTTP client error: {e}"),
-            )
-                .into_response();
-        }
-    };
-
     let streams_url = format!("{base}/api/v1/streams");
-    let streams_response = match client
+    let streams_response = match state
+        .http_client
         .get(&streams_url)
         .bearer_auth(&profile.token)
         .send()
@@ -875,7 +858,8 @@ async fn get_replay_target_epochs(
     };
 
     let epochs_url = format!("{base}/api/v1/streams/{}/epochs", stream.stream_id);
-    let epochs_response = match client
+    let epochs_response = match state
+        .http_client
         .get(&epochs_url)
         .bearer_auth(&profile.token)
         .send()
@@ -906,7 +890,8 @@ async fn get_replay_target_epochs(
     };
 
     let races_url = format!("{base}/api/v1/races");
-    let races_response = match client
+    let races_response = match state
+        .http_client
         .get(&races_url)
         .bearer_auth(&profile.token)
         .send()
@@ -934,7 +919,7 @@ async fn get_replay_target_epochs(
     };
 
     let race_mapping_fetches = races.iter().map(|race| {
-        let client = client.clone();
+        let client = state.http_client.clone();
         let base = base.clone();
         let token = profile.token.clone();
         let race_id = race.race_id.clone();

@@ -443,7 +443,7 @@ async fn main() {
                                         let (session_result, ws) = {
                                             let receiver_id = state.receiver_id.read().await.clone();
                                             let db = state.db.lock().await;
-                                            do_handshake(ws, &db, &state.ui_tx, &receiver_id).await
+                                            do_handshake(ws, &db, &state.ui_tx, &receiver_id, &state.http_client).await
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -816,6 +816,7 @@ async fn do_handshake<S>(
     db: &Db,
     ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
     receiver_id: &str,
+    http_client: &reqwest::Client,
 ) -> (Result<String, receiver::session::SessionError>, Option<S>)
 where
     S: futures_util::Stream<
@@ -893,7 +894,8 @@ where
 
         let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
         if let Some(url) = profile_url
-            && let Ok(server_streams) = receiver::control_api::fetch_server_streams(&url).await
+            && let Ok(server_streams) =
+                receiver::control_api::fetch_server_streams(http_client, &url).await
         {
             let server_epoch_by_stream: HashMap<(String, String), i64> = server_streams
                 .into_iter()
@@ -1271,7 +1273,8 @@ mod tests {
         let db = Db::open_in_memory().expect("db");
         let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
 
-        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver").await;
+        let http_client = reqwest::Client::new();
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver", &http_client).await;
         assert!(result.is_ok(), "handshake should succeed");
 
         let mut log_entries = Vec::new();
@@ -1358,7 +1361,8 @@ mod tests {
         );
 
         let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
-        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver").await;
+        let http_client = reqwest::Client::new();
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver", &http_client).await;
         assert!(result.is_ok(), "handshake should succeed");
         assert_eq!(
             db.load_receiver_mode().expect("load mode after handshake"),
