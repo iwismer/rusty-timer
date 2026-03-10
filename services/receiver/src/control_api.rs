@@ -83,6 +83,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(db: Db, receiver_id: String) -> (Arc<Self>, watch::Receiver<bool>) {
+        Self::with_integrity(db, receiver_id, true)
+    }
+
+    pub fn with_integrity(
+        db: Db,
+        receiver_id: String,
+        db_integrity_ok: bool,
+    ) -> (Arc<Self>, watch::Receiver<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (ui_tx, _) = broadcast::channel(256);
         let state = Arc::new(Self {
@@ -101,7 +109,7 @@ impl AppState {
             update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
-            db_integrity_ok: true,
+            db_integrity_ok,
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });

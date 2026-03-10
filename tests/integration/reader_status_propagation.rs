@@ -6,7 +6,7 @@
 //! Requires Docker for the Postgres testcontainer.
 
 use rt_protocol::*;
-use rt_test_utils::MockWsClient;
+use rt_test_utils::{MockWsClient, poll_until};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
@@ -97,27 +97,6 @@ fn find_stream<'a>(streams: &'a [serde_json::Value], reader_ip: &str) -> &'a ser
                 reader_ip, streams
             )
         })
-}
-
-// ---------------------------------------------------------------------------
-// Polling helper
-// ---------------------------------------------------------------------------
-
-async fn poll_until<F, Fut>(mut f: F, timeout: Duration)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if f().await {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("poll_until timed out after {:?}", timeout);
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 // ---------------------------------------------------------------------------

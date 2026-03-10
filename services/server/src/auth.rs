@@ -6,7 +6,10 @@ pub struct TokenClaims {
     pub device_type: String,
 }
 
-pub async fn validate_token(pool: &PgPool, raw_token: &str) -> Option<TokenClaims> {
+pub async fn validate_token(
+    pool: &PgPool,
+    raw_token: &str,
+) -> Result<Option<TokenClaims>, sqlx::Error> {
     let hash = Sha256::digest(raw_token.as_bytes());
     let hash_bytes = hash.as_slice().to_vec();
     let row = sqlx::query!(
@@ -17,12 +20,11 @@ pub async fn validate_token(pool: &PgPool, raw_token: &str) -> Option<TokenClaim
         hash_bytes.as_slice()
     )
     .fetch_optional(pool)
-    .await
-    .ok()??;
-    Some(TokenClaims {
-        device_id: row.device_id,
-        device_type: row.device_type,
-    })
+    .await?;
+    Ok(row.map(|r| TokenClaims {
+        device_id: r.device_id,
+        device_type: r.device_type,
+    }))
 }
 
 pub fn extract_bearer(authorization: &str) -> Option<&str> {

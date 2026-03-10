@@ -86,6 +86,11 @@ pub trait WorkflowState: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
+async fn set_and_emit(state: &dyn WorkflowState, status: UpdateStatus) {
+    state.set_status(status.clone()).await;
+    state.emit_status_changed(status).await;
+}
+
 /// Run an update check and apply mode-specific transitions.
 pub async fn run_check(
     state: &dyn WorkflowState,
@@ -107,13 +112,12 @@ pub async fn run_check(
                             version: version.clone(),
                         };
                         state.set_downloaded(status.clone(), path).await;
-                        state.emit_status_changed(status.clone()).await;
-                        status
+                        state.emit_status_changed(status).await;
+                        UpdateStatus::Downloaded { version }
                     }
                     Err(error) => {
                         let status = UpdateStatus::Failed { error };
-                        state.set_status(status.clone()).await;
-                        state.emit_status_changed(status.clone()).await;
+                        set_and_emit(state, status.clone()).await;
                         status
                     }
                 }
@@ -124,14 +128,12 @@ pub async fn run_check(
             }
         }
         Ok(status) => {
-            state.set_status(status.clone()).await;
-            state.emit_status_changed(status.clone()).await;
+            set_and_emit(state, status.clone()).await;
             status
         }
         Err(error) => {
             let status = UpdateStatus::Failed { error };
-            state.set_status(status.clone()).await;
-            state.emit_status_changed(status.clone()).await;
+            set_and_emit(state, status.clone()).await;
             status
         }
     }
@@ -150,13 +152,14 @@ pub async fn run_download(
                     version: version.clone(),
                 };
                 state.set_downloaded(status.clone(), path).await;
-                state.emit_status_changed(status.clone()).await;
-                Ok(status)
+                state.emit_status_changed(status).await;
+                Ok(UpdateStatus::Downloaded {
+                    version: version.clone(),
+                })
             }
             Err(error) => {
                 let status = UpdateStatus::Failed { error };
-                state.set_status(status.clone()).await;
-                state.emit_status_changed(status.clone()).await;
+                set_and_emit(state, status.clone()).await;
                 Err(status)
             }
         },

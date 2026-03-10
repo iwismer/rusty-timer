@@ -99,10 +99,13 @@ async fn main() {
         eprintln!("FATAL: failed to open DB: {e}");
         std::process::exit(1);
     });
-    db.integrity_check().unwrap_or_else(|e| {
-        eprintln!("FATAL: integrity_check failed: {e}");
-        std::process::exit(1);
-    });
+    let db_integrity_ok = match db.integrity_check() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("FATAL: integrity_check failed: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // -------------------------------------------------------------------------
     // 1b. Resolve receiver ID: CLI flag > DB > auto-generate
@@ -113,7 +116,7 @@ async fn main() {
     // -------------------------------------------------------------------------
     // 2. Create AppState
     // -------------------------------------------------------------------------
-    let (state, mut shutdown_rx) = AppState::new(db, receiver_id);
+    let (state, mut shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok);
     state.logger.log("Receiver started");
 
     // -------------------------------------------------------------------------

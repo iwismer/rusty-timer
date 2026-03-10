@@ -6,9 +6,21 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use sqlx::Row;
 use uuid::Uuid;
+
+fn streaming_response(
+    content_type: &str,
+    stream: impl Stream<Item = Result<axum::body::Bytes, std::io::Error>> + Send + 'static,
+) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from_stream(stream))
+        .expect("hardcoded response builder")
+        .into_response()
+}
 
 async fn ensure_stream_exists(pool: &sqlx::PgPool, stream_id: Uuid) -> HttpResult {
     let exists = sqlx::query!(
@@ -52,15 +64,13 @@ pub async fn export_raw(
                 line.push('\n');
                 axum::body::Bytes::from(line.into_bytes())
             })
-            .map_err(std::io::Error::other)
+            .map_err(|e| {
+                tracing::error!(error = %e, "database error during export stream");
+                std::io::Error::other(e)
+            })
     });
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from_stream(stream))
-        .unwrap()
-        .into_response()
+    streaming_response("text/plain; charset=utf-8", stream)
 }
 
 /// `GET /api/v1/streams/{stream_id}/export.csv`
@@ -95,17 +105,15 @@ pub async fn export_csv(
     .map(|row_result| {
         row_result
             .map(|row| axum::body::Bytes::from(format_csv_row(&row)))
-            .map_err(std::io::Error::other)
+            .map_err(|e| {
+                tracing::error!(error = %e, "database error during export stream");
+                std::io::Error::other(e)
+            })
     });
 
     let stream = header_row.chain(data_stream);
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
-        .body(Body::from_stream(stream))
-        .unwrap()
-        .into_response()
+    streaming_response("text/csv; charset=utf-8", stream)
 }
 
 /// `GET /api/v1/streams/{stream_id}/epochs/{epoch}/export.csv`
@@ -141,17 +149,15 @@ pub async fn export_epoch_csv(
     .map(|row_result| {
         row_result
             .map(|row| axum::body::Bytes::from(format_csv_row(&row)))
-            .map_err(std::io::Error::other)
+            .map_err(|e| {
+                tracing::error!(error = %e, "database error during export stream");
+                std::io::Error::other(e)
+            })
     });
 
     let stream = header_row.chain(data_stream);
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
-        .body(Body::from_stream(stream))
-        .unwrap()
-        .into_response()
+    streaming_response("text/csv; charset=utf-8", stream)
 }
 
 /// `GET /api/v1/streams/{stream_id}/epochs/{epoch}/export.txt`
@@ -182,15 +188,13 @@ pub async fn export_epoch_raw(
                 line.push('\n');
                 axum::body::Bytes::from(line.into_bytes())
             })
-            .map_err(std::io::Error::other)
+            .map_err(|e| {
+                tracing::error!(error = %e, "database error during export stream");
+                std::io::Error::other(e)
+            })
     });
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from_stream(stream))
-        .unwrap()
-        .into_response()
+    streaming_response("text/plain; charset=utf-8", stream)
 }
 
 fn format_csv_row(row: &sqlx::postgres::PgRow) -> Vec<u8> {

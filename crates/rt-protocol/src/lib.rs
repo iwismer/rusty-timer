@@ -4,8 +4,18 @@
 // deserialization. The enum covers the frozen v1/v1.2 message kinds plus
 // reader-status tracking and reader-control extensions.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
+
+fn deserialize_non_negative_i64<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let v = i64::deserialize(d)?;
+    if v < 0 {
+        return Err(serde::de::Error::custom(format!(
+            "expected non-negative value, got {v}"
+        )));
+    }
+    Ok(v)
+}
 
 // ---------------------------------------------------------------------------
 // Shared sub-types
@@ -20,7 +30,9 @@ use uuid::Uuid;
 pub struct ResumeCursor {
     pub forwarder_id: String,
     pub reader_ip: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub stream_epoch: i64,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub last_seq: i64,
 }
 
@@ -30,7 +42,9 @@ pub struct ReadEvent {
     /// Redundant for self-describing messages.
     pub forwarder_id: String,
     pub reader_ip: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub stream_epoch: i64,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub seq: i64,
     /// Device-reported timestamp; accepted as-is, no server adjustment.
     pub reader_timestamp: String,
@@ -47,7 +61,9 @@ pub struct AckEntry {
     /// Redundant for self-describing messages.
     pub forwarder_id: String,
     pub reader_ip: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub stream_epoch: i64,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub last_seq: i64,
 }
 
@@ -137,8 +153,12 @@ pub struct StreamRef {
 pub struct ReplayTarget {
     pub forwarder_id: String,
     pub reader_ip: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub stream_epoch: i64,
-    #[serde(default = "default_replay_from_seq")]
+    #[serde(
+        default = "default_replay_from_seq",
+        deserialize_with = "deserialize_non_negative_i64"
+    )]
     pub from_seq: i64,
 }
 
@@ -155,6 +175,7 @@ fn default_replay_from_seq() -> i64 {
 pub struct EarliestEpochOverride {
     pub forwarder_id: String,
     pub reader_ip: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub earliest_epoch: i64,
 }
 
@@ -270,6 +291,7 @@ pub struct EpochResetCommand {
     pub session_id: String,
     pub forwarder_id: String,
     pub reader_ip: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub new_stream_epoch: i64,
 }
 
@@ -654,6 +676,52 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn negative_stream_epoch_rejected() {
+        let json = r#"{
+            "kind": "forwarder_event_batch",
+            "session_id": "s1",
+            "batch_id": "b1",
+            "events": [{
+                "forwarder_id": "fwd",
+                "reader_ip": "10.0.0.1:10000",
+                "stream_epoch": -1,
+                "seq": 1,
+                "reader_timestamp": "2026-01-01T00:00:00Z",
+                "raw_frame": [],
+                "read_type": "RAW"
+            }]
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn negative_seq_rejected() {
+        let json = r#"{
+            "kind": "forwarder_event_batch",
+            "session_id": "s1",
+            "batch_id": "b1",
+            "events": [{
+                "forwarder_id": "fwd",
+                "reader_ip": "10.0.0.1:10000",
+                "stream_epoch": 1,
+                "seq": -5,
+                "reader_timestamp": "2026-01-01T00:00:00Z",
+                "raw_frame": [],
+                "read_type": "RAW"
+            }]
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
     }
 
     #[test]

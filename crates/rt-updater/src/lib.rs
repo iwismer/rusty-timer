@@ -157,7 +157,9 @@ impl UpdateChecker {
         self_replace::self_replace(staged_path)?;
 
         // Clean up staged file (best-effort).
-        let _ = std::fs::remove_file(staged_path);
+        if let Err(e) = std::fs::remove_file(staged_path) {
+            tracing::warn!(path = %staged_path.display(), error = %e, "failed to clean up staged binary");
+        }
 
         info!("binary replaced successfully — caller should exit for restart");
         Ok(())

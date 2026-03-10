@@ -24,6 +24,11 @@
       : [],
   );
 
+  function closeSearch() {
+    searchOpen = false;
+    query = "";
+  }
+
   function toggleSearch() {
     searchOpen = !searchOpen;
     if (searchOpen) {
@@ -41,27 +46,23 @@
     dialogContext = result.context;
     dialogField = fieldKey;
     dialogOpen = true;
-    searchOpen = false;
-    query = "";
+    closeSearch();
   }
 
   function handleSearchKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
-      searchOpen = false;
-      query = "";
+      closeSearch();
     }
   }
 
   function handleClickOutside(e: MouseEvent) {
     const target = e.target;
     if (!(target instanceof Element)) {
-      searchOpen = false;
-      query = "";
+      closeSearch();
       return;
     }
     if (!target.closest("[data-help-search]")) {
-      searchOpen = false;
-      query = "";
+      closeSearch();
     }
   }
 

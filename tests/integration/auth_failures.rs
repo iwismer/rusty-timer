@@ -44,9 +44,9 @@ async fn start_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
     addr
 }
 
-/// Helper: expect the server to send an Error message with the given code,
-/// then close the connection.
-async fn expect_ws_error(client: &mut MockWsClient, expected_code: &str) {
+/// Expect the server to send an Error message with the given code.
+/// Panics if the connection closes without an error frame or a different message arrives.
+async fn expect_ws_error_strict(client: &mut MockWsClient, expected_code: &str) {
     match client.recv_message().await {
         Ok(WsMessage::Error(err)) => {
             assert_eq!(
@@ -56,10 +56,25 @@ async fn expect_ws_error(client: &mut MockWsClient, expected_code: &str) {
             );
         }
         Ok(other) => panic!("expected Error message, got {:?}", other),
-        Err(e) => {
-            // Connection closed before we got a message — also acceptable
+        Err(e) => panic!("connection closed before receiving Error message: {e}"),
+    }
+}
+
+/// Expect the server to reject the connection — either via an Error message
+/// or by closing the connection immediately (acceptable for missing-header scenarios).
+async fn expect_ws_error_or_close(client: &mut MockWsClient, expected_code: &str) {
+    match client.recv_message().await {
+        Ok(WsMessage::Error(err)) => {
+            assert_eq!(
+                err.code, expected_code,
+                "expected error code {}, got {}",
+                expected_code, err.code
+            );
+        }
+        Ok(other) => panic!("expected Error message, got {:?}", other),
+        Err(_) => {
+            // Connection closed before we got a message — acceptable
             // for missing auth header scenarios where the server may close immediately.
-            eprintln!("connection closed/errored (acceptable): {e}");
         }
     }
 }
@@ -91,7 +106,7 @@ async fn forwarder_invalid_token_rejected() {
     let mut client = MockWsClient::connect_with_token(&url, "wrong-token")
         .await
         .unwrap();
-    expect_ws_error(&mut client, "INVALID_TOKEN").await;
+    expect_ws_error_strict(&mut client, "INVALID_TOKEN").await;
 }
 
 #[tokio::test]
@@ -99,7 +114,7 @@ async fn forwarder_empty_token_rejected() {
     let (_pool, addr, _container) = setup().await;
     let url = format!("ws://{}/ws/v1/forwarders", addr);
     let mut client = MockWsClient::connect_with_token(&url, "").await.unwrap();
-    expect_ws_error(&mut client, "INVALID_TOKEN").await;
+    expect_ws_error_strict(&mut client, "INVALID_TOKEN").await;
 }
 
 #[tokio::test]
@@ -107,7 +122,7 @@ async fn forwarder_missing_auth_header_rejected() {
     let (_pool, addr, _container) = setup().await;
     let url = format!("ws://{}/ws/v1/forwarders", addr);
     let mut client = MockWsClient::connect(&url).await.unwrap();
-    expect_ws_error(&mut client, "INVALID_TOKEN").await;
+    expect_ws_error_or_close(&mut client, "INVALID_TOKEN").await;
 }
 
 #[tokio::test]
@@ -117,7 +132,15 @@ async fn receiver_invalid_token_rejected() {
     let mut client = MockWsClient::connect_with_token(&url, "wrong-token")
         .await
         .unwrap();
-    expect_ws_error(&mut client, "INVALID_TOKEN").await;
+    expect_ws_error_strict(&mut client, "INVALID_TOKEN").await;
+}
+
+#[tokio::test]
+async fn receiver_empty_token_rejected() {
+    let (_pool, addr, _container) = setup().await;
+    let url = format!("ws://{}/ws/v1.2/receivers", addr);
+    let mut client = MockWsClient::connect_with_token(&url, "").await.unwrap();
+    expect_ws_error_strict(&mut client, "INVALID_TOKEN").await;
 }
 
 #[tokio::test]
@@ -125,7 +148,7 @@ async fn receiver_missing_auth_header_rejected() {
     let (_pool, addr, _container) = setup().await;
     let url = format!("ws://{}/ws/v1.2/receivers", addr);
     let mut client = MockWsClient::connect(&url).await.unwrap();
-    expect_ws_error(&mut client, "INVALID_TOKEN").await;
+    expect_ws_error_or_close(&mut client, "INVALID_TOKEN").await;
 }
 
 #[tokio::test]
@@ -136,5 +159,5 @@ async fn forwarder_token_rejected_on_receiver_endpoint() {
     let mut client = MockWsClient::connect_with_token(&url, "valid-fwd-token")
         .await
         .unwrap();
-    expect_ws_error(&mut client, "INVALID_TOKEN").await;
+    expect_ws_error_strict(&mut client, "INVALID_TOKEN").await;
 }

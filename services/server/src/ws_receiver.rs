@@ -127,13 +127,24 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
     };
 
     let claims = match validate_token(&state.pool, &token_str).await {
-        Some(c) => c,
-        None => {
+        Ok(Some(c)) => c,
+        Ok(None) => {
             send_ws_error(
                 &mut socket,
                 error_codes::INVALID_TOKEN,
                 "unknown or revoked token",
                 false,
+            )
+            .await;
+            return;
+        }
+        Err(e) => {
+            error!(error = %e, "database error during token validation");
+            send_ws_error(
+                &mut socket,
+                error_codes::INTERNAL_ERROR,
+                "internal server error",
+                true,
             )
             .await;
             return;
