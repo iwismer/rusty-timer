@@ -26,7 +26,11 @@ pub async fn validate_token(pool: &PgPool, raw_token: &str) -> Option<TokenClaim
 }
 
 pub fn extract_bearer(authorization: &str) -> Option<&str> {
-    authorization.strip_prefix("Bearer ")
+    let token = authorization.strip_prefix("Bearer ")?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
 }
 
 #[cfg(test)]
@@ -46,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_bearer_allows_empty_token_after_prefix() {
-        assert_eq!(extract_bearer("Bearer "), Some(""));
+    fn extract_bearer_rejects_empty_token_after_prefix() {
+        assert_eq!(extract_bearer("Bearer "), None);
     }
 }
