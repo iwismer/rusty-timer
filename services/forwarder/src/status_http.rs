@@ -3015,13 +3015,18 @@ async fn update_apply_handler<J: JournalAccess + Send + 'static>(
                 json_response(StatusCode::OK, r#"{"status":"restarting"}"#.to_owned())
             } else {
                 let sub = state.subsystem.clone();
+                let restart = state.restart_signal.clone();
                 tokio::spawn(async move {
                     match tokio::task::spawn_blocking(move || {
-                        rt_updater::UpdateChecker::apply_and_exit(&path)
+                        rt_updater::UpdateChecker::apply_update(&path)
                     })
                     .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => {
+                            if let Some(notify) = restart.as_ref() {
+                                notify.notify_one();
+                            }
+                        }
                         Ok(Err(e)) => {
                             tracing::error!(error = %e, "update apply failed");
                             sub.lock().await.update_status = rt_updater::UpdateStatus::Failed {

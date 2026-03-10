@@ -142,12 +142,15 @@ impl UpdateChecker {
         .await?
     }
 
-    /// Replace the running binary with the staged binary and exit the process.
+    /// Replace the running binary with the staged binary.
+    ///
+    /// Returns `Ok(())` after a successful replacement. The caller is
+    /// responsible for initiating a graceful shutdown/restart.
     ///
     /// # Errors
     ///
     /// Returns an error if the replacement fails.
-    pub fn apply_and_exit(
+    pub fn apply_update(
         staged_path: &Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!(path = %staged_path.display(), "replacing running binary with staged update");
@@ -156,8 +159,8 @@ impl UpdateChecker {
         // Clean up staged file (best-effort).
         let _ = std::fs::remove_file(staged_path);
 
-        info!("binary replaced successfully — exiting for restart");
-        std::process::exit(0);
+        info!("binary replaced successfully — caller should exit for restart");
+        Ok(())
     }
 }
 

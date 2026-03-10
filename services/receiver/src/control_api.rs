@@ -1289,11 +1289,13 @@ async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoRespo
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 match tokio::task::spawn_blocking(move || {
-                    rt_updater::UpdateChecker::apply_and_exit(&path)
+                    rt_updater::UpdateChecker::apply_update(&path)
                 })
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        let _ = state_clone.shutdown_tx.send(true);
+                    }
                     Ok(Err(e)) => {
                         tracing::error!(error = %e, "update apply failed");
                         *state_clone.update_status.write().await =
