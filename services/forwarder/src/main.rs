@@ -1507,6 +1507,9 @@ async fn run_uplink(
                             ) {
                                 warn!(error = %e, "failed to update ack cursor");
                             }
+                            if let Err(e) = j.prune_acked(&entry.reader_ip, 500) {
+                                warn!(error = %e, "failed to prune acked journal events");
+                            }
                         }
                     }
                     Ok(SendBatchResult::EpochReset(cmd)) => {
@@ -1798,6 +1801,9 @@ async fn run_uplink(
                             entry.last_seq,
                         ) {
                             warn!(error = %e, "failed to update ack cursor");
+                        }
+                        if let Err(e) = j.prune_acked(&entry.reader_ip, 500) {
+                            warn!(error = %e, "failed to prune acked journal events");
                         }
                     }
                 }
