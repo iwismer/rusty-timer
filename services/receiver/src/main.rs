@@ -891,12 +891,7 @@ where
         {
             let server_epoch_by_stream: HashMap<(String, String), i64> = server_streams
                 .into_iter()
-                .map(|stream| {
-                    (
-                        (stream.forwarder_id, stream.reader_ip),
-                        i64::try_from(stream.stream_epoch).unwrap_or(i64::MAX),
-                    )
-                })
+                .map(|stream| ((stream.forwarder_id, stream.reader_ip), stream.stream_epoch))
                 .collect();
 
             for stream in streams.iter() {
