@@ -1,21 +1,9 @@
 //! Integration tests for fault injection.
 //!
-//! Reader mode faults: jitter, disconnect, reconnect_delay
-//! Forwarder mode faults: malformed_messages, slow_acks
-//!
-//! Tests:
-//! 1. FaultSchedule parses jitter fault from YAML
-//! 2. FaultSchedule parses disconnect fault from YAML
-//! 3. FaultSchedule parses reconnect_delay fault from YAML
-//! 4. Jitter fault delays event emission after trigger point
-//! 5. Disconnect fault marks stream as disconnected after trigger point
-//! 6. Reconnect delay is configurable
-//! 7. Malformed message fault generates unparseable payloads
-//! 8. Slow ack fault introduces delay before ack
-//! 9. No fault = zero delays, all events emitted
-//! 10. until_events bounds transient fault window
-//! 11. until_events: None fires permanently (existing behavior)
-//! 12. Two faults: first deactivates, second activates after
+//! Covers: YAML parsing of fault configs, FaultSchedule construction,
+//! fault outcome behavior (jitter, disconnect, reconnect_delay,
+//! malformed_messages, slow_acks), no-fault baseline, and
+//! `until_events` window bounds (transient, permanent, multi-fault).
 
 use emulator::faults::{FaultOutcome, FaultSchedule, apply_fault_to_event_emission};
 use emulator::scenario::{FaultConfig, load_scenario_from_str};

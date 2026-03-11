@@ -32,10 +32,7 @@ use reader_task::{
     stall_outcome_for_download,
 };
 #[cfg(test)]
-use uplink_task::{
-    chunk_for_replay, handle_config_message, handle_reader_control_message, handle_restart_message,
-    to_protocol_reader_info,
-};
+use uplink_task::chunk_for_replay;
 
 // Additional imports that are only needed by the test module below.
 #[cfg(test)]

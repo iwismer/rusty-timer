@@ -108,7 +108,7 @@ impl AppState {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build HTTP client");
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
             connection_state: conn_tx,

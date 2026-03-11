@@ -4,7 +4,7 @@
 /// to prevent unbounded growth on long-running SBCs.
 use forwarder::storage::journal::Journal;
 
-/// Helper: open a Journal backed by an in-memory temp file.
+/// Helper: open a Journal backed by a temporary directory on disk.
 fn open_temp_journal() -> (Journal, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create temp dir");
     let path = dir.path().join("journal.db");

@@ -2,10 +2,13 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 pub async fn create_pool(database_url: &str) -> PgPool {
-    let max_conn: u32 = std::env::var("DATABASE_POOL_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+    let max_conn: u32 = match std::env::var("DATABASE_POOL_SIZE") {
+        Ok(s) => s.parse().unwrap_or_else(|e| {
+            tracing::warn!(value = %s, error = %e, "invalid DATABASE_POOL_SIZE, using default 10");
+            10
+        }),
+        Err(_) => 10,
+    };
     PgPoolOptions::new()
         .max_connections(max_conn)
         .connect(database_url)

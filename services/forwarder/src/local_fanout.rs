@@ -144,6 +144,8 @@ impl Drop for FanoutServer {
         // rather than blocking or panicking — this is best-effort cleanup.
         if let Ok(mut reg) = registry().try_lock() {
             reg.remove(&self.local_addr);
+        } else {
+            tracing::warn!(addr = %self.local_addr, "FanoutServer::drop: registry lock contended, entry may leak");
         }
     }
 }
