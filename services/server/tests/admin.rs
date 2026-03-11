@@ -864,7 +864,10 @@ async fn test_delete_epoch_events_clears_stream_cursors() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(s1_cursor_count, 0, "all s1 cursors should be deleted");
+    assert_eq!(
+        s1_cursor_count, 1,
+        "only epoch-1 cursor should be deleted; epoch-2 cursor remains"
+    );
 
     let s2_cursor_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE stream_id = $1")
