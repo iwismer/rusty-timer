@@ -655,4 +655,52 @@ mod tests {
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, Some("id-2".to_owned()));
     }
+
+    #[test]
+    fn save_cursor_rejects_same_epoch_lower_seq() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 5, 5).unwrap();
+        let rows = db.load_cursors().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stream_epoch, 5);
+        assert_eq!(rows[0].last_seq, 10, "cursor must not regress to lower seq");
+    }
+
+    #[test]
+    fn save_cursor_rejects_lower_epoch() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 4, 100).unwrap();
+        let rows = db.load_cursors().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].stream_epoch, 5,
+            "cursor must not regress to lower epoch"
+        );
+        assert_eq!(rows[0].last_seq, 10);
+    }
+
+    #[test]
+    fn save_cursor_accepts_same_epoch_higher_seq() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 5, 15).unwrap();
+        let rows = db.load_cursors().unwrap();
+        assert_eq!(rows[0].stream_epoch, 5);
+        assert_eq!(rows[0].last_seq, 15, "cursor must advance to higher seq");
+    }
+
+    #[test]
+    fn save_cursor_accepts_higher_epoch() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 5, 10).unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 6, 1).unwrap();
+        let rows = db.load_cursors().unwrap();
+        assert_eq!(
+            rows[0].stream_epoch, 6,
+            "cursor must advance to higher epoch"
+        );
+        assert_eq!(rows[0].last_seq, 1);
+    }
 }
