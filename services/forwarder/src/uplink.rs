@@ -324,7 +324,10 @@ impl UplinkSession {
                             .map_err(|e| UplinkError::Ws(e.to_string()))?;
                         continue;
                     }
-                    _ => continue,
+                    other => {
+                        tracing::debug!("ignoring non-text WS frame: {:?}", other);
+                        continue;
+                    }
                 },
             }
         }
