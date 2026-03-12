@@ -9,10 +9,13 @@
 //!
 //! Requires Docker for the Postgres testcontainer.
 
+#[path = "helpers/mod.rs"]
+mod helpers;
+use helpers::{insert_token, start_server};
+
 use forwarder::uplink::{SendBatchResult, UplinkConfig, UplinkSession};
 use ipico_core::read::ChipRead;
 use rt_protocol::ReadEvent;
-use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
@@ -33,38 +36,8 @@ const FORWARDER_TOKEN: &[u8] = b"fwd-export-token-01";
 const READ_TYPE: &str = "RAW";
 
 // ---------------------------------------------------------------------------
-// Harness helpers
+// Harness helpers (local to this test file)
 // ---------------------------------------------------------------------------
-
-/// Insert a device token into the server DB for testing.
-async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, raw_token: &[u8]) {
-    let hash = Sha256::digest(raw_token);
-    let hash_bytes: Vec<u8> = hash.as_slice().to_vec();
-    sqlx::query(
-        "INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3)",
-    )
-    .bind(hash_bytes)
-    .bind(device_type)
-    .bind(device_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-/// Spin up an in-process server against the given Postgres pool.
-async fn start_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
-    let state = server::AppState::new(pool);
-    let router = server::build_router(state, None);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind server");
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("server error");
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    addr
-}
 
 /// Start a TCP emulator that sends each read line (with \r\n) to every
 /// connecting client, then keeps the connection open.
@@ -167,9 +140,9 @@ async fn e2e_export_txt_and_csv() {
         token: String::from_utf8_lossy(FORWARDER_TOKEN).to_string(),
         forwarder_id: FORWARDER_DEVICE_ID.to_owned(),
         display_name: None,
-        batch_mode: "immediate".to_owned(),
         batch_flush_ms: 100,
         batch_max_events: 50,
+        ack_timeout_secs: 30,
     };
     let mut session = UplinkSession::connect_with_readers(uplink_cfg, vec![READER_IP.to_owned()])
         .await

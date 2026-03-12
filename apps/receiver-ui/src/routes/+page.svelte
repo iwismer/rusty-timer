@@ -836,7 +836,7 @@
       },
       onLogEntry: (entry) => {
         if (logs) {
-          logs = { entries: [entry, ...logs.entries] };
+          logs = { entries: [entry, ...logs.entries].slice(0, 500) };
         } else {
           logs = { entries: [entry] };
         }

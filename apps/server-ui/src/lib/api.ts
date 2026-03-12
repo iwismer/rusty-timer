@@ -2,7 +2,12 @@
 // All dashboard-to-server communication goes through this module exclusively.
 // Base URL defaults to the same origin (dashboard is served by the server process).
 
+import { apiFetch as sharedApiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
+
 const BASE = typeof window !== "undefined" ? "" : "http://localhost:8080";
+
+// Re-export ApiError from shared-ui so callers can use it for instanceof checks.
+export { ApiError } from "@rusty-timer/shared-ui/lib/api-helpers";
 
 // ----- Types -----
 
@@ -48,12 +53,6 @@ export interface EpochInfo {
   last_event_at: string | null;
   name: string | null;
   is_current: boolean;
-}
-
-export interface ApiError {
-  code: string;
-  message: string;
-  details?: Record<string, unknown>;
 }
 
 export interface AnnouncerConfig {
@@ -112,19 +111,9 @@ export interface PublicAnnouncerDelta {
 
 // ----- Internal helpers -----
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(
-      `API ${init?.method ?? "GET"} ${path} -> ${resp.status}: ${text}`,
-    );
-  }
-  if (resp.status === 204) return undefined as unknown as T;
-  return resp.json();
+/** Wrapper around the shared apiFetch that prepends BASE to all paths. */
+function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  return sharedApiFetch<T>(`${BASE}${path}`, init);
 }
 
 // ----- Public API -----

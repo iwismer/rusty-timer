@@ -72,6 +72,10 @@ pub struct FaultConfig {
     pub after_events: u64,
     /// Duration of the fault in milliseconds.
     pub duration_ms: u64,
+    /// Stop triggering the fault at this event number (exclusive upper bound).
+    /// When `None`, the fault fires on every event from `after_events` onward.
+    #[serde(default)]
+    pub until_events: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------

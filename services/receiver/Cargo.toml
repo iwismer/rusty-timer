@@ -44,6 +44,7 @@ getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { version = "0.37", features = ["bundled"] }
 rt-test-utils = { path = "../../crates/rt-test-utils" }
 tokio = { version = "1", features = ["full", "test-util"] }
 axum = { version = "0.8", features = ["ws"] }

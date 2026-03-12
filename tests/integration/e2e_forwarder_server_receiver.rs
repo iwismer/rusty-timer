@@ -14,116 +14,15 @@
 //! - Protocol-level mock receiver client: broad contract check.
 //! - Headless receiver smoke path: receiver lib Db open + integrity_check.
 
+#[path = "helpers/mod.rs"]
+mod helpers;
+use helpers::{forwarder_handshake, insert_token, receiver_handshake, start_server};
+
 use rt_protocol::*;
 use rt_test_utils::MockWsClient;
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
-
-// ---------------------------------------------------------------------------
-// Harness helpers
-// ---------------------------------------------------------------------------
-
-/// Insert a device token into the server DB for testing.
-async fn insert_token(pool: &sqlx::PgPool, device_id: &str, device_type: &str, raw_token: &[u8]) {
-    let hash = Sha256::digest(raw_token);
-    let hash_bytes: Vec<u8> = hash.as_slice().to_vec();
-    sqlx::query(
-        "INSERT INTO device_tokens (token_hash, device_type, device_id) VALUES ($1, $2, $3)",
-    )
-    .bind(hash_bytes)
-    .bind(device_type)
-    .bind(device_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-/// Spin up an in-process server against the given Postgres pool.
-/// Returns the local address the server is bound to.
-async fn start_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
-    let state = server::AppState::new(pool);
-    let router = server::build_router(state, None);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind server");
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("server error");
-    });
-    // Give the server a moment to start accepting connections.
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    addr
-}
-
-/// Perform the forwarder hello handshake and return the session_id.
-async fn forwarder_handshake(
-    client: &mut MockWsClient,
-    forwarder_id: &str,
-    reader_ips: Vec<String>,
-) -> String {
-    client
-        .send_message(&WsMessage::ForwarderHello(ForwarderHello {
-            forwarder_id: forwarder_id.to_owned(),
-            reader_ips,
-            display_name: None,
-        }))
-        .await
-        .unwrap();
-    match client.recv_message().await.unwrap() {
-        WsMessage::Heartbeat(hb) => {
-            assert!(!hb.session_id.is_empty(), "session_id must not be empty");
-            hb.session_id
-        }
-        other => panic!("expected Heartbeat after forwarder hello, got {:?}", other),
-    }
-}
-
-/// Perform the receiver hello handshake with a resume cursor list.
-/// Returns the session_id.
-async fn receiver_handshake(
-    client: &mut MockWsClient,
-    receiver_id: &str,
-    resume: Vec<ResumeCursor>,
-) -> String {
-    let mut seen = std::collections::HashSet::new();
-    let streams: Vec<StreamRef> = resume
-        .iter()
-        .filter_map(|cursor| {
-            let key = (cursor.forwarder_id.clone(), cursor.reader_ip.clone());
-            if seen.insert(key.clone()) {
-                Some(StreamRef {
-                    forwarder_id: key.0,
-                    reader_ip: key.1,
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-    client
-        .send_message(&WsMessage::ReceiverHelloV12(ReceiverHelloV12 {
-            receiver_id: receiver_id.to_owned(),
-            mode: ReceiverMode::Live {
-                streams,
-                earliest_epochs: vec![],
-            },
-            resume,
-        }))
-        .await
-        .unwrap();
-    loop {
-        match client.recv_message().await.unwrap() {
-            WsMessage::Heartbeat(hb) => {
-                assert!(!hb.session_id.is_empty(), "session_id must not be empty");
-                break hb.session_id;
-            }
-            WsMessage::ReceiverModeApplied(_) => {}
-            other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Test: Single forwarder stream — mock receiver client (protocol-level lane).

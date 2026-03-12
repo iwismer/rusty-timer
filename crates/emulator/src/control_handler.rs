@@ -12,6 +12,7 @@ use ipico_core::control::{
 use ipico_core::read::ReadType;
 
 use chrono::{Datelike, Local, TimeZone, Timelike};
+use tracing::warn;
 
 use crate::lcg_next;
 use crate::read_gen::generate_read_for_chip;
@@ -388,23 +389,46 @@ pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec
     let length_byte = match u8::from_str_radix(&frame[4..6], 16) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!(
-                "[emulator] rejecting frame: invalid length hex: {:?}",
-                &frame[4..6]
-            );
+            warn!(hex = ?&frame[4..6], "rejecting frame: invalid length hex");
             return vec![];
         }
     };
     let instruction = match u8::from_str_radix(&frame[6..8], 16) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!(
-                "[emulator] rejecting frame: invalid instruction hex: {:?}",
-                &frame[6..8]
-            );
+            warn!(hex = ?&frame[6..8], "rejecting frame: invalid instruction hex");
             return vec![];
         }
     };
+
+    // Validate LRC checksum for ab-prefixed frames.
+    //
+    // Body = everything between the "ab" prefix and the last 2 checksum chars.
+    // Expected LRC = sum of ASCII byte values of body, low byte.
+    // "ac"-prefixed frames skip checksum validation per spec. This function
+    // independently rejects non-"ab" frames at its entry guard above.
+    {
+        let declared_hex = &frame[frame.len() - 2..];
+        match u8::from_str_radix(declared_hex, 16) {
+            Ok(declared) => {
+                let body = &frame[2..frame.len() - 2];
+                let computed = lrc(body.as_bytes());
+                if computed != declared {
+                    warn!(
+                        declared = format_args!("0x{:02x}", declared),
+                        computed = format_args!("0x{:02x}", computed),
+                        frame_prefix = ?&frame[..frame.len().min(30)],
+                        "rejecting frame: LRC mismatch"
+                    );
+                    return vec![];
+                }
+            }
+            Err(_) => {
+                warn!(hex = ?declared_hex, "rejecting frame: invalid LRC hex");
+                return vec![];
+            }
+        }
+    }
 
     // Parse data bytes (between instruction and checksum).
     // Reject the entire frame if any data byte has invalid hex.
@@ -1201,6 +1225,33 @@ mod tests {
         state.set_recording(true);
         assert!(state.recording());
         assert!(!state.downloading());
+    }
+
+    // -- Checksum validation tests --
+
+    #[test]
+    fn handle_control_frame_rejects_corrupted_checksum() {
+        let mut state = make_test_state();
+
+        // Build a valid GetStatistics frame with correct LRC.
+        let frame = cmd_to_frame(&Command::GetStatistics);
+        assert!(
+            !handle_control_frame(&mut state, &frame).is_empty(),
+            "valid frame should be accepted"
+        );
+
+        // Corrupt the last 2 chars (the checksum) by XOR-ing the first nibble.
+        let mut corrupted = frame.clone();
+        let last_char = corrupted.pop().unwrap();
+        // Flip between '0' and '1' to guarantee a different value.
+        let replacement = if last_char == '0' { '1' } else { '0' };
+        corrupted.push(replacement);
+
+        let responses = handle_control_frame(&mut state, &corrupted);
+        assert!(
+            responses.is_empty(),
+            "frame with corrupted checksum should be rejected"
+        );
     }
 
     // -- Malformed frame tests --

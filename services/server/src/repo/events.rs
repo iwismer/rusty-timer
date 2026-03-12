@@ -138,6 +138,7 @@ pub async fn upsert_stream(
     reader_ip: &str,
     forwarder_display_name: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
+    let mut tx = pool.begin().await?;
     let row = sqlx::query!(
         r#"INSERT INTO streams (forwarder_id, reader_ip, forwarder_display_name) VALUES ($1, $2, $3)
            ON CONFLICT (forwarder_id, reader_ip) DO UPDATE SET forwarder_display_name = EXCLUDED.forwarder_display_name
@@ -146,15 +147,16 @@ pub async fn upsert_stream(
         reader_ip,
         forwarder_display_name
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     let stream_id = row.stream_id;
     sqlx::query!(
         "INSERT INTO stream_metrics (stream_id) VALUES ($1) ON CONFLICT (stream_id) DO NOTHING",
         stream_id
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(stream_id)
 }
 

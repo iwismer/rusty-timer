@@ -224,22 +224,27 @@ impl TryFrom<&str> for ChipRead {
         };
         let read_month = match chip_read[22..24].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
+            Ok(month) if !(1..=12).contains(&month) => return Err("Invalid Chip Read"),
             Ok(month) => month,
         };
         let read_day = match chip_read[24..26].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
+            Ok(day) if !(1..=31).contains(&day) => return Err("Invalid Chip Read"),
             Ok(day) => day,
         };
         let read_hour = match chip_read[26..28].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
+            Ok(hour) if hour > 23 => return Err("Invalid Chip Read"),
             Ok(hour) => hour,
         };
         let read_min = match chip_read[28..30].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
+            Ok(min) if min > 59 => return Err("Invalid Chip Read"),
             Ok(min) => min,
         };
         let read_sec = match chip_read[30..32].parse::<u8>() {
             Err(_) => return Err("Invalid Chip Read"),
+            Ok(sec) if sec > 59 => return Err("Invalid Chip Read"),
             Ok(sec) => sec,
         };
         let read_millis = match i32::from_str_radix(&chip_read[32..34], 16) {

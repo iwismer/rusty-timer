@@ -73,7 +73,10 @@ pub enum ShutdownSignal {
 
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
-    pub connection_state: Arc<RwLock<ConnectionState>>,
+    pub connection_state: watch::Sender<ConnectionState>,
+    // Keepalive receiver so that `connection_state.send()` never fails due
+    // to "no receivers" even when no external subscriber is active.
+    _conn_state_keepalive: watch::Receiver<ConnectionState>,
     pub logger: Arc<rt_ui_log::UiLogger<ReceiverUiEvent>>,
     pub shutdown_tx: watch::Sender<ShutdownSignal>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
@@ -84,6 +87,7 @@ pub struct AppState {
     pub stream_counts: crate::cache::StreamCounts,
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
+    pub http_client: reqwest::Client,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -100,9 +104,15 @@ impl AppState {
     ) -> (Arc<Self>, watch::Receiver<ShutdownSignal>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
+        let (conn_tx, conn_keepalive_rx) = watch::channel(ConnectionState::Disconnected);
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .expect("failed to build HTTP client");
         let state = Arc::new(Self {
             db: Arc::new(Mutex::new(db)),
-            connection_state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            connection_state: conn_tx,
+            _conn_state_keepalive: conn_keepalive_rx,
             logger: Arc::new(rt_ui_log::UiLogger::with_buffer(
                 ui_tx.clone(),
                 |entry| ReceiverUiEvent::LogEntry { entry },
@@ -117,10 +127,16 @@ impl AppState {
             stream_counts: crate::cache::StreamCounts::new(),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
+            http_client,
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
         (state, shutdown_rx)
+    }
+
+    /// Subscribe to connection state changes.
+    pub fn conn_rx(&self) -> watch::Receiver<ConnectionState> {
+        self.connection_state.subscribe()
     }
 
     pub fn request_disconnect_shutdown(&self) {
@@ -156,15 +172,19 @@ impl AppState {
     }
 
     pub async fn request_reconnect_if_connected(&self) -> bool {
-        {
-            let mut connection_state = self.connection_state.write().await;
-            if *connection_state != ConnectionState::Connected {
-                return false;
+        let was_connected = self.connection_state.send_if_modified(|state| {
+            if *state == ConnectionState::Connected {
+                *state = ConnectionState::Connecting;
+                true
+            } else {
+                false
             }
-            self.retry_streak.fetch_add(1, Ordering::SeqCst);
-            self.connect_attempt.fetch_add(1, Ordering::SeqCst);
-            *connection_state = ConnectionState::Connecting;
+        });
+        if !was_connected {
+            return false;
         }
+        self.retry_streak.fetch_add(1, Ordering::SeqCst);
+        self.connect_attempt.fetch_add(1, Ordering::SeqCst);
         self.emit_connection_state_side_effects(ConnectionState::Connecting)
             .await;
         true
@@ -173,7 +193,13 @@ impl AppState {
     async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
         let streams_count = {
             let db = self.db.lock().await;
-            db.load_subscriptions().map(|s| s.len()).unwrap_or(0)
+            match db.load_subscriptions() {
+                Ok(s) => s.len(),
+                Err(e) => {
+                    warn!(error = %e, "failed to load subscriptions for status event");
+                    0
+                }
+            }
         };
         let receiver_id = self.receiver_id.read().await.clone();
         let _ = self.ui_tx.send(ReceiverUiEvent::StatusChanged {
@@ -192,7 +218,7 @@ impl AppState {
 
     /// Update connection state, broadcast status change, and emit a log entry.
     pub async fn set_connection_state(&self, new_state: ConnectionState) {
-        *self.connection_state.write().await = new_state.clone();
+        let _ = self.connection_state.send(new_state.clone());
         self.emit_connection_state_side_effects(new_state).await;
     }
 
@@ -210,11 +236,11 @@ impl AppState {
                 };
             }
         };
-        let cursors = match db.load_cursors() {
-            Ok(c) => c,
+        let (cursors, cursors_degraded) = match db.load_cursors() {
+            Ok(c) => (c, false),
             Err(e) => {
                 warn!(error = %e, "failed to load cursors");
-                vec![]
+                (vec![], true)
             }
         };
         drop(db);
@@ -230,14 +256,14 @@ impl AppState {
             .collect();
 
         let upstream_url = self.upstream_url.read().await.clone();
-        let conn_state = self.connection_state.read().await.clone();
+        let conn_state = self.connection_state.borrow().clone();
 
         let (server_streams, upstream_error) = match (&upstream_url, &conn_state) {
             (None, _) => (None, Some("no profile configured".to_owned())),
             (_, cs) if *cs != ConnectionState::Connected => {
                 (None, Some(format!("connection state: {cs:?}")))
             }
-            (Some(url), _) => match fetch_server_streams(url).await {
+            (Some(url), _) => match fetch_server_streams(&self.http_client, url).await {
                 Ok(streams) => (Some(streams), None),
                 Err(e) => {
                     warn!(error = %e, "failed to fetch server streams");
@@ -310,7 +336,12 @@ impl AppState {
             });
         }
 
-        let degraded = upstream_error.is_some();
+        let degraded = upstream_error.is_some() || cursors_degraded;
+        let upstream_error = if cursors_degraded && upstream_error.is_none() {
+            Some("failed to load cursors".to_owned())
+        } else {
+            upstream_error
+        };
         StreamsResponse {
             streams,
             degraded,
@@ -553,14 +584,12 @@ pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
 }
 
 /// Fetch available streams from the upstream server.
-pub async fn fetch_server_streams(ws_url: &str) -> Result<Vec<UpstreamStreamInfo>, String> {
+pub async fn fetch_server_streams(
+    client: &reqwest::Client,
+    ws_url: &str,
+) -> Result<Vec<UpstreamStreamInfo>, String> {
     let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
     let url = format!("{base}/api/v1/streams");
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
 
     let resp = client
         .get(&url)
@@ -765,21 +794,13 @@ async fn get_races(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
     let url = format!("{base}/api/v1/races");
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
+    let response = match state
+        .http_client
+        .get(&url)
+        .bearer_auth(profile.token)
+        .send()
+        .await
     {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("HTTP client error: {e}"),
-            )
-                .into_response();
-        }
-    };
-
-    let response = match client.get(&url).bearer_auth(profile.token).send().await {
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
     };
@@ -813,22 +834,9 @@ async fn get_replay_target_epochs(
         return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("HTTP client error: {e}"),
-            )
-                .into_response();
-        }
-    };
-
     let streams_url = format!("{base}/api/v1/streams");
-    let streams_response = match client
+    let streams_response = match state
+        .http_client
         .get(&streams_url)
         .bearer_auth(&profile.token)
         .send()
@@ -861,7 +869,8 @@ async fn get_replay_target_epochs(
     };
 
     let epochs_url = format!("{base}/api/v1/streams/{}/epochs", stream.stream_id);
-    let epochs_response = match client
+    let epochs_response = match state
+        .http_client
         .get(&epochs_url)
         .bearer_auth(&profile.token)
         .send()
@@ -892,7 +901,8 @@ async fn get_replay_target_epochs(
     };
 
     let races_url = format!("{base}/api/v1/races");
-    let races_response = match client
+    let races_response = match state
+        .http_client
         .get(&races_url)
         .bearer_auth(&profile.token)
         .send()
@@ -920,7 +930,7 @@ async fn get_replay_target_epochs(
     };
 
     let race_mapping_fetches = races.iter().map(|race| {
-        let client = client.clone();
+        let client = state.http_client.clone();
         let base = base.clone();
         let token = profile.token.clone();
         let race_id = race.race_id.clone();
@@ -1016,7 +1026,7 @@ async fn put_subscriptions(
     match db.replace_subscriptions(&subs) {
         Ok(()) => {
             drop(db);
-            let conn_for_status = state.connection_state.read().await.clone();
+            let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
             let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
@@ -1027,7 +1037,7 @@ async fn put_subscriptions(
             });
             drop(db);
             state.emit_streams_snapshot().await;
-            let conn_for_reconnect = state.connection_state.read().await.clone();
+            let conn_for_reconnect = state.connection_state.borrow().clone();
             if matches!(
                 conn_for_reconnect,
                 ConnectionState::Connected
@@ -1062,7 +1072,7 @@ async fn get_subscriptions(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let receiver_id = state.receiver_id.read().await.clone();
-    let conn = state.connection_state.read().await.clone();
+    let conn = state.connection_state.borrow().clone();
     let db = state.db.lock().await;
     let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = state.db_integrity_ok;
@@ -1086,7 +1096,7 @@ async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let current = state.connection_state.read().await.clone();
+    let current = state.connection_state.borrow().clone();
     if current == ConnectionState::Disconnected {
         return StatusCode::OK.into_response();
     }
@@ -1174,7 +1184,7 @@ async fn post_admin_purge_subscriptions(
     match db.delete_all_subscriptions() {
         Ok(count) => {
             drop(db);
-            let conn_for_status = state.connection_state.read().await.clone();
+            let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
             let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
@@ -1185,7 +1195,7 @@ async fn post_admin_purge_subscriptions(
             });
             drop(db);
             state.emit_streams_snapshot().await;
-            let conn_for_reconnect = state.connection_state.read().await.clone();
+            let conn_for_reconnect = state.connection_state.borrow().clone();
             if matches!(
                 conn_for_reconnect,
                 ConnectionState::Connected
@@ -1207,7 +1217,7 @@ async fn post_admin_reset_profile(
     if !check_admin_intent(&headers, ADMIN_RESET_PROFILE_INTENT) {
         return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
     }
-    let current = state.connection_state.read().await.clone();
+    let current = state.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
             .set_connection_state(ConnectionState::Disconnecting)
@@ -1235,7 +1245,7 @@ async fn post_admin_factory_reset(
     if !check_admin_intent(&headers, ADMIN_FACTORY_RESET_INTENT) {
         return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
     }
-    let current = state.connection_state.read().await.clone();
+    let current = state.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
             .set_connection_state(ConnectionState::Disconnecting)

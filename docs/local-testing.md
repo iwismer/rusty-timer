@@ -60,6 +60,7 @@ applied automatically on startup.
 |----------|---------|-------------|
 | `BIND_ADDR` | `0.0.0.0:8080` | TCP address the HTTP/WS server listens on |
 | `LOG_LEVEL` | `info` | Tracing filter (e.g. `debug`, `info`, `warn`) |
+| `DATABASE_POOL_SIZE` | `10` | Maximum number of Postgres connections in the pool |
 
 ```bash
 DATABASE_URL=postgres://rt:secret@localhost:5432/rusty_timer \

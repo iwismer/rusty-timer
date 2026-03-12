@@ -864,7 +864,10 @@ async fn test_delete_epoch_events_clears_stream_cursors() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(s1_cursor_count, 0, "all s1 cursors should be deleted");
+    assert_eq!(
+        s1_cursor_count, 1,
+        "only epoch-1 cursor should be deleted; epoch-2 cursor remains"
+    );
 
     let s2_cursor_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM receiver_cursors WHERE stream_id = $1")
@@ -1265,4 +1268,23 @@ async fn test_delete_all_races_idempotent() {
         .await
         .unwrap();
     assert_eq!(forwarder_races_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Readyz tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn readyz_returns_ok_when_db_is_healthy() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool).await;
+
+    let resp = reqwest::get(format!("http://{addr}/readyz")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "ok");
 }

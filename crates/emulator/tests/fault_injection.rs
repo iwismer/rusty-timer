@@ -1,18 +1,9 @@
 //! Integration tests for fault injection.
 //!
-//! Reader mode faults: jitter, disconnect, reconnect_delay
-//! Forwarder mode faults: malformed_messages, slow_acks
-//!
-//! Tests:
-//! 1. FaultSchedule parses jitter fault from YAML
-//! 2. FaultSchedule parses disconnect fault from YAML
-//! 3. FaultSchedule parses reconnect_delay fault from YAML
-//! 4. Jitter fault delays event emission after trigger point
-//! 5. Disconnect fault marks stream as disconnected after trigger point
-//! 6. Reconnect delay is configurable
-//! 7. Malformed message fault generates unparseable payloads
-//! 8. Slow ack fault introduces delay before ack
-//! 9. No fault = zero delays, all events emitted
+//! Covers: YAML parsing of fault configs, FaultSchedule construction,
+//! fault outcome behavior (jitter, disconnect, reconnect_delay,
+//! malformed_messages, slow_acks), no-fault baseline, and
+//! `until_events` window bounds (transient, permanent, multi-fault).
 
 use emulator::faults::{FaultOutcome, FaultSchedule, apply_fault_to_event_emission};
 use emulator::scenario::{FaultConfig, load_scenario_from_str};
@@ -46,6 +37,7 @@ readers:
     assert_eq!(fault.fault_type, "jitter");
     assert_eq!(fault.after_events, 50);
     assert_eq!(fault.duration_ms, 500);
+    assert_eq!(fault.until_events, None);
 }
 
 #[test]
@@ -94,6 +86,31 @@ readers:
     assert_eq!(cfg.readers[0].faults[0].duration_ms, 2000);
 }
 
+#[test]
+fn fault_until_events_parses_from_yaml() {
+    let yaml = r#"
+mode: reader
+seed: 1
+readers:
+  - ip: "192.168.2.4"
+    port: 10004
+    read_type: raw
+    chip_ids: [400]
+    events_per_second: 10
+    total_events: 50
+    start_delay_ms: 0
+    faults:
+      - type: jitter
+        after_events: 5
+        duration_ms: 100
+        until_events: 8
+"#;
+    let cfg = load_scenario_from_str(yaml).expect("parse");
+    let fault = &cfg.readers[0].faults[0];
+    assert_eq!(fault.after_events, 5);
+    assert_eq!(fault.until_events, Some(8));
+}
+
 // ---------------------------------------------------------------------------
 // FaultSchedule construction
 // ---------------------------------------------------------------------------
@@ -105,11 +122,13 @@ fn fault_schedule_from_reader_faults() {
             fault_type: "jitter".to_owned(),
             after_events: 10,
             duration_ms: 500,
+            until_events: None,
         },
         FaultConfig {
             fault_type: "disconnect".to_owned(),
             after_events: 20,
             duration_ms: 1000,
+            until_events: None,
         },
     ];
     let schedule = FaultSchedule::from_fault_configs(&faults);
@@ -143,6 +162,7 @@ fn jitter_fault_triggers_after_threshold() {
         fault_type: "jitter".to_owned(),
         after_events: 5,
         duration_ms: 200,
+        until_events: None,
     }];
     let schedule = FaultSchedule::from_fault_configs(&faults);
 
@@ -176,6 +196,7 @@ fn disconnect_fault_triggers_after_threshold() {
         fault_type: "disconnect".to_owned(),
         after_events: 10,
         duration_ms: 500,
+        until_events: None,
     }];
     let schedule = FaultSchedule::from_fault_configs(&faults);
 
@@ -198,6 +219,7 @@ fn reconnect_delay_fault_triggers() {
         fault_type: "reconnect_delay".to_owned(),
         after_events: 3,
         duration_ms: 1500,
+        until_events: None,
     }];
     let schedule = FaultSchedule::from_fault_configs(&faults);
 
@@ -217,6 +239,7 @@ fn malformed_message_fault_type_recognized() {
         fault_type: "malformed_messages".to_owned(),
         after_events: 0,
         duration_ms: 0,
+        until_events: None,
     }];
     let schedule = FaultSchedule::from_fault_configs(&faults);
     let outcome = apply_fault_to_event_emission(&schedule, 0);
@@ -233,6 +256,7 @@ fn slow_ack_fault_type_recognized() {
         fault_type: "slow_acks".to_owned(),
         after_events: 0,
         duration_ms: 300,
+        until_events: None,
     }];
     let schedule = FaultSchedule::from_fault_configs(&faults);
     let outcome = apply_fault_to_event_emission(&schedule, 0);
@@ -251,15 +275,151 @@ fn earliest_fault_wins_when_multiple_trigger() {
             fault_type: "jitter".to_owned(),
             after_events: 5,
             duration_ms: 100,
+            until_events: None,
         },
         FaultConfig {
             fault_type: "disconnect".to_owned(),
             after_events: 5,
             duration_ms: 200,
+            until_events: None,
         },
     ];
     let schedule = FaultSchedule::from_fault_configs(&faults);
     let outcome = apply_fault_to_event_emission(&schedule, 5);
     // First defined fault (jitter) wins
     assert_eq!(outcome, FaultOutcome::Jitter { delay_ms: 100 });
+}
+
+// ---------------------------------------------------------------------------
+// until_events tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn until_events_bounds_transient_fault_window() {
+    // Fault fires on events 5, 6, 7 but NOT at 8, 9, 10.
+    let faults = vec![FaultConfig {
+        fault_type: "jitter".to_owned(),
+        after_events: 5,
+        duration_ms: 100,
+        until_events: Some(8),
+    }];
+    let schedule = FaultSchedule::from_fault_configs(&faults);
+
+    // Before window: normal
+    for event_num in 0u64..5 {
+        let outcome = apply_fault_to_event_emission(&schedule, event_num);
+        assert_eq!(
+            outcome,
+            FaultOutcome::Normal,
+            "event_num={} is before the fault window, expected Normal",
+            event_num
+        );
+    }
+
+    // Inside window [5, 8): fault fires
+    for event_num in 5u64..8 {
+        let outcome = apply_fault_to_event_emission(&schedule, event_num);
+        assert_eq!(
+            outcome,
+            FaultOutcome::Jitter { delay_ms: 100 },
+            "event_num={} is inside the fault window [5,8), expected Jitter",
+            event_num
+        );
+    }
+
+    // At and after upper bound: normal again
+    for event_num in 8u64..=10 {
+        let outcome = apply_fault_to_event_emission(&schedule, event_num);
+        assert_eq!(
+            outcome,
+            FaultOutcome::Normal,
+            "event_num={} is at/after until_events=8, expected Normal",
+            event_num
+        );
+    }
+}
+
+#[test]
+fn until_events_none_fires_permanently() {
+    // A fault with until_events: None fires on every event from after_events onward.
+    let faults = vec![FaultConfig {
+        fault_type: "jitter".to_owned(),
+        after_events: 3,
+        duration_ms: 50,
+        until_events: None,
+    }];
+    let schedule = FaultSchedule::from_fault_configs(&faults);
+
+    // Before threshold: normal
+    for event_num in 0u64..3 {
+        let outcome = apply_fault_to_event_emission(&schedule, event_num);
+        assert_eq!(outcome, FaultOutcome::Normal, "event_num={}", event_num);
+    }
+
+    // From threshold onward: always fault
+    for event_num in 3u64..20 {
+        let outcome = apply_fault_to_event_emission(&schedule, event_num);
+        assert_eq!(
+            outcome,
+            FaultOutcome::Jitter { delay_ms: 50 },
+            "event_num={} should permanently trigger Jitter when until_events is None",
+            event_num
+        );
+    }
+}
+
+#[test]
+fn two_faults_first_transient_second_permanent() {
+    // First fault: jitter active in [5, 10)
+    // Second fault: disconnect active from 10 onward
+    // At events 0-4: Normal
+    // At events 5-9: Jitter (first fault active, second not yet)
+    // At events 10+: Disconnect (first fault expired, second now active)
+    let faults = vec![
+        FaultConfig {
+            fault_type: "jitter".to_owned(),
+            after_events: 5,
+            duration_ms: 100,
+            until_events: Some(10),
+        },
+        FaultConfig {
+            fault_type: "disconnect".to_owned(),
+            after_events: 10,
+            duration_ms: 500,
+            until_events: None,
+        },
+    ];
+    let schedule = FaultSchedule::from_fault_configs(&faults);
+
+    // Before first fault window
+    for event_num in 0u64..5 {
+        assert_eq!(
+            apply_fault_to_event_emission(&schedule, event_num),
+            FaultOutcome::Normal,
+            "event_num={} should be Normal before any fault",
+            event_num
+        );
+    }
+
+    // Inside first fault window [5, 10): jitter wins (first entry)
+    for event_num in 5u64..10 {
+        assert_eq!(
+            apply_fault_to_event_emission(&schedule, event_num),
+            FaultOutcome::Jitter { delay_ms: 100 },
+            "event_num={} should trigger Jitter (first fault active)",
+            event_num
+        );
+    }
+
+    // From 10 onward: first fault expired, second fault active
+    for event_num in 10u64..15 {
+        assert_eq!(
+            apply_fault_to_event_emission(&schedule, event_num),
+            FaultOutcome::Disconnect {
+                reconnect_delay_ms: 500
+            },
+            "event_num={} should trigger Disconnect (second fault active after first expired)",
+            event_num
+        );
+    }
 }

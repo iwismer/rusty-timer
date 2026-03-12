@@ -396,15 +396,6 @@ fn find_extracted_binary(
         }
     }
 
-    // Fallback: return the first (only) file.
-    for entry in std::fs::read_dir(extract_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-
     Err(format!("no binary found in extracted archive for {service_name}").into())
 }
 
@@ -569,5 +560,42 @@ mod tests {
     #[test]
     fn update_mode_rejects_unknown_string() {
         assert!(serde_json::from_str::<UpdateMode>(r#""bogus""#).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // find_extracted_binary tests
+    // -----------------------------------------------------------------------
+
+    /// When the directory contains only non-matching files (e.g. README.md and
+    /// an unrelated binary), the function must return an error — not silently
+    /// pick the first file found.
+    #[test]
+    fn find_extracted_binary_rejects_non_matching_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("README.md"), b"# readme").expect("write README");
+        fs::write(temp.path().join("other-binary"), b"\x7fELF").expect("write other-binary");
+
+        let result = find_extracted_binary(temp.path(), "my-service");
+        assert!(
+            result.is_err(),
+            "expected error when no file matches service name, but got: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no binary found"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// When the exact service name is present the function should return it.
+    #[test]
+    fn find_extracted_binary_returns_exact_match() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("README.md"), b"# readme").expect("write README");
+        let bin_path = temp.path().join("my-service");
+        fs::write(&bin_path, b"\x7fELF").expect("write binary");
+
+        let found = find_extracted_binary(temp.path(), "my-service").expect("should find binary");
+        assert_eq!(found, bin_path);
     }
 }

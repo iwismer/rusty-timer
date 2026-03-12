@@ -96,8 +96,9 @@ async fn delete_events_and_cursors(
             )?;
             exec_or_500(
                 sqlx::query!(
-                    "DELETE FROM receiver_cursors WHERE stream_id = $1",
-                    stream_id
+                    "DELETE FROM receiver_cursors WHERE stream_id = $1 AND stream_epoch = $2",
+                    stream_id,
+                    epoch
                 )
                 .execute(&mut **tx)
                 .await,

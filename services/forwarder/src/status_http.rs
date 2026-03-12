@@ -970,22 +970,14 @@ pub async fn apply_section_update(
             .await
         }
         "uplink" => {
-            let batch_mode = optional_string_field(payload, "batch_mode")?;
-            if let Some(ref mode) = batch_mode
-                && mode != "immediate"
-                && mode != "batched"
-            {
-                return Err(bad_request_error(
-                    "batch_mode must be \"immediate\" or \"batched\"",
-                ));
-            }
             let batch_flush_ms = optional_u64_field(payload, "batch_flush_ms")?;
             let batch_max_events = optional_u32_field(payload, "batch_max_events")?;
+            let ack_timeout_secs = optional_u64_field(payload, "ack_timeout_secs")?;
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.uplink = Some(crate::config::RawUplinkConfig {
-                    batch_mode,
                     batch_flush_ms,
                     batch_max_events,
+                    ack_timeout_secs,
                 });
                 Ok(())
             })

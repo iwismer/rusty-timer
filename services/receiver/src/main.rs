@@ -150,7 +150,13 @@ async fn main() {
     // Start local proxies for any saved subscriptions on startup.
     let initial_subs = {
         let db = state.db.lock().await;
-        db.load_subscriptions().unwrap_or_default()
+        match db.load_subscriptions() {
+            Ok(subs) => subs,
+            Err(e) => {
+                warn!(error = %e, "failed to load subscriptions at startup; starting with none");
+                vec![]
+            }
+        }
     };
     // Map from stream-key -> LocalProxy handle.
     let mut proxies: HashMap<String, LocalProxy> = HashMap::new();
@@ -315,6 +321,9 @@ async fn main() {
     let mut session_cancel_tx: Option<watch::Sender<bool>> = None;
     let mut session_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Watch receiver for connection state changes (replaces 50ms polling).
+    let mut conn_state_rx = state.conn_rx();
+
     // Interval for subscription reconciliation polling.
     let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_millis(500));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -375,7 +384,7 @@ async fn main() {
             // ------------------------------------------------------------------
             // Connection state changes
             // ------------------------------------------------------------------
-            result = watch_connection_state(Arc::clone(&state)) => {
+            result = watch_connection_state(&mut conn_state_rx) => {
                 match result {
                     ConnectionState::Connecting => {
                         let attempt = state.current_connect_attempt();
@@ -440,7 +449,7 @@ async fn main() {
                                         let (session_result, ws) = {
                                             let receiver_id = state.receiver_id.read().await.clone();
                                             let db = state.db.lock().await;
-                                            do_handshake(ws, &db, &state.ui_tx, &receiver_id).await
+                                            do_handshake(ws, &db, &state.ui_tx, &receiver_id, &state.http_client).await
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -482,9 +491,7 @@ async fn main() {
                                                         stream_counts: counts,
                                                         ui_tx,
                                                         shutdown: cancel_rx,
-                                                        connection_state: Arc::clone(
-                                                            &st.connection_state,
-                                                        ),
+                                                        connection_state: st.conn_rx(),
                                                     };
                                                     let result = receiver::session::run_session_loop(
                                                         ws, session_id, deps,
@@ -505,7 +512,7 @@ async fn main() {
                                                         // Unexpected drop — auto-reconnect.
                                                         st.logger.log("Connection lost, will reconnect");
                                                         st.emit_streams_snapshot().await;
-                                                    } else if *st.connection_state.read().await
+                                                    } else if *st.connection_state.borrow()
                                                         == ConnectionState::Disconnecting
                                                     {
                                                         // User-initiated disconnect.
@@ -569,11 +576,10 @@ fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
 // ---------------------------------------------------------------------------
 // Helper: watch connection_state and return the new value when it changes.
 // ---------------------------------------------------------------------------
-async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
-    // Poll until the state changes from its "idle" values.
+async fn watch_connection_state(rx: &mut watch::Receiver<ConnectionState>) -> ConnectionState {
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let cs = state.connection_state.read().await.clone();
+        rx.changed().await.expect("watch sender dropped");
+        let cs = rx.borrow().clone();
         if cs == ConnectionState::Connecting || cs == ConnectionState::Disconnecting {
             return cs;
         }
@@ -582,7 +588,7 @@ async fn watch_connection_state(state: Arc<AppState>) -> ConnectionState {
 
 async fn is_current_connect_attempt(state: &Arc<AppState>, attempt: u64) -> bool {
     state.current_connect_attempt() == attempt
-        && *state.connection_state.read().await == ConnectionState::Connecting
+        && *state.connection_state.borrow() == ConnectionState::Connecting
 }
 
 fn compute_reconnect_delay_secs(retries: u64) -> u64 {
@@ -676,7 +682,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
     };
 
     loop {
-        if *state.connection_state.read().await != ConnectionState::Connected {
+        if *state.connection_state.borrow() != ConnectionState::Connected {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
         }
@@ -707,7 +713,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
         {
             Ok(()) => {}
             Err(e) => {
-                if *state.connection_state.read().await == ConnectionState::Connected {
+                if *state.connection_state.borrow() == ConnectionState::Connected {
                     state.logger.log_at(
                         UiLogLevel::Warn,
                         format!("upstream dashboard SSE refresh disconnected: {e}"),
@@ -741,7 +747,7 @@ async fn consume_upstream_dashboard_events(
     let mut pending_event: Option<String> = None;
 
     loop {
-        if *state.connection_state.read().await != ConnectionState::Connected {
+        if *state.connection_state.borrow() != ConnectionState::Connected {
             return Ok(());
         }
 
@@ -816,6 +822,7 @@ async fn do_handshake<S>(
     db: &Db,
     ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
     receiver_id: &str,
+    http_client: &reqwest::Client,
 ) -> (Result<String, receiver::session::SessionError>, Option<S>)
 where
     S: futures_util::Stream<
@@ -893,7 +900,8 @@ where
 
         let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
         if let Some(url) = profile_url
-            && let Ok(server_streams) = receiver::control_api::fetch_server_streams(&url).await
+            && let Ok(server_streams) =
+                receiver::control_api::fetch_server_streams(http_client, &url).await
         {
             let server_epoch_by_stream: HashMap<(String, String), i64> = server_streams
                 .into_iter()
@@ -1271,7 +1279,8 @@ mod tests {
         let db = Db::open_in_memory().expect("db");
         let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
 
-        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver").await;
+        let http_client = reqwest::Client::new();
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver", &http_client).await;
         assert!(result.is_ok(), "handshake should succeed");
 
         let mut log_entries = Vec::new();
@@ -1358,7 +1367,8 @@ mod tests {
         );
 
         let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
-        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver").await;
+        let http_client = reqwest::Client::new();
+        let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver", &http_client).await;
         assert!(result.is_ok(), "handshake should succeed");
         assert_eq!(
             db.load_receiver_mode().expect("load mode after handshake"),
@@ -1386,7 +1396,7 @@ mod tests {
         assert!(!reissued);
         assert_eq!(state.current_connect_attempt(), before_attempt);
         assert_eq!(
-            *state.connection_state.read().await,
+            *state.connection_state.borrow(),
             ConnectionState::Disconnecting
         );
     }
@@ -1404,7 +1414,7 @@ mod tests {
         assert!(retried);
         assert!(state.current_connect_attempt() > attempt);
         assert_eq!(
-            *state.connection_state.read().await,
+            *state.connection_state.borrow(),
             ConnectionState::Connecting
         );
     }
@@ -1703,7 +1713,7 @@ mod tests {
         let transitioned = set_disconnected_if_attempt_current(&state, stale_attempt).await;
         assert!(!transitioned);
         assert_eq!(
-            *state.connection_state.read().await,
+            *state.connection_state.borrow(),
             ConnectionState::Connecting
         );
     }

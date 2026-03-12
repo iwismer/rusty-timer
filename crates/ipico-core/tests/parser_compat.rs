@@ -150,6 +150,164 @@ fn tto_enabled_ascii_frame_parses_without_breaking_legacy_fields() {
 }
 
 // ===========================================================================
+// Date/time range validation tests
+// ===========================================================================
+
+/// Build a 36-char chip read string with the given datetime fields and the
+/// correct LRC checksum.  All other fields (tag type byte, tag ID, unknown
+/// nibble) are taken from the canonical test fixture so existing tests are
+/// unaffected.
+fn read_with_datetime(year: u8, month: u8, day: u8, hour: u8, min: u8, sec: u8) -> String {
+    // body covers positions [2..34]:
+    //   [2..4]  = type byte "40"
+    //   [4..16] = tag_id "000000012345"
+    //   [16..20] = "0a2a" (constant bytes from real fixtures)
+    //   [20..22] = year (2-digit decimal)
+    //   [22..24] = month
+    //   [24..26] = day
+    //   [26..28] = hour
+    //   [28..30] = minute
+    //   [30..32] = second
+    //   [32..34] = centisecond hex "27"
+    let body = format!(
+        "400000000123450a2a{:02}{:02}{:02}{:02}{:02}{:02}27",
+        year, month, day, hour, min, sec
+    );
+    let checksum: u8 = body.bytes().map(|b| b as u32).sum::<u32>() as u8;
+    format!("aa{}{:02x}", body, checksum)
+}
+
+// --- Invalid ranges ---
+
+#[test]
+fn month_zero_is_rejected() {
+    let s = read_with_datetime(1, 0, 15, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_err(), "month=0 should be rejected");
+    assert_eq!(result.err().unwrap(), "Invalid Chip Read");
+}
+
+#[test]
+fn month_13_is_rejected() {
+    let s = read_with_datetime(1, 13, 15, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_err(), "month=13 should be rejected");
+    assert_eq!(result.err().unwrap(), "Invalid Chip Read");
+}
+
+#[test]
+fn day_zero_is_rejected() {
+    let s = read_with_datetime(1, 6, 0, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_err(), "day=0 should be rejected");
+    assert_eq!(result.err().unwrap(), "Invalid Chip Read");
+}
+
+#[test]
+fn day_32_is_rejected() {
+    let s = read_with_datetime(1, 6, 32, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_err(), "day=32 should be rejected");
+    assert_eq!(result.err().unwrap(), "Invalid Chip Read");
+}
+
+#[test]
+fn hour_24_is_rejected() {
+    let s = read_with_datetime(1, 6, 15, 24, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_err(), "hour=24 should be rejected");
+    assert_eq!(result.err().unwrap(), "Invalid Chip Read");
+}
+
+#[test]
+fn minute_60_is_rejected() {
+    let s = read_with_datetime(1, 6, 15, 10, 60, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_err(), "minute=60 should be rejected");
+    assert_eq!(result.err().unwrap(), "Invalid Chip Read");
+}
+
+#[test]
+fn second_60_is_rejected() {
+    let s = read_with_datetime(1, 6, 15, 10, 30, 60);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_err(), "second=60 should be rejected");
+    assert_eq!(result.err().unwrap(), "Invalid Chip Read");
+}
+
+// --- Valid boundary values ---
+
+#[test]
+fn month_1_is_accepted() {
+    let s = read_with_datetime(1, 1, 15, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "month=1 should be accepted");
+}
+
+#[test]
+fn month_12_is_accepted() {
+    let s = read_with_datetime(1, 12, 15, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "month=12 should be accepted");
+}
+
+#[test]
+fn day_1_is_accepted() {
+    let s = read_with_datetime(1, 6, 1, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "day=1 should be accepted");
+}
+
+#[test]
+fn day_31_is_accepted() {
+    let s = read_with_datetime(1, 1, 31, 10, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "day=31 should be accepted");
+}
+
+#[test]
+fn hour_0_is_accepted() {
+    let s = read_with_datetime(1, 6, 15, 0, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "hour=0 should be accepted");
+}
+
+#[test]
+fn hour_23_is_accepted() {
+    let s = read_with_datetime(1, 6, 15, 23, 30, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "hour=23 should be accepted");
+}
+
+#[test]
+fn minute_0_is_accepted() {
+    let s = read_with_datetime(1, 6, 15, 10, 0, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "minute=0 should be accepted");
+}
+
+#[test]
+fn minute_59_is_accepted() {
+    let s = read_with_datetime(1, 6, 15, 10, 59, 45);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "minute=59 should be accepted");
+}
+
+#[test]
+fn second_0_is_accepted() {
+    let s = read_with_datetime(1, 6, 15, 10, 30, 0);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "second=0 should be accepted");
+}
+
+#[test]
+fn second_59_is_accepted() {
+    let s = read_with_datetime(1, 6, 15, 10, 30, 59);
+    let result = ChipRead::try_from(s.as_str());
+    assert!(result.is_ok(), "second=59 should be accepted");
+}
+
+// ===========================================================================
 // Error / edge-case tests (behavior parity with original chip.rs)
 // ===========================================================================
 

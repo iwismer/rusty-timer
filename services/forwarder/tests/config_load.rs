@@ -285,6 +285,28 @@ target = "192.168.2.156:10000"
 }
 
 #[test]
+fn default_ack_timeout_secs() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert_eq!(cfg.uplink.ack_timeout_secs, 30);
+}
+
+#[test]
 fn default_status_http_bind() {
     let token_file = write_token_file("tok");
     let toml = format!(
@@ -304,30 +326,6 @@ target = "192.168.2.156:10000"
     );
     let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
     assert_eq!(cfg.status_http.bind, "127.0.0.1:8080");
-}
-
-#[test]
-fn default_uplink_batch_mode() {
-    let token_file = write_token_file("tok");
-    let toml = format!(
-        r#"
-schema_version = 1
-
-[server]
-base_url = "https://timing.example.com"
-
-[auth]
-token_file = "{}"
-
-[[readers]]
-target = "192.168.2.156:10000"
-"#,
-        token_file.path().display()
-    );
-    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
-    assert_eq!(cfg.uplink.batch_mode, "immediate");
-    assert_eq!(cfg.uplink.batch_flush_ms, 100);
-    assert_eq!(cfg.uplink.batch_max_events, 50);
 }
 
 #[test]
