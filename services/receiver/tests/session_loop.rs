@@ -491,18 +491,14 @@ async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
 
             // Check if any message was received (there should be none).
             let next = tokio::time::timeout(Duration::from_millis(100), ws.next()).await;
-            match next {
-                Ok(Some(Ok(Message::Text(t)))) => {
-                    let parsed = serde_json::from_str::<WsMessage>(&t).unwrap();
-                    if let WsMessage::ReceiverAck(ack) = parsed {
-                        panic!(
-                            "expected no ack when save_cursor fails, but got ack with {} entries",
-                            ack.entries.len()
-                        );
-                    }
+            if let Ok(Some(Ok(Message::Text(t)))) = next {
+                let parsed = serde_json::from_str::<WsMessage>(&t).unwrap();
+                if let WsMessage::ReceiverAck(ack) = parsed {
+                    panic!(
+                        "expected no ack when save_cursor fails, but got ack with {} entries",
+                        ack.entries.len()
+                    );
                 }
-                // Timeout or close = good, no ack was sent
-                _ => {}
             }
 
             no_ack_tx.send(()).unwrap();
