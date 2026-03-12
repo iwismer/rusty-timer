@@ -285,6 +285,28 @@ target = "192.168.2.156:10000"
 }
 
 #[test]
+fn default_ack_timeout_secs() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert_eq!(cfg.uplink.ack_timeout_secs, 30);
+}
+
+#[test]
 fn default_status_http_bind() {
     let token_file = write_token_file("tok");
     let toml = format!(
