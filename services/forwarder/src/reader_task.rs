@@ -25,6 +25,23 @@ pub(crate) async fn mark_reader_disconnected(status: &StatusServer, reader_ip: &
         .await;
 }
 
+async fn disconnect_and_notify(
+    status: &StatusServer,
+    stream_key: &str,
+    reader_status_tx: &tokio::sync::mpsc::UnboundedSender<rt_protocol::ReaderStatusUpdate>,
+) {
+    mark_reader_disconnected(status, stream_key).await;
+    if reader_status_tx
+        .send(rt_protocol::ReaderStatusUpdate {
+            reader_ip: stream_key.to_owned(),
+            connected: false,
+        })
+        .is_err()
+    {
+        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum JournalAppendError {
     StreamState(String),
@@ -167,16 +184,7 @@ pub(crate) async fn run_reader(
                         reader_ip, e, backoff_secs
                     ),
                 );
-                mark_reader_disconnected(&status, &stream_key).await;
-                if reader_status_tx
-                    .send(rt_protocol::ReaderStatusUpdate {
-                        reader_ip: stream_key.clone(),
-                        connected: false,
-                    })
-                    .is_err()
-                {
-                    warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
-                }
+                disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -222,11 +230,7 @@ pub(crate) async fn run_reader(
                         reader_ip, e, backoff_secs
                     ),
                 );
-                mark_reader_disconnected(&status, &stream_key).await;
-                let _ = reader_status_tx.send(rt_protocol::ReaderStatusUpdate {
-                    reader_ip: stream_key.clone(),
-                    connected: false,
-                });
+                disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -451,16 +455,7 @@ pub(crate) async fn run_reader(
                         format!("reader {} read error during download: {}", reader_ip, e),
                     )
                     .await;
-                    mark_reader_disconnected(&status, &stream_key).await;
-                    if reader_status_tx
-                        .send(rt_protocol::ReaderStatusUpdate {
-                            reader_ip: stream_key.clone(),
-                            connected: false,
-                        })
-                        .is_err()
-                    {
-                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
-                    }
+                    disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
                     break;
                 }
                 Ok(0) => {
@@ -473,16 +468,7 @@ pub(crate) async fn run_reader(
                         format!("reader {} connection closed during download", reader_ip),
                     )
                     .await;
-                    mark_reader_disconnected(&status, &stream_key).await;
-                    if reader_status_tx
-                        .send(rt_protocol::ReaderStatusUpdate {
-                            reader_ip: stream_key.clone(),
-                            connected: false,
-                        })
-                        .is_err()
-                    {
-                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
-                    }
+                    disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
                     break;
                 }
                 Ok(_) => {}
@@ -552,55 +538,25 @@ pub(crate) async fn run_reader(
             };
             let (epoch, seq) = match append_result {
                 Ok(v) => v,
-                Err(JournalAppendError::StreamState(e)) => {
+                Err(e) => {
+                    let context = match &e {
+                        JournalAppendError::StreamState(_) => "epoch",
+                        JournalAppendError::NextSeq(_) => "seq",
+                        JournalAppendError::Insert(_) => "insert",
+                    };
+                    let inner = match &e {
+                        JournalAppendError::StreamState(s)
+                        | JournalAppendError::NextSeq(s)
+                        | JournalAppendError::Insert(s) => s.as_str(),
+                    };
                     logger.log_at(
                         UiLogLevel::Error,
-                        format!("reader {} journal error (epoch): {}", reader_ip, e),
+                        format!(
+                            "reader {} journal error ({}): {}",
+                            reader_ip, context, inner
+                        ),
                     );
-                    mark_reader_disconnected(&status, &stream_key).await;
-                    if reader_status_tx
-                        .send(rt_protocol::ReaderStatusUpdate {
-                            reader_ip: stream_key.clone(),
-                            connected: false,
-                        })
-                        .is_err()
-                    {
-                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
-                    }
-                    break;
-                }
-                Err(JournalAppendError::NextSeq(e)) => {
-                    logger.log_at(
-                        UiLogLevel::Error,
-                        format!("reader {} journal error (seq): {}", reader_ip, e),
-                    );
-                    mark_reader_disconnected(&status, &stream_key).await;
-                    if reader_status_tx
-                        .send(rt_protocol::ReaderStatusUpdate {
-                            reader_ip: stream_key.clone(),
-                            connected: false,
-                        })
-                        .is_err()
-                    {
-                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
-                    }
-                    break;
-                }
-                Err(JournalAppendError::Insert(e)) => {
-                    logger.log_at(
-                        UiLogLevel::Error,
-                        format!("reader {} journal insert failed: {}", reader_ip, e),
-                    );
-                    mark_reader_disconnected(&status, &stream_key).await;
-                    if reader_status_tx
-                        .send(rt_protocol::ReaderStatusUpdate {
-                            reader_ip: stream_key.clone(),
-                            connected: false,
-                        })
-                        .is_err()
-                    {
-                        warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
-                    }
+                    disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
                     break;
                 }
             };

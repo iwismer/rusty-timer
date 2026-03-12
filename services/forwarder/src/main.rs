@@ -234,6 +234,10 @@ async fn main() {
                 Ok(count) => count,
                 Err(e) => {
                     warn!(reader_ip = %reader_addr, error = %e, "failed to load reader total");
+                    logger.log_at(
+                        UiLogLevel::Warn,
+                        format!("reader {} historical total unavailable: {}", reader_addr, e),
+                    );
                     0
                 }
             }

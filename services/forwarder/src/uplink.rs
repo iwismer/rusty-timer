@@ -222,6 +222,12 @@ impl UplinkSession {
         });
         self.send_ws_message(&batch).await?;
 
+        // NOTE: The ack timeout covers the entire recv_batch_response() loop,
+        // including inline processing of control messages (ConfigGet, ConfigSet,
+        // RestartRequest, ReaderControl). If a control handler takes significant
+        // time, it counts against the ack deadline. This is acceptable because
+        // control handlers are designed to be fast (sub-second), and a long stall
+        // likely indicates a real problem worth reconnecting over.
         let timeout_duration = Duration::from_secs(self.ack_timeout_secs);
         tokio::time::timeout(timeout_duration, self.recv_batch_response())
             .await

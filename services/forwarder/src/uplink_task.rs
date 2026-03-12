@@ -13,7 +13,7 @@ use rt_ui_log::UiLogLevel;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{Duration, sleep};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,7 +113,13 @@ pub(crate) async fn handle_config_message(
             });
             session.send_message(&response).await
         }
-        _ => Ok(()),
+        other => {
+            debug!(
+                "handle_config_message called with non-config message: {:?}",
+                std::mem::discriminant(&other)
+            );
+            Ok(())
+        }
     }
 }
 
@@ -194,7 +200,10 @@ pub(crate) async fn handle_reader_control_message(
         status
             .control_clients()
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("recovered from poisoned RwLock");
+                e.into_inner()
+            })
             .get(&reader_ip)
             .cloned()
     };
@@ -431,7 +440,10 @@ pub(crate) async fn handle_reader_control_message(
                 status
                     .download_trackers()
                     .read()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(|e| {
+                        warn!("recovered from poisoned RwLock");
+                        e.into_inner()
+                    })
                     .get(&reader_ip)
                     .cloned()
             };
@@ -530,7 +542,10 @@ pub(crate) async fn handle_reader_control_message(
                 status
                     .reconnect_notifies()
                     .read()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(|e| {
+                        warn!("recovered from poisoned RwLock");
+                        e.into_inner()
+                    })
                     .get(&reader_ip)
                     .cloned()
             };
@@ -581,6 +596,14 @@ pub(crate) async fn handle_reader_control_message(
                 }
                 if rtts.is_empty() {
                     warn!(reader_ip = %bg_reader_ip, "all RTT probes failed; cannot estimate latency for clock sync");
+                    let mut info = bg_status
+                        .get_reader_info(&bg_reader_ip)
+                        .await
+                        .unwrap_or_default();
+                    info.clock = None;
+                    bg_status
+                        .update_reader_info_unless_disconnected(&bg_reader_ip, info)
+                        .await;
                     return;
                 }
                 rtts.sort();
@@ -807,6 +830,7 @@ pub(crate) async fn run_uplink(
                         }
                     }
                     Err(e) => {
+                        warn!(reader_ip = %ip, error = %e, "replay error; events skipped until next reconnect");
                         logger.log_at(
                             UiLogLevel::Error,
                             format!("replay error for reader {}: {}; events skipped until next reconnect", ip, e),
@@ -859,6 +883,9 @@ pub(crate) async fn run_uplink(
                                 entry.last_seq,
                             ) {
                                 warn!(error = %e, "failed to update ack cursor");
+                            }
+                            if let Err(e) = j.prune_acked(&entry.reader_ip, 500) {
+                                warn!(error = %e, reader_ip = %entry.reader_ip, "journal prune failed after replay ack");
                             }
                         }
                     }
@@ -1154,6 +1181,9 @@ pub(crate) async fn run_uplink(
                             entry.last_seq,
                         ) {
                             warn!(error = %e, "failed to update ack cursor");
+                        }
+                        if let Err(e) = j.prune_acked(&entry.reader_ip, 500) {
+                            warn!(error = %e, reader_ip = %entry.reader_ip, "journal prune failed after ack");
                         }
                     }
                 }
