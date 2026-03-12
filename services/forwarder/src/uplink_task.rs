@@ -973,6 +973,7 @@ pub(crate) async fn run_uplink(
                             UiLogLevel::Warn,
                             format!("replay send failed: {}; reconnecting", e),
                         );
+                        reconnect_after_replay = true;
                     }
                 }
 
