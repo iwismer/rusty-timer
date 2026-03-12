@@ -41,6 +41,18 @@ fn extract_error_message(err_json: String) -> String {
         .unwrap_or(err_json)
 }
 
+async fn process_ack(journal: &Mutex<Journal>, ack: &rt_protocol::ForwarderAck) {
+    let mut j = journal.lock().await;
+    for entry in &ack.entries {
+        if let Err(e) = j.update_ack_cursor(&entry.reader_ip, entry.stream_epoch, entry.last_seq) {
+            warn!(error = %e, "failed to update ack cursor");
+        }
+        if let Err(e) = j.prune_acked(&entry.reader_ip, 500) {
+            warn!(error = %e, reader_ip = %entry.reader_ip, "journal prune failed after ack");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Config message handler (used by uplink loop)
 // ---------------------------------------------------------------------------
@@ -858,19 +870,7 @@ pub(crate) async fn run_uplink(
 
                 match send_result {
                     Ok(SendBatchResult::Ack(ack)) => {
-                        let mut j = journal.lock().await;
-                        for entry in &ack.entries {
-                            if let Err(e) = j.update_ack_cursor(
-                                &entry.reader_ip,
-                                entry.stream_epoch,
-                                entry.last_seq,
-                            ) {
-                                warn!(error = %e, "failed to update ack cursor");
-                            }
-                            if let Err(e) = j.prune_acked(&entry.reader_ip, 500) {
-                                warn!(error = %e, reader_ip = %entry.reader_ip, "journal prune failed after replay ack");
-                            }
-                        }
+                        process_ack(&journal, &ack).await;
                     }
                     Ok(SendBatchResult::EpochReset(cmd)) => {
                         logger.log(format!(
@@ -1156,19 +1156,7 @@ pub(crate) async fn run_uplink(
 
             match session.send_batch(pending).await {
                 Ok(SendBatchResult::Ack(ack)) => {
-                    let mut j = journal.lock().await;
-                    for entry in &ack.entries {
-                        if let Err(e) = j.update_ack_cursor(
-                            &entry.reader_ip,
-                            entry.stream_epoch,
-                            entry.last_seq,
-                        ) {
-                            warn!(error = %e, "failed to update ack cursor");
-                        }
-                        if let Err(e) = j.prune_acked(&entry.reader_ip, 500) {
-                            warn!(error = %e, reader_ip = %entry.reader_ip, "journal prune failed after ack");
-                        }
-                    }
+                    process_ack(&journal, &ack).await;
                 }
                 Ok(SendBatchResult::EpochReset(cmd)) => {
                     logger.log(format!(
