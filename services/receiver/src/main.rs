@@ -150,7 +150,13 @@ async fn main() {
     // Start local proxies for any saved subscriptions on startup.
     let initial_subs = {
         let db = state.db.lock().await;
-        db.load_subscriptions().unwrap_or_default()
+        match db.load_subscriptions() {
+            Ok(subs) => subs,
+            Err(e) => {
+                warn!(error = %e, "failed to load subscriptions at startup; starting with none");
+                vec![]
+            }
+        }
     };
     // Map from stream-key -> LocalProxy handle.
     let mut proxies: HashMap<String, LocalProxy> = HashMap::new();

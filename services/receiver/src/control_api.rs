@@ -193,7 +193,13 @@ impl AppState {
     async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
         let streams_count = {
             let db = self.db.lock().await;
-            db.load_subscriptions().map(|s| s.len()).unwrap_or(0)
+            match db.load_subscriptions() {
+                Ok(s) => s.len(),
+                Err(e) => {
+                    warn!(error = %e, "failed to load subscriptions for status event");
+                    0
+                }
+            }
         };
         let receiver_id = self.receiver_id.read().await.clone();
         let _ = self.ui_tx.send(ReceiverUiEvent::StatusChanged {
