@@ -178,10 +178,11 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 return;
             }
             Err(e) => {
+                warn!(error = %e, "invalid JSON in receiver hello");
                 send_ws_error(
                     &mut socket,
                     error_codes::PROTOCOL_ERROR,
-                    &format!("invalid JSON: {e}"),
+                    "invalid JSON in hello message",
                     false,
                 )
                 .await;
@@ -380,10 +381,11 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     break;
                                 }
                                 Err(e) => {
+                                    warn!(error = %e, "invalid JSON in receiver session message");
                                     send_ws_error(
                                         &mut socket,
                                         error_codes::PROTOCOL_ERROR,
-                                        &format!("invalid JSON: {e}"),
+                                        "invalid JSON in message",
                                         false,
                                     )
                                     .await;

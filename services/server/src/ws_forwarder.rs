@@ -207,10 +207,11 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 return;
             }
             Err(e) => {
+                warn!(error = %e, "invalid JSON in forwarder hello");
                 send_ws_error(
                     &mut socket,
                     error_codes::PROTOCOL_ERROR,
-                    &format!("invalid JSON: {}", e),
+                    "invalid JSON in hello message",
                     false,
                 )
                 .await;
@@ -599,7 +600,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 });
                             }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
-                            Err(e) => { send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, &format!("invalid JSON: {}", e), false).await; break; }
+                            Err(e) => { warn!(device_id = %device_id, error = %e, "invalid JSON in forwarder session message"); send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, "invalid JSON in message", false).await; break; }
                         }
                     }
                     Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
