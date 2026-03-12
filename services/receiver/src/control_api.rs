@@ -230,11 +230,11 @@ impl AppState {
                 };
             }
         };
-        let cursors = match db.load_cursors() {
-            Ok(c) => c,
+        let (cursors, cursors_degraded) = match db.load_cursors() {
+            Ok(c) => (c, false),
             Err(e) => {
                 warn!(error = %e, "failed to load cursors");
-                vec![]
+                (vec![], true)
             }
         };
         drop(db);
@@ -330,7 +330,12 @@ impl AppState {
             });
         }
 
-        let degraded = upstream_error.is_some();
+        let degraded = upstream_error.is_some() || cursors_degraded;
+        let upstream_error = if cursors_degraded && upstream_error.is_none() {
+            Some("failed to load cursors".to_owned())
+        } else {
+            upstream_error
+        };
         StreamsResponse {
             streams,
             degraded,
