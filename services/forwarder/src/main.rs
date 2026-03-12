@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Notify, watch};
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 
-// run_reader and run_uplink are called from main() and also used by tests.
+// run_reader and run_uplink are used by main() in production; NOT cfg(test)-gated.
 use reader_task::run_reader;
 use uplink_task::run_uplink;
 
