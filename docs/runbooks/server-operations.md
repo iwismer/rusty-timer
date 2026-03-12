@@ -102,6 +102,7 @@ The server is configured via environment variables (12-factor model):
 | `DATABASE_URL` | (required) | PostgreSQL connection string |
 | `BIND_ADDR` | `0.0.0.0:8080` | HTTP/WS listen address |
 | `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `DATABASE_POOL_SIZE` | `10` | Maximum number of Postgres connections in the pool |
 
 No TOML config file — all config from environment.
 
