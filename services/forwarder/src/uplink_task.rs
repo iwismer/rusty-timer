@@ -230,6 +230,22 @@ pub(crate) fn to_protocol_reader_info(
     }
 }
 
+fn reader_control_response(
+    request_id: String,
+    reader_ip: String,
+    success: bool,
+    error: Option<String>,
+    reader_info: Option<rt_protocol::ReaderInfo>,
+) -> WsMessage {
+    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+        request_id,
+        reader_ip,
+        success,
+        error,
+        reader_info,
+    })
+}
+
 pub(crate) async fn handle_reader_control_message(
     session: &mut UplinkSession,
     req: rt_protocol::ReaderControlRequest,
@@ -254,13 +270,13 @@ pub(crate) async fn handle_reader_control_message(
     };
 
     let Some(client) = client else {
-        let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+        let response = reader_control_response(
             request_id,
             reader_ip,
-            success: false,
-            error: Some("reader not connected".to_owned()),
-            reader_info: None,
-        });
+            false,
+            Some("reader not connected".to_owned()),
+            None,
+        );
         return session.send_message(&response).await;
     };
 
@@ -287,13 +303,13 @@ pub(crate) async fn handle_reader_control_message(
             let mut info = get_cached_info(status, &reader_ip).await;
             forwarder::reader_control::run_status_poll(&client, &mut info).await;
             update_info(status, &reader_ip, info.clone()).await;
-            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
+            let response = reader_control_response(
                 request_id,
                 reader_ip,
-                success: true,
-                error: None,
-                reader_info: Some(to_protocol_reader_info(&info)),
-            });
+                true,
+                None,
+                Some(to_protocol_reader_info(&info)),
+            );
             session.send_message(&response).await
         }
 
@@ -310,25 +326,23 @@ pub(crate) async fn handle_reader_control_message(
                     forwarder::reader_control::run_status_poll_merge_successes(&client, &mut info)
                         .await;
                     update_info(status, &reader_ip, info.clone()).await;
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: true,
-                            error: None,
-                            reader_info: Some(to_protocol_reader_info(&info)),
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        true,
+                        None,
+                        Some(to_protocol_reader_info(&info)),
+                    );
                     session.send_message(&response).await
                 }
                 Err(e) => {
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: false,
-                            error: Some(e.to_string()),
-                            reader_info: None,
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        false,
+                        Some(e.to_string()),
+                        None,
+                    );
                     session.send_message(&response).await
                 }
             }
@@ -338,27 +352,25 @@ pub(crate) async fn handle_reader_control_message(
             let current = match client.get_tag_message_format().await {
                 Ok(format) => format,
                 Err(e) => {
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: false,
-                            error: Some(e.to_string()),
-                            reader_info: None,
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        false,
+                        Some(e.to_string()),
+                        None,
+                    );
                     return session.send_message(&response).await;
                 }
             };
             let updated = current.with_tto_enabled(enabled);
             if let Err(e) = client.set_tag_message_format(updated).await {
-                let response =
-                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                        request_id,
-                        reader_ip,
-                        success: false,
-                        error: Some(e.to_string()),
-                        reader_info: None,
-                    });
+                let response = reader_control_response(
+                    request_id,
+                    reader_ip,
+                    false,
+                    Some(e.to_string()),
+                    None,
+                );
                 return session.send_message(&response).await;
             }
             // Verify and update info
@@ -369,25 +381,23 @@ pub(crate) async fn handle_reader_control_message(
                     forwarder::reader_control::run_status_poll_merge_successes(&client, &mut info)
                         .await;
                     update_info(status, &reader_ip, info.clone()).await;
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: true,
-                            error: None,
-                            reader_info: Some(to_protocol_reader_info(&info)),
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        true,
+                        None,
+                        Some(to_protocol_reader_info(&info)),
+                    );
                     session.send_message(&response).await
                 }
                 Err(e) => {
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: false,
-                            error: Some(format!("set ok but verify failed: {}", e)),
-                            reader_info: None,
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        false,
+                        Some(format!("set ok but verify failed: {}", e)),
+                        None,
+                    );
                     session.send_message(&response).await
                 }
             }
@@ -402,25 +412,23 @@ pub(crate) async fn handle_reader_control_message(
                     forwarder::reader_control::run_status_poll_merge_successes(&client, &mut info)
                         .await;
                     update_info(status, &reader_ip, info.clone()).await;
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: true,
-                            error: None,
-                            reader_info: Some(to_protocol_reader_info(&info)),
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        true,
+                        None,
+                        Some(to_protocol_reader_info(&info)),
+                    );
                     session.send_message(&response).await
                 }
                 Err(e) => {
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: false,
-                            error: Some(e.to_string()),
-                            reader_info: None,
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        false,
+                        Some(e.to_string()),
+                        None,
+                    );
                     session.send_message(&response).await
                 }
             }
@@ -450,13 +458,7 @@ pub(crate) async fn handle_reader_control_message(
                 }
             });
             // Return success immediately
-            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                request_id,
-                reader_ip,
-                success: true,
-                error: None,
-                reader_info: None,
-            });
+            let response = reader_control_response(request_id, reader_ip, true, None, None);
             session.send_message(&response).await
         }
 
@@ -473,14 +475,13 @@ pub(crate) async fn handle_reader_control_message(
                     .cloned()
             };
             let Some(tracker) = tracker else {
-                let response =
-                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                        request_id,
-                        reader_ip,
-                        success: false,
-                        error: Some("reader not connected".to_owned()),
-                        reader_info: None,
-                    });
+                let response = reader_control_response(
+                    request_id,
+                    reader_ip,
+                    false,
+                    Some("reader not connected".to_owned()),
+                    None,
+                );
                 return session.send_message(&response).await;
             };
 
@@ -490,14 +491,13 @@ pub(crate) async fn handle_reader_control_message(
                 match dt.state() {
                     forwarder::reader_control::DownloadState::Starting
                     | forwarder::reader_control::DownloadState::Downloading => {
-                        let response =
-                            WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                                request_id,
-                                reader_ip,
-                                success: false,
-                                error: Some("download already in progress".to_owned()),
-                                reader_info: None,
-                            });
+                        let response = reader_control_response(
+                            request_id,
+                            reader_ip,
+                            false,
+                            Some("download already in progress".to_owned()),
+                            None,
+                        );
                         return session.send_message(&response).await;
                     }
                     forwarder::reader_control::DownloadState::Complete
@@ -527,37 +527,23 @@ pub(crate) async fn handle_reader_control_message(
                 }
             });
 
-            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                request_id,
-                reader_ip,
-                success: true,
-                error: None,
-                reader_info: None,
-            });
+            let response = reader_control_response(request_id, reader_ip, true, None, None);
             session.send_message(&response).await
         }
 
         ReaderControlAction::StopDownload => match client.stop_download().await {
             Ok(()) => {
-                let response =
-                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                        request_id,
-                        reader_ip,
-                        success: true,
-                        error: None,
-                        reader_info: None,
-                    });
+                let response = reader_control_response(request_id, reader_ip, true, None, None);
                 session.send_message(&response).await
             }
             Err(e) => {
-                let response =
-                    WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                        request_id,
-                        reader_ip,
-                        success: false,
-                        error: Some(e.to_string()),
-                        reader_info: None,
-                    });
+                let response = reader_control_response(
+                    request_id,
+                    reader_ip,
+                    false,
+                    Some(e.to_string()),
+                    None,
+                );
                 session.send_message(&response).await
             }
         },
@@ -577,25 +563,17 @@ pub(crate) async fn handle_reader_control_message(
             match notify {
                 Some(n) => {
                     n.notify_one();
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: true,
-                            error: None,
-                            reader_info: None,
-                        });
+                    let response = reader_control_response(request_id, reader_ip, true, None, None);
                     session.send_message(&response).await
                 }
                 None => {
-                    let response =
-                        WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                            request_id,
-                            reader_ip,
-                            success: false,
-                            error: Some("reader not found".to_owned()),
-                            reader_info: None,
-                        });
+                    let response = reader_control_response(
+                        request_id,
+                        reader_ip,
+                        false,
+                        Some("reader not found".to_owned()),
+                        None,
+                    );
                     session.send_message(&response).await
                 }
             }
@@ -706,13 +684,7 @@ pub(crate) async fn handle_reader_control_message(
                 }
             });
             // Return success immediately
-            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                request_id,
-                reader_ip,
-                success: true,
-                error: None,
-                reader_info: None,
-            });
+            let response = reader_control_response(request_id, reader_ip, true, None, None);
             session.send_message(&response).await
         }
     }
