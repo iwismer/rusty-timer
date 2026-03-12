@@ -30,6 +30,32 @@ pub(crate) fn chunk_for_replay(
         .collect()
 }
 
+fn ui_to_protocol_connection_state(
+    state: forwarder::ui_events::ReaderConnectionState,
+) -> rt_protocol::ReaderConnectionState {
+    match state {
+        forwarder::ui_events::ReaderConnectionState::Connected => {
+            rt_protocol::ReaderConnectionState::Connected
+        }
+        forwarder::ui_events::ReaderConnectionState::Connecting => {
+            rt_protocol::ReaderConnectionState::Connecting
+        }
+        forwarder::ui_events::ReaderConnectionState::Disconnected => {
+            rt_protocol::ReaderConnectionState::Disconnected
+        }
+    }
+}
+
+fn status_to_protocol_connection_state(
+    state: ReaderConnectionState,
+) -> rt_protocol::ReaderConnectionState {
+    match state {
+        ReaderConnectionState::Connected => rt_protocol::ReaderConnectionState::Connected,
+        ReaderConnectionState::Connecting => rt_protocol::ReaderConnectionState::Connecting,
+        ReaderConnectionState::Disconnected => rt_protocol::ReaderConnectionState::Disconnected,
+    }
+}
+
 fn extract_error_message(err_json: String) -> String {
     serde_json::from_str::<serde_json::Value>(&err_json)
         .ok()
@@ -970,17 +996,7 @@ pub(crate) async fn run_uplink(
             loop {
                 match ui_rx.try_recv() {
                     Ok(ForwarderUiEvent::ReaderUpdated { ip, state, .. }) => {
-                        let proto_state = match state {
-                            forwarder::ui_events::ReaderConnectionState::Connected => {
-                                rt_protocol::ReaderConnectionState::Connected
-                            }
-                            forwarder::ui_events::ReaderConnectionState::Connecting => {
-                                rt_protocol::ReaderConnectionState::Connecting
-                            }
-                            forwarder::ui_events::ReaderConnectionState::Disconnected => {
-                                rt_protocol::ReaderConnectionState::Disconnected
-                            }
-                        };
+                        let proto_state = ui_to_protocol_connection_state(state);
                         let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
                             reader_ip: ip.clone(),
                             state: proto_state,
@@ -995,17 +1011,7 @@ pub(crate) async fn run_uplink(
                         let proto_state = {
                             let ss = subsystem.lock().await;
                             ss.reader_connection_state(&ip)
-                                .map(|s| match s {
-                                    ReaderConnectionState::Connected => {
-                                        rt_protocol::ReaderConnectionState::Connected
-                                    }
-                                    ReaderConnectionState::Connecting => {
-                                        rt_protocol::ReaderConnectionState::Connecting
-                                    }
-                                    ReaderConnectionState::Disconnected => {
-                                        rt_protocol::ReaderConnectionState::Disconnected
-                                    }
-                                })
+                                .map(|s| status_to_protocol_connection_state(s))
                                 .unwrap_or(rt_protocol::ReaderConnectionState::Disconnected)
                         };
                         let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
