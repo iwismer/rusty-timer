@@ -12,6 +12,7 @@ use ipico_core::control::{
 use ipico_core::read::ReadType;
 
 use chrono::{Datelike, Local, TimeZone, Timelike};
+use tracing::warn;
 
 use crate::lcg_next;
 use crate::read_gen::generate_read_for_chip;
@@ -388,20 +389,14 @@ pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec
     let length_byte = match u8::from_str_radix(&frame[4..6], 16) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!(
-                "[emulator] rejecting frame: invalid length hex: {:?}",
-                &frame[4..6]
-            );
+            warn!(hex = ?&frame[4..6], "rejecting frame: invalid length hex");
             return vec![];
         }
     };
     let instruction = match u8::from_str_radix(&frame[6..8], 16) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!(
-                "[emulator] rejecting frame: invalid instruction hex: {:?}",
-                &frame[6..8]
-            );
+            warn!(hex = ?&frame[6..8], "rejecting frame: invalid instruction hex");
             return vec![];
         }
     };
@@ -419,20 +414,17 @@ pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec
                 let body = &frame[2..frame.len() - 2];
                 let computed = lrc(body.as_bytes());
                 if computed != declared {
-                    eprintln!(
-                        "[emulator] rejecting frame: LRC mismatch (declared 0x{:02x}, computed 0x{:02x}): {:?}",
-                        declared,
-                        computed,
-                        &frame[..frame.len().min(30)]
+                    warn!(
+                        declared = format_args!("0x{:02x}", declared),
+                        computed = format_args!("0x{:02x}", computed),
+                        frame_prefix = ?&frame[..frame.len().min(30)],
+                        "rejecting frame: LRC mismatch"
                     );
                     return vec![];
                 }
             }
             Err(_) => {
-                eprintln!(
-                    "[emulator] rejecting frame: invalid LRC hex: {:?}",
-                    declared_hex
-                );
+                warn!(hex = ?declared_hex, "rejecting frame: invalid LRC hex");
                 return vec![];
             }
         }
