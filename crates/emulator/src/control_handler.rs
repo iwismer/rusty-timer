@@ -405,8 +405,8 @@ pub fn handle_control_frame(state: &mut EmulatedReaderState, frame: &str) -> Vec
     //
     // Body = everything between the "ab" prefix and the last 2 checksum chars.
     // Expected LRC = sum of ASCII byte values of body, low byte.
-    // "ac"-prefixed frames skip checksum validation per spec. This function's
-    // callers already filter for "ab" frames before dispatch.
+    // "ac"-prefixed frames skip checksum validation per spec. This function
+    // independently rejects non-"ab" frames at its entry guard above.
     {
         let declared_hex = &frame[frame.len() - 2..];
         match u8::from_str_radix(declared_hex, 16) {
