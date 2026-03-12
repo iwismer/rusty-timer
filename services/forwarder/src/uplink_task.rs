@@ -56,6 +56,22 @@ fn status_to_protocol_connection_state(
     }
 }
 
+fn ipico_to_protocol_read_mode(mode: ipico_core::control::ReadMode) -> rt_protocol::ReadMode {
+    match mode {
+        ipico_core::control::ReadMode::Raw => rt_protocol::ReadMode::Raw,
+        ipico_core::control::ReadMode::Event => rt_protocol::ReadMode::Event,
+        ipico_core::control::ReadMode::FirstLastSeen => rt_protocol::ReadMode::FirstLastSeen,
+    }
+}
+
+fn protocol_to_ipico_read_mode(mode: rt_protocol::ReadMode) -> ipico_core::control::ReadMode {
+    match mode {
+        rt_protocol::ReadMode::Raw => ipico_core::control::ReadMode::Raw,
+        rt_protocol::ReadMode::Event => ipico_core::control::ReadMode::Event,
+        rt_protocol::ReadMode::FirstLastSeen => ipico_core::control::ReadMode::FirstLastSeen,
+    }
+}
+
 fn extract_error_message(err_json: String) -> String {
     serde_json::from_str::<serde_json::Value>(&err_json)
         .ok()
@@ -200,13 +216,7 @@ pub(crate) fn to_protocol_reader_info(
             reader_id: Some(format!("0x{:02X}", h.reader_id)),
         }),
         config: info.config.as_ref().map(|c| rt_protocol::Config3Info {
-            mode: match c.mode {
-                ipico_core::control::ReadMode::Raw => rt_protocol::ReadMode::Raw,
-                ipico_core::control::ReadMode::Event => rt_protocol::ReadMode::Event,
-                ipico_core::control::ReadMode::FirstLastSeen => {
-                    rt_protocol::ReadMode::FirstLastSeen
-                }
-            },
+            mode: ipico_to_protocol_read_mode(c.mode),
             timeout: c.timeout,
         }),
         tto_enabled: info.tto_enabled,
@@ -288,13 +298,7 @@ pub(crate) async fn handle_reader_control_message(
         }
 
         ReaderControlAction::SetReadMode { mode, timeout } => {
-            let read_mode = match mode {
-                rt_protocol::ReadMode::Raw => ipico_core::control::ReadMode::Raw,
-                rt_protocol::ReadMode::Event => ipico_core::control::ReadMode::Event,
-                rt_protocol::ReadMode::FirstLastSeen => {
-                    ipico_core::control::ReadMode::FirstLastSeen
-                }
-            };
+            let read_mode = protocol_to_ipico_read_mode(mode);
             match client.set_config3(read_mode, timeout).await {
                 Ok(()) => {
                     let mut info = get_cached_info(status, &reader_ip).await;
