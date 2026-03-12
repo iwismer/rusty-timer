@@ -1011,7 +1011,7 @@ pub(crate) async fn run_uplink(
                         let proto_state = {
                             let ss = subsystem.lock().await;
                             ss.reader_connection_state(&ip)
-                                .map(|s| status_to_protocol_connection_state(s))
+                                .map(status_to_protocol_connection_state)
                                 .unwrap_or(rt_protocol::ReaderConnectionState::Disconnected)
                         };
                         let msg = WsMessage::ReaderInfoUpdate(rt_protocol::ReaderInfoUpdate {
