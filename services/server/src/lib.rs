@@ -357,7 +357,10 @@ mod health {
     pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
         match sqlx::query("SELECT 1").execute(&state.pool).await {
             Ok(_) => (StatusCode::OK, "ok").into_response(),
-            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response(),
+            Err(e) => {
+                tracing::warn!(error = %e, "readyz database check failed");
+                (StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response()
+            }
         }
     }
 }
