@@ -238,21 +238,7 @@ pub(crate) async fn handle_reader_control_message(
         };
 
     match req.action {
-        ReaderControlAction::GetInfo => {
-            let mut info = get_cached_info(status, &reader_ip).await;
-            forwarder::reader_control::run_status_poll(&client, &mut info).await;
-            update_info(status, &reader_ip, info.clone()).await;
-            let response = WsMessage::ReaderControlResponse(rt_protocol::ReaderControlResponse {
-                request_id,
-                reader_ip,
-                success: true,
-                error: None,
-                reader_info: Some(to_protocol_reader_info(&info)),
-            });
-            session.send_message(&response).await
-        }
-
-        ReaderControlAction::Refresh => {
+        ReaderControlAction::GetInfo | ReaderControlAction::Refresh => {
             let mut info = get_cached_info(status, &reader_ip).await;
             forwarder::reader_control::run_status_poll(&client, &mut info).await;
             update_info(status, &reader_ip, info.clone()).await;
