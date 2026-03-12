@@ -204,9 +204,11 @@ impl UplinkSession {
 
     /// Send a batch of events and wait for the server's response.
     ///
-    /// Returns [`SendBatchResult::Ack`] on normal ack, or
-    /// [`SendBatchResult::EpochReset`] if the server sends an epoch-reset
-    /// command before the ack arrives.  The caller must handle both.
+    /// Returns [`SendBatchResult::Ack`] on normal ack. May also return
+    /// [`SendBatchResult::EpochReset`], [`SendBatchResult::ConfigGet`],
+    /// [`SendBatchResult::ConfigSet`], [`SendBatchResult::Restart`], or
+    /// [`SendBatchResult::ReaderControl`] if the server interleaves control
+    /// messages before the ack arrives.
     ///
     /// Returns [`UplinkError::Timeout`] if no response arrives within
     /// `ack_timeout_secs`.
