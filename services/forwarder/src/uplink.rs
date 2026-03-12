@@ -316,8 +316,10 @@ impl UplinkSession {
                     }
                     Message::Close(_) => return Err(UplinkError::Disconnected),
                     Message::Ping(data) => {
-                        // Reply to pings
-                        let _ = self.ws.send(Message::Pong(data)).await;
+                        self.ws
+                            .send(Message::Pong(data))
+                            .await
+                            .map_err(|e| UplinkError::Ws(e.to_string()))?;
                         continue;
                     }
                     _ => continue,
