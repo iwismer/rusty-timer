@@ -161,7 +161,7 @@ fn read_with_datetime(year: u8, month: u8, day: u8, hour: u8, min: u8, sec: u8) 
     // body covers positions [2..34]:
     //   [2..4]  = type byte "40"
     //   [4..16] = tag_id "000000012345"
-    //   [16..20] = "0a2a" (constant nibble from real fixtures)
+    //   [16..20] = "0a2a" (constant bytes from real fixtures)
     //   [20..22] = year (2-digit decimal)
     //   [22..24] = month
     //   [24..26] = day
