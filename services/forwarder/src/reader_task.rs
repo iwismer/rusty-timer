@@ -144,24 +144,23 @@ pub(crate) async fn run_reader(
     reader_status_tx: tokio::sync::mpsc::UnboundedSender<rt_protocol::ReaderStatusUpdate>,
 ) {
     let target_addr = format!("{}:{}", reader_ip, reader_port);
-    let stream_key = format!("{}:{}", reader_ip, reader_port);
     let mut backoff_secs: u64 = 1;
 
     let reconnect_notify = Arc::new(Notify::new());
-    status.register_reconnect_notify(&stream_key, reconnect_notify.clone());
+    status.register_reconnect_notify(&target_addr, reconnect_notify.clone());
 
     loop {
         // Check for shutdown before attempting connect
         if *shutdown_rx.borrow() {
             info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
-            status.deregister_reconnect_notify(&stream_key);
+            status.deregister_reconnect_notify(&target_addr);
             return;
         }
 
         info!(reader_ip = %reader_ip, target = %target_addr, "connecting to reader");
 
         status
-            .update_reader_state(&stream_key, ReaderConnectionState::Connecting)
+            .update_reader_state(&target_addr, ReaderConnectionState::Connecting)
             .await;
 
         let stream = match tokio::time::timeout(
@@ -184,7 +183,7 @@ pub(crate) async fn run_reader(
                         reader_ip, e, backoff_secs
                     ),
                 );
-                disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
+                disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -194,7 +193,7 @@ pub(crate) async fn run_reader(
                     }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
-                            status.deregister_reconnect_notify(&stream_key);
+                            status.deregister_reconnect_notify(&target_addr);
                             return;
                         }
                     }
@@ -206,23 +205,23 @@ pub(crate) async fn run_reader(
         logger.log(format!("reader {} connected", reader_ip));
         backoff_secs = 1;
         status
-            .update_reader_state(&stream_key, ReaderConnectionState::Connected)
+            .update_reader_state(&target_addr, ReaderConnectionState::Connected)
             .await;
         if reader_status_tx
             .send(rt_protocol::ReaderStatusUpdate {
-                reader_ip: stream_key.clone(),
+                reader_ip: target_addr.clone(),
                 connected: true,
             })
             .is_err()
         {
-            warn!(reader_ip = %stream_key, "reader status channel closed; uplink may be down");
+            warn!(reader_ip = %target_addr, "reader status channel closed; uplink may be down");
         }
 
         // Ensure journal has stream state for this reader (idempotent)
         {
             let mut j = journal.lock().await;
             let epoch = 1_i64;
-            if let Err(e) = j.ensure_stream_state(&stream_key, epoch) {
+            if let Err(e) = j.ensure_stream_state(&target_addr, epoch) {
                 logger.log_at(
                     UiLogLevel::Error,
                     format!(
@@ -230,7 +229,7 @@ pub(crate) async fn run_reader(
                         reader_ip, e, backoff_secs
                     ),
                 );
-                disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
+                disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
                 let delay = Duration::from_secs(backoff_secs);
                 tokio::select! {
                     _ = sleep(delay) => {}
@@ -239,7 +238,7 @@ pub(crate) async fn run_reader(
                     }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
-                            status.deregister_reconnect_notify(&stream_key);
+                            status.deregister_reconnect_notify(&target_addr);
                             return;
                         }
                     }
@@ -256,12 +255,12 @@ pub(crate) async fn run_reader(
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
         let (control_client, control_sink) = forwarder::reader_control::ControlClient::new(cmd_tx);
         let control_client = Arc::new(control_client);
-        status.register_control_client(&stream_key, control_client.clone());
+        status.register_control_client(&target_addr, control_client.clone());
 
         let download_tracker = Arc::new(tokio::sync::Mutex::new(
             forwarder::reader_control::DownloadTracker::new(),
         ));
-        status.register_download_tracker(&stream_key, download_tracker.clone());
+        status.register_download_tracker(&target_addr, download_tracker.clone());
 
         // Writer task: drains command channel to TCP socket
         let mut writer = write_half;
@@ -284,7 +283,7 @@ pub(crate) async fn run_reader(
         let poll_logger = logger.clone();
         let poll_reader_ip = reader_ip.clone();
         let poll_status = status.clone();
-        let poll_stream_key = stream_key.clone();
+        let poll_target_addr = target_addr.clone();
         let poll_download_tracker = download_tracker.clone();
         let poll_handle = tokio::spawn(async move {
             // Run initial connection sequence
@@ -309,7 +308,7 @@ pub(crate) async fn run_reader(
                 reader_info.estimated_stored_reads.unwrap_or(0),
             ));
             poll_status
-                .update_reader_info_unless_disconnected(&poll_stream_key, reader_info.clone())
+                .update_reader_info_unless_disconnected(&poll_target_addr, reader_info.clone())
                 .await;
 
             // Transition to 10s polling
@@ -326,7 +325,7 @@ pub(crate) async fn run_reader(
                     _ = interval.tick() => {
                         forwarder::reader_control::run_status_poll(&poll_client, &mut info).await;
                         poll_status
-                            .update_reader_info_unless_disconnected(&poll_stream_key, info.clone())
+                            .update_reader_info_unless_disconnected(&poll_target_addr, info.clone())
                             .await;
 
                         // Check download progress
@@ -435,9 +434,9 @@ pub(crate) async fn run_reader(
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         info!(reader_ip = %reader_ip, "reader task stopping (shutdown)");
-                        status.deregister_control_client(&stream_key);
-                        status.deregister_download_tracker(&stream_key);
-                        status.deregister_reconnect_notify(&stream_key);
+                        status.deregister_control_client(&target_addr);
+                        status.deregister_download_tracker(&target_addr);
+                        status.deregister_reconnect_notify(&target_addr);
                         return;
                     }
                     continue;
@@ -455,7 +454,7 @@ pub(crate) async fn run_reader(
                         format!("reader {} read error during download: {}", reader_ip, e),
                     )
                     .await;
-                    disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
+                    disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
                     break;
                 }
                 Ok(0) => {
@@ -468,7 +467,7 @@ pub(crate) async fn run_reader(
                         format!("reader {} connection closed during download", reader_ip),
                     )
                     .await;
-                    disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
+                    disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
                     break;
                 }
                 Ok(_) => {}
@@ -530,7 +529,7 @@ pub(crate) async fn run_reader(
                 let mut j = journal.lock().await;
                 append_read_to_journal(
                     &mut j,
-                    &stream_key,
+                    &target_addr,
                     reader_timestamp.as_deref(),
                     &frame_buf,
                     &parsed_read_type,
@@ -556,7 +555,7 @@ pub(crate) async fn run_reader(
                             reader_ip, context, inner
                         ),
                     );
-                    disconnect_and_notify(&status, &stream_key, &reader_status_tx).await;
+                    disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
                     break;
                 }
             };
@@ -581,13 +580,13 @@ pub(crate) async fn run_reader(
                 // Non-fatal: local fanout failure doesn't break uplink path
             }
 
-            status.record_read(&stream_key).await;
+            status.record_read(&target_addr).await;
         }
 
         writer_handle.abort();
         poll_handle.abort();
-        status.deregister_control_client(&stream_key);
-        status.deregister_download_tracker(&stream_key);
+        status.deregister_control_client(&target_addr);
+        status.deregister_download_tracker(&target_addr);
 
         // Reconnect with backoff
         let delay = Duration::from_secs(backoff_secs);
@@ -604,7 +603,7 @@ pub(crate) async fn run_reader(
             }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
-                    status.deregister_reconnect_notify(&stream_key);
+                    status.deregister_reconnect_notify(&target_addr);
                     return;
                 }
             }
