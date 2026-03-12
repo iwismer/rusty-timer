@@ -30,6 +30,17 @@ pub(crate) fn chunk_for_replay(
         .collect()
 }
 
+fn extract_error_message(err_json: String) -> String {
+    serde_json::from_str::<serde_json::Value>(&err_json)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_owned())
+        })
+        .unwrap_or(err_json)
+}
+
 // ---------------------------------------------------------------------------
 // Config message handler (used by uplink loop)
 // ---------------------------------------------------------------------------
@@ -55,14 +66,7 @@ pub(crate) async fn handle_config_message(
                         })
                     }
                     Err((_code, err_json)) => {
-                        let err_msg = serde_json::from_str::<serde_json::Value>(&err_json)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("error")
-                                    .and_then(|e| e.as_str())
-                                    .map(|s| s.to_owned())
-                            })
-                            .unwrap_or(err_json);
+                        let err_msg = extract_error_message(err_json);
                         WsMessage::ConfigGetResponse(rt_protocol::ConfigGetResponse {
                             request_id: req.request_id,
                             ok: false,
@@ -88,14 +92,7 @@ pub(crate) async fn handle_config_message(
                 {
                     Ok(()) => (true, None, subsystem.lock().await.restart_needed(), None),
                     Err((status, err_json)) => {
-                        let err_msg = serde_json::from_str::<serde_json::Value>(&err_json)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("error")
-                                    .and_then(|e| e.as_str())
-                                    .map(|s| s.to_owned())
-                            })
-                            .unwrap_or(err_json);
+                        let err_msg = extract_error_message(err_json);
                         (
                             false,
                             Some(err_msg),
