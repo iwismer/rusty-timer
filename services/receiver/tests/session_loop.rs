@@ -451,3 +451,87 @@ async fn raw_ws_server_helper_exposes_handler_panic_via_join_handle() {
         "handler panic should propagate through JoinHandle"
     );
 }
+
+#[tokio::test]
+async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_owned();
+    let db = Db::open(&db_path).unwrap();
+    // Drop the cursors table via a separate connection so save_cursor will fail.
+    {
+        let sabotage = rusqlite::Connection::open(&db_path).unwrap();
+        sabotage.execute_batch("DROP TABLE cursors").unwrap();
+    }
+    let db = Arc::new(Mutex::new(db));
+
+    let events = vec![ReadEvent {
+        forwarder_id: "fwd-1".to_owned(),
+        reader_ip: "10.0.0.1:10000".to_owned(),
+        stream_epoch: 1,
+        seq: 1,
+        reader_timestamp: "2026-02-01T00:00:00.000Z".to_owned(),
+        raw_frame: b"raw-1".to_vec(),
+        read_type: "RAW".to_owned(),
+    }];
+
+    let (no_ack_tx, no_ack_rx) = oneshot::channel::<()>();
+    let (addr, task) = run_raw_ws_server_once(move |mut ws| {
+        let events = events.clone();
+        async move {
+            let msg = WsMessage::ReceiverEventBatch(ReceiverEventBatch {
+                session_id: "session-cursor-fail".to_owned(),
+                events,
+            });
+            ws.send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                .await
+                .unwrap();
+
+            // Wait briefly for any potential ack, then close.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Check if any message was received (there should be none).
+            let next = tokio::time::timeout(Duration::from_millis(100), ws.next()).await;
+            match next {
+                Ok(Some(Ok(Message::Text(t)))) => {
+                    let parsed = serde_json::from_str::<WsMessage>(&t).unwrap();
+                    if let WsMessage::ReceiverAck(ack) = parsed {
+                        panic!(
+                            "expected no ack when save_cursor fails, but got ack with {} entries",
+                            ack.entries.len()
+                        );
+                    }
+                }
+                // Timeout or close = good, no ack was sent
+                _ => {}
+            }
+
+            no_ack_tx.send(()).unwrap();
+            let _ = ws.send(Message::Close(None)).await;
+        }
+    })
+    .await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(16);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    run_session_loop(
+        ws,
+        "session-cursor-fail".to_owned(),
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            connection_state: watch::channel(ConnectionState::Connected).1,
+        },
+    )
+    .await
+    .unwrap();
+
+    no_ack_rx.await.expect("server handler should complete");
+    join_server_task(task).await;
+}

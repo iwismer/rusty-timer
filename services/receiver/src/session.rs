@@ -126,9 +126,8 @@ where
                                 let mut hw: HashMap<(String,String,i64),i64> = HashMap::new();
                                 for e in &forwarded_events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();
-                                { let d=deps.db.lock().await; for((f,i,ep),ls) in &hw { if let Err(e)=d.save_cursor(f,i,*ep,*ls){error!(error=%e);} acks.push(AckEntry{forwarder_id:f.clone(),reader_ip:i.clone(),stream_epoch:*ep,last_seq:*ls}); } }
-                                let ack=WsMessage::ReceiverAck(ReceiverAck{session_id:session_id.clone(),entries:acks});
-                                ws.send(Message::Text(serde_json::to_string(&ack)?.into())).await?;
+                                { let d=deps.db.lock().await; for((f,i,ep),ls) in &hw { if let Err(e)=d.save_cursor(f,i,*ep,*ls){error!(error=%e,forwarder_id=%f,reader_ip=%i,"save_cursor failed, withholding ack");} else { acks.push(AckEntry{forwarder_id:f.clone(),reader_ip:i.clone(),stream_epoch:*ep,last_seq:*ls}); } } }
+                                if !acks.is_empty() { let ack=WsMessage::ReceiverAck(ReceiverAck{session_id:session_id.clone(),entries:acks}); ws.send(Message::Text(serde_json::to_string(&ack)?.into())).await?; }
                             }
                             Ok(WsMessage::ReceiverModeApplied(applied)) => {
                                 info!(mode=%applied.mode_summary, streams=applied.resolved_stream_count, "server applied mode");
