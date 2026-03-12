@@ -263,3 +263,79 @@ async fn send_batch_surfaces_epoch_reset_command() {
 
     server_task.await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Timeout when server never acks
+// ---------------------------------------------------------------------------
+
+/// Test: when the server never sends an ack, send_batch returns UplinkError::Timeout.
+#[tokio::test]
+async fn send_batch_returns_timeout_when_server_does_not_ack() {
+    use forwarder::uplink::UplinkError;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (mut write, mut read) = ws.split();
+
+        // 1. Receive ForwarderHello
+        let msg = read.next().await.unwrap().unwrap();
+        let text = match msg {
+            Message::Text(t) => t,
+            other => panic!("expected text, got {:?}", other),
+        };
+        let hello: WsMessage = serde_json::from_str(&text).unwrap();
+        let fwd_id = match &hello {
+            WsMessage::ForwarderHello(h) => h.forwarder_id.clone(),
+            other => panic!("expected ForwarderHello, got {:?}", other),
+        };
+
+        // 2. Send Heartbeat
+        let hb = WsMessage::Heartbeat(Heartbeat {
+            session_id: "test-session".to_owned(),
+            device_id: fwd_id,
+        });
+        let json = serde_json::to_string(&hb).unwrap();
+        write.send(Message::Text(json.into())).await.unwrap();
+
+        // 3. Receive ForwarderEventBatch — but never send an ack
+        let _msg = read.next().await.unwrap().unwrap();
+
+        // Keep the connection alive longer than the timeout
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    });
+
+    let url = format!("ws://{}", addr);
+    let cfg = UplinkConfig {
+        server_url: url,
+        token: "test-token".to_owned(),
+        forwarder_id: "fwd-timeout-test".to_owned(),
+        display_name: None,
+        batch_flush_ms: 100,
+        batch_max_events: 50,
+        ack_timeout_secs: 2, // Short timeout for test speed
+    };
+
+    let mut session = UplinkSession::connect(cfg).await.expect("connect");
+
+    let events = vec![rt_protocol::ReadEvent {
+        forwarder_id: "fwd-timeout-test".to_owned(),
+        reader_ip: "10.0.0.1:10000".to_owned(),
+        stream_epoch: 1,
+        seq: 1,
+        reader_timestamp: "2026-01-01T00:00:00Z".to_owned(),
+        raw_frame: b"aa400000000123450a2a01123018455927a7".to_vec(),
+        read_type: "RAW".to_owned(),
+    }];
+
+    let result = session.send_batch(events).await;
+    match result {
+        Err(UplinkError::Timeout) => {} // expected
+        other => panic!("expected UplinkError::Timeout, got {:?}", other),
+    }
+
+    server_task.abort();
+}
