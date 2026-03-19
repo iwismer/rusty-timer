@@ -11,8 +11,9 @@ ext_docs/
 # Git worktrees used during development
 .worktrees/
 
-# Docs — only exclude the plans directory; keep specs, runbooks, docker docs tracked
+# Docs — only exclude plans directories; keep specs, runbooks, docker docs tracked
 docs/plans/
+docs/superpowers/
 
 # Python
 __pycache__/
