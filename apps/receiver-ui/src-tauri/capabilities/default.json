@@ -5,6 +5,15 @@
   "permissions": [
     "core:default",
     {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "binaries/receiver",
+          "sidecar": true
+        }
+      ]
+    },
+    {
       "identifier": "shell:allow-execute",
       "allow": [
         {

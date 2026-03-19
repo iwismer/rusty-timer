@@ -713,6 +713,14 @@ def build_rust(skip_build: bool, *, tauri: bool = False) -> None:
         shutil.copy2(src, dst)
         console.print(f"  [green]Copied[/green] receiver binary to {dst.relative_to(REPO_ROOT)}")
 
+        # Also copy without target triple for dev mode (tauri-plugin-shell resolves
+        # sidecars relative to the running binary without the triple suffix).
+        dev_sidecar_dir = REPO_ROOT / "target" / "debug" / "binaries"
+        dev_sidecar_dir.mkdir(parents=True, exist_ok=True)
+        dev_dst = dev_sidecar_dir / receiver_bin
+        shutil.copy2(src, dev_dst)
+        console.print(f"  [green]Copied[/green] receiver binary to {dev_dst.relative_to(REPO_ROOT)}")
+
 
 def npm_install() -> None:
     console.print("[bold]Running npm install in workspace root…[/bold]")

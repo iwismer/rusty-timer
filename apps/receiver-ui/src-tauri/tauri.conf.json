@@ -3,7 +3,9 @@
   "identifier": "com.rusty-timer.receiver",
   "version": "0.1.0",
   "build": {
-    "frontendDist": "http://127.0.0.1:9090",
+    "beforeDevCommand": "mkdir -p ../../target/debug/binaries && cp -f src-tauri/binaries/receiver-* ../../target/debug/binaries/receiver 2>/dev/null; npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build",
     "devUrl": "http://127.0.0.1:5173"
   },
   "bundle": {
