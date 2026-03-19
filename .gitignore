@@ -46,3 +46,6 @@ deploy/sbc/generated/
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store
+
+# Tauri sidecar binaries (copied during build)
+apps/receiver-ui/src-tauri/binaries/
