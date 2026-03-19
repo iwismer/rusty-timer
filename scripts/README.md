@@ -56,6 +56,9 @@ uv run scripts/dev.py --bibchip test_assets/bibchip/large.txt --ppl test_assets/
 - `--emulator SPEC`: add an emulator instance. Repeat this flag for multiple emulators.
 - `--bibchip PATH`: upload chip file to a new race after startup; can also generate emulator reads.
 - `--ppl PATH`: upload participant file to a new race after startup.
+- `--tauri`: launch the receiver via Tauri desktop app instead of the standalone
+  binary. Requires `cargo install tauri-cli`. In Tauri dev mode the SvelteKit
+  frontend is served by Vite (with hot-reload) and the receiver runs as a sidecar.
 
 `--emulator` format:
 

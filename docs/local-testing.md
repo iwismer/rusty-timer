@@ -251,6 +251,28 @@ created automatically.
 
 The control API listens on **127.0.0.1:9090**.
 
+### Running via Tauri (Native Window)
+
+Instead of opening the receiver UI in a browser, you can run it as a desktop
+app via Tauri:
+
+```bash
+# Build the receiver
+cargo build -p receiver
+
+# Copy to sidecar location
+mkdir -p apps/receiver-ui/src-tauri/binaries
+cp target/debug/receiver apps/receiver-ui/src-tauri/binaries/receiver-$(rustc --print host-tuple)
+
+# Run Tauri dev mode
+cd apps/receiver-ui && cargo tauri dev
+```
+
+This opens a native window instead of a browser tab. The receiver API is
+identical — all the control API steps below work the same way.
+
+See `docs/receiver-tauri-dev.md` for more details.
+
 ---
 
 ## Step 7: Subscribe to a Stream via the Control API
