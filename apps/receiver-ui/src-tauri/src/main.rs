@@ -100,12 +100,11 @@ async fn run_sidecar_lifecycle(handle: &AppHandle) -> Result<(), String> {
         let (tx, rx_close) = tokio::sync::oneshot::channel::<()>();
         let tx = std::sync::Mutex::new(Some(tx));
         window.on_window_event(move |event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if let Ok(mut guard) = tx.lock() {
-                    if let Some(sender) = guard.take() {
-                        let _ = sender.send(());
-                    }
-                }
+            if let tauri::WindowEvent::Destroyed = event
+                && let Ok(mut guard) = tx.lock()
+                && let Some(sender) = guard.take()
+            {
+                let _ = sender.send(());
             }
         });
 
