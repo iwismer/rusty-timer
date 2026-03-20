@@ -4,5 +4,5 @@
 </script>
 
 <div class="h-full">
-  <LogViewer entries={store.logEntries} />
+  <LogViewer entries={store.logEntries} maxHeight="none" />
 </div>

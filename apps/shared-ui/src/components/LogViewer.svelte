@@ -57,9 +57,9 @@
   }
 </script>
 
-<section data-testid="logs-section">
+<section data-testid="logs-section" class="flex flex-col {maxHeight === 'none' ? 'h-full' : ''}">
   <div
-    class="flex items-center justify-between px-4 py-2 border-b border-border"
+    class="flex items-center justify-between px-4 py-2 border-b border-border shrink-0"
   >
     <h2 class="text-sm font-semibold text-text-primary m-0">Logs</h2>
     <div class="flex items-center gap-3">
@@ -87,8 +87,8 @@
   {:else}
     <ul
       bind:this={listEl}
-      class="font-mono text-xs overflow-y-auto list-none p-0 m-0"
-      style="max-height: {maxHeight}"
+      class="font-mono text-xs overflow-y-auto list-none p-0 m-0 {maxHeight === 'none' ? 'flex-1 min-h-0' : ''}"
+      style={maxHeight !== 'none' ? `max-height: ${maxHeight}` : ''}
     >
       {#each filteredEntries as entry}
         <li
