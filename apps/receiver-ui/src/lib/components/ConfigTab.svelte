@@ -3,6 +3,9 @@
   import {
     store,
     getConfigDirty,
+    getConnectionState,
+    handleConnect,
+    handleDisconnect,
     saveProfile,
     setEditServerUrl,
     setEditToken,
@@ -13,6 +16,23 @@
     "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
   const btnPrimary =
     "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+  const btnDisconnect =
+    "px-3 py-1.5 text-sm font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
+
+  function connectionLabel(state: string): string {
+    switch (state) {
+      case "connected":
+        return "Connected";
+      case "disconnected":
+        return "Disconnected";
+      case "connecting":
+        return "Connecting...";
+      case "disconnecting":
+        return "Disconnecting...";
+      default:
+        return "Unknown";
+    }
+  }
 </script>
 
 <div class="max-w-[500px] mx-auto px-6 py-6">
@@ -65,4 +85,48 @@
       {store.saving ? "Saving\u2026" : "Save"}
     </button>
   </div>
+
+  <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
+    <div class="flex items-center justify-between gap-4">
+      <div>
+        <p class="text-xs font-medium text-text-muted">Connection</p>
+        <p
+          data-testid="config-connection-state"
+          class="mt-1 text-sm text-text-primary"
+        >
+          {connectionLabel(getConnectionState())}
+        </p>
+      </div>
+
+      {#if getConnectionState() === "connected"}
+        <button
+          data-testid="config-connect-toggle-btn"
+          class={btnDisconnect}
+          onclick={() => handleDisconnect()}
+          disabled={store.connectBusy}
+        >
+          Disconnect
+        </button>
+      {:else if getConnectionState() === "disconnected"}
+        <button
+          data-testid="config-connect-toggle-btn"
+          class={btnPrimary}
+          onclick={() => handleConnect()}
+          disabled={store.connectBusy || !store.savedServerUrl}
+        >
+          Connect
+        </button>
+      {:else}
+        <button
+          data-testid="config-connect-toggle-btn"
+          class={btnPrimary}
+          disabled
+        >
+          {getConnectionState() === "disconnecting"
+            ? "Disconnecting..."
+            : "Connecting..."}
+        </button>
+      {/if}
+    </div>
+  </section>
 </div>

@@ -5,7 +5,6 @@
   import { initStore, destroyStore, store } from "$lib/store.svelte";
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import { AlertBanner } from "@rusty-timer/shared-ui";
-  import Toolbar from "$lib/components/Toolbar.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import HelpModal from "$lib/components/HelpModal.svelte";
@@ -45,7 +44,6 @@
 </svelte:head>
 
 <div class="flex flex-col h-screen">
-  <Toolbar />
   <TabBar />
 
   {#if store.error}

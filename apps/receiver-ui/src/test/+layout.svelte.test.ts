@@ -112,6 +112,7 @@ describe("receiver layout SSE updates", () => {
 
     expect(document.documentElement.style.scrollbarGutter).toBe("auto");
     expect(document.body.style.scrollbarGutter).toBe("auto");
+    expect(screen.queryByTestId("connect-toggle-btn")).not.toBeInTheDocument();
 
     expect(await screen.findByText("0 reads")).toBeInTheDocument();
 
