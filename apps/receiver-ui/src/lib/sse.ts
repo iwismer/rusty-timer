@@ -27,22 +27,11 @@ export type SseCallbacks = {
 
 let handle: SseHandle | null = null;
 
-function receiverEventsUrl(): string {
-  if (
-    typeof window !== "undefined" &&
-    window.location.protocol === "http:" &&
-    window.location.port === "5173"
-  ) {
-    return "http://127.0.0.1:9090/api/v1/events";
-  }
-  return "/api/v1/events";
-}
-
 export function initSSE(callbacks: SseCallbacks): void {
   if (handle) return;
 
   handle = createSSE(
-    receiverEventsUrl(),
+    "/api/v1/events",
     {
       status_changed: (data: any) => {
         callbacks.onStatusChanged({

@@ -283,7 +283,7 @@ describe("sse client", () => {
     );
   });
 
-  it("connects directly to the receiver control API in local dev", async () => {
+  it("uses the same-origin SSE endpoint in local dev", async () => {
     vi.stubGlobal("location", {
       ...window.location,
       protocol: "http:",
@@ -307,9 +307,7 @@ describe("sse client", () => {
 
     initSSE(callbacks);
 
-    expect(MockEventSource.lastInstance?.url).toBe(
-      "http://127.0.0.1:9090/api/v1/events",
-    );
+    expect(MockEventSource.lastInstance?.url).toBe("/api/v1/events");
 
     destroySSE();
     vi.unstubAllGlobals();
