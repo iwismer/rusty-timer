@@ -364,6 +364,43 @@ async fn main() {
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
 
+                                                // Fetch chip→participant lookup from the server.
+                                                let chip_lookup = {
+                                                    let db = state.db.lock().await;
+                                                    let mode = db.load_receiver_mode().ok().flatten();
+                                                    let profile = db.load_profile().ok().flatten();
+                                                    drop(db);
+                                                    if let Some(p) = profile {
+                                                        let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
+                                                            receiver::control_api::fetch_chip_lookup(
+                                                                &state.http_client, &p.server_url, &p.token, &race_id,
+                                                            ).await
+                                                        } else {
+                                                            receiver::control_api::fetch_chip_lookup_all_races(
+                                                                &state.http_client, &p.server_url, &p.token,
+                                                            ).await
+                                                        };
+                                                        match result {
+                                                            Ok(lookup) => {
+                                                                if !lookup.is_empty() {
+                                                                    state.logger.log(format!(
+                                                                        "Loaded {} chip→participant mappings",
+                                                                        lookup.len()
+                                                                    ));
+                                                                }
+                                                                lookup
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(error = %e, "failed to fetch participant lookup");
+                                                                state.logger.log_at(UiLogLevel::Warn, format!("Could not load participants: {e}"));
+                                                                std::collections::HashMap::new()
+                                                            }
+                                                        }
+                                                    } else {
+                                                        std::collections::HashMap::new()
+                                                    }
+                                                };
+
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
                                                 let db_arc = Arc::clone(&state.db);
@@ -380,6 +417,7 @@ async fn main() {
                                                         ui_tx,
                                                         shutdown: cancel_rx,
                                                         connection_state: st.conn_rx(),
+                                                        chip_lookup,
                                                     };
                                                     let result = receiver::session::run_session_loop(
                                                         ws, session_id, deps,

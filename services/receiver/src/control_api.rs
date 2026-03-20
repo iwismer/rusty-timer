@@ -593,6 +593,119 @@ pub async fn fetch_server_streams(
     Ok(body.streams)
 }
 
+/// Parse a participants JSON response into chip_id → (bib, name) entries,
+/// inserting them into the provided lookup map.
+fn parse_participants_into(body: &serde_json::Value, lookup: &mut crate::session::ChipLookup) {
+    if let Some(participants) = body.get("participants").and_then(|v| v.as_array()) {
+        for p in participants {
+            let bib = match p.get("bib").and_then(|v| v.as_i64()) {
+                Some(b) => b.to_string(),
+                None => continue,
+            };
+            let first = p.get("first_name").and_then(|v| v.as_str()).unwrap_or("");
+            let last = p.get("last_name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = format!("{first} {last}").trim().to_owned();
+
+            if let Some(chip_ids) = p.get("chip_ids").and_then(|v| v.as_array()) {
+                for chip_val in chip_ids {
+                    if let Some(chip_id) = chip_val.as_str() {
+                        lookup.insert(chip_id.to_owned(), (bib.clone(), name.clone()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Fetch participants for a single race from the upstream server, returning a
+/// chip_id → (bib, display_name) lookup map.
+pub async fn fetch_chip_lookup(
+    client: &reqwest::Client,
+    ws_url: &str,
+    token: &str,
+    race_id: &str,
+) -> Result<crate::session::ChipLookup, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+    let url = format!("{base}/api/v1/races/{race_id}/participants");
+
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("fetch participants failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let mut lookup = crate::session::ChipLookup::new();
+    parse_participants_into(&body, &mut lookup);
+    Ok(lookup)
+}
+
+/// Fetch participants for ALL races from the upstream server, returning a
+/// combined chip_id → (bib, display_name) lookup map.
+pub async fn fetch_chip_lookup_all_races(
+    client: &reqwest::Client,
+    ws_url: &str,
+    token: &str,
+) -> Result<crate::session::ChipLookup, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+
+    // First, list all races.
+    let races_url = format!("{base}/api/v1/races");
+    let races_resp = client
+        .get(&races_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("fetch races failed: {e}"))?;
+
+    if !races_resp.status().is_success() {
+        return Err(format!("server returned {}", races_resp.status()));
+    }
+
+    let races_body: serde_json::Value = races_resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid races JSON: {e}"))?;
+
+    let race_ids: Vec<String> = races_body
+        .get("races")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    r.get("race_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Then fetch participants for each race.
+    let mut lookup = crate::session::ChipLookup::new();
+    for race_id in &race_ids {
+        let url = format!("{base}/api/v1/races/{race_id}/participants");
+        let resp = match client.get(&url).bearer_auth(token).send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => continue,
+        };
+        if let Ok(body) = resp.json::<serde_json::Value>().await {
+            parse_participants_into(&body, &mut lookup);
+        }
+    }
+
+    Ok(lookup)
+}
+
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------

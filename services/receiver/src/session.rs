@@ -27,6 +27,10 @@ pub struct Session {
     pub device_id: String,
 }
 
+/// Maps chip_id (e.g. "058003700001") to (bib, display_name).
+/// Populated from the server's participant list on connect.
+pub type ChipLookup = HashMap<String, (String, String)>;
+
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
@@ -34,6 +38,7 @@ pub struct SessionLoopDeps {
     pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     pub shutdown: watch::Receiver<bool>,
     pub connection_state: watch::Receiver<ConnectionState>,
+    pub chip_lookup: ChipLookup,
 }
 
 fn apply_batch_counts(
@@ -125,14 +130,17 @@ where
                                 }
                                 for e in &forwarded_events {
                                     let chip_id = crate::ui_events::chip_id_from_raw_frame(&e.raw_frame);
+                                    let (bib, name) = deps.chip_lookup.get(&chip_id)
+                                        .map(|(b, n)| (Some(b.clone()), Some(n.clone())))
+                                        .unwrap_or((None, None));
                                     let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LastRead(
                                         crate::ui_events::LastRead {
                                             forwarder_id: e.forwarder_id.clone(),
                                             reader_ip: e.reader_ip.clone(),
                                             chip_id,
                                             timestamp: e.reader_timestamp.clone(),
-                                            bib: None,
-                                            name: None,
+                                            bib,
+                                            name,
                                         },
                                     ));
                                 }

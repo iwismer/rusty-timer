@@ -113,6 +113,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await
@@ -195,6 +196,7 @@ async fn run_session_loop_drops_events_while_reconnect_is_pending() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connecting).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await
@@ -238,6 +240,7 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await;
@@ -277,6 +280,7 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await;
@@ -318,6 +322,7 @@ async fn run_session_loop_replies_to_ping_with_pong() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await;
@@ -352,6 +357,7 @@ async fn run_session_loop_stops_on_shutdown_signal() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     ));
 
@@ -398,6 +404,7 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await;
@@ -467,6 +474,7 @@ async fn run_session_loop_emits_resync_to_ui_channel_on_reader_status_changed() 
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await;
@@ -574,6 +582,7 @@ async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: HashMap::new(),
         },
     )
     .await
