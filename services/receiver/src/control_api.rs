@@ -82,6 +82,7 @@ pub struct AppState {
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
+    pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -119,6 +120,7 @@ impl AppState {
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
             http_client,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });

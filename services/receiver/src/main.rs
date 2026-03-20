@@ -365,37 +365,7 @@ async fn main() {
                                                 state.emit_streams_snapshot().await;
 
                                                 // Fetch chip→participant lookup from the server.
-                                                let initial_lookup = fetch_chip_lookup(&state).await;
-                                                {
-                                                    let total_chips: usize = initial_lookup.values().map(|m| m.len()).sum();
-                                                    if total_chips > 0 {
-                                                        state.logger.log(format!(
-                                                            "Loaded chip→participant mappings for {} forwarder(s) ({total_chips} chips)",
-                                                            initial_lookup.len()
-                                                        ));
-                                                    }
-                                                }
-                                                let chip_lookup = Arc::new(tokio::sync::RwLock::new(initial_lookup));
-
-                                                // Spawn a background task to periodically
-                                                // refresh the chip lookup (e.g. when race
-                                                // assignments change on the server).
-                                                let refresh_lookup = Arc::clone(&chip_lookup);
-                                                let refresh_state = Arc::clone(&state);
-                                                let refresh_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-                                                    let mut interval = tokio::time::interval(
-                                                        std::time::Duration::from_secs(10),
-                                                    );
-                                                    interval.set_missed_tick_behavior(
-                                                        tokio::time::MissedTickBehavior::Delay,
-                                                    );
-                                                    interval.tick().await; // skip immediate tick
-                                                    loop {
-                                                        interval.tick().await;
-                                                        let new = fetch_chip_lookup(&refresh_state).await;
-                                                        *refresh_lookup.write().await = new;
-                                                    }
-                                                });
+                                                refresh_chip_lookup(&state).await;
 
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
@@ -404,7 +374,6 @@ async fn main() {
                                                 let counts = state.stream_counts.clone();
                                                 let ui_tx = state.ui_tx.clone();
                                                 let st = Arc::clone(&state);
-                                                let refresh_handle_for_session = refresh_handle.abort_handle();
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
                                                     let deps = receiver::session::SessionLoopDeps {
@@ -414,13 +383,12 @@ async fn main() {
                                                         ui_tx,
                                                         shutdown: cancel_rx,
                                                         connection_state: st.conn_rx(),
-                                                        chip_lookup,
+                                                        chip_lookup: Arc::clone(&st.chip_lookup),
                                                     };
                                                     let result = receiver::session::run_session_loop(
                                                         ws, session_id, deps,
                                                     )
                                                     .await;
-                                                    refresh_handle_for_session.abort();
                                                     match result {
                                                         Ok(()) => {
                                                             info!("WS session ended normally");
@@ -555,9 +523,10 @@ async fn wait_for_reconnect_delay_or_abort(
     }
 }
 
-/// Fetch a chip→participant lookup from the server based on the current
-/// receiver mode and subscriptions.
-async fn fetch_chip_lookup(state: &Arc<AppState>) -> receiver::session::ChipLookup {
+/// Fetch a chip→participant lookup from the server and store it in
+/// `state.chip_lookup`.  Called on connect and when the server pushes a
+/// `forwarder_race_assigned` SSE event.
+async fn refresh_chip_lookup(state: &Arc<AppState>) {
     let db = state.db.lock().await;
     let mode = db.load_receiver_mode().ok().flatten();
     let profile = db.load_profile().ok().flatten();
@@ -572,7 +541,8 @@ async fn fetch_chip_lookup(state: &Arc<AppState>) -> receiver::session::ChipLook
         .collect();
 
     let Some(p) = profile else {
-        return HashMap::new();
+        *state.chip_lookup.write().await = HashMap::new();
+        return;
     };
 
     let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
@@ -594,17 +564,31 @@ async fn fetch_chip_lookup(state: &Arc<AppState>) -> receiver::session::ChipLook
         .await
     };
 
-    match result {
+    let lookup = match result {
         Ok(lookup) => lookup,
         Err(e) => {
             warn!(error = %e, "failed to fetch participant lookup");
-            HashMap::new()
+            return; // keep the existing lookup on error
         }
+    };
+
+    let total_chips: usize = lookup.values().map(|m| m.len()).sum();
+    if total_chips > 0 {
+        state.logger.log(format!(
+            "Loaded chip→participant mappings for {} forwarder(s) ({total_chips} chips)",
+            lookup.len()
+        ));
     }
+
+    *state.chip_lookup.write().await = lookup;
 }
 
 fn should_refresh_stream_snapshot_for_dashboard_event(event_name: &str) -> bool {
     matches!(event_name, "stream_created" | "stream_updated" | "resync")
+}
+
+fn should_refresh_chip_lookup_for_dashboard_event(event_name: &str) -> bool {
+    matches!(event_name, "forwarder_race_assigned")
 }
 
 fn should_emit_receiver_resync_for_dashboard_event(event_name: &str) -> bool {
@@ -753,6 +737,9 @@ async fn consume_upstream_dashboard_events(
                 }
                 if should_emit_receiver_resync_for_dashboard_event(&event_name) {
                     state.emit_resync();
+                }
+                if should_refresh_chip_lookup_for_dashboard_event(&event_name) {
+                    refresh_chip_lookup(state).await;
                 }
             }
         }
