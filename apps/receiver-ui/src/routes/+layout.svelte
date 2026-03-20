@@ -20,12 +20,23 @@
   import AdminTab from "$lib/components/AdminTab.svelte";
   import "@rusty-timer/shared-ui/styles/tokens.css";
 
+  let previousHtmlScrollbarGutter = "";
+  let previousBodyScrollbarGutter = "";
+
   onMount(() => {
+    previousHtmlScrollbarGutter =
+      document.documentElement.style.scrollbarGutter;
+    previousBodyScrollbarGutter = document.body.style.scrollbarGutter;
+    document.documentElement.style.scrollbarGutter = "auto";
+    document.body.style.scrollbarGutter = "auto";
     initDarkMode();
     initStore();
   });
 
   onDestroy(() => {
+    document.documentElement.style.scrollbarGutter =
+      previousHtmlScrollbarGutter;
+    document.body.style.scrollbarGutter = previousBodyScrollbarGutter;
     destroyStore();
   });
 </script>

@@ -84,11 +84,10 @@ describe("receiver layout SSE updates", () => {
   });
 
   it("updates visible read totals when stream_counts_updated arrives", async () => {
-    const { getByTestId } = render(Layout);
+    render(Layout);
 
-    expect(getByTestId("receiver-tab-panel")).toHaveStyle({
-      "scrollbar-gutter": "auto",
-    });
+    expect(document.documentElement.style.scrollbarGutter).toBe("auto");
+    expect(document.body.style.scrollbarGutter).toBe("auto");
 
     expect(await screen.findByText("0 reads")).toBeInTheDocument();
 
