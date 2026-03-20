@@ -21,7 +21,7 @@
 //!   POST /api/v1/admin/profile/reset   - reset profile to defaults
 //!   POST /api/v1/admin/factory-reset   - full factory reset
 
-use crate::db::{Db, Subscription};
+use crate::db::{DEFAULT_UPDATE_MODE, Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post};
 use axum::{
@@ -31,11 +31,8 @@ use axum::{
     response::IntoResponse,
 };
 use rt_protocol::ReceiverMode;
-use rt_updater::UpdateStatus;
-use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
@@ -81,13 +78,11 @@ pub struct AppState {
     pub shutdown_tx: watch::Sender<ShutdownSignal>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
-    pub update_status: Arc<RwLock<UpdateStatus>>,
-    pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
-    pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
+    pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -121,13 +116,11 @@ impl AppState {
             shutdown_tx,
             upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
-            update_status: Arc::new(RwLock::new(UpdateStatus::UpToDate)),
-            staged_update_path: Arc::new(RwLock::new(None)),
-            update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
             http_client,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -374,13 +367,7 @@ pub struct ProfileRequest {
     pub server_url: String,
     pub token: String,
     #[serde(default)]
-    pub update_mode: Option<String>,
-    #[serde(default)]
     pub receiver_id: Option<String>,
-}
-
-fn default_update_mode() -> String {
-    crate::db::DEFAULT_UPDATE_MODE.to_owned()
 }
 
 fn is_valid_receiver_id(id: &str) -> bool {
@@ -406,7 +393,6 @@ fn is_uuid_format(value: &str) -> bool {
 pub struct ProfileResponse {
     pub server_url: String,
     pub token: String,
-    pub update_mode: String,
     pub receiver_id: String,
 }
 
@@ -534,6 +520,16 @@ struct UpstreamRaceEpochMapping {
     stream_epoch: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceStreamMappingsResponse {
+    mappings: Vec<UpstreamRaceStreamMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceStreamMapping {
+    forwarder_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Server stream fetching helpers
 // ---------------------------------------------------------------------------
@@ -556,6 +552,7 @@ pub struct UpstreamStreamInfo {
 }
 
 /// Normalize a server URL by prepending `ws://` if no scheme is present.
+/// Use `wss://` explicitly in the URL for a TLS connection.
 pub(crate) fn normalize_server_url(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
@@ -569,7 +566,7 @@ pub(crate) fn normalize_server_url(raw: &str) -> String {
 ///
 /// `ws://host:port`  → `http://host:port`
 /// `wss://host:port` → `https://host:port`
-pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
+pub fn http_base_url(base_url: &str) -> Option<String> {
     let url = reqwest::Url::parse(base_url).ok()?;
     let scheme = match url.scheme() {
         "ws" => "http",
@@ -609,6 +606,194 @@ pub async fn fetch_server_streams(
     Ok(body.streams)
 }
 
+/// Flat chip_id → (bib, name) map for a single race.
+type FlatChipMap = HashMap<String, (String, String)>;
+
+/// Parse a participants JSON response into a flat chip_id → (bib, name) map.
+fn parse_participants(body: &serde_json::Value) -> FlatChipMap {
+    let mut map = FlatChipMap::new();
+    if let Some(participants) = body.get("participants").and_then(|v| v.as_array()) {
+        for p in participants {
+            let bib = match p.get("bib").and_then(|v| v.as_i64()) {
+                Some(b) => b.to_string(),
+                None => {
+                    tracing::debug!("skipping participant without bib field");
+                    continue;
+                }
+            };
+            let first = p.get("first_name").and_then(|v| v.as_str()).unwrap_or("");
+            let last = p.get("last_name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = format!("{first} {last}").trim().to_owned();
+
+            if let Some(chip_ids) = p.get("chip_ids").and_then(|v| v.as_array()) {
+                for chip_val in chip_ids {
+                    if let Some(chip_id) = chip_val.as_str() {
+                        map.insert(chip_id.to_owned(), (bib.clone(), name.clone()));
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Fetch a flat chip map for a single race from the upstream server.
+async fn fetch_race_chips(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    race_id: &str,
+) -> Result<FlatChipMap, String> {
+    let url = format!("{base}/api/v1/races/{race_id}/participants");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("fetch participants failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid JSON: {e}"))?;
+
+    Ok(parse_participants(&body))
+}
+
+/// Build a per-forwarder chip lookup for Race mode.  All forwarders that
+/// sent the receiver a hello for the given race share the same chip map.
+pub async fn fetch_chip_lookup_for_race(
+    client: &reqwest::Client,
+    ws_url: &str,
+    token: &str,
+    race_id: &str,
+    forwarder_ids: &[String],
+) -> Result<crate::session::ChipLookup, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+    let chips = fetch_race_chips(client, &base, token, race_id).await?;
+    let mut lookup = crate::session::ChipLookup::new();
+    for fwd in forwarder_ids {
+        lookup.insert(fwd.clone(), chips.clone());
+    }
+    Ok(lookup)
+}
+
+pub async fn fetch_forwarder_ids_for_race(
+    client: &reqwest::Client,
+    ws_url: &str,
+    token: &str,
+    race_id: &str,
+) -> Result<Vec<String>, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+    let url = format!("{base}/api/v1/races/{race_id}/stream-epochs");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("fetch race stream mappings failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+
+    let body: UpstreamRaceStreamMappingsResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid race stream mappings JSON: {e}"))?;
+
+    let mut forwarder_ids: Vec<String> = body
+        .mappings
+        .into_iter()
+        .map(|mapping| mapping.forwarder_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    forwarder_ids.sort();
+    Ok(forwarder_ids)
+}
+
+/// Build a per-forwarder chip lookup for Live mode by querying the server's
+/// `forwarder_races` assignments.  Only forwarders with an assigned race get
+/// entries; reads from unassigned forwarders will not be enriched.
+pub async fn fetch_chip_lookup_for_forwarders(
+    client: &reqwest::Client,
+    ws_url: &str,
+    token: &str,
+    forwarder_ids: &[String],
+) -> Result<crate::session::ChipLookup, String> {
+    if forwarder_ids.is_empty() {
+        return Ok(crate::session::ChipLookup::new());
+    }
+
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+
+    // Fetch all forwarder→race assignments in one call.
+    let url = format!("{base}/api/v1/forwarder-races");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("fetch forwarder-races failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid forwarder-races JSON: {e}"))?;
+
+    // Build forwarder_id → race_id mapping for our subscribed forwarders.
+    let forwarder_set: std::collections::HashSet<&str> =
+        forwarder_ids.iter().map(|s| s.as_str()).collect();
+    let mut fwd_to_race: HashMap<String, String> = HashMap::new();
+
+    if let Some(assignments) = body.get("assignments").and_then(|v| v.as_array()) {
+        for a in assignments {
+            let fwd = a.get("forwarder_id").and_then(|v| v.as_str()).unwrap_or("");
+            if forwarder_set.contains(fwd)
+                && let Some(rid) = a.get("race_id").and_then(|v| v.as_str())
+            {
+                fwd_to_race.insert(fwd.to_owned(), rid.to_owned());
+            }
+        }
+    }
+
+    // Fetch participants per unique race, caching to avoid duplicate requests.
+    let mut race_chips: HashMap<String, FlatChipMap> = HashMap::new();
+    for race_id in fwd_to_race.values() {
+        if !race_chips.contains_key(race_id) {
+            let url = format!("{base}/api/v1/races/{race_id}/participants");
+            let chips = match client.get(&url).bearer_auth(token).send().await {
+                Ok(r) if r.status().is_success() => r
+                    .json::<serde_json::Value>()
+                    .await
+                    .map(|b| parse_participants(&b))
+                    .unwrap_or_default(),
+                _ => FlatChipMap::new(),
+            };
+            race_chips.insert(race_id.clone(), chips);
+        }
+    }
+
+    // Build the per-forwarder lookup.
+    let mut lookup = crate::session::ChipLookup::new();
+    for (fwd, race_id) in &fwd_to_race {
+        if let Some(chips) = race_chips.get(race_id) {
+            lookup.insert(fwd.clone(), chips.clone());
+        }
+    }
+
+    Ok(lookup)
+}
+
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
@@ -620,7 +805,6 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Ok(Some(p)) => Json(ProfileResponse {
             server_url: p.server_url,
             token: p.token,
-            update_mode: p.update_mode,
             receiver_id,
         })
         .into_response(),
@@ -662,34 +846,6 @@ async fn put_profile(
     }
 
     let mut db = state.db.lock().await;
-    let mut effective_update_mode = body.update_mode.clone().unwrap_or_else(|| {
-        db.load_profile()
-            .ok()
-            .flatten()
-            .map(|p| p.update_mode)
-            .unwrap_or_else(default_update_mode)
-    });
-
-    let parsed_update_mode = match serde_json::from_value::<rt_updater::UpdateMode>(
-        serde_json::Value::String(effective_update_mode.clone()),
-    ) {
-        Ok(mode) => mode,
-        Err(_) if body.update_mode.is_none() => {
-            effective_update_mode = default_update_mode();
-            rt_updater::UpdateMode::default()
-        }
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "update_mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'",
-                    effective_update_mode
-                ),
-            )
-                .into_response();
-        }
-    };
-
     let persist_receiver_id = new_receiver_id
         .clone()
         .or_else(|| db.load_profile().ok().flatten().and_then(|p| p.receiver_id));
@@ -697,13 +853,12 @@ async fn put_profile(
     match db.save_profile(
         &url,
         &body.token,
-        &effective_update_mode,
+        DEFAULT_UPDATE_MODE,
         persist_receiver_id.as_deref(),
     ) {
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
-            *state.update_mode.write().await = parsed_update_mode;
             if let Some(id) = new_receiver_id {
                 *state.receiver_id.write().await = id;
             }
@@ -1230,7 +1385,6 @@ async fn post_admin_reset_profile(
             drop(db);
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
-            *state.update_mode.write().await = rt_updater::UpdateMode::default();
             state.emit_streams_snapshot().await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1258,7 +1412,6 @@ async fn post_admin_factory_reset(
             drop(db);
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
-            *state.update_mode.write().await = rt_updater::UpdateMode::default();
             state.emit_streams_snapshot().await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1286,183 +1439,6 @@ async fn post_admin_update_port(
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "subscription not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-async fn get_update_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = state.update_status.read().await.clone();
-    Json(status).into_response()
-}
-
-async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let path = state.staged_update_path.read().await.clone();
-    match path {
-        Some(path) => {
-            // Detect a missing staged file synchronously so the status update is
-            // immediate and reliable (avoids Windows blocking-thread startup
-            // latency causing the test to race against a fixed timeout).
-            let staged_file_error = match path.try_exists() {
-                Ok(true) => None,
-                Ok(false) => Some(format!("staged file not found: {}", path.display())),
-                Err(e) => Some(format!(
-                    "failed to access staged file {}: {}",
-                    path.display(),
-                    e
-                )),
-            };
-            if let Some(error) = staged_file_error {
-                tracing::error!(path = %path.display(), error = %error, "cannot apply update");
-                *state.update_status.write().await = rt_updater::UpdateStatus::Failed { error };
-                return (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"status": "failed"})),
-                )
-                    .into_response();
-            }
-            let state_clone = Arc::clone(&state);
-            // Send response before exiting
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                match tokio::task::spawn_blocking(move || {
-                    rt_updater::UpdateChecker::apply_update(&path)
-                })
-                .await
-                {
-                    Ok(Ok(())) => {
-                        state_clone.request_process_shutdown();
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(error = %e, "update apply failed");
-                        *state_clone.update_status.write().await =
-                            rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "update apply task failed");
-                        *state_clone.update_status.write().await =
-                            rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
-                    }
-                }
-            });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "applying"})),
-            )
-                .into_response()
-        }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no update staged"})),
-        )
-            .into_response(),
-    }
-}
-
-async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let update_mode = *state.update_mode.read().await;
-
-    let checker = match rt_updater::UpdateChecker::new(
-        "iwismer",
-        "rusty-timer",
-        "receiver",
-        env!("CARGO_PKG_VERSION"),
-    ) {
-        Ok(c) => RealChecker::new(c),
-        Err(e) => {
-            let (status_code, status) = update_check_init_error_status(e.to_string());
-            *state.update_status.write().await = status.clone();
-            return (status_code, Json(status)).into_response();
-        }
-    };
-
-    let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-    let status = run_check(&workflow_state, &checker, update_mode).await;
-    Json(status).into_response()
-}
-
-fn update_check_init_error_status(error: String) -> (StatusCode, UpdateStatus) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        UpdateStatus::Failed { error },
-    )
-}
-
-struct ReceiverWorkflowAdapter {
-    state: Arc<AppState>,
-}
-
-impl ReceiverWorkflowAdapter {
-    fn new(state: Arc<AppState>) -> Self {
-        Self { state }
-    }
-}
-
-impl WorkflowState for ReceiverWorkflowAdapter {
-    fn current_status<'a>(
-        &'a self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = UpdateStatus> + Send + 'a>> {
-        Box::pin(async move { self.state.update_status.read().await.clone() })
-    }
-
-    fn set_status<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            *self.state.update_status.write().await = status;
-        })
-    }
-
-    fn set_downloaded<'a>(
-        &'a self,
-        status: UpdateStatus,
-        path: PathBuf,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            *self.state.update_status.write().await = status;
-            *self.state.staged_update_path.write().await = Some(path);
-        })
-    }
-
-    fn emit_status_changed<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let _ = self
-                .state
-                .ui_tx
-                .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                    status: status.clone(),
-                });
-        })
-    }
-}
-
-async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let checker = match rt_updater::UpdateChecker::new(
-        "iwismer",
-        "rusty-timer",
-        "receiver",
-        env!("CARGO_PKG_VERSION"),
-    ) {
-        Ok(c) => RealChecker::new(c),
-        Err(e) => {
-            let status = rt_updater::UpdateStatus::Failed {
-                error: e.to_string(),
-            };
-            *state.update_status.write().await = status.clone();
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(status)).into_response();
-        }
-    };
-
-    let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-    match run_download(&workflow_state, &checker).await {
-        Ok(status) => Json(status).into_response(),
-        Err(status) => (StatusCode::CONFLICT, Json(status)).into_response(),
     }
 }
 
@@ -1527,10 +1503,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/admin/subscriptions/port",
             post(post_admin_update_port),
         )
-        .route("/api/v1/update/status", get(get_update_status))
-        .route("/api/v1/update/apply", post(post_update_apply))
-        .route("/api/v1/update/check", post(post_update_check))
-        .route("/api/v1/update/download", post(post_update_download))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }
@@ -1539,6 +1511,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 mod tests {
     use super::*;
     use crate::db::Db;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio::net::TcpListener;
 
     #[test]
     fn http_base_url_ws_with_port() {
@@ -1576,5 +1552,61 @@ mod tests {
         state.request_process_shutdown();
         shutdown_rx.changed().await.unwrap();
         assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Terminate);
+    }
+
+    async fn run_test_server(router: Router) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn fetch_forwarder_ids_for_race_deduplicates_mapped_forwarders() {
+        let race_id = "11111111-1111-1111-1111-111111111111";
+        let router = Router::new().route(
+            &format!("/api/v1/races/{race_id}/stream-epochs"),
+            get(move || async move {
+                Json(json!({
+                    "mappings": [
+                        {
+                            "stream_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                            "forwarder_id": "fwd-a",
+                            "reader_ip": "10.0.0.1:10000",
+                            "stream_epoch": 1,
+                            "race_id": race_id,
+                        },
+                        {
+                            "stream_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                            "forwarder_id": "fwd-b",
+                            "reader_ip": "10.0.0.2:10000",
+                            "stream_epoch": 2,
+                            "race_id": race_id,
+                        },
+                        {
+                            "stream_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                            "forwarder_id": "fwd-a",
+                            "reader_ip": "10.0.0.3:10000",
+                            "stream_epoch": 3,
+                            "race_id": race_id,
+                        }
+                    ]
+                }))
+            }),
+        );
+        let addr = run_test_server(router).await;
+
+        let ids = fetch_forwarder_ids_for_race(
+            &reqwest::Client::new(),
+            &format!("ws://{addr}"),
+            "test-token",
+            race_id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ids, vec!["fwd-a", "fwd-b"]);
     }
 }

@@ -122,7 +122,6 @@ async fn main() {
     // -------------------------------------------------------------------------
     // 4. Load profile and restore subscriptions
     // -------------------------------------------------------------------------
-    let update_mode: rt_updater::UpdateMode;
     let has_profile: bool;
     {
         let db = state.db.lock().await;
@@ -132,18 +131,7 @@ async fn main() {
             *state.upstream_url.write().await = Some(p.server_url.clone());
             info!(url = %p.server_url, "restored profile");
         }
-        update_mode = profile
-            .as_ref()
-            .and_then(|p| {
-                serde_json::from_value::<rt_updater::UpdateMode>(serde_json::Value::String(
-                    p.update_mode.clone(),
-                ))
-                .ok()
-            })
-            .unwrap_or_default();
     }
-
-    *state.update_mode.write().await = update_mode;
 
     let event_bus = EventBus::new();
 
@@ -207,106 +195,6 @@ async fn main() {
         shutdown_for_ctrlc.request_process_shutdown();
     });
 
-    // Spawn background update check
-    {
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            if update_mode == rt_updater::UpdateMode::Disabled {
-                state.logger.log("auto-update disabled by configuration");
-                return;
-            }
-
-            let checker = match rt_updater::UpdateChecker::new(
-                "iwismer",
-                "rusty-timer",
-                "receiver",
-                env!("CARGO_PKG_VERSION"),
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    state.logger.log_at(
-                        UiLogLevel::Warn,
-                        format!("failed to create update checker: {e}"),
-                    );
-                    return;
-                }
-            };
-
-            match checker.check().await {
-                Ok(rt_updater::UpdateStatus::Available { ref version }) => {
-                    state.logger.log(format!("Update v{version} available"));
-                    *state.update_status.write().await = rt_updater::UpdateStatus::Available {
-                        version: version.clone(),
-                    };
-                    let _ = state
-                        .ui_tx
-                        .send(receiver::ReceiverUiEvent::UpdateStatusChanged {
-                            status: rt_updater::UpdateStatus::Available {
-                                version: version.clone(),
-                            },
-                        });
-
-                    if update_mode == rt_updater::UpdateMode::CheckAndDownload {
-                        match checker.download(version).await {
-                            Ok(path) => {
-                                state
-                                    .logger
-                                    .log(format!("Update v{version} downloaded and staged"));
-                                *state.update_status.write().await =
-                                    rt_updater::UpdateStatus::Downloaded {
-                                        version: version.clone(),
-                                    };
-                                *state.staged_update_path.write().await = Some(path);
-
-                                let _ = state.ui_tx.send(
-                                    receiver::ReceiverUiEvent::UpdateStatusChanged {
-                                        status: rt_updater::UpdateStatus::Downloaded {
-                                            version: version.clone(),
-                                        },
-                                    },
-                                );
-                            }
-                            Err(e) => {
-                                state.logger.log_at(
-                                    UiLogLevel::Warn,
-                                    format!("update download failed: {e}"),
-                                );
-                                *state.update_status.write().await =
-                                    rt_updater::UpdateStatus::Failed {
-                                        error: e.to_string(),
-                                    };
-                                let _ = state.ui_tx.send(
-                                    receiver::ReceiverUiEvent::UpdateStatusChanged {
-                                        status: rt_updater::UpdateStatus::Failed {
-                                            error: e.to_string(),
-                                        },
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {
-                    state.logger.log("receiver is up to date");
-                }
-                Err(e) => {
-                    state
-                        .logger
-                        .log_at(UiLogLevel::Warn, format!("update check failed: {e}"));
-                    *state.update_status.write().await = rt_updater::UpdateStatus::Failed {
-                        error: e.to_string(),
-                    };
-                    let _ = state
-                        .ui_tx
-                        .send(receiver::ReceiverUiEvent::UpdateStatusChanged {
-                            status: rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            },
-                        });
-                }
-            }
-        });
-    }
     {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -333,14 +221,6 @@ async fn main() {
     loop {
         tokio::select! {
             biased;
-
-            // ------------------------------------------------------------------
-            // Graceful shutdown: ctrl-c or SIGTERM
-            // ------------------------------------------------------------------
-            _ = tokio::signal::ctrl_c() => {
-                info!("received ctrl-c, shutting down");
-                break;
-            }
 
             // ------------------------------------------------------------------
             // Shutdown signal from control API (e.g. disconnect sends true)
@@ -446,10 +326,11 @@ async fn main() {
                                     }
                                     Ok((ws, _)) => {
                                         // Perform the receiver hello / heartbeat handshake.
+                                        // NOTE: do_handshake takes Arc<Mutex<Db>> so it can
+                                        // drop the lock before making async HTTP calls.
                                         let (session_result, ws) = {
                                             let receiver_id = state.receiver_id.read().await.clone();
-                                            let db = state.db.lock().await;
-                                            do_handshake(ws, &db, &state.ui_tx, &receiver_id, &state.http_client).await
+                                            do_handshake(ws, &state.db, &state.ui_tx, &receiver_id, &state.http_client).await
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -476,6 +357,9 @@ async fn main() {
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
 
+                                                // Fetch chip→participant lookup from the server.
+                                                refresh_chip_lookup(&state).await;
+
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
                                                 let db_arc = Arc::clone(&state.db);
@@ -492,6 +376,7 @@ async fn main() {
                                                         ui_tx,
                                                         shutdown: cancel_rx,
                                                         connection_state: st.conn_rx(),
+                                                        chip_lookup: Arc::clone(&st.chip_lookup),
                                                     };
                                                     let result = receiver::session::run_session_loop(
                                                         ws, session_id, deps,
@@ -577,6 +462,11 @@ fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
 // Helper: watch connection_state and return the new value when it changes.
 // ---------------------------------------------------------------------------
 async fn watch_connection_state(rx: &mut watch::Receiver<ConnectionState>) -> ConnectionState {
+    let current = rx.borrow().clone();
+    if current == ConnectionState::Connecting || current == ConnectionState::Disconnecting {
+        return current;
+    }
+
     loop {
         rx.changed().await.expect("watch sender dropped");
         let cs = rx.borrow().clone();
@@ -626,8 +516,119 @@ async fn wait_for_reconnect_delay_or_abort(
     }
 }
 
+fn collect_lookup_forwarder_ids(
+    mode: Option<&rt_protocol::ReceiverMode>,
+    subs: &[Subscription],
+) -> Vec<String> {
+    let from_mode = match mode {
+        Some(rt_protocol::ReceiverMode::Live { streams, .. }) if !streams.is_empty() => Some(
+            streams
+                .iter()
+                .map(|stream| stream.forwarder_id.clone())
+                .collect::<Vec<_>>(),
+        ),
+        Some(rt_protocol::ReceiverMode::TargetedReplay { targets }) if !targets.is_empty() => Some(
+            targets
+                .iter()
+                .map(|target| target.forwarder_id.clone())
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    };
+
+    let mut forwarder_ids: Vec<String> = from_mode
+        .unwrap_or_else(|| {
+            subs.iter()
+                .map(|sub| sub.forwarder_id.clone())
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    forwarder_ids.sort();
+    forwarder_ids
+}
+
+/// Fetch a chip→participant lookup from the server and store it in
+/// `state.chip_lookup`.  Called on connect and when the server pushes a
+/// `forwarder_race_assigned` SSE event.
+async fn refresh_chip_lookup(state: &Arc<AppState>) {
+    let db = state.db.lock().await;
+    let mode = db.load_receiver_mode().ok().flatten();
+    let profile = db.load_profile().ok().flatten();
+    let subs = db.load_subscriptions().unwrap_or_default();
+    drop(db);
+
+    let Some(p) = profile else {
+        *state.chip_lookup.write().await = HashMap::new();
+        return;
+    };
+
+    let forwarder_ids = match mode.as_ref() {
+        Some(rt_protocol::ReceiverMode::Race { race_id }) => {
+            match receiver::control_api::fetch_forwarder_ids_for_race(
+                &state.http_client,
+                &p.server_url,
+                &p.token,
+                race_id,
+            )
+            .await
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(error = %e, "failed to fetch race forwarder mappings");
+                    return;
+                }
+            }
+        }
+        _ => collect_lookup_forwarder_ids(mode.as_ref(), &subs),
+    };
+
+    let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
+        receiver::control_api::fetch_chip_lookup_for_race(
+            &state.http_client,
+            &p.server_url,
+            &p.token,
+            &race_id,
+            &forwarder_ids,
+        )
+        .await
+    } else {
+        receiver::control_api::fetch_chip_lookup_for_forwarders(
+            &state.http_client,
+            &p.server_url,
+            &p.token,
+            &forwarder_ids,
+        )
+        .await
+    };
+
+    let lookup = match result {
+        Ok(lookup) => lookup,
+        Err(e) => {
+            warn!(error = %e, "failed to fetch participant lookup");
+            return; // keep the existing lookup on error
+        }
+    };
+
+    let total_chips: usize = lookup.values().map(|m| m.len()).sum();
+    if total_chips > 0 {
+        state.logger.log(format!(
+            "Loaded chip→participant mappings for {} forwarder(s) ({total_chips} chips)",
+            lookup.len()
+        ));
+    }
+
+    *state.chip_lookup.write().await = lookup;
+}
+
 fn should_refresh_stream_snapshot_for_dashboard_event(event_name: &str) -> bool {
     matches!(event_name, "stream_created" | "stream_updated" | "resync")
+}
+
+fn should_refresh_chip_lookup_for_dashboard_event(event_name: &str) -> bool {
+    matches!(event_name, "forwarder_race_assigned")
 }
 
 fn should_emit_receiver_resync_for_dashboard_event(event_name: &str) -> bool {
@@ -652,19 +653,8 @@ fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) ->
     None
 }
 
-fn http_base_url(base_url: &str) -> Option<String> {
-    let url = reqwest::Url::parse(base_url).ok()?;
-    let scheme = match url.scheme() {
-        "ws" => "http",
-        "wss" => "https",
-        _ => return None,
-    };
-    let host = url.host_str()?;
-    match url.port() {
-        Some(port) => Some(format!("{scheme}://{host}:{port}")),
-        None => Some(format!("{scheme}://{host}")),
-    }
-}
+// Use the shared http_base_url from control_api.
+use receiver::control_api::http_base_url;
 
 async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
     let client = match reqwest::Client::builder()
@@ -777,6 +767,9 @@ async fn consume_upstream_dashboard_events(
                 if should_emit_receiver_resync_for_dashboard_event(&event_name) {
                     state.emit_resync();
                 }
+                if should_refresh_chip_lookup_for_dashboard_event(&event_name) {
+                    refresh_chip_lookup(state).await;
+                }
             }
         }
     }
@@ -819,7 +812,7 @@ async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64
 #[allow(clippy::type_complexity)]
 async fn do_handshake<S>(
     mut ws: S,
-    db: &Db,
+    db: &Arc<tokio::sync::Mutex<Db>>,
     ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
     receiver_id: &str,
     http_client: &reqwest::Client,
@@ -841,30 +834,74 @@ where
     };
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    let resume = match db.load_resume_cursors() {
-        Ok(cursors) => cursors,
-        Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-    };
-    let mut mode = match db.load_receiver_mode() {
-        Ok(Some(mode)) => mode,
-        Ok(None) => {
-            let streams = match db.load_subscriptions() {
-                Ok(subs) => subs
-                    .into_iter()
-                    .map(|s| StreamRef {
-                        forwarder_id: s.forwarder_id,
-                        reader_ip: s.reader_ip,
-                    })
-                    .collect(),
-                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-            };
-            ReceiverMode::Live {
-                streams,
-                earliest_epochs: vec![],
+    // Read all DB data we need upfront, then drop the lock before any async HTTP calls.
+    let (resume, mut mode, earliest_epochs_rows, profile_url) = {
+        let db = db.lock().await;
+        let resume = match db.load_resume_cursors() {
+            Ok(cursors) => cursors,
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+        let mode = match db.load_receiver_mode() {
+            Ok(Some(mode)) => mode,
+            Ok(None) => {
+                let streams = match db.load_subscriptions() {
+                    Ok(subs) => subs
+                        .into_iter()
+                        .map(|s| StreamRef {
+                            forwarder_id: s.forwarder_id,
+                            reader_ip: s.reader_ip,
+                        })
+                        .collect(),
+                    Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+                };
+                ReceiverMode::Live {
+                    streams,
+                    earliest_epochs: vec![],
+                }
             }
-        }
-        Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+        let earliest_epochs_rows = match db.load_earliest_epochs() {
+            Ok(rows) => rows,
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+        let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
+        // If mode is Live with empty streams, load subscriptions
+        let mode = if let ReceiverMode::Live { ref streams, .. } = mode {
+            if streams.is_empty() {
+                match db.load_subscriptions() {
+                    Ok(subs) => {
+                        let streams = subs
+                            .into_iter()
+                            .map(|s| StreamRef {
+                                forwarder_id: s.forwarder_id,
+                                reader_ip: s.reader_ip,
+                            })
+                            .collect();
+                        if let ReceiverMode::Live {
+                            earliest_epochs, ..
+                        } = mode
+                        {
+                            ReceiverMode::Live {
+                                streams,
+                                earliest_epochs,
+                            }
+                        } else {
+                            mode
+                        }
+                    }
+                    Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+                }
+            } else {
+                mode
+            }
+        } else {
+            mode
+        };
+        (resume, mode, earliest_epochs_rows, profile_url)
     };
+    // DB lock is now released — safe to make async HTTP calls.
+
     let clear_targeted_mode_after_handshake = matches!(
         &mode,
         ReceiverMode::TargetedReplay { targets } if !targets.is_empty()
@@ -875,30 +912,11 @@ where
         ref mut earliest_epochs,
     } = mode
     {
-        if streams.is_empty() {
-            match db.load_subscriptions() {
-                Ok(subs) => {
-                    *streams = subs
-                        .into_iter()
-                        .map(|s| StreamRef {
-                            forwarder_id: s.forwarder_id,
-                            reader_ip: s.reader_ip,
-                        })
-                        .collect();
-                }
-                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-            }
-        }
+        let mut map: HashMap<(String, String), i64> = earliest_epochs_rows
+            .into_iter()
+            .map(|(fwd, ip, epoch)| ((fwd, ip), epoch))
+            .collect();
 
-        let mut map: HashMap<(String, String), i64> = match db.load_earliest_epochs() {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|(fwd, ip, epoch)| ((fwd, ip), epoch))
-                .collect(),
-            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-        };
-
-        let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
         if let Some(url) = profile_url
             && let Ok(server_streams) =
                 receiver::control_api::fetch_server_streams(http_client, &url).await
@@ -979,9 +997,11 @@ where
                     let clear_mode = ReceiverMode::TargetedReplay {
                         targets: Vec::new(),
                     };
-                    if let Err(e) = db.save_receiver_mode(&clear_mode) {
+                    let db_guard = db.lock().await;
+                    if let Err(e) = db_guard.save_receiver_mode(&clear_mode) {
                         return (Err(receiver::session::SessionError::Db(e)), None);
                     }
+                    drop(db_guard);
                 }
                 info!(session_id = %hb.session_id, "handshake complete");
                 return (Ok(hb.session_id), Some(ws));
@@ -1058,11 +1078,11 @@ async fn cancel_session(
     if let Some(tx) = cancel_tx.take() {
         let _ = tx.send(true);
     }
-    // Await the task.
+    // Await the task; abort it if it doesn't exit within 5s.
     if let Some(handle) = task.take() {
-        // Give the task a moment to exit cleanly; abort if it doesn't.
-        let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), handle);
-        match timeout.await {
+        // Pin the handle so we can poll it without consuming it on timeout.
+        tokio::pin!(handle);
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 logger.log_at(UiLogLevel::Warn, format!("session task panicked: {e}"));
@@ -1070,8 +1090,9 @@ async fn cancel_session(
             Err(_) => {
                 logger.log_at(
                     UiLogLevel::Warn,
-                    "session task did not exit in 5s; continuing",
+                    "session task did not exit in 5s; aborting",
                 );
+                handle.abort();
             }
         }
     }
@@ -1276,7 +1297,7 @@ mod tests {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .expect("connect");
-        let db = Db::open_in_memory().expect("db");
+        let db = Arc::new(tokio::sync::Mutex::new(Db::open_in_memory().expect("db")));
         let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
 
         let http_client = reqwest::Client::new();
@@ -1366,12 +1387,16 @@ mod tests {
             Some(initial_mode)
         );
 
+        let db = Arc::new(tokio::sync::Mutex::new(db));
         let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
         let http_client = reqwest::Client::new();
         let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver", &http_client).await;
         assert!(result.is_ok(), "handshake should succeed");
         assert_eq!(
-            db.load_receiver_mode().expect("load mode after handshake"),
+            db.lock()
+                .await
+                .load_receiver_mode()
+                .expect("load mode after handshake"),
             Some(ReceiverMode::TargetedReplay {
                 targets: Vec::new()
             })
@@ -1431,6 +1456,85 @@ mod tests {
         let retried = retry_connect_if_attempt_current(&state, stale_attempt).await;
 
         assert!(!retried);
+    }
+
+    #[tokio::test]
+    async fn watch_connection_state_observes_current_connecting_state() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+
+        state.request_connect().await;
+
+        let mut conn_state_rx = state.conn_rx();
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            watch_connection_state(&mut conn_state_rx),
+        )
+        .await;
+
+        assert_eq!(
+            observed.expect("watcher should not miss the current connecting state"),
+            ConnectionState::Connecting
+        );
+    }
+
+    #[test]
+    fn collect_lookup_forwarder_ids_prefers_live_mode_streams_over_subscriptions() {
+        let subs = vec![Subscription {
+            forwarder_id: "sub-fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            local_port_override: None,
+        }];
+        let mode = ReceiverMode::Live {
+            streams: vec![
+                rt_protocol::StreamRef {
+                    forwarder_id: "mode-fwd-a".to_owned(),
+                    reader_ip: "10.0.0.2:10000".to_owned(),
+                },
+                rt_protocol::StreamRef {
+                    forwarder_id: "mode-fwd-b".to_owned(),
+                    reader_ip: "10.0.0.3:10000".to_owned(),
+                },
+                rt_protocol::StreamRef {
+                    forwarder_id: "mode-fwd-a".to_owned(),
+                    reader_ip: "10.0.0.4:10000".to_owned(),
+                },
+            ],
+            earliest_epochs: Vec::new(),
+        };
+
+        let forwarder_ids = collect_lookup_forwarder_ids(Some(&mode), &subs);
+
+        assert_eq!(forwarder_ids, vec!["mode-fwd-a", "mode-fwd-b"]);
+    }
+
+    #[test]
+    fn collect_lookup_forwarder_ids_uses_targeted_replay_targets() {
+        let subs = vec![Subscription {
+            forwarder_id: "sub-fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            local_port_override: None,
+        }];
+        let mode = ReceiverMode::TargetedReplay {
+            targets: vec![
+                ReplayTarget {
+                    forwarder_id: "target-fwd".to_owned(),
+                    reader_ip: "10.0.0.2:10000".to_owned(),
+                    stream_epoch: 4,
+                    from_seq: 1,
+                },
+                ReplayTarget {
+                    forwarder_id: "target-fwd".to_owned(),
+                    reader_ip: "10.0.0.3:10000".to_owned(),
+                    stream_epoch: 5,
+                    from_seq: 1,
+                },
+            ],
+        };
+
+        let forwarder_ids = collect_lookup_forwarder_ids(Some(&mode), &subs);
+
+        assert_eq!(forwarder_ids, vec!["target-fwd"]);
     }
 
     #[test]

@@ -27,6 +27,12 @@ pub struct Session {
     pub device_id: String,
 }
 
+/// Per-forwarder chip→participant lookup.
+/// Outer key is forwarder_id, inner key is chip_id (e.g. "058003700001"),
+/// value is (bib, display_name).  Only forwarders with an assigned race
+/// have entries; reads from other forwarders are not enriched.
+pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
+
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
@@ -34,6 +40,7 @@ pub struct SessionLoopDeps {
     pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     pub shutdown: watch::Receiver<bool>,
     pub connection_state: watch::Receiver<ConnectionState>,
+    pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
 }
 
 fn apply_batch_counts(
@@ -123,6 +130,31 @@ where
                                         updates,
                                     });
                                 }
+                                // Emit only the last read per (forwarder_id, reader_ip) to avoid SSE chatter on large batches.
+                                let chip_lookup = deps.chip_lookup.read().await;
+                                let mut last_reads: HashMap<(String,String), crate::ui_events::LastRead> = HashMap::new();
+                                for e in &forwarded_events {
+                                    let chip_id = crate::ui_events::chip_id_from_raw_frame(&e.raw_frame);
+                                    let (bib, name) = chip_lookup
+                                        .get(&e.forwarder_id)
+                                        .and_then(|chips| chips.get(&chip_id))
+                                        .map(|(b, n)| (Some(b.clone()), Some(n.clone())))
+                                        .unwrap_or((None, None));
+                                    last_reads.insert(
+                                        (e.forwarder_id.clone(), e.reader_ip.clone()),
+                                        crate::ui_events::LastRead {
+                                            forwarder_id: e.forwarder_id.clone(),
+                                            reader_ip: e.reader_ip.clone(),
+                                            chip_id,
+                                            timestamp: e.reader_timestamp.clone(),
+                                            bib,
+                                            name,
+                                        },
+                                    );
+                                }
+                                for last_read in last_reads.into_values() {
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LastRead(last_read));
+                                }
                                 let mut hw: HashMap<(String,String,i64),i64> = HashMap::new();
                                 for e in &forwarded_events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();
@@ -171,6 +203,9 @@ where
                                         ),
                                     });
                                 }
+                                let _ = deps
+                                    .ui_tx
+                                    .send(crate::ui_events::ReceiverUiEvent::Resync);
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }

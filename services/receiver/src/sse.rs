@@ -8,6 +8,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tracing::warn;
 
 pub async fn receiver_sse(
     State(state): State<Arc<AppState>>,
@@ -20,16 +21,22 @@ pub async fn receiver_sse(
                 ReceiverUiEvent::StatusChanged { .. } => "status_changed",
                 ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
                 ReceiverUiEvent::LogEntry { .. } => "log_entry",
-                ReceiverUiEvent::UpdateStatusChanged { .. } => "update_status_changed",
                 ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
                 ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
+                ReceiverUiEvent::LastRead(_) => "last_read",
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
-                Err(_) => None,
+                Err(e) => {
+                    warn!(error = %e, event_type, "failed to serialize SSE event, dropping");
+                    None
+                }
             }
         }
-        Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
+        Err(e) => {
+            warn!(error = %e, "SSE subscriber lagged, sending resync");
+            Some(Ok(Event::default().event("resync").data("{}")))
+        }
     });
     let initial = tokio_stream::once(Ok(Event::default().event("connected").data("{}")));
     let stream = initial.chain(updates);

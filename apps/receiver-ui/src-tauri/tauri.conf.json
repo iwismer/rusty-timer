@@ -1,7 +1,7 @@
 {
   "productName": "Rusty Timer Receiver",
   "identifier": "com.rusty-timer.receiver",
-  "version": "0.1.1",
+  "version": "0.8.0",
   "build": {
     "beforeDevCommand": "mkdir -p ../../target/debug/binaries && cp -f src-tauri/binaries/receiver-* ../../target/debug/binaries/receiver 2>/dev/null; npm run dev",
     "beforeBuildCommand": "npm run build",

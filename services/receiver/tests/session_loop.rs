@@ -113,6 +113,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await
@@ -195,6 +196,7 @@ async fn run_session_loop_drops_events_while_reconnect_is_pending() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connecting).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await
@@ -238,6 +240,7 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -277,6 +280,7 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -318,6 +322,7 @@ async fn run_session_loop_replies_to_ping_with_pong() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -352,6 +357,7 @@ async fn run_session_loop_stops_on_shutdown_signal() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     ));
 
@@ -398,6 +404,7 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -428,6 +435,58 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
             .iter()
             .any(|entry| entry.contains("replay capped at 1000 events")),
         "expected second warning log entry, got: {log_entries:?}"
+    );
+
+    join_server_task(task).await;
+}
+
+#[tokio::test]
+async fn run_session_loop_emits_resync_to_ui_channel_on_reader_status_changed() {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+        let msg = serde_json::json!({
+            "kind": "reader_status_changed",
+            "stream_id": "00000000-0000-0000-0000-000000000000",
+            "reader_ip": "10.0.0.1:10000",
+            "connected": false
+        });
+        ws.send(Message::Text(msg.to_string().into()))
+            .await
+            .unwrap();
+        ws.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+    let result = run_session_loop(
+        ws,
+        "session-reader-status".to_owned(),
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        },
+    )
+    .await;
+
+    assert!(result.is_ok());
+
+    let events: Vec<_> = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ReceiverUiEvent::Resync)),
+        "expected a resync event, got: {events:?}"
     );
 
     join_server_task(task).await;
@@ -486,11 +545,13 @@ async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
                 .await
                 .unwrap();
 
-            // Wait briefly for any potential ack, then close.
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait long enough for the session loop to process the event and
+            // potentially send an ack.  Use a generous timeout to avoid
+            // false-passing on slow CI.
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             // Check if any message was received (there should be none).
-            let next = tokio::time::timeout(Duration::from_millis(100), ws.next()).await;
+            let next = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
             if let Ok(Some(Ok(Message::Text(t)))) = next {
                 let parsed = serde_json::from_str::<WsMessage>(&t).unwrap();
                 if let WsMessage::ReceiverAck(ack) = parsed {
@@ -523,6 +584,7 @@ async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
             ui_tx,
             shutdown: shutdown_rx,
             connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await

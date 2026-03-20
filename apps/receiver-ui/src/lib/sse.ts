@@ -1,10 +1,10 @@
 import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
 import type {
+  LastRead,
   ReceiverMode,
   StatusResponse,
   StreamCountUpdate,
   StreamsResponse,
-  UpdateStatusResponse,
 } from "./api";
 
 export type SseCallbacks = {
@@ -13,9 +13,9 @@ export type SseCallbacks = {
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
-  onUpdateStatusChanged: (status: UpdateStatusResponse) => void;
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
   onModeChanged: (mode: ReceiverMode) => void;
+  onLastRead: (read: LastRead) => void;
 };
 
 let handle: SseHandle | null = null;
@@ -29,7 +29,7 @@ export function initSSE(callbacks: SseCallbacks): void {
       status_changed: (data: any) => {
         callbacks.onStatusChanged({
           connection_state: data.connection_state,
-          local_ok: true,
+          local_ok: data.local_ok ?? true,
           streams_count: data.streams_count,
           receiver_id: data.receiver_id ?? "",
         });
@@ -47,14 +47,21 @@ export function initSSE(callbacks: SseCallbacks): void {
       resync: () => {
         callbacks.onResync();
       },
-      update_status_changed: (data: any) => {
-        callbacks.onUpdateStatusChanged(data.status);
-      },
       stream_counts_updated: (data: any) => {
         callbacks.onStreamCountsUpdated(data.updates ?? []);
       },
       mode_changed: (data: any) => {
         callbacks.onModeChanged(data.mode);
+      },
+      last_read: (data: any) => {
+        callbacks.onLastRead({
+          forwarder_id: data.forwarder_id,
+          reader_ip: data.reader_ip,
+          chip_id: data.chip_id,
+          timestamp: data.timestamp,
+          bib: data.bib ?? null,
+          name: data.name ?? null,
+        });
       },
     },
     (connected) => {

@@ -686,11 +686,25 @@ def build_rust(skip_build: bool, *, tauri: bool = False) -> None:
         console.print("[dim]Skipping Rust build (--no-build)[/dim]")
         return
     console.print("[bold]Building Rust binaries…[/bold]")
-    subprocess.run(
-        ["cargo", "build", "-p", "server", "-p", "forwarder", "--features", "forwarder/embed-ui", "-p", "receiver", "--features", "receiver/embed-ui", "-p", "emulator"],
-        check=True,
-        cwd=REPO_ROOT,
-    )
+    build_cmd = [
+        "cargo",
+        "build",
+        "-p",
+        "server",
+        "-p",
+        "forwarder",
+        "--features",
+        "forwarder/embed-ui",
+        "-p",
+        "receiver",
+        "--features",
+        "receiver/embed-ui",
+        "-p",
+        "emulator",
+    ]
+    if tauri:
+        build_cmd.extend(["-p", "receiver-tauri"])
+    subprocess.run(build_cmd, check=True, cwd=REPO_ROOT)
     console.print("  [green]Build complete.[/green]")
     if tauri:
         target_triple = (
@@ -900,6 +914,7 @@ def configure_receiver_dev() -> None:
     profile_payload = json.dumps({
         "server_url": "ws://127.0.0.1:8080",
         "token": RECEIVER_TOKEN_TEXT,
+        "receiver_id": RECEIVER_DEVICE_ID,
         "log_level": "info",
     }).encode()
     req = urllib.request.Request(

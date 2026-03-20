@@ -25,18 +25,9 @@ export const RECEIVER_HELP = {
         detailHtml: "The authentication token used to connect this receiver to the server. It must match a valid token configured on the server.",
         default: "None (required for authenticated servers)",
       },
-      update_mode: {
-        label: "Update Mode",
-        summary: "How the receiver checks for and applies software updates.",
-        detailHtml: "Controls the receiver's update behavior.<br><br><strong>Automatic</strong>: Checks for updates and downloads/applies them automatically. The application will restart to apply.<br><br><strong>Check Only</strong>: Checks for updates and notifies but does not download or apply them.<br><br><strong>Disabled</strong>: No update checking. Use this on race day to prevent unexpected restarts.",
-        default: "Automatic",
-        range: "Automatic, Check Only, Disabled",
-        recommended: "Set to Disabled on race day to prevent unexpected restarts.",
-      },
     },
     tips: [
       "Save your config before connecting for the first time.",
-      "Set Update Mode to Disabled on race day to prevent unexpected application restarts.",
       "If the receiver can't connect, verify the Server URL is correct and the server is reachable from this machine.",
     ],
     seeAlso: [{ sectionKey: "receiver_mode", label: "Receiver Mode" }],

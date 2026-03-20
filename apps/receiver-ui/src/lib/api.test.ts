@@ -24,7 +24,6 @@ describe("api client", () => {
       makeResponse(200, {
         server_url: "wss://s.com",
         token: "tok",
-        update_mode: "check-and-download",
         receiver_id: "recv-test",
       }),
     );
@@ -43,7 +42,6 @@ describe("api client", () => {
     await putProfile({
       server_url: "wss://s.com",
       token: "t",
-      update_mode: "check-and-download",
       receiver_id: "recv-test",
     });
     expect(mockFetch).toHaveBeenCalledWith(
@@ -80,7 +78,7 @@ describe("api client", () => {
   it("connect accepts 200 or 202", async () => {
     const { connect } = await import("./api");
     mockFetch.mockResolvedValue({
-      ok: false,
+      ok: true,
       status: 202,
       json: async () => ({}),
       text: async () => "",
@@ -91,7 +89,7 @@ describe("api client", () => {
   it("disconnect accepts 200 or 202", async () => {
     const { disconnect } = await import("./api");
     mockFetch.mockResolvedValue({
-      ok: false,
+      ok: true,
       status: 200,
       json: async () => ({}),
       text: async () => "",
@@ -119,69 +117,6 @@ describe("api client", () => {
     const { getProfile } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(500, "internal error"));
     await expect(getProfile()).rejects.toThrow();
-  });
-
-  it("getUpdateStatus calls update status endpoint", async () => {
-    const { getUpdateStatus } = await import("./api");
-    mockFetch.mockResolvedValue(
-      makeResponse(200, { status: "downloaded", version: "1.2.3" }),
-    );
-    const status = await getUpdateStatus();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/update/status",
-      expect.any(Object),
-    );
-    expect(status.status).toBe("downloaded");
-    expect(status.version).toBe("1.2.3");
-  });
-
-  it("applyUpdate succeeds on 200", async () => {
-    const { applyUpdate } = await import("./api");
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({}),
-      text: async () => "",
-    });
-    await expect(applyUpdate()).resolves.toBeUndefined();
-  });
-
-  it("applyUpdate throws on non-200", async () => {
-    const { applyUpdate } = await import("./api");
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 500,
-      json: async () => ({}),
-      text: async () => "err",
-    });
-    await expect(applyUpdate()).rejects.toThrow("apply update -> 500");
-  });
-
-  it("checkForUpdate calls POST /api/v1/update/check", async () => {
-    const { checkForUpdate } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(200, { status: "up_to_date" }));
-    const result = await checkForUpdate();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/update/check",
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(result.status).toBe("up_to_date");
-  });
-
-  it("downloadUpdate returns failed status payload on 409", async () => {
-    const { downloadUpdate } = await import("./api");
-    mockFetch.mockResolvedValue(
-      makeResponse(409, { status: "failed", error: "no update available" }),
-    );
-    const result = await downloadUpdate();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/update/download",
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(result).toEqual({
-      status: "failed",
-      error: "no update available",
-    });
   });
 
   it("getMode calls mode endpoint", async () => {
@@ -348,7 +283,15 @@ describe("sse client", () => {
     );
   });
 
-  it("forwards update_status_changed event payload", async () => {
+  it("uses the same-origin SSE endpoint in local dev", async () => {
+    vi.stubGlobal("location", {
+      ...window.location,
+      protocol: "http:",
+      hostname: "127.0.0.1",
+      port: "5173",
+      origin: "http://127.0.0.1:5173",
+    });
+
     const { initSSE, destroySSE } = await import("./sse");
     const callbacks = {
       onStatusChanged: vi.fn(),
@@ -356,22 +299,16 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateStatusChanged: vi.fn(),
+
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
     };
 
     initSSE(callbacks);
-    expect(MockEventSource.lastInstance).not.toBeNull();
 
-    MockEventSource.lastInstance!.emit("update_status_changed", {
-      status: { status: "available", version: "1.2.3" },
-    });
+    expect(MockEventSource.lastInstance?.url).toBe("/api/v1/events");
 
-    expect(callbacks.onUpdateStatusChanged).toHaveBeenCalledWith({
-      status: "available",
-      version: "1.2.3",
-    });
     destroySSE();
     vi.unstubAllGlobals();
   });
@@ -384,9 +321,10 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateStatusChanged: vi.fn(),
+
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
     };
 
     initSSE(callbacks);
@@ -424,9 +362,10 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateStatusChanged: vi.fn(),
+
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
     };
 
     initSSE(callbacks);

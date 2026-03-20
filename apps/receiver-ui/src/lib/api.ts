@@ -7,7 +7,6 @@ import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
 export interface Profile {
   server_url: string;
   token: string;
-  update_mode: string;
   receiver_id: string;
 }
 
@@ -32,6 +31,15 @@ export interface StreamCountUpdate {
   reader_ip: string;
   reads_total: number;
   reads_epoch: number;
+}
+
+export interface LastRead {
+  forwarder_id: string;
+  reader_ip: string;
+  chip_id: string;
+  timestamp: string;
+  bib?: number | null;
+  name?: string | null;
 }
 
 export interface StreamsResponse {
@@ -196,45 +204,19 @@ export async function resetStreamCursor(stream: StreamRef): Promise<void> {
 }
 
 export async function connect(): Promise<void> {
-  const resp = await fetch("/api/v1/connect", { method: "POST" });
-  if (resp.status !== 200 && resp.status !== 202)
-    throw new Error(`connect -> ${resp.status}`);
+  const resp = await fetch("/api/v1/connect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!resp.ok) throw new Error(`connect -> ${resp.status}`);
 }
 
 export async function disconnect(): Promise<void> {
-  const resp = await fetch("/api/v1/disconnect", { method: "POST" });
-  if (resp.status !== 200 && resp.status !== 202)
-    throw new Error(`disconnect -> ${resp.status}`);
-}
-
-export interface UpdateStatusResponse {
-  status: "up_to_date" | "available" | "downloaded" | "failed";
-  version?: string;
-  error?: string;
-}
-
-export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
-  return apiFetch<UpdateStatusResponse>("/api/v1/update/status");
-}
-
-export async function applyUpdate(): Promise<void> {
-  const resp = await fetch("/api/v1/update/apply", { method: "POST" });
-  if (resp.status !== 200) throw new Error(`apply update -> ${resp.status}`);
-}
-
-export async function checkForUpdate(): Promise<UpdateStatusResponse> {
-  return apiFetch<UpdateStatusResponse>("/api/v1/update/check", {
+  const resp = await fetch("/api/v1/disconnect", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
   });
-}
-
-export async function downloadUpdate(): Promise<UpdateStatusResponse> {
-  const resp = await fetch("/api/v1/update/download", { method: "POST" });
-  if (resp.status !== 200 && resp.status !== 409) {
-    const text = await resp.text();
-    throw new Error(`download update -> ${resp.status}: ${text}`);
-  }
-  return (await resp.json()) as UpdateStatusResponse;
+  if (!resp.ok) throw new Error(`disconnect -> ${resp.status}`);
 }
 
 export async function resetAllCursors(): Promise<{ deleted: number }> {

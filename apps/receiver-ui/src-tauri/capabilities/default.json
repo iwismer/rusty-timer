@@ -23,6 +23,7 @@
       ]
     },
     "shell:allow-kill",
-    "updater:default"
+    "updater:default",
+    "core:event:default"
   ]
 }

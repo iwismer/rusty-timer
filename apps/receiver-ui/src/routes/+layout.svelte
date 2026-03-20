@@ -1,53 +1,74 @@
-<script>
-  import { onMount } from "svelte";
-  import { NavBar } from "@rusty-timer/shared-ui";
-  import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
+<script lang="ts">
+  import type { Snippet } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { page } from "$app/state";
+  import { initStore, destroyStore, store } from "$lib/store.svelte";
+  import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
+  import { AlertBanner } from "@rusty-timer/shared-ui";
+  import TabBar from "$lib/components/TabBar.svelte";
+  import StatusBar from "$lib/components/StatusBar.svelte";
+  import HelpModal from "$lib/components/HelpModal.svelte";
+  import UpdateModal from "$lib/components/UpdateModal.svelte";
+  import StreamsTab from "$lib/components/StreamsTab.svelte";
+  import ConfigTab from "$lib/components/ConfigTab.svelte";
+  import ModeTab from "$lib/components/ModeTab.svelte";
+  import LogsTab from "$lib/components/LogsTab.svelte";
+  import AdminTab from "$lib/components/AdminTab.svelte";
   import "@rusty-timer/shared-ui/styles/tokens.css";
 
-  let { children } = $props();
-  let version = $state("");
+  let { children }: { children?: Snippet } = $props();
+  let previousHtmlScrollbarGutter = "";
+  let previousBodyScrollbarGutter = "";
+  let hasNestedRoute = $derived(page.url.pathname !== "/");
 
   onMount(() => {
+    previousHtmlScrollbarGutter =
+      document.documentElement.style.scrollbarGutter;
+    previousBodyScrollbarGutter = document.body.style.scrollbarGutter;
+    document.documentElement.style.scrollbarGutter = "auto";
+    document.body.style.scrollbarGutter = "auto";
     initDarkMode();
-    fetch("/api/v1/version")
-      .then((r) => r.json())
-      .then((d) => {
-        version = d.version;
-      })
-      .catch(() => {});
+    initStore();
+  });
+
+  onDestroy(() => {
+    document.documentElement.style.scrollbarGutter =
+      previousHtmlScrollbarGutter;
+    document.body.style.scrollbarGutter = previousBodyScrollbarGutter;
+    destroyStore();
   });
 </script>
 
 <svelte:head>
-  <title>Receiver · Rusty Timer</title>
+  <title>Receiver &middot; Rusty Timer</title>
 </svelte:head>
 
-<div class="flex flex-col min-h-screen min-h-[100dvh]">
-  <NavBar
-    links={[
-      {
-        href: "/",
-        label: "Receiver",
-        active: page.url.pathname === "/",
-      },
-      {
-        href: "/admin",
-        label: "Admin",
-        active: page.url.pathname.startsWith("/admin"),
-      },
-    ]}
-    helpContext="receiver"
-  />
+<div class="flex flex-col h-screen">
+  <TabBar />
 
-  <div class="grow">
-    {@render children()}
+  {#if store.error}
+    <div class="px-3 py-1.5 shrink-0">
+      <AlertBanner variant="err" message={store.error} />
+    </div>
+  {/if}
+
+  <div class="flex-1 overflow-y-auto">
+    {#if hasNestedRoute && children}
+      {@render children()}
+    {:else if store.activeTab === "streams"}
+      <StreamsTab />
+    {:else if store.activeTab === "config"}
+      <ConfigTab />
+    {:else if store.activeTab === "mode"}
+      <ModeTab />
+    {:else if store.activeTab === "logs"}
+      <LogsTab />
+    {:else if store.activeTab === "admin"}
+      <AdminTab />
+    {/if}
   </div>
 
-  <footer class="border-t border-border py-3 px-8 text-center">
-    <p class="text-xs text-text-muted m-0">
-      Rusty Timer &middot; Receiver{version ? ` · v${version}` : ""} &middot; Built
-      {__BUILD_DATE__}
-    </p>
-  </footer>
+  <StatusBar />
+  <UpdateModal />
+  <HelpModal />
 </div>
