@@ -19,6 +19,7 @@ def make_args(**overrides: object) -> argparse.Namespace:
         "bibchip": None,
         "ppl": None,
         "log_level": "info",
+        "tauri": False,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -160,6 +161,7 @@ class MainValidationTests(unittest.TestCase):
             bibchip_path=None,
             ppl_path=None,
             log_level="info",
+            tauri=False,
         )
 
     @patch("scripts.dev.console.input")
@@ -608,7 +610,7 @@ class SetupOrderingTests(unittest.TestCase):
         build_dashboard_mock.side_effect = lambda skip_build: call_order.append(
             f"build_dashboard({skip_build})"
         )
-        build_rust_mock.side_effect = lambda skip_build: call_order.append(
+        build_rust_mock.side_effect = lambda skip_build, tauri=False: call_order.append(
             f"build_rust({skip_build})"
         )
 
@@ -670,6 +672,31 @@ class BuildDashboardTests(unittest.TestCase):
         run_mock.assert_not_called()
 
 
+class BuildRustTests(unittest.TestCase):
+    @patch("scripts.dev.subprocess.run")
+    def test_build_rust_prewarms_tauri_shell_when_requested(self, run_mock) -> None:
+        def run_side_effect(cmd, **kwargs):
+            if cmd == ["rustc", "--print", "host-tuple"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="x86_64-apple-darwin\n")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        run_mock.side_effect = run_side_effect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            receiver_bin = "receiver.exe" if sys.platform == "win32" else "receiver"
+            receiver_path = repo_root / "target" / "debug" / receiver_bin
+            receiver_path.parent.mkdir(parents=True)
+            receiver_path.write_text("receiver", encoding="utf-8")
+
+            with patch.object(dev, "REPO_ROOT", repo_root):
+                dev.build_rust(skip_build=False, tauri=True)
+
+        build_cmd = run_mock.call_args_list[0].args[0]
+        self.assertIn("-p", build_cmd)
+        self.assertIn("receiver-tauri", build_cmd)
+
+
 class BuildPanesTests(unittest.TestCase):
     def test_server_pane_uses_current_repo_root_with_shell_safe_dashboard_dir(self) -> None:
         with tempfile.TemporaryDirectory(prefix="repo with spaces ") as tmp:
@@ -711,7 +738,6 @@ class StartReceiverAutoConfigTests(unittest.TestCase):
         thread_cls.assert_called_once_with(
             target=dev.configure_receiver_dev,
             name="receiver-auto-config",
-            daemon=True,
         )
         thread_mock.start.assert_called_once_with()
 
@@ -757,7 +783,6 @@ class StartRaceDataSetupTests(unittest.TestCase):
             target=dev.setup_race_data,
             args=(bibchip, ppl),
             name="race-data-setup",
-            daemon=True,
         )
         thread_mock.start.assert_called_once_with()
 
