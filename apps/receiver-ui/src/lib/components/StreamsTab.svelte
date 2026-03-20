@@ -82,23 +82,26 @@
       used += BIB_W;
     }
 
-    // Name
-    if (read.name && used + NAME_W <= avail) {
-      parts.push(read.name);
-      used += NAME_W;
-    }
-
-    // Chip ID truncated
-    if (used + CHIP_TRUNC_W <= avail && used + CHIP_FULL_W > avail) {
+    if (read.name) {
+      // Has participant name → show name, no chip ID
+      if (used + NAME_W <= avail) {
+        parts.push(read.name);
+        used += NAME_W;
+      }
+    } else if (read.bib) {
+      // Has bib but no name → show "Unknown Participant"
+      if (used + NAME_W <= avail) {
+        parts.push("Unknown Participant");
+        used += NAME_W;
+      }
+    } else {
+      // No bib and no name → show "Unknown Chip <chip-id>"
       const cleaned = read.chip_id.replaceAll(":", "");
-      const last = cleaned.slice(-5);
-      parts.push(`\u2026${last}`);
-      used += CHIP_TRUNC_W;
-    }
-    // Chip ID full
-    else if (used + CHIP_FULL_W <= avail) {
-      parts.push(read.chip_id.replaceAll(":", ""));
-      used += CHIP_FULL_W;
+      const label = `Unknown Chip ${cleaned}`;
+      if (used + NAME_W <= avail) {
+        parts.push(label);
+        used += NAME_W;
+      }
     }
 
     return parts.join("  ");
