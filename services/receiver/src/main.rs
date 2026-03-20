@@ -537,7 +537,11 @@ fn collect_lookup_forwarder_ids(
     };
 
     let mut forwarder_ids: Vec<String> = from_mode
-        .unwrap_or_else(|| subs.iter().map(|sub| sub.forwarder_id.clone()).collect::<Vec<_>>())
+        .unwrap_or_else(|| {
+            subs.iter()
+                .map(|sub| sub.forwarder_id.clone())
+                .collect::<Vec<_>>()
+        })
         .into_iter()
         .collect::<HashSet<_>>()
         .into_iter()
