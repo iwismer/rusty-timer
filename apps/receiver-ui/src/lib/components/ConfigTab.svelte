@@ -11,13 +11,7 @@
     setEditToken,
     setEditReceiverId,
   } from "$lib/store.svelte";
-
-  const inputClass =
-    "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
-  const btnPrimary =
-    "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
-  const btnDisconnect =
-    "px-3 py-1.5 text-sm font-medium rounded-md text-status-err border border-status-err-border bg-status-err-bg cursor-pointer hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed";
+  import { inputClass, btnPrimary, btnDisconnect } from "$lib/ui-classes";
 
   function connectionLabel(state: string): string {
     switch (state) {

@@ -64,7 +64,14 @@ export function initSSE(callbacks: SseCallbacks): void {
         callbacks.onModeChanged(data.mode);
       },
       last_read: (data: any) => {
-        callbacks.onLastRead(data as LastRead);
+        callbacks.onLastRead({
+          forwarder_id: data.forwarder_id,
+          reader_ip: data.reader_ip,
+          chip_id: data.chip_id,
+          timestamp: data.timestamp,
+          bib: data.bib ?? null,
+          name: data.name ?? null,
+        });
       },
     },
     (connected) => {

@@ -14,6 +14,7 @@
     setTargetedEpochInputs,
     markModeEdited,
   } from "$lib/store.svelte";
+  import { btnPrimary, btnSecondary } from "$lib/ui-classes";
 
   let tableWidth = $state(0);
   let expandedKey = $state<string | null>(null);
@@ -41,11 +42,6 @@
   function showLastReadCol(): boolean {
     return availableLastReadWidth() >= TIME_W;
   }
-
-  const btnPrimary =
-    "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
-  const btnSecondary =
-    "px-3 py-1.5 text-sm font-medium rounded-md bg-surface-2 text-text-primary border border-border cursor-pointer hover:bg-surface-3 disabled:opacity-50 disabled:cursor-not-allowed";
 
   function dotClass(online: boolean | undefined | null): string {
     if (online === true) return "bg-status-ok";

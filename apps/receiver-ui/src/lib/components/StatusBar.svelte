@@ -1,7 +1,7 @@
 <script lang="ts">
   import { openUpdateModal, store } from "$lib/store.svelte";
 
-  function counts() {
+  function computeCounts() {
     const list = store.streams?.streams ?? [];
     let online = 0;
     let degraded = 0;
@@ -17,35 +17,37 @@
     }
     return { online, degraded, offline, totalReads };
   }
+
+  let c = $derived(computeCounts());
 </script>
 
 <div
   class="flex items-center justify-between px-3 h-7 bg-surface-1 border-t border-border shrink-0 text-xs @container"
 >
   <div class="flex items-center gap-3">
-    {#if counts().online > 0}
+    {#if c.online > 0}
       <span class="flex items-center gap-1">
         <span class="w-2 h-2 rounded-full bg-status-ok"></span>
-        <span class="text-text-muted">{counts().online}</span>
+        <span class="text-text-muted">{c.online}</span>
         <span class="text-text-muted hidden @[300px]:inline">online</span>
       </span>
     {/if}
-    {#if counts().degraded > 0}
+    {#if c.degraded > 0}
       <span class="flex items-center gap-1">
         <span class="w-2 h-2 rounded-full bg-status-warn"></span>
-        <span class="text-text-muted">{counts().degraded}</span>
+        <span class="text-text-muted">{c.degraded}</span>
         <span class="text-text-muted hidden @[300px]:inline">degraded</span>
       </span>
     {/if}
-    {#if counts().offline > 0}
+    {#if c.offline > 0}
       <span class="flex items-center gap-1">
         <span class="w-2 h-2 rounded-full bg-status-err"></span>
-        <span class="text-text-muted">{counts().offline}</span>
+        <span class="text-text-muted">{c.offline}</span>
         <span class="text-text-muted hidden @[300px]:inline">offline</span>
       </span>
     {/if}
     <span class="font-mono text-text-primary"
-      >{counts().totalReads.toLocaleString()} reads</span
+      >{c.totalReads.toLocaleString()} reads</span
     >
   </div>
 

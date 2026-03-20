@@ -69,9 +69,10 @@ describe("desktop updater", () => {
     });
   });
 
-  it("downloads and installs the available update", async () => {
+  it("downloads and installs the available update using the cached handle from check", async () => {
     (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ =
       {};
+    mocks.getVersion.mockResolvedValue("0.8.0");
     mocks.check.mockResolvedValue({
       version: "0.9.0",
       body: null,
@@ -79,10 +80,15 @@ describe("desktop updater", () => {
       downloadAndInstall: mocks.downloadAndInstall,
     });
 
-    const { installDesktopUpdate } = await import("./desktop-updater");
+    const { checkForDesktopUpdate, installDesktopUpdate } =
+      await import("./desktop-updater");
 
+    // check() is called once during checkForDesktopUpdate
+    await checkForDesktopUpdate();
+    expect(mocks.check).toHaveBeenCalledTimes(1);
+
+    // installDesktopUpdate reuses the cached handle — no second check() call
     await installDesktopUpdate();
-
     expect(mocks.check).toHaveBeenCalledTimes(1);
     expect(mocks.downloadAndInstall).toHaveBeenCalledTimes(1);
   });

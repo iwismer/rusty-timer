@@ -101,6 +101,9 @@ let streamRefreshVersion = 0;
 let loadAllInFlight = false;
 let loadAllQueued = false;
 
+// Tauri event listener cleanup
+let tauriUnlistenFns: (() => void)[] = [];
+
 // --------------- Derived state ---------------
 
 export function getConfigDirty(): boolean {
@@ -825,12 +828,15 @@ export function initStore(): void {
 
   // Listen for Tauri native menu events (no-op if not running in Tauri)
   void import("@tauri-apps/api/event")
-    .then(({ listen }) => {
-      listen("menu-check-update", () => void handleCheckUpdate());
-      listen("menu-toggle-theme", () => cycleTheme());
-      listen("menu-open-help", () => {
-        setShowHelpModal(true);
-      });
+    .then(async ({ listen }) => {
+      const unlistens = await Promise.all([
+        listen("menu-check-update", () => void handleCheckUpdate()),
+        listen("menu-toggle-theme", () => cycleTheme()),
+        listen("menu-open-help", () => {
+          setShowHelpModal(true);
+        }),
+      ]);
+      tauriUnlistenFns = unlistens;
     })
     .catch(() => {
       // Not running in Tauri (e.g., dev server in browser) — ignore
@@ -873,5 +879,9 @@ export function initStore(): void {
 }
 
 export function destroyStore(): void {
+  for (const unlisten of tauriUnlistenFns) {
+    unlisten();
+  }
+  tauriUnlistenFns = [];
   destroySSE();
 }

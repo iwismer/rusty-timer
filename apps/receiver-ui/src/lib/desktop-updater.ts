@@ -22,6 +22,10 @@ type TauriWindow = Window & {
   __TAURI_INTERNALS__?: unknown;
 };
 
+// Cached update handle from the last check(), reused by installDesktopUpdate
+// so we install exactly the version the user saw.
+let cachedUpdateHandle: Awaited<ReturnType<typeof check>> | null = null;
+
 function isTauriRuntime(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -44,6 +48,7 @@ export async function checkForDesktopUpdate(): Promise<DesktopUpdateCheckResult>
 
   const currentVersion = await getVersion();
   const update = await check();
+  cachedUpdateHandle = update;
   if (!update) {
     return { supported: true, update: null };
   }
@@ -62,7 +67,9 @@ export async function checkForDesktopUpdate(): Promise<DesktopUpdateCheckResult>
 export async function installDesktopUpdate(): Promise<void> {
   if (!isTauriRuntime()) return;
 
-  const update = await check();
+  // Prefer the cached handle so we install the version the user reviewed.
+  // Fall back to a fresh check() if no cached handle exists.
+  const update = cachedUpdateHandle ?? (await check());
   if (!update) return;
 
   await update.downloadAndInstall();

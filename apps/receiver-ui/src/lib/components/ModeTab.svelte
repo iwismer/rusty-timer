@@ -9,11 +9,7 @@
     setRaceIdDraft,
   } from "$lib/store.svelte";
   import type { ReceiverMode } from "$lib/api";
-
-  const inputClass =
-    "w-full px-3 py-1.5 text-sm rounded-md bg-surface-0 border border-border text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent";
-  const btnPrimary =
-    "px-3 py-1.5 text-sm font-medium rounded-md text-white bg-accent border-none cursor-pointer hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed";
+  import { inputClass, btnPrimary } from "$lib/ui-classes";
 </script>
 
 <div class="max-w-[500px] mx-auto px-6 py-6">

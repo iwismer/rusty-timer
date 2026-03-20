@@ -130,7 +130,9 @@ where
                                         updates,
                                     });
                                 }
+                                // Emit only the last read per (forwarder_id, reader_ip) to avoid SSE chatter on large batches.
                                 let chip_lookup = deps.chip_lookup.read().await;
+                                let mut last_reads: HashMap<(String,String), crate::ui_events::LastRead> = HashMap::new();
                                 for e in &forwarded_events {
                                     let chip_id = crate::ui_events::chip_id_from_raw_frame(&e.raw_frame);
                                     let (bib, name) = chip_lookup
@@ -138,7 +140,8 @@ where
                                         .and_then(|chips| chips.get(&chip_id))
                                         .map(|(b, n)| (Some(b.clone()), Some(n.clone())))
                                         .unwrap_or((None, None));
-                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LastRead(
+                                    last_reads.insert(
+                                        (e.forwarder_id.clone(), e.reader_ip.clone()),
                                         crate::ui_events::LastRead {
                                             forwarder_id: e.forwarder_id.clone(),
                                             reader_ip: e.reader_ip.clone(),
@@ -147,7 +150,10 @@ where
                                             bib,
                                             name,
                                         },
-                                    ));
+                                    );
+                                }
+                                for last_read in last_reads.into_values() {
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LastRead(last_read));
                                 }
                                 let mut hw: HashMap<(String,String,i64),i64> = HashMap::new();
                                 for e in &forwarded_events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
