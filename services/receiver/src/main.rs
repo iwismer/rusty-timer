@@ -516,6 +516,36 @@ async fn wait_for_reconnect_delay_or_abort(
     }
 }
 
+fn collect_lookup_forwarder_ids(
+    mode: Option<&rt_protocol::ReceiverMode>,
+    subs: &[Subscription],
+) -> Vec<String> {
+    let from_mode = match mode {
+        Some(rt_protocol::ReceiverMode::Live { streams, .. }) if !streams.is_empty() => Some(
+            streams
+                .iter()
+                .map(|stream| stream.forwarder_id.clone())
+                .collect::<Vec<_>>(),
+        ),
+        Some(rt_protocol::ReceiverMode::TargetedReplay { targets }) if !targets.is_empty() => Some(
+            targets
+                .iter()
+                .map(|target| target.forwarder_id.clone())
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    };
+
+    let mut forwarder_ids: Vec<String> = from_mode
+        .unwrap_or_else(|| subs.iter().map(|sub| sub.forwarder_id.clone()).collect::<Vec<_>>())
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    forwarder_ids.sort();
+    forwarder_ids
+}
+
 /// Fetch a chip→participant lookup from the server and store it in
 /// `state.chip_lookup`.  Called on connect and when the server pushes a
 /// `forwarder_race_assigned` SSE event.
@@ -526,16 +556,29 @@ async fn refresh_chip_lookup(state: &Arc<AppState>) {
     let subs = db.load_subscriptions().unwrap_or_default();
     drop(db);
 
-    let forwarder_ids: Vec<String> = subs
-        .iter()
-        .map(|s| s.forwarder_id.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
     let Some(p) = profile else {
         *state.chip_lookup.write().await = HashMap::new();
         return;
+    };
+
+    let forwarder_ids = match mode.as_ref() {
+        Some(rt_protocol::ReceiverMode::Race { race_id }) => {
+            match receiver::control_api::fetch_forwarder_ids_for_race(
+                &state.http_client,
+                &p.server_url,
+                &p.token,
+                race_id,
+            )
+            .await
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(error = %e, "failed to fetch race forwarder mappings");
+                    return;
+                }
+            }
+        }
+        _ => collect_lookup_forwarder_ids(mode.as_ref(), &subs),
     };
 
     let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
@@ -1429,6 +1472,65 @@ mod tests {
             observed.expect("watcher should not miss the current connecting state"),
             ConnectionState::Connecting
         );
+    }
+
+    #[test]
+    fn collect_lookup_forwarder_ids_prefers_live_mode_streams_over_subscriptions() {
+        let subs = vec![Subscription {
+            forwarder_id: "sub-fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            local_port_override: None,
+        }];
+        let mode = ReceiverMode::Live {
+            streams: vec![
+                rt_protocol::StreamRef {
+                    forwarder_id: "mode-fwd-a".to_owned(),
+                    reader_ip: "10.0.0.2:10000".to_owned(),
+                },
+                rt_protocol::StreamRef {
+                    forwarder_id: "mode-fwd-b".to_owned(),
+                    reader_ip: "10.0.0.3:10000".to_owned(),
+                },
+                rt_protocol::StreamRef {
+                    forwarder_id: "mode-fwd-a".to_owned(),
+                    reader_ip: "10.0.0.4:10000".to_owned(),
+                },
+            ],
+            earliest_epochs: Vec::new(),
+        };
+
+        let forwarder_ids = collect_lookup_forwarder_ids(Some(&mode), &subs);
+
+        assert_eq!(forwarder_ids, vec!["mode-fwd-a", "mode-fwd-b"]);
+    }
+
+    #[test]
+    fn collect_lookup_forwarder_ids_uses_targeted_replay_targets() {
+        let subs = vec![Subscription {
+            forwarder_id: "sub-fwd".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            local_port_override: None,
+        }];
+        let mode = ReceiverMode::TargetedReplay {
+            targets: vec![
+                ReplayTarget {
+                    forwarder_id: "target-fwd".to_owned(),
+                    reader_ip: "10.0.0.2:10000".to_owned(),
+                    stream_epoch: 4,
+                    from_seq: 1,
+                },
+                ReplayTarget {
+                    forwarder_id: "target-fwd".to_owned(),
+                    reader_ip: "10.0.0.3:10000".to_owned(),
+                    stream_epoch: 5,
+                    from_seq: 1,
+                },
+            ],
+        };
+
+        let forwarder_ids = collect_lookup_forwarder_ids(Some(&mode), &subs);
+
+        assert_eq!(forwarder_ids, vec!["target-fwd"]);
     }
 
     #[test]

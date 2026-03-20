@@ -143,4 +143,24 @@ describe("receiver updater store", () => {
     expect(apiMocks.downloadUpdate).not.toHaveBeenCalled();
     expect(apiMocks.applyUpdate).not.toHaveBeenCalled();
   });
+
+  it("hydrates config edit fields from the saved profile on initial load", async () => {
+    apiMocks.getProfile.mockResolvedValueOnce({
+      server_url: "wss://receiver.example/ws",
+      token: "secret-token",
+      receiver_id: "recv-live",
+    });
+
+    const { initStore, store } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    expect(store.editServerUrl).toBe("wss://receiver.example/ws");
+    expect(store.editToken).toBe("secret-token");
+    expect(store.editReceiverId).toBe("recv-live");
+    expect(store.savedServerUrl).toBe("wss://receiver.example/ws");
+    expect(store.savedToken).toBe("secret-token");
+    expect(store.savedReceiverId).toBe("recv-live");
+  });
 });

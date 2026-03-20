@@ -562,11 +562,12 @@ export async function loadAll(): Promise<void> {
 
     const p = await api.getProfile().catch(() => null);
     if (p) {
+      const configWasDirty = getConfigDirty();
       store.savedServerUrl = p.server_url;
       store.savedToken = p.token;
       store.savedReceiverId = p.receiver_id;
       // Only overwrite edit fields if the user hasn't made unsaved changes.
-      if (!getConfigDirty()) {
+      if (!configWasDirty) {
         store.editServerUrl = p.server_url;
         store.editToken = p.token;
         store.editReceiverId = p.receiver_id;

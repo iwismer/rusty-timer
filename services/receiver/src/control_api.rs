@@ -520,6 +520,16 @@ struct UpstreamRaceEpochMapping {
     stream_epoch: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceStreamMappingsResponse {
+    mappings: Vec<UpstreamRaceStreamMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamRaceStreamMapping {
+    forwarder_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Server stream fetching helpers
 // ---------------------------------------------------------------------------
@@ -670,6 +680,41 @@ pub async fn fetch_chip_lookup_for_race(
         lookup.insert(fwd.clone(), chips.clone());
     }
     Ok(lookup)
+}
+
+pub async fn fetch_forwarder_ids_for_race(
+    client: &reqwest::Client,
+    ws_url: &str,
+    token: &str,
+    race_id: &str,
+) -> Result<Vec<String>, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+    let url = format!("{base}/api/v1/races/{race_id}/stream-epochs");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("fetch race stream mappings failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+
+    let body: UpstreamRaceStreamMappingsResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("invalid race stream mappings JSON: {e}"))?;
+
+    let mut forwarder_ids: Vec<String> = body
+        .mappings
+        .into_iter()
+        .map(|mapping| mapping.forwarder_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    forwarder_ids.sort();
+    Ok(forwarder_ids)
 }
 
 /// Build a per-forwarder chip lookup for Live mode by querying the server's
@@ -1466,6 +1511,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 mod tests {
     use super::*;
     use crate::db::Db;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio::net::TcpListener;
 
     #[test]
     fn http_base_url_ws_with_port() {
@@ -1503,5 +1552,61 @@ mod tests {
         state.request_process_shutdown();
         shutdown_rx.changed().await.unwrap();
         assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Terminate);
+    }
+
+    async fn run_test_server(router: Router) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn fetch_forwarder_ids_for_race_deduplicates_mapped_forwarders() {
+        let race_id = "11111111-1111-1111-1111-111111111111";
+        let router = Router::new().route(
+            &format!("/api/v1/races/{race_id}/stream-epochs"),
+            get(move || async move {
+                Json(json!({
+                    "mappings": [
+                        {
+                            "stream_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                            "forwarder_id": "fwd-a",
+                            "reader_ip": "10.0.0.1:10000",
+                            "stream_epoch": 1,
+                            "race_id": race_id,
+                        },
+                        {
+                            "stream_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                            "forwarder_id": "fwd-b",
+                            "reader_ip": "10.0.0.2:10000",
+                            "stream_epoch": 2,
+                            "race_id": race_id,
+                        },
+                        {
+                            "stream_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                            "forwarder_id": "fwd-a",
+                            "reader_ip": "10.0.0.3:10000",
+                            "stream_epoch": 3,
+                            "race_id": race_id,
+                        }
+                    ]
+                }))
+            }),
+        );
+        let addr = run_test_server(router).await;
+
+        let ids = fetch_forwarder_ids_for_race(
+            &reqwest::Client::new(),
+            &format!("ws://{addr}"),
+            "test-token",
+            race_id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ids, vec!["fwd-a", "fwd-b"]);
     }
 }
