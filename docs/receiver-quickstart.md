@@ -6,21 +6,22 @@ sees the data as if the reader were plugged in directly.
 
 ## Download
 
-Download the latest `receiver-*-x86_64-pc-windows-msvc.zip` from the
+### Recommended: Desktop App (Windows)
+
+Download the latest `Rusty-Timer-Receiver_*_x64-setup.exe` from the
 [Releases](https://github.com/iwismer/rusty-timer/releases) page.
 
-Extract the archive. You should have `rt-receiver.exe`.
+Run the installer. It will install the app and download WebView2 if needed.
 
-## First Run
+Launch "Rusty Timer Receiver" from the Start Menu.
 
-Double-click `rt-receiver.exe` or run from PowerShell:
+### Alternative: Standalone Binary
 
-```powershell
-.\rt-receiver.exe
-```
+Download `receiver-*-x86_64-pc-windows-msvc.zip` from the
+[Releases](https://github.com/iwismer/rusty-timer/releases) page.
 
-The receiver opens a web UI in your browser. If it doesn't open
-automatically, go to **http://localhost:9090**.
+Extract the archive and double-click `receiver.exe`. The receiver opens a
+web UI in your browser at **http://localhost:9090**.
 
 ## Configure
 

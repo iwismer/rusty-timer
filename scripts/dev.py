@@ -191,7 +191,7 @@ def build_forwarder_toml(emulators: list[EmulatorSpec]) -> str:
     return FORWARDER_TOML_HEADER + "\n" + readers
 
 
-def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> list[tuple[str, str]]:
+def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info", tauri: bool = False) -> list[tuple[str, str]]:
     dashboard_build_dir = REPO_ROOT / "apps" / "server-ui" / "build"
     dashboard_env = ""
     if dashboard_build_dir.is_dir():
@@ -213,9 +213,14 @@ def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> li
         emu_panes = [
             (f"Emulator {i + 1}", e.to_cmd()) for i, e in enumerate(emulators)
         ]
-    panes_after_emulator = PANES_AFTER_EMULATOR + [
-        ("Receiver", f"RUST_LOG={shlex.quote(log_level)} ./target/debug/receiver --no-open-browser --receiver-id {RECEIVER_DEVICE_ID}"),
-    ]
+    if tauri:
+        receiver_cmd = f'cd "{REPO_ROOT}/apps/receiver-ui" && cargo tauri dev'
+    else:
+        receiver_cmd = (
+            f"RUST_LOG={shlex.quote(log_level)} ./target/debug/receiver"
+            f" --no-open-browser --receiver-id {RECEIVER_DEVICE_ID}"
+        )
+    panes_after_emulator = PANES_AFTER_EMULATOR + [("Receiver", receiver_cmd)]
     return panes_before_emulator + emu_panes + panes_after_emulator
 
 console = Console()
@@ -676,7 +681,7 @@ def seed_tokens() -> None:
         console.print(f"  [green]Seeded[/green] {device_type} token (sha256={hex_hash[:16]}… device_id={device_id})")
 
 
-def build_rust(skip_build: bool) -> None:
+def build_rust(skip_build: bool, *, tauri: bool = False) -> None:
     if skip_build:
         console.print("[dim]Skipping Rust build (--no-build)[/dim]")
         return
@@ -687,6 +692,34 @@ def build_rust(skip_build: bool) -> None:
         cwd=REPO_ROOT,
     )
     console.print("  [green]Build complete.[/green]")
+    if tauri:
+        target_triple = (
+            subprocess.run(
+                ["rustc", "--print", "host-tuple"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            .stdout.strip()
+        )
+        sidecar_dir = REPO_ROOT / "apps" / "receiver-ui" / "src-tauri" / "binaries"
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+
+        receiver_bin = "receiver.exe" if sys.platform == "win32" else "receiver"
+        src = REPO_ROOT / "target" / "debug" / receiver_bin
+        suffix = ".exe" if sys.platform == "win32" else ""
+        dst = sidecar_dir / f"receiver-{target_triple}{suffix}"
+
+        shutil.copy2(src, dst)
+        console.print(f"  [green]Copied[/green] receiver binary to {dst.relative_to(REPO_ROOT)}")
+
+        # Also copy without target triple for dev mode (tauri-plugin-shell resolves
+        # sidecars relative to the running binary without the triple suffix).
+        dev_sidecar_dir = REPO_ROOT / "target" / "debug" / "binaries"
+        dev_sidecar_dir.mkdir(parents=True, exist_ok=True)
+        dev_dst = dev_sidecar_dir / receiver_bin
+        shutil.copy2(src, dev_dst)
+        console.print(f"  [green]Copied[/green] receiver binary to {dev_dst.relative_to(REPO_ROOT)}")
 
 
 def npm_install() -> None:
@@ -714,7 +747,7 @@ def build_dashboard(skip_build: bool = False) -> None:
     console.print("  [green]Dashboard build complete.[/green]")
 
 
-def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None) -> None:
+def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None, *, tauri: bool = False) -> None:
     check_prereqs()
     start_postgres()
     wait_for_postgres()
@@ -723,7 +756,7 @@ def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None)
     seed_tokens()
     npm_install()
     build_dashboard(skip_build=skip_build)
-    build_rust(skip_build=skip_build)
+    build_rust(skip_build=skip_build, tauri=tauri)
 
 
 # ---------------------------------------------------------------------------
@@ -1099,8 +1132,9 @@ def detect_and_launch(
     bibchip_path: Path | None = None,
     ppl_path: Path | None = None,
     log_level: str = "info",
+    tauri: bool = False,
 ) -> None:
-    panes = build_panes(emulators, log_level=log_level)
+    panes = build_panes(emulators, log_level=log_level, tauri=tauri)
     bg_threads: list[threading.Thread] = []
     console.print("[dim]Receiver will be auto-configured with dev profile when ready.[/dim]")
     bg_threads.append(start_receiver_auto_config())
@@ -1160,6 +1194,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-level", default="info", metavar="LEVEL",
         help="Log level for the server (default: info)",
+    )
+    parser.add_argument(
+        "--tauri",
+        action="store_true",
+        help="Launch receiver via Tauri desktop app instead of standalone binary",
     )
     return parser.parse_args()
 
@@ -1232,9 +1271,9 @@ def main() -> None:
         "Setting up local dev environment…",
         border_style="cyan",
     ))
-    setup(skip_build=args.no_build, emulators=emulators)
+    setup(skip_build=args.no_build, emulators=emulators, tauri=args.tauri)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
-    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path, log_level=args.log_level)
+    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path, log_level=args.log_level, tauri=args.tauri)
 
 
 if __name__ == "__main__":

@@ -81,4 +81,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run integration tests (requires Docker)
-        run: cargo test --workspace --tests -- --test-threads=4
+        run: cargo test --workspace --exclude receiver-tauri --tests -- --test-threads=4

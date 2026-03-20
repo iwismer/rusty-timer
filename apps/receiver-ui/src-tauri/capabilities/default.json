@@ -1,0 +1,28 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for the receiver Tauri shell",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "binaries/receiver",
+          "sidecar": true
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/receiver",
+          "sidecar": true
+        }
+      ]
+    },
+    "shell:allow-kill",
+    "updater:default"
+  ]
+}
