@@ -26,6 +26,7 @@ impl LocalProxy {
     pub async fn bind(port: u16, event_tx: broadcast::Sender<ReadEvent>) -> std::io::Result<Self> {
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let listener = TcpListener::bind(addr).await?;
+        let port = listener.local_addr()?.port();
         info!(port, "local proxy bound");
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -94,20 +95,11 @@ mod tests {
         }
     }
 
-    /// Pick a free port.
-    async fn free_port() -> u16 {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let p = l.local_addr().unwrap().port();
-        drop(l);
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        p
-    }
-
     #[tokio::test]
     async fn proxy_binds_and_accepts_connection() {
         let (tx, _rx) = broadcast::channel::<ReadEvent>(16);
-        let port = free_port().await;
-        let proxy = LocalProxy::bind(port, tx.clone()).await.unwrap();
+        let proxy = LocalProxy::bind(0, tx.clone()).await.unwrap();
+        let port = proxy.port;
         // Connect a client
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
@@ -130,8 +122,8 @@ mod tests {
     #[tokio::test]
     async fn proxy_forwards_exact_bytes() {
         let (tx, _rx) = broadcast::channel::<ReadEvent>(16);
-        let port = free_port().await;
-        let _proxy = LocalProxy::bind(port, tx.clone()).await.unwrap();
+        let _proxy = LocalProxy::bind(0, tx.clone()).await.unwrap();
+        let port = _proxy.port;
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .unwrap();
@@ -149,8 +141,8 @@ mod tests {
     #[tokio::test]
     async fn multiple_consumers_all_receive() {
         let (tx, _rx) = broadcast::channel::<ReadEvent>(16);
-        let port = free_port().await;
-        let _proxy = LocalProxy::bind(port, tx.clone()).await.unwrap();
+        let _proxy = LocalProxy::bind(0, tx.clone()).await.unwrap();
+        let port = _proxy.port;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let mut c1 = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
@@ -177,8 +169,8 @@ mod tests {
     #[tokio::test]
     async fn proxy_open_before_events_arrive() {
         let (tx, _rx) = broadcast::channel::<ReadEvent>(16);
-        let port = free_port().await;
-        let proxy = LocalProxy::bind(port, tx).await.unwrap();
+        let proxy = LocalProxy::bind(0, tx).await.unwrap();
+        let port = proxy.port;
         // Client can connect immediately - port is open
         let _client = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
@@ -189,8 +181,8 @@ mod tests {
     #[tokio::test]
     async fn shutdown_closes_listener() {
         let (tx, _rx) = broadcast::channel::<ReadEvent>(16);
-        let port = free_port().await;
-        let proxy = LocalProxy::bind(port, tx).await.unwrap();
+        let proxy = LocalProxy::bind(0, tx).await.unwrap();
+        let port = proxy.port;
         proxy.shutdown();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let result = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await;
