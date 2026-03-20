@@ -61,6 +61,13 @@ COPY crates/ crates/
 COPY services/ services/
 COPY src/ src/
 
+# Tauri workspace member needs a valid manifest for Cargo workspace resolution,
+# but we only need a stub (the real Tauri app is never built inside Docker).
+RUN mkdir -p apps/receiver-ui/src-tauri/src \
+    && echo 'fn main() {}' > apps/receiver-ui/src-tauri/src/main.rs \
+    && printf '[package]\nname = "receiver-tauri"\nversion = "0.1.0"\nedition = "2024"\npublish = false\n' \
+       > apps/receiver-ui/src-tauri/Cargo.toml
+
 # Build the server binary in release mode.
 RUN cargo build --release --package server --bin server
 
