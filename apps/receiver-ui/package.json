@@ -14,6 +14,9 @@
     "format": "prettier --write .",
     "lint": "prettier --check ."
   },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
   "devDependencies": {
     "@playwright/test": "^1.40.0",
     "@rusty-timer/shared-ui": "*",

@@ -359,6 +359,7 @@ describe("sse client", () => {
       onUpdateStatusChanged: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
     };
 
     initSSE(callbacks);
@@ -387,6 +388,7 @@ describe("sse client", () => {
       onUpdateStatusChanged: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
     };
 
     initSSE(callbacks);
@@ -427,6 +429,7 @@ describe("sse client", () => {
       onUpdateStatusChanged: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
     };
 
     initSSE(callbacks);

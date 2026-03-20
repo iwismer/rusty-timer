@@ -123,6 +123,19 @@ where
                                         updates,
                                     });
                                 }
+                                for e in &forwarded_events {
+                                    let chip_id = crate::ui_events::chip_id_from_raw_frame(&e.raw_frame);
+                                    let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LastRead(
+                                        crate::ui_events::LastRead {
+                                            forwarder_id: e.forwarder_id.clone(),
+                                            reader_ip: e.reader_ip.clone(),
+                                            chip_id,
+                                            timestamp: e.reader_timestamp.clone(),
+                                            bib: None,
+                                            name: None,
+                                        },
+                                    ));
+                                }
                                 let mut hw: HashMap<(String,String,i64),i64> = HashMap::new();
                                 for e in &forwarded_events { let k=(e.forwarder_id.clone(),e.reader_ip.clone(),e.stream_epoch); let v=hw.entry(k).or_insert(0); if e.seq>*v{*v=e.seq;} }
                                 let mut acks=Vec::new();
@@ -171,6 +184,9 @@ where
                                         ),
                                     });
                                 }
+                                let _ = deps
+                                    .ui_tx
+                                    .send(crate::ui_events::ReceiverUiEvent::Resync);
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }

@@ -34,6 +34,15 @@ export interface StreamCountUpdate {
   reads_epoch: number;
 }
 
+export interface LastRead {
+  forwarder_id: string;
+  reader_ip: string;
+  chip_id: string;
+  timestamp: string;
+  bib?: number | null;
+  name?: string | null;
+}
+
 export interface StreamsResponse {
   streams: StreamEntry[];
   degraded: boolean;

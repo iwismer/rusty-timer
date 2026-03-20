@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::AppHandle;
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::ShellExt;
 
 const RECEIVER_URL: &str = "http://127.0.0.1:9090";
@@ -15,6 +16,48 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Build native menu bar
+            let check_update =
+                MenuItemBuilder::with_id("check-update", "Check for Updates...").build(app)?;
+            let quit = PredefinedMenuItem::quit(app, Some("Quit"))?;
+            let file_menu = SubmenuBuilder::new(app, "File")
+                .item(&check_update)
+                .separator()
+                .item(&quit)
+                .build()?;
+
+            let toggle_theme =
+                MenuItemBuilder::with_id("toggle-theme", "Toggle Theme").build(app)?;
+            let view_menu = SubmenuBuilder::new(app, "View")
+                .item(&toggle_theme)
+                .build()?;
+
+            let open_help = MenuItemBuilder::with_id("open-help", "Help...").build(app)?;
+            let help_menu = SubmenuBuilder::new(app, "Help").item(&open_help).build()?;
+
+            let menu = MenuBuilder::new(app)
+                .item(&file_menu)
+                .item(&view_menu)
+                .item(&help_menu)
+                .build()?;
+
+            app.set_menu(menu)?;
+
+            // Handle menu events
+            app.on_menu_event(|app_handle, event| match event.id().as_ref() {
+                "check-update" => {
+                    let _ = app_handle.emit("menu-check-update", ());
+                }
+                "toggle-theme" => {
+                    let _ = app_handle.emit("menu-toggle-theme", ());
+                }
+                "open-help" => {
+                    let _ = app_handle.emit("menu-open-help", ());
+                }
+                _ => {}
+            });
+
+            // Spawn sidecar lifecycle
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = run_sidecar_lifecycle(&handle).await {

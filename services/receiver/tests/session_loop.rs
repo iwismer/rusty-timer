@@ -434,6 +434,57 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
 }
 
 #[tokio::test]
+async fn run_session_loop_emits_resync_to_ui_channel_on_reader_status_changed() {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+        let msg = serde_json::json!({
+            "kind": "reader_status_changed",
+            "stream_id": "00000000-0000-0000-0000-000000000000",
+            "reader_ip": "10.0.0.1:10000",
+            "connected": false
+        });
+        ws.send(Message::Text(msg.to_string().into()))
+            .await
+            .unwrap();
+        ws.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+    let result = run_session_loop(
+        ws,
+        "session-reader-status".to_owned(),
+        SessionLoopDeps {
+            db,
+            event_tx,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            connection_state: watch::channel(ConnectionState::Connected).1,
+        },
+    )
+    .await;
+
+    assert!(result.is_ok());
+
+    let events: Vec<_> = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ReceiverUiEvent::Resync)),
+        "expected a resync event, got: {events:?}"
+    );
+
+    join_server_task(task).await;
+}
+
+#[tokio::test]
 async fn raw_ws_server_helper_exposes_handler_panic_via_join_handle() {
     let (addr, task) = run_raw_ws_server_once(|_ws| async move {
         panic!("intentional panic from handler");
