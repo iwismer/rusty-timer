@@ -67,6 +67,11 @@ cd apps/receiver-ui && cargo tauri build
 
 The installer is at `target/release/bundle/nsis/`.
 
+`src-tauri/icons/icon.ico` must be a valid multi-size ICO (an empty or truncated
+file makes `cargo tauri build` fail on Windows). To regenerate all bundle
+icons from a square master PNG (for example 1024×1024), run from
+`apps/receiver-ui/src-tauri`: `cargo tauri icon path/to/icon.png`.
+
 Note: building the installer requires the Tauri signing key. In CI, this is
 provided via `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 secrets. For local builds without signing, set `"active": false` in
