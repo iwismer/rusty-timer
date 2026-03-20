@@ -690,10 +690,10 @@ pub async fn fetch_chip_lookup_for_forwarders(
     if let Some(assignments) = body.get("assignments").and_then(|v| v.as_array()) {
         for a in assignments {
             let fwd = a.get("forwarder_id").and_then(|v| v.as_str()).unwrap_or("");
-            if forwarder_set.contains(fwd) {
-                if let Some(rid) = a.get("race_id").and_then(|v| v.as_str()) {
-                    race_ids.insert(rid.to_owned());
-                }
+            if forwarder_set.contains(fwd)
+                && let Some(rid) = a.get("race_id").and_then(|v| v.as_str())
+            {
+                race_ids.insert(rid.to_owned());
             }
         }
     }
