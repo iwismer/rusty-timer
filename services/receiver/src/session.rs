@@ -27,9 +27,11 @@ pub struct Session {
     pub device_id: String,
 }
 
-/// Maps chip_id (e.g. "058003700001") to (bib, display_name).
-/// Populated from the server's participant list on connect.
-pub type ChipLookup = HashMap<String, (String, String)>;
+/// Per-forwarder chip→participant lookup.
+/// Outer key is forwarder_id, inner key is chip_id (e.g. "058003700001"),
+/// value is (bib, display_name).  Only forwarders with an assigned race
+/// have entries; reads from other forwarders are not enriched.
+pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
@@ -130,7 +132,10 @@ where
                                 }
                                 for e in &forwarded_events {
                                     let chip_id = crate::ui_events::chip_id_from_raw_frame(&e.raw_frame);
-                                    let (bib, name) = deps.chip_lookup.get(&chip_id)
+                                    let (bib, name) = deps
+                                        .chip_lookup
+                                        .get(&e.forwarder_id)
+                                        .and_then(|chips| chips.get(&chip_id))
                                         .map(|(b, n)| (Some(b.clone()), Some(n.clone())))
                                         .unwrap_or((None, None));
                                     let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::LastRead(

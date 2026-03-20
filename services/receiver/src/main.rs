@@ -371,27 +371,28 @@ async fn main() {
                                                     let profile = db.load_profile().ok().flatten();
                                                     let subs = db.load_subscriptions().unwrap_or_default();
                                                     drop(db);
+                                                    let forwarder_ids: Vec<String> = subs
+                                                        .iter()
+                                                        .map(|s| s.forwarder_id.clone())
+                                                        .collect::<std::collections::HashSet<_>>()
+                                                        .into_iter()
+                                                        .collect();
                                                     if let Some(p) = profile {
                                                         let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
-                                                            receiver::control_api::fetch_chip_lookup(
-                                                                &state.http_client, &p.server_url, &p.token, &race_id,
+                                                            receiver::control_api::fetch_chip_lookup_for_race(
+                                                                &state.http_client, &p.server_url, &p.token, &race_id, &forwarder_ids,
                                                             ).await
                                                         } else {
-                                                            let forwarder_ids: Vec<String> = subs
-                                                                .iter()
-                                                                .map(|s| s.forwarder_id.clone())
-                                                                .collect::<std::collections::HashSet<_>>()
-                                                                .into_iter()
-                                                                .collect();
                                                             receiver::control_api::fetch_chip_lookup_for_forwarders(
                                                                 &state.http_client, &p.server_url, &p.token, &forwarder_ids,
                                                             ).await
                                                         };
                                                         match result {
                                                             Ok(lookup) => {
-                                                                if !lookup.is_empty() {
+                                                                let total_chips: usize = lookup.values().map(|m| m.len()).sum();
+                                                                if total_chips > 0 {
                                                                     state.logger.log(format!(
-                                                                        "Loaded {} chip→participant mappings",
+                                                                        "Loaded chip→participant mappings for {} forwarder(s) ({total_chips} chips)",
                                                                         lookup.len()
                                                                     ));
                                                                 }

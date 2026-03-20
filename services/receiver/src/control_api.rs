@@ -593,9 +593,12 @@ pub async fn fetch_server_streams(
     Ok(body.streams)
 }
 
-/// Parse a participants JSON response into chip_id → (bib, name) entries,
-/// inserting them into the provided lookup map.
-fn parse_participants_into(body: &serde_json::Value, lookup: &mut crate::session::ChipLookup) {
+/// Flat chip_id → (bib, name) map for a single race.
+type FlatChipMap = HashMap<String, (String, String)>;
+
+/// Parse a participants JSON response into a flat chip_id → (bib, name) map.
+fn parse_participants(body: &serde_json::Value) -> FlatChipMap {
+    let mut map = FlatChipMap::new();
     if let Some(participants) = body.get("participants").and_then(|v| v.as_array()) {
         for p in participants {
             let bib = match p.get("bib").and_then(|v| v.as_i64()) {
@@ -609,25 +612,23 @@ fn parse_participants_into(body: &serde_json::Value, lookup: &mut crate::session
             if let Some(chip_ids) = p.get("chip_ids").and_then(|v| v.as_array()) {
                 for chip_val in chip_ids {
                     if let Some(chip_id) = chip_val.as_str() {
-                        lookup.insert(chip_id.to_owned(), (bib.clone(), name.clone()));
+                        map.insert(chip_id.to_owned(), (bib.clone(), name.clone()));
                     }
                 }
             }
         }
     }
+    map
 }
 
-/// Fetch participants for a single race from the upstream server, returning a
-/// chip_id → (bib, display_name) lookup map.
-pub async fn fetch_chip_lookup(
+/// Fetch a flat chip map for a single race from the upstream server.
+async fn fetch_race_chips(
     client: &reqwest::Client,
-    ws_url: &str,
+    base: &str,
     token: &str,
     race_id: &str,
-) -> Result<crate::session::ChipLookup, String> {
-    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+) -> Result<FlatChipMap, String> {
     let url = format!("{base}/api/v1/races/{race_id}/participants");
-
     let resp = client
         .get(&url)
         .bearer_auth(token)
@@ -644,14 +645,30 @@ pub async fn fetch_chip_lookup(
         .await
         .map_err(|e| format!("invalid JSON: {e}"))?;
 
+    Ok(parse_participants(&body))
+}
+
+/// Build a per-forwarder chip lookup for Race mode.  All forwarders that
+/// sent the receiver a hello for the given race share the same chip map.
+pub async fn fetch_chip_lookup_for_race(
+    client: &reqwest::Client,
+    ws_url: &str,
+    token: &str,
+    race_id: &str,
+    forwarder_ids: &[String],
+) -> Result<crate::session::ChipLookup, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+    let chips = fetch_race_chips(client, &base, token, race_id).await?;
     let mut lookup = crate::session::ChipLookup::new();
-    parse_participants_into(&body, &mut lookup);
+    for fwd in forwarder_ids {
+        lookup.insert(fwd.clone(), chips.clone());
+    }
     Ok(lookup)
 }
 
-/// Fetch participants for races mapped to the given forwarder IDs via the
-/// server's `forwarder_races` table.  Returns an empty map if none of the
-/// forwarders have an assigned race.
+/// Build a per-forwarder chip lookup for Live mode by querying the server's
+/// `forwarder_races` assignments.  Only forwarders with an assigned race get
+/// entries; reads from unassigned forwarders will not be enriched.
 pub async fn fetch_chip_lookup_for_forwarders(
     client: &reqwest::Client,
     ws_url: &str,
@@ -682,10 +699,10 @@ pub async fn fetch_chip_lookup_for_forwarders(
         .await
         .map_err(|e| format!("invalid forwarder-races JSON: {e}"))?;
 
-    // Collect unique race_ids for our subscribed forwarders.
+    // Build forwarder_id → race_id mapping for our subscribed forwarders.
     let forwarder_set: std::collections::HashSet<&str> =
         forwarder_ids.iter().map(|s| s.as_str()).collect();
-    let mut race_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut fwd_to_race: HashMap<String, String> = HashMap::new();
 
     if let Some(assignments) = body.get("assignments").and_then(|v| v.as_array()) {
         for a in assignments {
@@ -693,21 +710,33 @@ pub async fn fetch_chip_lookup_for_forwarders(
             if forwarder_set.contains(fwd)
                 && let Some(rid) = a.get("race_id").and_then(|v| v.as_str())
             {
-                race_ids.insert(rid.to_owned());
+                fwd_to_race.insert(fwd.to_owned(), rid.to_owned());
             }
         }
     }
 
-    // Fetch participants for each discovered race.
+    // Fetch participants per unique race, caching to avoid duplicate requests.
+    let mut race_chips: HashMap<String, FlatChipMap> = HashMap::new();
+    for race_id in fwd_to_race.values() {
+        if !race_chips.contains_key(race_id) {
+            let url = format!("{base}/api/v1/races/{race_id}/participants");
+            let chips = match client.get(&url).bearer_auth(token).send().await {
+                Ok(r) if r.status().is_success() => r
+                    .json::<serde_json::Value>()
+                    .await
+                    .map(|b| parse_participants(&b))
+                    .unwrap_or_default(),
+                _ => FlatChipMap::new(),
+            };
+            race_chips.insert(race_id.clone(), chips);
+        }
+    }
+
+    // Build the per-forwarder lookup.
     let mut lookup = crate::session::ChipLookup::new();
-    for race_id in &race_ids {
-        let url = format!("{base}/api/v1/races/{race_id}/participants");
-        let resp = match client.get(&url).bearer_auth(token).send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => continue,
-        };
-        if let Ok(body) = resp.json::<serde_json::Value>().await {
-            parse_participants_into(&body, &mut lookup);
+    for (fwd, race_id) in &fwd_to_race {
+        if let Some(chips) = race_chips.get(race_id) {
+            lookup.insert(fwd.clone(), chips.clone());
         }
     }
 
