@@ -44,13 +44,22 @@
 <div
   class="flex items-center justify-between px-3 h-9 bg-surface-1 border-b border-border shrink-0"
 >
-  <div class="flex items-center gap-2">
-    <span class="w-2.5 h-2.5 rounded-full {dotColor(getConnectionState())}"
+  <div class="flex items-center gap-2 min-w-0">
+    <span
+      class="w-2.5 h-2.5 rounded-full shrink-0 {dotColor(getConnectionState())}"
     ></span>
-    <span class="text-sm text-text-primary">{label(getConnectionState())}</span>
+    <span class="text-sm text-text-primary shrink-0"
+      >{label(getConnectionState())}</span
+    >
+    {#if store.savedServerUrl && getConnectionState() !== "disconnected"}
+      <span
+        class="text-xs text-text-muted truncate"
+        title={store.savedServerUrl}>{store.savedServerUrl}</span
+      >
+    {/if}
   </div>
 
-  <div>
+  <div class="py-1">
     {#if getConnectionState() === "connected"}
       <button
         data-testid="connect-toggle-btn"

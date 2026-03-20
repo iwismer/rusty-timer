@@ -87,13 +87,14 @@
 
     // Chip ID truncated
     if (used + CHIP_TRUNC_W <= avail && used + CHIP_FULL_W > avail) {
-      const last = read.chip_id.slice(-5);
+      const cleaned = read.chip_id.replaceAll(":", "");
+      const last = cleaned.slice(-5);
       parts.push(`\u2026${last}`);
       used += CHIP_TRUNC_W;
     }
     // Chip ID full
     else if (used + CHIP_FULL_W <= avail) {
-      parts.push(read.chip_id);
+      parts.push(read.chip_id.replaceAll(":", ""));
       used += CHIP_FULL_W;
     }
 
