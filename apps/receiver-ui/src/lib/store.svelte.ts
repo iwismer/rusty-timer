@@ -861,7 +861,6 @@ export function initStore(): void {
       void loadAll();
     },
     onConnectionChange: () => {},
-    onUpdateStatusChanged: () => {},
     onStreamCountsUpdated: (updates) => {
       const needsResync = applyStreamCountUpdates(updates);
       if (needsResync) void loadAll();

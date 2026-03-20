@@ -299,7 +299,7 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateStatusChanged: vi.fn(),
+
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
@@ -313,35 +313,6 @@ describe("sse client", () => {
     vi.unstubAllGlobals();
   });
 
-  it("forwards update_status_changed event payload", async () => {
-    const { initSSE, destroySSE } = await import("./sse");
-    const callbacks = {
-      onStatusChanged: vi.fn(),
-      onStreamsSnapshot: vi.fn(),
-      onLogEntry: vi.fn(),
-      onResync: vi.fn(),
-      onConnectionChange: vi.fn(),
-      onUpdateStatusChanged: vi.fn(),
-      onStreamCountsUpdated: vi.fn(),
-      onModeChanged: vi.fn(),
-      onLastRead: vi.fn(),
-    };
-
-    initSSE(callbacks);
-    expect(MockEventSource.lastInstance).not.toBeNull();
-
-    MockEventSource.lastInstance!.emit("update_status_changed", {
-      status: { status: "available", version: "1.2.3" },
-    });
-
-    expect(callbacks.onUpdateStatusChanged).toHaveBeenCalledWith({
-      status: "available",
-      version: "1.2.3",
-    });
-    destroySSE();
-    vi.unstubAllGlobals();
-  });
-
   it("forwards stream_counts_updated event payload", async () => {
     const { initSSE, destroySSE } = await import("./sse");
     const callbacks = {
@@ -350,7 +321,7 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateStatusChanged: vi.fn(),
+
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
@@ -391,7 +362,7 @@ describe("sse client", () => {
       onLogEntry: vi.fn(),
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
-      onUpdateStatusChanged: vi.fn(),
+
       onStreamCountsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),

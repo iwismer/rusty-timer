@@ -605,7 +605,10 @@ fn parse_participants(body: &serde_json::Value) -> FlatChipMap {
         for p in participants {
             let bib = match p.get("bib").and_then(|v| v.as_i64()) {
                 Some(b) => b.to_string(),
-                None => continue,
+                None => {
+                    tracing::debug!("skipping participant without bib field");
+                    continue;
+                }
             };
             let first = p.get("first_name").and_then(|v| v.as_str()).unwrap_or("");
             let last = p.get("last_name").and_then(|v| v.as_str()).unwrap_or("");

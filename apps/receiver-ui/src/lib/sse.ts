@@ -7,19 +7,12 @@ import type {
   StreamsResponse,
 } from "./api";
 
-type LegacyUpdateStatusEvent = {
-  status: string;
-  version?: string;
-  error?: string;
-};
-
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;
   onStreamsSnapshot: (streams: StreamsResponse) => void;
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
-  onUpdateStatusChanged: (status: LegacyUpdateStatusEvent) => void;
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;
@@ -53,9 +46,6 @@ export function initSSE(callbacks: SseCallbacks): void {
       },
       resync: () => {
         callbacks.onResync();
-      },
-      update_status_changed: (data: any) => {
-        callbacks.onUpdateStatusChanged(data.status);
       },
       stream_counts_updated: (data: any) => {
         callbacks.onStreamCountsUpdated(data.updates ?? []);
