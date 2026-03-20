@@ -48,6 +48,9 @@
   }
 
   // Only provide help context when this Card is configured for help.
+  // `setContext` runs during component initialization, so the initial prop
+  // value is the intended one here.
+  // svelte-ignore state_referenced_locally
   if (helpSection) {
     setContext(HELP_OPEN_MODAL_KEY, (fieldKey?: string) => {
       openHelp(fieldKey);

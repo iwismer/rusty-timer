@@ -1,5 +1,7 @@
-<script>
+<script lang="ts">
+  import type { Snippet } from "svelte";
   import { onMount, onDestroy } from "svelte";
+  import { page } from "$app/state";
   import { initStore, destroyStore, store } from "$lib/store.svelte";
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
   import { AlertBanner } from "@rusty-timer/shared-ui";
@@ -15,8 +17,10 @@
   import AdminTab from "$lib/components/AdminTab.svelte";
   import "@rusty-timer/shared-ui/styles/tokens.css";
 
+  let { children }: { children?: Snippet } = $props();
   let previousHtmlScrollbarGutter = "";
   let previousBodyScrollbarGutter = "";
+  let hasNestedRoute = $derived(page.url.pathname !== "/");
 
   onMount(() => {
     previousHtmlScrollbarGutter =
@@ -51,7 +55,9 @@
   {/if}
 
   <div class="flex-1 overflow-y-auto">
-    {#if store.activeTab === "streams"}
+    {#if hasNestedRoute && children}
+      {@render children()}
+    {:else if store.activeTab === "streams"}
       <StreamsTab />
     {:else if store.activeTab === "config"}
       <ConfigTab />

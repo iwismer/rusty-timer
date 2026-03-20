@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Layout from "../routes/+layout.svelte";
+import LayoutChildrenHarness from "./LayoutChildrenHarness.svelte";
 
 const apiMocks = vi.hoisted(() => ({
   getStatus: vi.fn().mockResolvedValue({
@@ -52,9 +53,21 @@ const sseMocks = vi.hoisted(() => ({
   destroySSE: vi.fn(),
 }));
 
+const pageState = vi.hoisted(() => ({
+  pathname: "/",
+}));
+
 vi.mock("$lib/sse", () => ({
   initSSE: sseMocks.initSSE,
   destroySSE: sseMocks.destroySSE,
+}));
+
+vi.mock("$app/state", () => ({
+  page: {
+    get url() {
+      return new URL(`http://localhost${pageState.pathname}`);
+    },
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -64,6 +77,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 describe("receiver layout SSE updates", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    pageState.pathname = "/";
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -76,6 +90,20 @@ describe("receiver layout SSE updates", () => {
       getItem: vi.fn().mockReturnValue(null),
       setItem: vi.fn(),
       removeItem: vi.fn(),
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {
+        transformCallback: vi.fn(() => 1),
+        invoke: vi.fn().mockResolvedValue(1),
+        unregisterCallback: vi.fn(),
+      },
+    });
+    Object.defineProperty(window, "__TAURI_EVENT_PLUGIN_INTERNALS__", {
+      configurable: true,
+      value: {
+        unregisterListener: vi.fn(),
+      },
     });
   });
 
@@ -101,5 +129,14 @@ describe("receiver layout SSE updates", () => {
     await waitFor(() => {
       expect(screen.getByText("15 reads")).toBeInTheDocument();
     });
+  });
+
+  it("renders nested route content", async () => {
+    pageState.pathname = "/admin";
+    render(LayoutChildrenHarness);
+
+    expect(await screen.findByTestId("layout-child")).toHaveTextContent(
+      "nested route content",
+    );
   });
 });
