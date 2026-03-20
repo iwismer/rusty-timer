@@ -348,6 +348,38 @@ describe("sse client", () => {
     );
   });
 
+  it("connects directly to the receiver control API in local dev", async () => {
+    vi.stubGlobal("location", {
+      ...window.location,
+      protocol: "http:",
+      hostname: "127.0.0.1",
+      port: "5173",
+      origin: "http://127.0.0.1:5173",
+    });
+
+    const { initSSE, destroySSE } = await import("./sse");
+    const callbacks = {
+      onStatusChanged: vi.fn(),
+      onStreamsSnapshot: vi.fn(),
+      onLogEntry: vi.fn(),
+      onResync: vi.fn(),
+      onConnectionChange: vi.fn(),
+      onUpdateStatusChanged: vi.fn(),
+      onStreamCountsUpdated: vi.fn(),
+      onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
+    };
+
+    initSSE(callbacks);
+
+    expect(MockEventSource.lastInstance?.url).toBe(
+      "http://127.0.0.1:9090/api/v1/events",
+    );
+
+    destroySSE();
+    vi.unstubAllGlobals();
+  });
+
   it("forwards update_status_changed event payload", async () => {
     const { initSSE, destroySSE } = await import("./sse");
     const callbacks = {
