@@ -40,7 +40,7 @@ pub struct SessionLoopDeps {
     pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     pub shutdown: watch::Receiver<bool>,
     pub connection_state: watch::Receiver<ConnectionState>,
-    pub chip_lookup: ChipLookup,
+    pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
 }
 
 fn apply_batch_counts(
@@ -130,10 +130,10 @@ where
                                         updates,
                                     });
                                 }
+                                let chip_lookup = deps.chip_lookup.read().await;
                                 for e in &forwarded_events {
                                     let chip_id = crate::ui_events::chip_id_from_raw_frame(&e.raw_frame);
-                                    let (bib, name) = deps
-                                        .chip_lookup
+                                    let (bib, name) = chip_lookup
                                         .get(&e.forwarder_id)
                                         .and_then(|chips| chips.get(&chip_id))
                                         .map(|(b, n)| (Some(b.clone()), Some(n.clone())))

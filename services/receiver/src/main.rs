@@ -365,49 +365,37 @@ async fn main() {
                                                 state.emit_streams_snapshot().await;
 
                                                 // Fetch chip→participant lookup from the server.
-                                                let chip_lookup = {
-                                                    let db = state.db.lock().await;
-                                                    let mode = db.load_receiver_mode().ok().flatten();
-                                                    let profile = db.load_profile().ok().flatten();
-                                                    let subs = db.load_subscriptions().unwrap_or_default();
-                                                    drop(db);
-                                                    let forwarder_ids: Vec<String> = subs
-                                                        .iter()
-                                                        .map(|s| s.forwarder_id.clone())
-                                                        .collect::<std::collections::HashSet<_>>()
-                                                        .into_iter()
-                                                        .collect();
-                                                    if let Some(p) = profile {
-                                                        let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
-                                                            receiver::control_api::fetch_chip_lookup_for_race(
-                                                                &state.http_client, &p.server_url, &p.token, &race_id, &forwarder_ids,
-                                                            ).await
-                                                        } else {
-                                                            receiver::control_api::fetch_chip_lookup_for_forwarders(
-                                                                &state.http_client, &p.server_url, &p.token, &forwarder_ids,
-                                                            ).await
-                                                        };
-                                                        match result {
-                                                            Ok(lookup) => {
-                                                                let total_chips: usize = lookup.values().map(|m| m.len()).sum();
-                                                                if total_chips > 0 {
-                                                                    state.logger.log(format!(
-                                                                        "Loaded chip→participant mappings for {} forwarder(s) ({total_chips} chips)",
-                                                                        lookup.len()
-                                                                    ));
-                                                                }
-                                                                lookup
-                                                            }
-                                                            Err(e) => {
-                                                                warn!(error = %e, "failed to fetch participant lookup");
-                                                                state.logger.log_at(UiLogLevel::Warn, format!("Could not load participants: {e}"));
-                                                                std::collections::HashMap::new()
-                                                            }
-                                                        }
-                                                    } else {
-                                                        std::collections::HashMap::new()
+                                                let initial_lookup = fetch_chip_lookup(&state).await;
+                                                {
+                                                    let total_chips: usize = initial_lookup.values().map(|m| m.len()).sum();
+                                                    if total_chips > 0 {
+                                                        state.logger.log(format!(
+                                                            "Loaded chip→participant mappings for {} forwarder(s) ({total_chips} chips)",
+                                                            initial_lookup.len()
+                                                        ));
                                                     }
-                                                };
+                                                }
+                                                let chip_lookup = Arc::new(tokio::sync::RwLock::new(initial_lookup));
+
+                                                // Spawn a background task to periodically
+                                                // refresh the chip lookup (e.g. when race
+                                                // assignments change on the server).
+                                                let refresh_lookup = Arc::clone(&chip_lookup);
+                                                let refresh_state = Arc::clone(&state);
+                                                let refresh_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+                                                    let mut interval = tokio::time::interval(
+                                                        std::time::Duration::from_secs(10),
+                                                    );
+                                                    interval.set_missed_tick_behavior(
+                                                        tokio::time::MissedTickBehavior::Delay,
+                                                    );
+                                                    interval.tick().await; // skip immediate tick
+                                                    loop {
+                                                        interval.tick().await;
+                                                        let new = fetch_chip_lookup(&refresh_state).await;
+                                                        *refresh_lookup.write().await = new;
+                                                    }
+                                                });
 
                                                 let (cancel_tx, cancel_rx) =
                                                     watch::channel(false);
@@ -416,6 +404,7 @@ async fn main() {
                                                 let counts = state.stream_counts.clone();
                                                 let ui_tx = state.ui_tx.clone();
                                                 let st = Arc::clone(&state);
+                                                let refresh_handle_for_session = refresh_handle.abort_handle();
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
                                                     let deps = receiver::session::SessionLoopDeps {
@@ -431,6 +420,7 @@ async fn main() {
                                                         ws, session_id, deps,
                                                     )
                                                     .await;
+                                                    refresh_handle_for_session.abort();
                                                     match result {
                                                         Ok(()) => {
                                                             info!("WS session ended normally");
@@ -562,6 +552,54 @@ async fn wait_for_reconnect_delay_or_abort(
 
         let remaining = deadline.saturating_duration_since(now);
         tokio::time::sleep(std::cmp::min(remaining, poll_interval)).await;
+    }
+}
+
+/// Fetch a chip→participant lookup from the server based on the current
+/// receiver mode and subscriptions.
+async fn fetch_chip_lookup(state: &Arc<AppState>) -> receiver::session::ChipLookup {
+    let db = state.db.lock().await;
+    let mode = db.load_receiver_mode().ok().flatten();
+    let profile = db.load_profile().ok().flatten();
+    let subs = db.load_subscriptions().unwrap_or_default();
+    drop(db);
+
+    let forwarder_ids: Vec<String> = subs
+        .iter()
+        .map(|s| s.forwarder_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let Some(p) = profile else {
+        return HashMap::new();
+    };
+
+    let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
+        receiver::control_api::fetch_chip_lookup_for_race(
+            &state.http_client,
+            &p.server_url,
+            &p.token,
+            &race_id,
+            &forwarder_ids,
+        )
+        .await
+    } else {
+        receiver::control_api::fetch_chip_lookup_for_forwarders(
+            &state.http_client,
+            &p.server_url,
+            &p.token,
+            &forwarder_ids,
+        )
+        .await
+    };
+
+    match result {
+        Ok(lookup) => lookup,
+        Err(e) => {
+            warn!(error = %e, "failed to fetch participant lookup");
+            HashMap::new()
+        }
     }
 }
 
