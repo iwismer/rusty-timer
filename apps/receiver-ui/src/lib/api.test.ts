@@ -78,7 +78,7 @@ describe("api client", () => {
   it("connect accepts 200 or 202", async () => {
     const { connect } = await import("./api");
     mockFetch.mockResolvedValue({
-      ok: false,
+      ok: true,
       status: 202,
       json: async () => ({}),
       text: async () => "",
@@ -89,7 +89,7 @@ describe("api client", () => {
   it("disconnect accepts 200 or 202", async () => {
     const { disconnect } = await import("./api");
     mockFetch.mockResolvedValue({
-      ok: false,
+      ok: true,
       status: 200,
       json: async () => ({}),
       text: async () => "",

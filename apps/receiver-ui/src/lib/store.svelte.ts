@@ -363,10 +363,18 @@ export function modeSignature(mode: ReceiverMode): string {
       });
     return JSON.stringify({ mode: "targeted_replay", targets });
   }
-  const earliestEpochRows = Array.isArray(
-    (mode as { earliest_epochs?: unknown }).earliest_epochs,
-  )
-    ? (mode as { earliest_epochs: api.EarliestEpochOverride[] }).earliest_epochs
+  const liveMode = mode as {
+    streams?: api.StreamRef[];
+    earliest_epochs?: api.EarliestEpochOverride[];
+  };
+  const sortedStreams = [...(liveMode.streams ?? [])]
+    .map((s) => ({
+      forwarder_id: s.forwarder_id,
+      reader_ip: s.reader_ip,
+    }))
+    .sort(compareStreamRefs);
+  const earliestEpochRows = Array.isArray(liveMode.earliest_epochs)
+    ? liveMode.earliest_epochs
     : [];
   const sorted = [...earliestEpochRows]
     .map((r) => ({
@@ -378,7 +386,11 @@ export function modeSignature(mode: ReceiverMode): string {
       const sc = compareStreamRefs(a, b);
       return sc !== 0 ? sc : a.earliest_epoch - b.earliest_epoch;
     });
-  return JSON.stringify({ mode: "live", earliest_epochs: sorted });
+  return JSON.stringify({
+    mode: "live",
+    streams: sortedStreams,
+    earliest_epochs: sorted,
+  });
 }
 
 export function getModeDirty(): boolean {
@@ -550,12 +562,15 @@ export async function loadAll(): Promise<void> {
 
     const p = await api.getProfile().catch(() => null);
     if (p) {
-      store.editServerUrl = p.server_url;
-      store.editToken = p.token;
-      store.editReceiverId = p.receiver_id;
       store.savedServerUrl = p.server_url;
       store.savedToken = p.token;
       store.savedReceiverId = p.receiver_id;
+      // Only overwrite edit fields if the user hasn't made unsaved changes.
+      if (!getConfigDirty()) {
+        store.editServerUrl = p.server_url;
+        store.editToken = p.token;
+        store.editReceiverId = p.receiver_id;
+      }
     }
   } catch (e) {
     store.error = String(e);
@@ -682,7 +697,9 @@ export async function replayStream(stream: api.StreamEntry): Promise<void> {
     };
     await api.putMode(payload);
     modeMutationVersion += 1;
+    store.modeDraft = "targeted_replay";
     store.savedModePayload = modeSignature(payload);
+    store.modeEditedSinceHydration = false;
   } catch (e) {
     store.error = String(e);
   }
@@ -711,7 +728,9 @@ export async function replayAll(): Promise<void> {
     const payload: ReceiverMode = { mode: "targeted_replay", targets };
     await api.putMode(payload);
     modeMutationVersion += 1;
+    store.modeDraft = "targeted_replay";
     store.savedModePayload = modeSignature(payload);
+    store.modeEditedSinceHydration = false;
   } catch (e) {
     store.error = String(e);
   }

@@ -70,7 +70,10 @@ async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<ReadE
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(n, "local consumer lagged, events dropped");
+                warn!(
+                    n,
+                    "local consumer lagged, {n} events dropped — consumer will see a gap in data"
+                );
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }

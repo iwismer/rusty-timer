@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { HelpTip } from "@rusty-timer/shared-ui";
   import * as api from "$lib/api";
+  import { loadAll as globalLoadAll } from "$lib/store.svelte";
 
   let streams = $state<api.StreamEntry[]>([]);
   let subscriptions = $state<api.SubscriptionItem[]>([]);
@@ -78,6 +79,8 @@
         setFeedback(`${label}: done.`, true);
       }
       await loadAll();
+      // Also refresh global store state so other tabs see the changes.
+      void globalLoadAll();
     } catch {
       setFeedback(`${label}: failed.`, false);
     } finally {
@@ -154,7 +157,7 @@
         portValue,
       );
       setFeedback(
-        portValue
+        portValue !== null
           ? `Port override set to ${portValue} for ${sub.forwarder_id} / ${sub.reader_ip}.`
           : `Port override cleared for ${sub.forwarder_id} / ${sub.reader_ip}.`,
         true,

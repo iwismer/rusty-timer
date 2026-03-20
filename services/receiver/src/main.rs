@@ -223,14 +223,6 @@ async fn main() {
             biased;
 
             // ------------------------------------------------------------------
-            // Graceful shutdown: ctrl-c or SIGTERM
-            // ------------------------------------------------------------------
-            _ = tokio::signal::ctrl_c() => {
-                info!("received ctrl-c, shutting down");
-                break;
-            }
-
-            // ------------------------------------------------------------------
             // Shutdown signal from control API (e.g. disconnect sends true)
             // We only break the outer loop here if it's a process-level shutdown
             // request (not a disconnect-only signal).  The disconnect path
@@ -334,10 +326,11 @@ async fn main() {
                                     }
                                     Ok((ws, _)) => {
                                         // Perform the receiver hello / heartbeat handshake.
+                                        // NOTE: do_handshake takes Arc<Mutex<Db>> so it can
+                                        // drop the lock before making async HTTP calls.
                                         let (session_result, ws) = {
                                             let receiver_id = state.receiver_id.read().await.clone();
-                                            let db = state.db.lock().await;
-                                            do_handshake(ws, &db, &state.ui_tx, &receiver_id, &state.http_client).await
+                                            do_handshake(ws, &state.db, &state.ui_tx, &receiver_id, &state.http_client).await
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -613,19 +606,8 @@ fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) ->
     None
 }
 
-fn http_base_url(base_url: &str) -> Option<String> {
-    let url = reqwest::Url::parse(base_url).ok()?;
-    let scheme = match url.scheme() {
-        "ws" => "http",
-        "wss" => "https",
-        _ => return None,
-    };
-    let host = url.host_str()?;
-    match url.port() {
-        Some(port) => Some(format!("{scheme}://{host}:{port}")),
-        None => Some(format!("{scheme}://{host}")),
-    }
-}
+// Use the shared http_base_url from control_api.
+use receiver::control_api::http_base_url;
 
 async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
     let client = match reqwest::Client::builder()
@@ -783,7 +765,7 @@ async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64
 #[allow(clippy::type_complexity)]
 async fn do_handshake<S>(
     mut ws: S,
-    db: &Db,
+    db: &Arc<tokio::sync::Mutex<Db>>,
     ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
     receiver_id: &str,
     http_client: &reqwest::Client,
@@ -805,30 +787,74 @@ where
     };
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    let resume = match db.load_resume_cursors() {
-        Ok(cursors) => cursors,
-        Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-    };
-    let mut mode = match db.load_receiver_mode() {
-        Ok(Some(mode)) => mode,
-        Ok(None) => {
-            let streams = match db.load_subscriptions() {
-                Ok(subs) => subs
-                    .into_iter()
-                    .map(|s| StreamRef {
-                        forwarder_id: s.forwarder_id,
-                        reader_ip: s.reader_ip,
-                    })
-                    .collect(),
-                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-            };
-            ReceiverMode::Live {
-                streams,
-                earliest_epochs: vec![],
+    // Read all DB data we need upfront, then drop the lock before any async HTTP calls.
+    let (resume, mut mode, earliest_epochs_rows, profile_url) = {
+        let db = db.lock().await;
+        let resume = match db.load_resume_cursors() {
+            Ok(cursors) => cursors,
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+        let mode = match db.load_receiver_mode() {
+            Ok(Some(mode)) => mode,
+            Ok(None) => {
+                let streams = match db.load_subscriptions() {
+                    Ok(subs) => subs
+                        .into_iter()
+                        .map(|s| StreamRef {
+                            forwarder_id: s.forwarder_id,
+                            reader_ip: s.reader_ip,
+                        })
+                        .collect(),
+                    Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+                };
+                ReceiverMode::Live {
+                    streams,
+                    earliest_epochs: vec![],
+                }
             }
-        }
-        Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+        let earliest_epochs_rows = match db.load_earliest_epochs() {
+            Ok(rows) => rows,
+            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+        };
+        let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
+        // If mode is Live with empty streams, load subscriptions
+        let mode = if let ReceiverMode::Live { ref streams, .. } = mode {
+            if streams.is_empty() {
+                match db.load_subscriptions() {
+                    Ok(subs) => {
+                        let streams = subs
+                            .into_iter()
+                            .map(|s| StreamRef {
+                                forwarder_id: s.forwarder_id,
+                                reader_ip: s.reader_ip,
+                            })
+                            .collect();
+                        if let ReceiverMode::Live {
+                            earliest_epochs, ..
+                        } = mode
+                        {
+                            ReceiverMode::Live {
+                                streams,
+                                earliest_epochs,
+                            }
+                        } else {
+                            mode
+                        }
+                    }
+                    Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+                }
+            } else {
+                mode
+            }
+        } else {
+            mode
+        };
+        (resume, mode, earliest_epochs_rows, profile_url)
     };
+    // DB lock is now released — safe to make async HTTP calls.
+
     let clear_targeted_mode_after_handshake = matches!(
         &mode,
         ReceiverMode::TargetedReplay { targets } if !targets.is_empty()
@@ -839,30 +865,11 @@ where
         ref mut earliest_epochs,
     } = mode
     {
-        if streams.is_empty() {
-            match db.load_subscriptions() {
-                Ok(subs) => {
-                    *streams = subs
-                        .into_iter()
-                        .map(|s| StreamRef {
-                            forwarder_id: s.forwarder_id,
-                            reader_ip: s.reader_ip,
-                        })
-                        .collect();
-                }
-                Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-            }
-        }
+        let mut map: HashMap<(String, String), i64> = earliest_epochs_rows
+            .into_iter()
+            .map(|(fwd, ip, epoch)| ((fwd, ip), epoch))
+            .collect();
 
-        let mut map: HashMap<(String, String), i64> = match db.load_earliest_epochs() {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|(fwd, ip, epoch)| ((fwd, ip), epoch))
-                .collect(),
-            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
-        };
-
-        let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
         if let Some(url) = profile_url
             && let Ok(server_streams) =
                 receiver::control_api::fetch_server_streams(http_client, &url).await
@@ -943,9 +950,11 @@ where
                     let clear_mode = ReceiverMode::TargetedReplay {
                         targets: Vec::new(),
                     };
-                    if let Err(e) = db.save_receiver_mode(&clear_mode) {
+                    let db_guard = db.lock().await;
+                    if let Err(e) = db_guard.save_receiver_mode(&clear_mode) {
                         return (Err(receiver::session::SessionError::Db(e)), None);
                     }
+                    drop(db_guard);
                 }
                 info!(session_id = %hb.session_id, "handshake complete");
                 return (Ok(hb.session_id), Some(ws));
@@ -1022,11 +1031,11 @@ async fn cancel_session(
     if let Some(tx) = cancel_tx.take() {
         let _ = tx.send(true);
     }
-    // Await the task.
+    // Await the task; abort it if it doesn't exit within 5s.
     if let Some(handle) = task.take() {
-        // Give the task a moment to exit cleanly; abort if it doesn't.
-        let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), handle);
-        match timeout.await {
+        // Pin the handle so we can poll it without consuming it on timeout.
+        tokio::pin!(handle);
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 logger.log_at(UiLogLevel::Warn, format!("session task panicked: {e}"));
@@ -1034,8 +1043,9 @@ async fn cancel_session(
             Err(_) => {
                 logger.log_at(
                     UiLogLevel::Warn,
-                    "session task did not exit in 5s; continuing",
+                    "session task did not exit in 5s; aborting",
                 );
+                handle.abort();
             }
         }
     }
@@ -1240,7 +1250,7 @@ mod tests {
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .expect("connect");
-        let db = Db::open_in_memory().expect("db");
+        let db = Arc::new(tokio::sync::Mutex::new(Db::open_in_memory().expect("db")));
         let (ui_tx, mut ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
 
         let http_client = reqwest::Client::new();
@@ -1330,12 +1340,16 @@ mod tests {
             Some(initial_mode)
         );
 
+        let db = Arc::new(tokio::sync::Mutex::new(db));
         let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
         let http_client = reqwest::Client::new();
         let (result, _ws) = do_handshake(ws, &db, &ui_tx, "test-receiver", &http_client).await;
         assert!(result.is_ok(), "handshake should succeed");
         assert_eq!(
-            db.load_receiver_mode().expect("load mode after handshake"),
+            db.lock()
+                .await
+                .load_receiver_mode()
+                .expect("load mode after handshake"),
             Some(ReceiverMode::TargetedReplay {
                 targets: Vec::new()
             })

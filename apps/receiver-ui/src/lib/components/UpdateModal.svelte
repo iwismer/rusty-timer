@@ -1,9 +1,12 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import {
     closeUpdateModal,
     confirmUpdateInstall,
     store,
   } from "$lib/store.svelte";
+
+  let dialogRef: HTMLDivElement | undefined = $state(undefined);
 
   function close() {
     closeUpdateModal();
@@ -14,12 +17,19 @@
     if (store.updateState?.status === "downloaded") return "Restart to update";
     return "Download and install";
   }
+
+  $effect(() => {
+    if (store.updateModalOpen && store.updateState) {
+      void tick().then(() => dialogRef?.focus());
+    }
+  });
 </script>
 
 {#if store.updateModalOpen && store.updateState}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    bind:this={dialogRef}
     role="dialog"
     aria-modal="true"
     tabindex="-1"

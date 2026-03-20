@@ -148,7 +148,15 @@
             {@const key = streamKey(stream.forwarder_id, stream.reader_ip)}
             <tr
               class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer"
+              role="button"
+              tabindex="0"
               onclick={() => toggleExpand(key)}
+              onkeydown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  toggleExpand(key);
+                }
+              }}
             >
               <td class="w-px whitespace-nowrap py-2 px-4">
                 <div class="flex items-center gap-2 min-w-0">
@@ -230,6 +238,7 @@
                           class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
                           value={selectedTargeted}
                           onchange={(e) => {
+                            e.stopPropagation();
                             setTargetedEpochInputs({
                               ...store.targetedEpochInputs,
                               [key]: e.currentTarget.value,

@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 
 const RECEIVER_URL: &str = "http://127.0.0.1:9090";
@@ -61,8 +61,16 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = run_sidecar_lifecycle(&handle).await {
-                    eprintln!("Fatal: failed to start receiver: {e}");
-                    // TODO: add tauri-plugin-dialog for a proper error dialog
+                    // Log to both stderr and a file for packaged Windows builds
+                    // where the console may not be visible.
+                    let msg = format!("Fatal: failed to start receiver: {e}");
+                    eprintln!("{msg}");
+                    // Write to a crash log next to the app data directory.
+                    if let Ok(dir) = handle.path().app_local_data_dir() {
+                        let log_path = dir.join("crash.log");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::fs::write(&log_path, &msg);
+                    }
                     handle.exit(1);
                 }
             });

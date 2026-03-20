@@ -22,8 +22,13 @@ pub struct LastRead {
 /// Extract chip ID from IPICO raw frame bytes.
 /// The raw frame is ASCII text; characters 4..16 are the chip identifier
 /// (e.g. "000000012345"), matching the server's `tag_id` format.
+/// Only extracts from frames with a valid IPICO prefix ("aa" at bytes 0..2).
 pub fn chip_id_from_raw_frame(raw_frame: &[u8]) -> String {
     if raw_frame.len() < 16 {
+        return "unknown".to_owned();
+    }
+    // Validate IPICO frame type prefix: first two bytes should be "aa"
+    if raw_frame.get(..2) != Some(b"aa") {
         return "unknown".to_owned();
     }
     std::str::from_utf8(&raw_frame[4..16])
@@ -165,6 +170,13 @@ mod tests {
     #[test]
     fn chip_id_from_raw_frame_short_returns_unknown() {
         assert_eq!(chip_id_from_raw_frame(&[0u8; 10]), "unknown");
+    }
+
+    #[test]
+    fn chip_id_from_raw_frame_non_ipico_prefix_returns_unknown() {
+        // Frame is long enough but doesn't start with "aa"
+        let frame = b"bb40000000012345extra_stuff_here";
+        assert_eq!(chip_id_from_raw_frame(frame), "unknown");
     }
 
     #[test]

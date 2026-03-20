@@ -337,8 +337,12 @@ async fn put_mode_emits_mode_changed_event() {
         StatusCode::NO_CONTENT
     );
 
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let event = ui_rx.recv().await.unwrap();
+        let event = tokio::time::timeout_at(deadline, ui_rx.recv())
+            .await
+            .expect("timed out waiting for ModeChanged event")
+            .unwrap();
         if let receiver::ui_events::ReceiverUiEvent::ModeChanged { mode } = event {
             assert_eq!(
                 mode,

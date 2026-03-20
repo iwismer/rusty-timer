@@ -13,9 +13,12 @@
 
 <div
   class="flex items-end gap-1 px-2 bg-surface-0 border-b border-border shrink-0"
+  role="tablist"
 >
   {#each tabs as tab (tab.id)}
     <button
+      role="tab"
+      aria-selected={store.activeTab === tab.id}
       class="px-3 py-1.5 text-sm border-b-2 transition-colors cursor-pointer bg-transparent
         {store.activeTab === tab.id
         ? 'border-accent text-text-primary font-semibold'

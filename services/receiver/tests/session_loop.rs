@@ -545,11 +545,13 @@ async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
                 .await
                 .unwrap();
 
-            // Wait briefly for any potential ack, then close.
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait long enough for the session loop to process the event and
+            // potentially send an ack.  Use a generous timeout to avoid
+            // false-passing on slow CI.
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             // Check if any message was received (there should be none).
-            let next = tokio::time::timeout(Duration::from_millis(100), ws.next()).await;
+            let next = tokio::time::timeout(Duration::from_millis(500), ws.next()).await;
             if let Ok(Some(Ok(Message::Text(t)))) = next {
                 let parsed = serde_json::from_str::<WsMessage>(&t).unwrap();
                 if let WsMessage::ReceiverAck(ack) = parsed {

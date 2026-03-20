@@ -60,11 +60,18 @@
     if (e.key === "Escape") close();
   }
 
+  let dialogRef: HTMLDivElement | undefined = $state(undefined);
+  let cachedSections = $derived(filteredSections());
+
   $effect(() => {
-    if (store.showHelpModal && store.helpScrollTarget) {
+    if (store.showHelpModal) {
       void tick().then(() => {
-        const el = document.getElementById(`help-${store.helpScrollTarget}`);
-        el?.scrollIntoView({ behavior: "smooth", block: "start" });
+        // Move focus into the modal on open.
+        dialogRef?.focus();
+        if (store.helpScrollTarget) {
+          const el = document.getElementById(`help-${store.helpScrollTarget}`);
+          el?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
       });
     }
   });
@@ -74,6 +81,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+    bind:this={dialogRef}
     onclick={close}
     onkeydown={handleKeydown}
     role="dialog"
@@ -109,7 +117,7 @@
       </div>
 
       <div class="overflow-y-auto px-4 py-3 flex-1">
-        {#each filteredSections() as { key, section, context } (context + "/" + key)}
+        {#each cachedSections as { key, section, context } (context + "/" + key)}
           <div id="help-{key}" class="mb-6">
             <h3 class="text-sm font-semibold text-text-primary mb-1">
               {section.title}
@@ -157,7 +165,7 @@
           </div>
         {/each}
 
-        {#if filteredSections().length === 0}
+        {#if cachedSections.length === 0}
           <p class="text-sm text-text-muted text-center py-8">
             No results for "{searchQuery}"
           </p>

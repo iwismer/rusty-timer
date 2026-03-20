@@ -29,7 +29,7 @@ export function initSSE(callbacks: SseCallbacks): void {
       status_changed: (data: any) => {
         callbacks.onStatusChanged({
           connection_state: data.connection_state,
-          local_ok: true,
+          local_ok: data.local_ok ?? true,
           streams_count: data.streams_count,
           receiver_id: data.receiver_id ?? "",
         });

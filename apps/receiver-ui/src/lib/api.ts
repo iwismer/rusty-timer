@@ -204,15 +204,19 @@ export async function resetStreamCursor(stream: StreamRef): Promise<void> {
 }
 
 export async function connect(): Promise<void> {
-  const resp = await fetch("/api/v1/connect", { method: "POST" });
-  if (resp.status !== 200 && resp.status !== 202)
-    throw new Error(`connect -> ${resp.status}`);
+  const resp = await fetch("/api/v1/connect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!resp.ok) throw new Error(`connect -> ${resp.status}`);
 }
 
 export async function disconnect(): Promise<void> {
-  const resp = await fetch("/api/v1/disconnect", { method: "POST" });
-  if (resp.status !== 200 && resp.status !== 202)
-    throw new Error(`disconnect -> ${resp.status}`);
+  const resp = await fetch("/api/v1/disconnect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!resp.ok) throw new Error(`disconnect -> ${resp.status}`);
 }
 
 export async function resetAllCursors(): Promise<{ deleted: number }> {

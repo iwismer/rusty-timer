@@ -542,6 +542,7 @@ pub struct UpstreamStreamInfo {
 }
 
 /// Normalize a server URL by prepending `ws://` if no scheme is present.
+/// Use `wss://` explicitly in the URL for a TLS connection.
 pub(crate) fn normalize_server_url(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
@@ -555,7 +556,7 @@ pub(crate) fn normalize_server_url(raw: &str) -> String {
 ///
 /// `ws://host:port`  → `http://host:port`
 /// `wss://host:port` → `https://host:port`
-pub(crate) fn http_base_url(base_url: &str) -> Option<String> {
+pub fn http_base_url(base_url: &str) -> Option<String> {
     let url = reqwest::Url::parse(base_url).ok()?;
     let scheme = match url.scheme() {
         "ws" => "http",
