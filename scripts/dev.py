@@ -914,6 +914,7 @@ def configure_receiver_dev() -> None:
     profile_payload = json.dumps({
         "server_url": "ws://127.0.0.1:8080",
         "token": RECEIVER_TOKEN_TEXT,
+        "receiver_id": RECEIVER_DEVICE_ID,
         "log_level": "info",
     }).encode()
     req = urllib.request.Request(
