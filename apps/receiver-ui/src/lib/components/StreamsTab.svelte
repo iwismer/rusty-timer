@@ -57,6 +57,13 @@
     expandedKey = expandedKey === key ? null : key;
   }
 
+  function formatLastReadTimestamp(timestamp: string): string {
+    const match = timestamp.match(
+      /(?:^|[T\s])(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:$|Z|[+-]\d{2}:?\d{2}|\s)/,
+    );
+    return match?.[1] ?? timestamp;
+  }
+
   function formatLastRead(key: string): string {
     const read = store.lastReads.get(key);
     if (!read) return "\u2014";
@@ -67,7 +74,7 @@
 
     // Time (highest priority)
     if (used + TIME_W <= avail) {
-      parts.push(read.timestamp.split(".")[0] ?? read.timestamp);
+      parts.push(formatLastReadTimestamp(read.timestamp));
       used += TIME_W;
     } else {
       return "\u2014";
@@ -132,9 +139,9 @@
           <tr
             class="sticky top-0 z-10 bg-surface-0 border-b border-border text-left text-text-muted"
           >
-            <th class="py-2 px-4 font-medium">Stream</th>
+            <th class="w-px whitespace-nowrap py-2 px-4 font-medium">Stream</th>
             {#if showLastReadCol()}
-              <th class="py-2 px-2 font-medium">Last Read</th>
+              <th class="w-full py-2 px-2 font-medium text-left">Last Read</th>
             {/if}
             <th class="py-2 px-2 font-medium text-right w-[70px]">Reads</th>
             <th class="py-2 px-4 font-medium text-right w-[60px]">Port</th>
@@ -147,20 +154,22 @@
               class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer"
               onclick={() => toggleExpand(key)}
             >
-              <td class="py-2 px-4">
+              <td class="w-px whitespace-nowrap py-2 px-4">
                 <div class="flex items-center gap-2 min-w-0">
                   <span
                     class="w-2.5 h-2.5 rounded-full shrink-0 {dotClass(
                       stream.online,
                     )}"
                   ></span>
-                  <span class="text-text-primary truncate">
+                  <span class="text-text-primary">
                     {stream.display_alias ?? stream.forwarder_id}
                   </span>
                 </div>
               </td>
               {#if showLastReadCol()}
-                <td class="py-2 px-2 text-text-muted font-mono truncate">
+                <td
+                  class="w-full max-w-0 py-2 px-2 text-left text-text-muted font-mono truncate"
+                >
                   {formatLastRead(key)}
                 </td>
               {/if}
