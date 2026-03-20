@@ -577,6 +577,11 @@ fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
 // Helper: watch connection_state and return the new value when it changes.
 // ---------------------------------------------------------------------------
 async fn watch_connection_state(rx: &mut watch::Receiver<ConnectionState>) -> ConnectionState {
+    let current = rx.borrow().clone();
+    if current == ConnectionState::Connecting || current == ConnectionState::Disconnecting {
+        return current;
+    }
+
     loop {
         rx.changed().await.expect("watch sender dropped");
         let cs = rx.borrow().clone();
@@ -1431,6 +1436,26 @@ mod tests {
         let retried = retry_connect_if_attempt_current(&state, stale_attempt).await;
 
         assert!(!retried);
+    }
+
+    #[tokio::test]
+    async fn watch_connection_state_observes_current_connecting_state() {
+        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+
+        state.request_connect().await;
+
+        let mut conn_state_rx = state.conn_rx();
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            watch_connection_state(&mut conn_state_rx),
+        )
+        .await;
+
+        assert_eq!(
+            observed.expect("watcher should not miss the current connecting state"),
+            ConnectionState::Connecting
+        );
     }
 
     #[test]
