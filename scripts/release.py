@@ -16,6 +16,10 @@ Usage:
     uv run scripts/release.py server --version 2.0.0 --server-local-docker-build --server-docker-image iwismer/rt-server
     uv run scripts/release.py receiver --version 2.0.0
     uv run scripts/release.py forwarder --patch --dry-run
+
+For `receiver`, also bumps `apps/receiver-ui/src-tauri/tauri.conf.json` to the
+same version and creates tags `receiver-vX.Y.Z` and `receiver-ui-vX.Y.Z` on the
+same commit (the latter triggers the Windows Tauri NSIS build in CI).
 """
 
 import argparse
@@ -39,6 +43,11 @@ UI_WORKSPACES = {
 SERVER_DOCKERFILE = "services/server/Dockerfile"
 DEFAULT_SERVER_DOCKER_IMAGE = "iwismer/rt-server"
 VERSION_FORMAT_RE = re.compile(r"^\d+\.\d+\.\d+$")
+TAURI_CONF_VERSION_RE = re.compile(
+    r'^(\s*"version"\s*:\s*")\d+\.\d+\.\d+(")',
+    re.MULTILINE,
+)
+RECEIVER_TAURI_CONF = REPO_ROOT / "apps/receiver-ui/src-tauri/tauri.conf.json"
 RESET = "\x1b[0m"
 STYLE_CODES = {
     "step": "\x1b[1;36m",
@@ -184,6 +193,32 @@ def write_version(service: str, new_version: str) -> None:
         print(f"Error: failed to update version in {cargo_toml}", file=sys.stderr)
         sys.exit(1)
     cargo_toml.write_text(new_text)
+
+
+def write_receiver_tauri_version(new_version: str) -> None:
+    """Keep Tauri app semver aligned with `services/receiver` for CI tag checks."""
+    path = RECEIVER_TAURI_CONF
+    text = path.read_text()
+    try:
+        new_text = update_tauri_conf_version(text, new_version)
+    except ValueError as e:
+        print(f"Error: failed to update version in {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+    path.write_text(new_text)
+
+
+def update_tauri_conf_version(text: str, new_version: str) -> str:
+    """Replace the root `version` field in `tauri.conf.json` (single match)."""
+    if not VERSION_FORMAT_RE.match(new_version):
+        raise ValueError(f"Invalid version: {new_version!r}")
+    new_text, count = TAURI_CONF_VERSION_RE.subn(
+        rf"\g<1>{new_version}\2", text, count=1
+    )
+    if count != 1:
+        raise ValueError(
+            "Expected exactly one top-level version field in tauri.conf.json"
+        )
+    return new_text
 
 
 def update_package_version(text: str, new_version: str) -> str:
@@ -416,14 +451,30 @@ def main() -> None:
             cargo_path = f"services/{service}/Cargo.toml"
             step = 1
 
-            # Update Cargo.toml
+            # Update Cargo.toml (and receiver Tauri shell version when applicable)
             print(style(f"  [{step}] Update {cargo_path} version to {new}", role="step"))
             step += 1
             if args.dry_run:
                 print(style(f"    (dry-run) would update {cargo_path}", role="dry_run"))
+                if service == "receiver":
+                    rel = RECEIVER_TAURI_CONF.relative_to(REPO_ROOT)
+                    print(
+                        style(
+                            f"    (dry-run) would update {rel} version to {new}",
+                            role="dry_run",
+                        )
+                    )
             else:
                 write_version(service, new)
                 print(style(f"    Updated {cargo_path}", role="success"))
+                if service == "receiver":
+                    write_receiver_tauri_version(new)
+                    print(
+                        style(
+                            f"    Updated {RECEIVER_TAURI_CONF.relative_to(REPO_ROOT)}",
+                            role="success",
+                        )
+                    )
 
             # Validate with the same checks/build used by release workflow.
             step = run_release_workflow_checks(
@@ -437,8 +488,13 @@ def main() -> None:
             # Stage, commit, tag
             print(style(f"  [{step}] Stage release files", role="step"))
             step += 1
+            stage_paths = [cargo_path, "Cargo.lock"]
+            if service == "receiver":
+                stage_paths.append(
+                    RECEIVER_TAURI_CONF.relative_to(REPO_ROOT).as_posix()
+                )
             log_command(
-                ["git", "add", cargo_path, "Cargo.lock"],
+                ["git", "add", *stage_paths],
                 execute=not args.dry_run,
             )
 
@@ -455,14 +511,26 @@ def main() -> None:
                 print(style(f"    Committed: {commit_msg}", role="success"))
 
             tag = f"{service}-v{new}"
-            print(style(f"  [{step}] Create release tag", role="step"))
+            print(style(f"  [{step}] Create release tag(s)", role="step"))
             step += 1
             log_command(["git", "tag", tag], execute=not args.dry_run)
             if args.dry_run:
                 print(style(f"    (dry-run) would tag: {tag}", role="dry_run"))
+                if service == "receiver":
+                    print(
+                        style(
+                            f"    (dry-run) would tag: receiver-ui-v{new}",
+                            role="dry_run",
+                        )
+                    )
             else:
                 print(style(f"    Tagged: {tag}", role="success"))
                 tags.append(tag)
+                if service == "receiver":
+                    tag_ui = f"receiver-ui-v{new}"
+                    log_command(["git", "tag", tag_ui], execute=True)
+                    print(style(f"    Tagged: {tag_ui}", role="success"))
+                    tags.append(tag_ui)
 
         # --- Push ---
         # Push commits first, then each tag individually.  GitHub's push.tags
@@ -471,7 +539,14 @@ def main() -> None:
         # silently dropped.  Pushing tags one-by-one ensures every tag gets its
         # own release workflow run.
         print(style("\n[Final Step] Push commits and tags", role="step"))
-        push_tags = tags if not args.dry_run else [f"{svc}-v{new}" for svc, _, new in plan]
+        if args.dry_run:
+            push_tags = []
+            for svc, _, new in plan:
+                push_tags.append(f"{svc}-v{new}")
+                if svc == "receiver":
+                    push_tags.append(f"receiver-ui-v{new}")
+        else:
+            push_tags = tags
 
         # 1. Push commits (without tags)
         log_command(["git", "push", "origin", "master"], execute=not args.dry_run)

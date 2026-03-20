@@ -171,7 +171,7 @@ This attempts to:
 
 ## `release.py` (Rusty Timer Release Helper)
 
-`release.py` automates service releases by bumping versions, validating release artifacts, creating commits/tags, and pushing everything atomically.
+`release.py` automates service releases by bumping versions, validating release artifacts, creating commits/tags, and pushing the branch plus each tag separately (so GitHub runs one workflow per tag).
 
 It supports these services:
 - `forwarder`
@@ -235,16 +235,22 @@ For each requested service, the script:
 1. Reads `services/<service>/Cargo.toml` package version.
 2. Computes target version.
 3. Skips services already at target.
-4. Updates `services/<service>/Cargo.toml`.
+4. Updates `services/<service>/Cargo.toml`. For `receiver`, also updates
+   `apps/receiver-ui/src-tauri/tauri.conf.json` `version` to the same semver
+   (required for the Tauri Windows release workflow).
 5. Runs release-workflow parity checks/build:
    - `forwarder`/`receiver`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/<service>-ui`
    - `server`: `npm ci`, UI `lint`, UI `check`, UI tests for `apps/server-ui`, then:
      - default: `cargo build --release --package server --bin server`
      - optional: `docker build -t <image>:v<version> -t <image>:latest -f services/server/Dockerfile .` (with `--server-local-docker-build`)
    - `forwarder`/`receiver`/`streamer`/`emulator`: `cargo build --release --package <service> --bin <service>` (`--features embed-ui` for `forwarder`/`receiver`)
-6. Stages `services/<service>/Cargo.toml` and `Cargo.lock`.
+6. Stages `services/<service>/Cargo.toml` and `Cargo.lock` (and for `receiver`,
+   `apps/receiver-ui/src-tauri/tauri.conf.json`).
 7. Creates commit: `chore(<service>): bump version to <new_version>`.
-8. Creates tag: `<service>-v<new_version>`.
+8. Creates tag: `<service>-v<new_version>`. For `receiver`, also creates
+   `receiver-ui-v<new_version>` on the same commit (triggers
+   `.github/workflows/release-tauri.yml` for the NSIS installer and updater
+   manifest).
 
 The script prints each step and the exact command before execution.
 In `--dry-run`, it still runs the checks/build commands, but prints and skips
@@ -253,11 +259,9 @@ mutating commands (version file write, `git add`, `git commit`, `git tag`,
 When output is a TTY, step/command/status lines are colorized for readability.
 Set `NO_COLOR=1` to force plain text output.
 
-After all services succeed, it pushes branch + tags in a single atomic command:
-
-```bash
-git push --atomic origin master <tag1> <tag2> ...
-```
+After all services succeed, it runs `git push origin master`, then pushes each
+tag with its own `git push origin <tag>` so every tag triggers its own GitHub
+Actions run (see comments in `scripts/release.py`).
 
 For `server` releases, Docker image build/push is handled by GitHub Actions on
 `server-v<version>` tags.

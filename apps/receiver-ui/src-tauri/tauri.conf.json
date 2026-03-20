@@ -1,7 +1,7 @@
 {
   "productName": "Rusty Timer Receiver",
   "identifier": "com.rusty-timer.receiver",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "build": {
     "beforeDevCommand": "mkdir -p ../../target/debug/binaries && cp -f src-tauri/binaries/receiver-* ../../target/debug/binaries/receiver 2>/dev/null; npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -24,7 +24,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "PLACEHOLDER_REPLACE_AFTER_KEY_GENERATION",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3MUE0RjkwQTdFNDk3MTIKUldRU2wrU25rRThhdDFGc0c5YkZ3TDRJWng3NVFMMDhxRVhJZzhNa1l0bHRRUEJ3OEZCb1lEVEwK",
       "endpoints": [
         "https://github.com/iwismer/rusty-timer/releases/download/receiver-ui-latest/update-manifest.json"
       ]

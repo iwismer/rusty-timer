@@ -24,6 +24,15 @@ class VersionUpdateTests(unittest.TestCase):
         self.assertIn('version = "1.2.4"', updated)
         self.assertNotIn('version = "1.2.3"', updated)
 
+    def test_update_tauri_conf_version_replaces_root_semver(self) -> None:
+        raw = (
+            '{\n  "productName": "Rusty Timer Receiver",\n'
+            '  "version": "0.9.0",\n  "build": {}\n}\n'
+        )
+        updated = release.update_tauri_conf_version(raw, "1.0.0")
+        self.assertIn('"version": "1.0.0"', updated)
+        self.assertNotIn('"version": "0.9.0"', updated)
+
 
 class OutputStyleTests(unittest.TestCase):
     def test_style_wraps_text_with_ansi_codes_when_color_enabled(self) -> None:
@@ -38,6 +47,7 @@ class OutputStyleTests(unittest.TestCase):
 
 
 class TransactionTests(unittest.TestCase):
+    @patch("scripts.release.write_receiver_tauri_version")
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
     @patch("scripts.release.read_version")
@@ -50,6 +60,7 @@ class TransactionTests(unittest.TestCase):
         read_version_mock,
         compute_new_version_mock,
         _write_version_mock,
+        _write_tauri_mock,
     ) -> None:
         args = argparse.Namespace(
             services=["forwarder", "receiver"],
@@ -102,7 +113,7 @@ class PushTests(unittest.TestCase):
     @patch("scripts.release.read_version")
     @patch("scripts.release.git_current_branch", return_value="master")
     @patch("scripts.release.git_is_dirty", return_value=False)
-    def test_pushes_branch_and_tags_atomically(
+    def test_pushes_branch_then_each_tag_separately(
         self,
         _dirty_mock,
         _branch_mock,
@@ -142,10 +153,8 @@ class PushTests(unittest.TestCase):
             ["git", "add", "services/forwarder/Cargo.toml", "Cargo.lock"],
             calls,
         )
-        self.assertIn(
-            ["git", "push", "--atomic", "origin", "master", "forwarder-v0.1.1"],
-            calls,
-        )
+        self.assertIn(["git", "push", "origin", "master"], calls)
+        self.assertIn(["git", "push", "origin", "forwarder-v0.1.1"], calls)
 
 
 class ReleaseWorkflowParityTests(unittest.TestCase):
@@ -217,6 +226,64 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             ],
             calls,
         )
+
+    @patch("scripts.release.write_receiver_tauri_version")
+    @patch("scripts.release.write_version")
+    @patch("scripts.release.compute_new_version")
+    @patch("scripts.release.read_version")
+    @patch("scripts.release.git_current_branch", return_value="master")
+    @patch("scripts.release.git_is_dirty", return_value=False)
+    def test_receiver_stages_tauri_conf_and_pushes_receiver_ui_tag(
+        self,
+        _dirty_mock,
+        _branch_mock,
+        read_version_mock,
+        compute_new_version_mock,
+        _write_version_mock,
+        _write_tauri_mock,
+    ) -> None:
+        args = argparse.Namespace(
+            services=["receiver"],
+            major=False,
+            minor=False,
+            patch=True,
+            version=None,
+            dry_run=False,
+            yes=True,
+            server_docker_image="iwismer/rt-server",
+            server_local_docker_build=False,
+        )
+
+        read_version_mock.return_value = "0.1.0"
+        compute_new_version_mock.return_value = "0.1.1"
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs):  # noqa: ANN003
+            calls.append(cmd)
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch("scripts.release.parse_args", return_value=args), patch(
+            "scripts.release.run", side_effect=fake_run
+        ):
+            release.main()
+
+        self.assertIn(
+            [
+                "git",
+                "add",
+                "services/receiver/Cargo.toml",
+                "Cargo.lock",
+                "apps/receiver-ui/src-tauri/tauri.conf.json",
+            ],
+            calls,
+        )
+        self.assertIn(["git", "tag", "receiver-v0.1.1"], calls)
+        self.assertIn(["git", "tag", "receiver-ui-v0.1.1"], calls)
+        self.assertIn(["git", "push", "origin", "receiver-v0.1.1"], calls)
+        self.assertIn(["git", "push", "origin", "receiver-ui-v0.1.1"], calls)
 
     @patch("scripts.release.write_version")
     @patch("scripts.release.compute_new_version")
@@ -341,10 +408,8 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             ],
             calls,
         )
-        self.assertIn(
-            ["git", "push", "--atomic", "origin", "master", "server-v0.1.1"],
-            calls,
-        )
+        self.assertIn(["git", "push", "origin", "master"], calls)
+        self.assertIn(["git", "push", "origin", "server-v0.1.1"], calls)
         self.assertNotIn(["docker", "push", "iwismer/rt-server:v0.1.1"], calls)
         self.assertNotIn(["docker", "push", "iwismer/rt-server:latest"], calls)
 
@@ -450,6 +515,8 @@ class DryRunBehaviorTests(unittest.TestCase):
 
         def fake_run(cmd: list[str], **kwargs):  # noqa: ANN003
             calls.append(cmd)
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         with patch("scripts.release.parse_args", return_value=args), patch(
@@ -496,10 +563,7 @@ class DryRunBehaviorTests(unittest.TestCase):
             calls,
         )
         self.assertNotIn(["git", "tag", "forwarder-v0.1.1"], calls)
-        self.assertNotIn(
-            ["git", "push", "--atomic", "origin", "master", "forwarder-v0.1.1"],
-            calls,
-        )
+        self.assertNotIn(["git", "push", "origin", "master"], calls)
 
 if __name__ == "__main__":
     unittest.main()

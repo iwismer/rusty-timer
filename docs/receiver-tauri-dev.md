@@ -72,6 +72,71 @@ provided via `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 secrets. For local builds without signing, set `"active": false` in
 `tauri.conf.json`'s `plugins.updater` section temporarily.
 
+## Shipping a GitHub release (CI)
+
+The workflow [`.github/workflows/release-tauri.yml`](../.github/workflows/release-tauri.yml)
+runs on tags matching `receiver-ui-vMAJOR.MINOR.PATCH` (for example
+`receiver-ui-v0.1.0`). The value after `receiver-ui-v` must match `version` in
+`apps/receiver-ui/src-tauri/tauri.conf.json`.
+
+### One-time: signing key and repository secrets
+
+1. **Generate a keypair** (only if you do not already have one; keep the private
+   key secret):
+
+   ```bash
+   cargo install tauri-cli --version "^2"
+   mkdir -p ~/.tauri
+   cargo tauri signer generate -w ~/.tauri/rusty-timer-receiver.key
+   ```
+
+   Prefer setting a password when prompted. For unattended CI only, you can use
+   `cargo tauri signer generate --ci -w ~/.tauri/rusty-timer-receiver.key`
+   (no password; protect the private key exclusively via GitHub Secrets).
+
+2. **Public key in the repo** — `plugins.updater.pubkey` in
+   `apps/receiver-ui/src-tauri/tauri.conf.json` must be the **entire** contents
+   of the generated `*.key.pub` file (one base64 line), matching the private key
+   you use in CI.
+
+3. **GitHub Actions secrets** (repository → *Settings* → *Secrets and variables*
+   → *Actions*):
+
+   - `TAURI_SIGNING_PRIVATE_KEY` — paste the **full** contents of the private
+     key file (`*.key`), as a single string.
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the key password, or leave the
+     secret **unset** if the key has no password.
+
+### Cut a release
+
+**Recommended:** use the repo release helper so `services/receiver`, Tauri
+`tauri.conf.json`, and both tags stay aligned:
+
+```bash
+uv run scripts/release.py receiver --patch   # or --minor / --major / --version X.Y.Z
+```
+
+That bumps the receiver crate and `apps/receiver-ui/src-tauri/tauri.conf.json`
+to the same version, then creates and pushes `receiver-vX.Y.Z` and
+`receiver-ui-vX.Y.Z`. The `receiver-v*` tag runs the standard binary release
+workflow; `receiver-ui-v*` runs [`.github/workflows/release-tauri.yml`](../.github/workflows/release-tauri.yml).
+
+**Manual alternative:** bump `version` in `tauri.conf.json` to match the tag you
+will use, commit, then:
+
+```bash
+git tag receiver-ui-v0.1.0
+git push origin receiver-ui-v0.1.0
+```
+
+Or run the workflow manually (*Actions* → *Release Tauri Receiver* → *Run
+workflow*) and pass an **existing** tag name.
+
+The Tauri workflow uploads the NSIS installer to a GitHub Release for
+`receiver-ui-v*` and publishes `update-manifest.json` to the
+`receiver-ui-latest` release for the in-app updater endpoint configured in
+`tauri.conf.json`.
+
 ## Architecture
 
 ```
