@@ -49,9 +49,6 @@ pub enum ReceiverUiEvent {
     LogEntry {
         entry: String,
     },
-    UpdateStatusChanged {
-        status: rt_updater::UpdateStatus,
-    },
     StreamCountsUpdated {
         updates: Vec<StreamCountUpdate>,
     },
@@ -107,19 +104,6 @@ mod tests {
         assert_eq!(json["type"], "streams_snapshot");
         assert_eq!(json["streams"].as_array().unwrap().len(), 0);
         assert_eq!(json["degraded"], false);
-    }
-
-    #[test]
-    fn update_status_changed_serializes_with_type_tag() {
-        let event = ReceiverUiEvent::UpdateStatusChanged {
-            status: rt_updater::UpdateStatus::Available {
-                version: "1.2.3".to_owned(),
-            },
-        };
-        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "update_status_changed");
-        assert_eq!(json["status"]["status"], "available");
-        assert_eq!(json["status"]["version"], "1.2.3");
     }
 
     #[test]

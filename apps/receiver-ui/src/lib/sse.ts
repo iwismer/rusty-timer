@@ -5,8 +5,13 @@ import type {
   StatusResponse,
   StreamCountUpdate,
   StreamsResponse,
-  UpdateStatusResponse,
 } from "./api";
+
+type LegacyUpdateStatusEvent = {
+  status: string;
+  version?: string;
+  error?: string;
+};
 
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;
@@ -14,7 +19,7 @@ export type SseCallbacks = {
   onLogEntry: (entry: string) => void;
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
-  onUpdateStatusChanged: (status: UpdateStatusResponse) => void;
+  onUpdateStatusChanged: (status: LegacyUpdateStatusEvent) => void;
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;

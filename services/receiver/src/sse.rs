@@ -20,7 +20,6 @@ pub async fn receiver_sse(
                 ReceiverUiEvent::StatusChanged { .. } => "status_changed",
                 ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
                 ReceiverUiEvent::LogEntry { .. } => "log_entry",
-                ReceiverUiEvent::UpdateStatusChanged { .. } => "update_status_changed",
                 ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
                 ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
                 ReceiverUiEvent::LastRead(_) => "last_read",

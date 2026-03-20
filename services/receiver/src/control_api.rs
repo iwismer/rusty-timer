@@ -21,7 +21,7 @@
 //!   POST /api/v1/admin/profile/reset   - reset profile to defaults
 //!   POST /api/v1/admin/factory-reset   - full factory reset
 
-use crate::db::{Db, Subscription};
+use crate::db::{DEFAULT_UPDATE_MODE, Db, Subscription};
 use crate::ui_events::ReceiverUiEvent;
 use axum::routing::{get, post};
 use axum::{
@@ -31,11 +31,8 @@ use axum::{
     response::IntoResponse,
 };
 use rt_protocol::ReceiverMode;
-use rt_updater::UpdateStatus;
-use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
@@ -81,9 +78,6 @@ pub struct AppState {
     pub shutdown_tx: watch::Sender<ShutdownSignal>,
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
-    pub update_status: Arc<RwLock<UpdateStatus>>,
-    pub staged_update_path: Arc<RwLock<Option<PathBuf>>>,
-    pub update_mode: Arc<RwLock<rt_updater::UpdateMode>>,
     pub stream_counts: crate::cache::StreamCounts,
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
@@ -121,9 +115,6 @@ impl AppState {
             shutdown_tx,
             upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
-            update_status: Arc::new(RwLock::new(UpdateStatus::UpToDate)),
-            staged_update_path: Arc::new(RwLock::new(None)),
-            update_mode: Arc::new(RwLock::new(rt_updater::UpdateMode::default())),
             stream_counts: crate::cache::StreamCounts::new(),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
@@ -374,13 +365,7 @@ pub struct ProfileRequest {
     pub server_url: String,
     pub token: String,
     #[serde(default)]
-    pub update_mode: Option<String>,
-    #[serde(default)]
     pub receiver_id: Option<String>,
-}
-
-fn default_update_mode() -> String {
-    crate::db::DEFAULT_UPDATE_MODE.to_owned()
 }
 
 fn is_valid_receiver_id(id: &str) -> bool {
@@ -406,7 +391,6 @@ fn is_uuid_format(value: &str) -> bool {
 pub struct ProfileResponse {
     pub server_url: String,
     pub token: String,
-    pub update_mode: String,
     pub receiver_id: String,
 }
 
@@ -620,7 +604,6 @@ async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Ok(Some(p)) => Json(ProfileResponse {
             server_url: p.server_url,
             token: p.token,
-            update_mode: p.update_mode,
             receiver_id,
         })
         .into_response(),
@@ -662,34 +645,6 @@ async fn put_profile(
     }
 
     let mut db = state.db.lock().await;
-    let mut effective_update_mode = body.update_mode.clone().unwrap_or_else(|| {
-        db.load_profile()
-            .ok()
-            .flatten()
-            .map(|p| p.update_mode)
-            .unwrap_or_else(default_update_mode)
-    });
-
-    let parsed_update_mode = match serde_json::from_value::<rt_updater::UpdateMode>(
-        serde_json::Value::String(effective_update_mode.clone()),
-    ) {
-        Ok(mode) => mode,
-        Err(_) if body.update_mode.is_none() => {
-            effective_update_mode = default_update_mode();
-            rt_updater::UpdateMode::default()
-        }
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "update_mode must be 'disabled', 'check-only', or 'check-and-download', got '{}'",
-                    effective_update_mode
-                ),
-            )
-                .into_response();
-        }
-    };
-
     let persist_receiver_id = new_receiver_id
         .clone()
         .or_else(|| db.load_profile().ok().flatten().and_then(|p| p.receiver_id));
@@ -697,13 +652,12 @@ async fn put_profile(
     match db.save_profile(
         &url,
         &body.token,
-        &effective_update_mode,
+        DEFAULT_UPDATE_MODE,
         persist_receiver_id.as_deref(),
     ) {
         Ok(()) => {
             drop(db);
             *state.upstream_url.write().await = Some(url);
-            *state.update_mode.write().await = parsed_update_mode;
             if let Some(id) = new_receiver_id {
                 *state.receiver_id.write().await = id;
             }
@@ -1230,7 +1184,6 @@ async fn post_admin_reset_profile(
             drop(db);
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
-            *state.update_mode.write().await = rt_updater::UpdateMode::default();
             state.emit_streams_snapshot().await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1258,7 +1211,6 @@ async fn post_admin_factory_reset(
             drop(db);
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
-            *state.update_mode.write().await = rt_updater::UpdateMode::default();
             state.emit_streams_snapshot().await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1286,183 +1238,6 @@ async fn post_admin_update_port(
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "subscription not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-async fn get_update_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = state.update_status.read().await.clone();
-    Json(status).into_response()
-}
-
-async fn post_update_apply(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let path = state.staged_update_path.read().await.clone();
-    match path {
-        Some(path) => {
-            // Detect a missing staged file synchronously so the status update is
-            // immediate and reliable (avoids Windows blocking-thread startup
-            // latency causing the test to race against a fixed timeout).
-            let staged_file_error = match path.try_exists() {
-                Ok(true) => None,
-                Ok(false) => Some(format!("staged file not found: {}", path.display())),
-                Err(e) => Some(format!(
-                    "failed to access staged file {}: {}",
-                    path.display(),
-                    e
-                )),
-            };
-            if let Some(error) = staged_file_error {
-                tracing::error!(path = %path.display(), error = %error, "cannot apply update");
-                *state.update_status.write().await = rt_updater::UpdateStatus::Failed { error };
-                return (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"status": "failed"})),
-                )
-                    .into_response();
-            }
-            let state_clone = Arc::clone(&state);
-            // Send response before exiting
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                match tokio::task::spawn_blocking(move || {
-                    rt_updater::UpdateChecker::apply_update(&path)
-                })
-                .await
-                {
-                    Ok(Ok(())) => {
-                        state_clone.request_process_shutdown();
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(error = %e, "update apply failed");
-                        *state_clone.update_status.write().await =
-                            rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "update apply task failed");
-                        *state_clone.update_status.write().await =
-                            rt_updater::UpdateStatus::Failed {
-                                error: e.to_string(),
-                            };
-                    }
-                }
-            });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "applying"})),
-            )
-                .into_response()
-        }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no update staged"})),
-        )
-            .into_response(),
-    }
-}
-
-async fn post_update_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let update_mode = *state.update_mode.read().await;
-
-    let checker = match rt_updater::UpdateChecker::new(
-        "iwismer",
-        "rusty-timer",
-        "receiver",
-        env!("CARGO_PKG_VERSION"),
-    ) {
-        Ok(c) => RealChecker::new(c),
-        Err(e) => {
-            let (status_code, status) = update_check_init_error_status(e.to_string());
-            *state.update_status.write().await = status.clone();
-            return (status_code, Json(status)).into_response();
-        }
-    };
-
-    let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-    let status = run_check(&workflow_state, &checker, update_mode).await;
-    Json(status).into_response()
-}
-
-fn update_check_init_error_status(error: String) -> (StatusCode, UpdateStatus) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        UpdateStatus::Failed { error },
-    )
-}
-
-struct ReceiverWorkflowAdapter {
-    state: Arc<AppState>,
-}
-
-impl ReceiverWorkflowAdapter {
-    fn new(state: Arc<AppState>) -> Self {
-        Self { state }
-    }
-}
-
-impl WorkflowState for ReceiverWorkflowAdapter {
-    fn current_status<'a>(
-        &'a self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = UpdateStatus> + Send + 'a>> {
-        Box::pin(async move { self.state.update_status.read().await.clone() })
-    }
-
-    fn set_status<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            *self.state.update_status.write().await = status;
-        })
-    }
-
-    fn set_downloaded<'a>(
-        &'a self,
-        status: UpdateStatus,
-        path: PathBuf,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            *self.state.update_status.write().await = status;
-            *self.state.staged_update_path.write().await = Some(path);
-        })
-    }
-
-    fn emit_status_changed<'a>(
-        &'a self,
-        status: UpdateStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let _ = self
-                .state
-                .ui_tx
-                .send(crate::ui_events::ReceiverUiEvent::UpdateStatusChanged {
-                    status: status.clone(),
-                });
-        })
-    }
-}
-
-async fn post_update_download(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let checker = match rt_updater::UpdateChecker::new(
-        "iwismer",
-        "rusty-timer",
-        "receiver",
-        env!("CARGO_PKG_VERSION"),
-    ) {
-        Ok(c) => RealChecker::new(c),
-        Err(e) => {
-            let status = rt_updater::UpdateStatus::Failed {
-                error: e.to_string(),
-            };
-            *state.update_status.write().await = status.clone();
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(status)).into_response();
-        }
-    };
-
-    let workflow_state = ReceiverWorkflowAdapter::new(Arc::clone(&state));
-    match run_download(&workflow_state, &checker).await {
-        Ok(status) => Json(status).into_response(),
-        Err(status) => (StatusCode::CONFLICT, Json(status)).into_response(),
     }
 }
 
@@ -1527,10 +1302,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/admin/subscriptions/port",
             post(post_admin_update_port),
         )
-        .route("/api/v1/update/status", get(get_update_status))
-        .route("/api/v1/update/apply", post(post_update_apply))
-        .route("/api/v1/update/check", post(post_update_check))
-        .route("/api/v1/update/download", post(post_update_download))
         .fallback(crate::ui_server::serve_ui)
         .with_state(state)
 }

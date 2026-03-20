@@ -1,18 +1,13 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import {
-    initStore,
-    destroyStore,
-    store,
-    handleDownloadUpdate,
-    handleApplyUpdate,
-  } from "$lib/store.svelte";
+  import { initStore, destroyStore, store } from "$lib/store.svelte";
   import { initDarkMode } from "@rusty-timer/shared-ui/lib/dark-mode";
-  import { UpdateBanner, AlertBanner } from "@rusty-timer/shared-ui";
+  import { AlertBanner } from "@rusty-timer/shared-ui";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import TabBar from "$lib/components/TabBar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
   import HelpModal from "$lib/components/HelpModal.svelte";
+  import UpdateModal from "$lib/components/UpdateModal.svelte";
   import StreamsTab from "$lib/components/StreamsTab.svelte";
   import ConfigTab from "$lib/components/ConfigTab.svelte";
   import ModeTab from "$lib/components/ModeTab.svelte";
@@ -49,18 +44,6 @@
   <Toolbar />
   <TabBar />
 
-  {#if store.updateVersion && store.updateStatus}
-    <div class="px-3 py-1.5 shrink-0">
-      <UpdateBanner
-        version={store.updateVersion}
-        status={store.updateStatus}
-        busy={store.updateBusy}
-        onDownload={handleDownloadUpdate}
-        onApply={handleApplyUpdate}
-      />
-    </div>
-  {/if}
-
   {#if store.error}
     <div class="px-3 py-1.5 shrink-0">
       <AlertBanner variant="err" message={store.error} />
@@ -82,5 +65,6 @@
   </div>
 
   <StatusBar />
+  <UpdateModal />
   <HelpModal />
 </div>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "$lib/store.svelte";
+  import { openUpdateModal, store } from "$lib/store.svelte";
 
   function counts() {
     const list = store.streams?.streams ?? [];
@@ -53,8 +53,31 @@
     {#if store.status?.receiver_id}
       <span class="font-mono">{store.status.receiver_id}</span>
     {/if}
-    {#if store.receiverVersion}
-      <span>v{store.receiverVersion}</span>
+    {#if store.appVersion}
+      <span>v{store.appVersion}</span>
+    {/if}
+    {#if store.updateState}
+      <button
+        type="button"
+        class="inline-flex h-5 w-5 items-center justify-center rounded-full border border-border bg-surface-0 text-text-primary cursor-pointer hover:bg-surface-2"
+        aria-label="Open update details"
+        data-testid="update-indicator-btn"
+        onclick={() => openUpdateModal()}
+      >
+        <svg
+          viewBox="0 0 16 16"
+          class="h-3.5 w-3.5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M8 12V4" />
+          <path d="M5 7l3-3 3 3" />
+        </svg>
+      </button>
     {/if}
   </div>
 </div>

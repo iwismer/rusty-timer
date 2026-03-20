@@ -7,7 +7,6 @@ import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
 export interface Profile {
   server_url: string;
   token: string;
-  update_mode: string;
   receiver_id: string;
 }
 
@@ -214,36 +213,6 @@ export async function disconnect(): Promise<void> {
   const resp = await fetch("/api/v1/disconnect", { method: "POST" });
   if (resp.status !== 200 && resp.status !== 202)
     throw new Error(`disconnect -> ${resp.status}`);
-}
-
-export interface UpdateStatusResponse {
-  status: "up_to_date" | "available" | "downloaded" | "failed";
-  version?: string;
-  error?: string;
-}
-
-export async function getUpdateStatus(): Promise<UpdateStatusResponse> {
-  return apiFetch<UpdateStatusResponse>("/api/v1/update/status");
-}
-
-export async function applyUpdate(): Promise<void> {
-  const resp = await fetch("/api/v1/update/apply", { method: "POST" });
-  if (resp.status !== 200) throw new Error(`apply update -> ${resp.status}`);
-}
-
-export async function checkForUpdate(): Promise<UpdateStatusResponse> {
-  return apiFetch<UpdateStatusResponse>("/api/v1/update/check", {
-    method: "POST",
-  });
-}
-
-export async function downloadUpdate(): Promise<UpdateStatusResponse> {
-  const resp = await fetch("/api/v1/update/download", { method: "POST" });
-  if (resp.status !== 200 && resp.status !== 409) {
-    const text = await resp.text();
-    throw new Error(`download update -> ${resp.status}: ${text}`);
-  }
-  return (await resp.json()) as UpdateStatusResponse;
 }
 
 export async function resetAllCursors(): Promise<{ deleted: number }> {

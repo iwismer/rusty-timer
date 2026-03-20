@@ -24,7 +24,6 @@ describe("api client", () => {
       makeResponse(200, {
         server_url: "wss://s.com",
         token: "tok",
-        update_mode: "check-and-download",
         receiver_id: "recv-test",
       }),
     );
@@ -43,7 +42,6 @@ describe("api client", () => {
     await putProfile({
       server_url: "wss://s.com",
       token: "t",
-      update_mode: "check-and-download",
       receiver_id: "recv-test",
     });
     expect(mockFetch).toHaveBeenCalledWith(
@@ -119,69 +117,6 @@ describe("api client", () => {
     const { getProfile } = await import("./api");
     mockFetch.mockResolvedValue(makeResponse(500, "internal error"));
     await expect(getProfile()).rejects.toThrow();
-  });
-
-  it("getUpdateStatus calls update status endpoint", async () => {
-    const { getUpdateStatus } = await import("./api");
-    mockFetch.mockResolvedValue(
-      makeResponse(200, { status: "downloaded", version: "1.2.3" }),
-    );
-    const status = await getUpdateStatus();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/update/status",
-      expect.any(Object),
-    );
-    expect(status.status).toBe("downloaded");
-    expect(status.version).toBe("1.2.3");
-  });
-
-  it("applyUpdate succeeds on 200", async () => {
-    const { applyUpdate } = await import("./api");
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({}),
-      text: async () => "",
-    });
-    await expect(applyUpdate()).resolves.toBeUndefined();
-  });
-
-  it("applyUpdate throws on non-200", async () => {
-    const { applyUpdate } = await import("./api");
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 500,
-      json: async () => ({}),
-      text: async () => "err",
-    });
-    await expect(applyUpdate()).rejects.toThrow("apply update -> 500");
-  });
-
-  it("checkForUpdate calls POST /api/v1/update/check", async () => {
-    const { checkForUpdate } = await import("./api");
-    mockFetch.mockResolvedValue(makeResponse(200, { status: "up_to_date" }));
-    const result = await checkForUpdate();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/update/check",
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(result.status).toBe("up_to_date");
-  });
-
-  it("downloadUpdate returns failed status payload on 409", async () => {
-    const { downloadUpdate } = await import("./api");
-    mockFetch.mockResolvedValue(
-      makeResponse(409, { status: "failed", error: "no update available" }),
-    );
-    const result = await downloadUpdate();
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/update/download",
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(result).toEqual({
-      status: "failed",
-      error: "no update available",
-    });
   });
 
   it("getMode calls mode endpoint", async () => {

@@ -27,7 +27,6 @@ const apiMocks = vi.hoisted(() => ({
   }),
   getLogs: vi.fn().mockResolvedValue({ entries: [] }),
   getProfile: vi.fn().mockResolvedValue(null),
-  getUpdateStatus: vi.fn().mockResolvedValue(null),
   getMode: vi.fn().mockResolvedValue({
     mode: "live",
     streams: [],
@@ -41,11 +40,8 @@ const apiMocks = vi.hoisted(() => ({
   }),
   putMode: vi.fn().mockResolvedValue(undefined),
   putProfile: vi.fn().mockResolvedValue(undefined),
-  checkForUpdate: vi.fn().mockResolvedValue({ status: "up_to_date" }),
-  downloadUpdate: vi.fn().mockResolvedValue({ status: "failed" }),
   connect: vi.fn().mockResolvedValue(undefined),
   disconnect: vi.fn().mockResolvedValue(undefined),
-  applyUpdate: vi.fn().mockResolvedValue(undefined),
   putEarliestEpoch: vi.fn().mockResolvedValue(undefined),
 }));
 

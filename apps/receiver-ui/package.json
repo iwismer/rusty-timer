@@ -15,7 +15,8 @@
     "lint": "prettier --check ."
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0"
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.9.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.40.0",

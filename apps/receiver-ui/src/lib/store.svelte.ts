@@ -9,16 +9,29 @@ import type {
   StatusResponse,
   StreamCountUpdate,
   StreamsResponse,
-  UpdateStatusResponse,
 } from "./api";
 import { buildUpdatedSubscriptions } from "./subscriptions";
 import { initSSE, destroySSE } from "./sse";
-import { waitForApplyResult } from "@rusty-timer/shared-ui/lib/update-flow";
 import { cycleTheme } from "@rusty-timer/shared-ui/lib/dark-mode";
+import {
+  checkForDesktopUpdate,
+  installDesktopUpdate,
+  loadDesktopVersion,
+  type DesktopUpdateInfo,
+} from "./desktop-updater";
 
 // --------------- Tab enum ---------------
 
 export type TabId = "streams" | "config" | "mode" | "logs" | "admin";
+
+export type UpdateState = {
+  status: "available" | "downloaded";
+  currentVersion: string;
+  version: string;
+  notes: string | null;
+  busy: boolean;
+  error: string | null;
+};
 
 // --------------- Reactive state ---------------
 // Wrapped in a single object so Svelte 5 allows export + mutation.
@@ -44,20 +57,17 @@ export const store = $state({
   // Config (edit + saved for dirty detection)
   editServerUrl: "",
   editToken: "",
-  editUpdateMode: "check-and-download",
   editReceiverId: "",
   savedServerUrl: "",
   savedToken: "",
-  savedUpdateMode: "check-and-download",
   savedReceiverId: "",
   saving: false,
   checkingUpdate: false,
   checkMessage: null as string | null,
 
   // Update
-  updateVersion: null as string | null,
-  updateStatus: null as "available" | "downloaded" | null,
-  updateBusy: false,
+  updateModalOpen: false,
+  updateState: null as UpdateState | null,
 
   // Mode
   races: [] as RaceEntry[],
@@ -78,7 +88,7 @@ export const store = $state({
   streamActionBusy: false,
 
   // Version info
-  receiverVersion: "",
+  appVersion: "",
 });
 
 // Version tracking counters (stale-write guards) — not reactive, internal only
@@ -97,7 +107,6 @@ export function getConfigDirty(): boolean {
   return (
     store.editServerUrl !== store.savedServerUrl ||
     store.editToken !== store.savedToken ||
-    store.editUpdateMode !== store.savedUpdateMode ||
     store.editReceiverId !== store.savedReceiverId
   );
 }
@@ -123,6 +132,28 @@ export function setShowHelpModal(show: boolean): void {
 
 export function setHelpScrollTarget(target: string | null): void {
   store.helpScrollTarget = target;
+}
+
+export function openUpdateModal(): void {
+  store.updateModalOpen = true;
+}
+
+export function closeUpdateModal(): void {
+  store.updateModalOpen = false;
+}
+
+function setUpdateState(
+  update: DesktopUpdateInfo,
+  extra: Partial<Pick<UpdateState, "busy" | "error" | "status">> = {},
+): void {
+  store.updateState = {
+    status: extra.status ?? "available",
+    currentVersion: update.currentVersion,
+    version: update.version,
+    notes: update.notes,
+    busy: extra.busy ?? false,
+    error: extra.error ?? null,
+  };
 }
 
 export function setEditServerUrl(value: string): void {
@@ -518,23 +549,10 @@ export async function loadAll(): Promise<void> {
     if (p) {
       store.editServerUrl = p.server_url;
       store.editToken = p.token;
-      store.editUpdateMode = p.update_mode || "check-and-download";
       store.editReceiverId = p.receiver_id;
       store.savedServerUrl = p.server_url;
       store.savedToken = p.token;
-      store.savedUpdateMode = p.update_mode || "check-and-download";
       store.savedReceiverId = p.receiver_id;
-    }
-    const us = await api.getUpdateStatus().catch(() => null);
-    if (
-      (us?.status === "downloaded" || us?.status === "available") &&
-      us.version
-    ) {
-      store.updateVersion = us.version;
-      store.updateStatus = us.status;
-    } else {
-      store.updateVersion = null;
-      store.updateStatus = null;
     }
   } catch (e) {
     store.error = String(e);
@@ -701,14 +719,12 @@ export async function saveProfile(): Promise<void> {
   const payload = {
     server_url: store.editServerUrl,
     token: store.editToken,
-    update_mode: store.editUpdateMode,
     receiver_id: store.editReceiverId,
   };
   try {
     await api.putProfile(payload);
     store.savedServerUrl = payload.server_url;
     store.savedToken = payload.token;
-    store.savedUpdateMode = payload.update_mode;
     store.savedReceiverId = payload.receiver_id;
   } catch (e) {
     store.error = String(e);
@@ -721,43 +737,29 @@ export async function handleCheckUpdate(): Promise<void> {
   store.checkingUpdate = true;
   store.checkMessage = null;
   try {
-    const result = await api.checkForUpdate();
-    if (result.status === "up_to_date") {
-      store.checkMessage = "Up to date.";
-    } else if (
-      result.status === "available" ||
-      result.status === "downloaded"
-    ) {
-      store.checkMessage = null;
-      store.updateVersion = result.version ?? null;
-      store.updateStatus = result.status;
-    } else if (result.status === "failed") {
-      store.checkMessage = result.error ?? "Update check failed.";
+    const result = await checkForDesktopUpdate();
+    if (!result.supported) {
+      store.checkMessage = "Desktop updates are unavailable in this runtime.";
+      return;
     }
+
+    if (!result.update) {
+      store.checkMessage = "Up to date.";
+      store.updateState = null;
+      return;
+    }
+
+    setUpdateState(result.update);
+    openUpdateModal();
   } catch (e) {
-    store.checkMessage = String(e);
+    const message = String(e);
+    store.checkMessage = message;
+    if (store.updateState) {
+      store.updateState = { ...store.updateState, error: message, busy: false };
+      openUpdateModal();
+    }
   } finally {
     store.checkingUpdate = false;
-  }
-}
-
-export async function handleDownloadUpdate(): Promise<void> {
-  store.updateBusy = true;
-  store.error = null;
-  try {
-    const result = await api.downloadUpdate();
-    if (result.status === "downloaded") {
-      store.updateVersion = result.version ?? null;
-      store.updateStatus = "downloaded";
-    } else if (result.status === "failed") {
-      store.error = result.error ?? "Download failed.";
-    } else {
-      store.error = "No downloadable update available.";
-    }
-  } catch (e) {
-    store.error = String(e);
-  } finally {
-    store.updateBusy = false;
   }
 }
 
@@ -783,25 +785,18 @@ export async function handleDisconnect(): Promise<void> {
   }
 }
 
-export async function handleApplyUpdate(): Promise<void> {
-  store.updateBusy = true;
-  store.error = null;
+export async function confirmUpdateInstall(): Promise<void> {
+  if (!store.updateState) return;
+
+  store.updateState = { ...store.updateState, busy: true, error: null };
   try {
-    await api.applyUpdate();
-    const result = await waitForApplyResult(() => api.getUpdateStatus());
-    if (result.outcome === "applied") {
-      store.updateVersion = null;
-      store.updateStatus = null;
-    } else if (result.outcome === "failed") {
-      store.error = `Update failed: ${result.error}`;
-    } else {
-      store.error =
-        "Update apply still in progress. Check status again shortly.";
-    }
+    await installDesktopUpdate();
   } catch (e) {
-    store.error = String(e);
-  } finally {
-    store.updateBusy = false;
+    store.updateState = {
+      ...store.updateState,
+      busy: false,
+      error: String(e),
+    };
   }
 }
 
@@ -810,12 +805,23 @@ export async function handleApplyUpdate(): Promise<void> {
 export function initStore(): void {
   void loadAll();
 
-  fetch("/api/v1/version")
-    .then((r) => r.json())
-    .then((d) => {
-      store.receiverVersion = d.version;
+  void loadDesktopVersion()
+    .then((versionInfo) => {
+      store.appVersion = versionInfo.version ?? "";
     })
     .catch(() => {});
+
+  void checkForDesktopUpdate()
+    .then((result) => {
+      if (result.supported && result.update) {
+        setUpdateState(result.update);
+      } else {
+        store.updateState = null;
+      }
+    })
+    .catch(() => {
+      store.updateState = null;
+    });
 
   // Listen for Tauri native menu events (no-op if not running in Tauri)
   void import("@tauri-apps/api/event")
@@ -849,18 +855,7 @@ export function initStore(): void {
       void loadAll();
     },
     onConnectionChange: () => {},
-    onUpdateStatusChanged: (us) => {
-      if (
-        (us.status === "available" || us.status === "downloaded") &&
-        us.version
-      ) {
-        store.updateVersion = us.version;
-        store.updateStatus = us.status;
-      } else {
-        store.updateVersion = null;
-        store.updateStatus = null;
-      }
-    },
+    onUpdateStatusChanged: () => {},
     onStreamCountsUpdated: (updates) => {
       const needsResync = applyStreamCountUpdates(updates);
       if (needsResync) void loadAll();

@@ -139,7 +139,6 @@ describe("template wiring validation", () => {
     { context: "receiver", section: "config", field: "receiver_id" },
     { context: "receiver", section: "config", field: "server_url" },
     { context: "receiver", section: "config", field: "token" },
-    { context: "receiver", section: "config", field: "update_mode" },
     { context: "receiver", section: "receiver_mode", field: "mode" },
     // receiver-ui admin/+page.svelte
     { context: "receiver-admin", section: "port_overrides", field: "port_override" },
