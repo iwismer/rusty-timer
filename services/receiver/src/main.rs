@@ -369,6 +369,7 @@ async fn main() {
                                                     let db = state.db.lock().await;
                                                     let mode = db.load_receiver_mode().ok().flatten();
                                                     let profile = db.load_profile().ok().flatten();
+                                                    let subs = db.load_subscriptions().unwrap_or_default();
                                                     drop(db);
                                                     if let Some(p) = profile {
                                                         let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
@@ -376,8 +377,14 @@ async fn main() {
                                                                 &state.http_client, &p.server_url, &p.token, &race_id,
                                                             ).await
                                                         } else {
-                                                            receiver::control_api::fetch_chip_lookup_all_races(
-                                                                &state.http_client, &p.server_url, &p.token,
+                                                            let forwarder_ids: Vec<String> = subs
+                                                                .iter()
+                                                                .map(|s| s.forwarder_id.clone())
+                                                                .collect::<std::collections::HashSet<_>>()
+                                                                .into_iter()
+                                                                .collect();
+                                                            receiver::control_api::fetch_chip_lookup_for_forwarders(
+                                                                &state.http_client, &p.server_url, &p.token, &forwarder_ids,
                                                             ).await
                                                         };
                                                         match result {

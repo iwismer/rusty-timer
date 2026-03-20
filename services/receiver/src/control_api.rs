@@ -649,48 +649,56 @@ pub async fn fetch_chip_lookup(
     Ok(lookup)
 }
 
-/// Fetch participants for ALL races from the upstream server, returning a
-/// combined chip_id → (bib, display_name) lookup map.
-pub async fn fetch_chip_lookup_all_races(
+/// Fetch participants for races mapped to the given forwarder IDs via the
+/// server's `forwarder_races` table.  Returns an empty map if none of the
+/// forwarders have an assigned race.
+pub async fn fetch_chip_lookup_for_forwarders(
     client: &reqwest::Client,
     ws_url: &str,
     token: &str,
+    forwarder_ids: &[String],
 ) -> Result<crate::session::ChipLookup, String> {
+    if forwarder_ids.is_empty() {
+        return Ok(crate::session::ChipLookup::new());
+    }
+
     let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
 
-    // First, list all races.
-    let races_url = format!("{base}/api/v1/races");
-    let races_resp = client
-        .get(&races_url)
+    // Fetch all forwarder→race assignments in one call.
+    let url = format!("{base}/api/v1/forwarder-races");
+    let resp = client
+        .get(&url)
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| format!("fetch races failed: {e}"))?;
+        .map_err(|e| format!("fetch forwarder-races failed: {e}"))?;
 
-    if !races_resp.status().is_success() {
-        return Err(format!("server returned {}", races_resp.status()));
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
     }
 
-    let races_body: serde_json::Value = races_resp
+    let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("invalid races JSON: {e}"))?;
+        .map_err(|e| format!("invalid forwarder-races JSON: {e}"))?;
 
-    let race_ids: Vec<String> = races_body
-        .get("races")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|r| {
-                    r.get("race_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_owned())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // Collect unique race_ids for our subscribed forwarders.
+    let forwarder_set: std::collections::HashSet<&str> =
+        forwarder_ids.iter().map(|s| s.as_str()).collect();
+    let mut race_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Then fetch participants for each race.
+    if let Some(assignments) = body.get("assignments").and_then(|v| v.as_array()) {
+        for a in assignments {
+            let fwd = a.get("forwarder_id").and_then(|v| v.as_str()).unwrap_or("");
+            if forwarder_set.contains(fwd) {
+                if let Some(rid) = a.get("race_id").and_then(|v| v.as_str()) {
+                    race_ids.insert(rid.to_owned());
+                }
+            }
+        }
+    }
+
+    // Fetch participants for each discovered race.
     let mut lookup = crate::session::ChipLookup::new();
     for race_id in &race_ids {
         let url = format!("{base}/api/v1/races/{race_id}/participants");
