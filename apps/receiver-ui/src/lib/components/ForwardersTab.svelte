@@ -12,7 +12,7 @@
 
   function selectedForwarder(): ForwarderEntry | undefined {
     if (!store.selectedForwarderId || !store.forwarders) return undefined;
-    return store.forwarders.forwarders.find(
+    return store.forwarders.find(
       (f) => f.forwarder_id === store.selectedForwarderId,
     );
   }
@@ -194,7 +194,7 @@
       >
         Loading forwarders...
       </div>
-    {:else if store.forwarders.forwarders.length === 0}
+    {:else if store.forwarders.length === 0}
       <div
         class="flex-1 flex items-center justify-center text-text-muted text-sm"
       >
@@ -215,7 +215,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each store.forwarders.forwarders as fwd (fwd.forwarder_id)}
+            {#each store.forwarders as fwd (fwd.forwarder_id)}
               <tr
                 class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer {!fwd.online
                   ? 'opacity-60'

@@ -931,7 +931,7 @@ pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverEr
 // Forwarder list + proxy commands (config, restart, device control)
 // ---------------------------------------------------------------------------
 
-/// Generate a unique request ID for WS proxy commands.
+/// Generate a process-unique request ID for WS proxy commands.
 fn generate_request_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -987,10 +987,13 @@ pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, Recei
     }
 }
 
-/// Send a WS command through the active session and wait for a response (15s timeout).
+/// Send a WS command through the active session and wait for a response.
+///
+/// Uses a 15s timeout, which intentionally exceeds the server-side 10s proxy
+/// timeout (`PROXY_TIMEOUT`) so that the server's timeout error is received
+/// rather than timing out locally.
 async fn send_ws_command(
     state: &AppState,
-    request_id: String,
     message: rt_protocol::WsMessage,
 ) -> Result<rt_protocol::WsMessage, ReceiverError> {
     let tx = {
@@ -1001,11 +1004,7 @@ async fn send_ws_command(
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let cmd = crate::session::WsCommand {
-        message,
-        request_id,
-        reply: reply_tx,
-    };
+    let cmd = crate::session::WsCommand::new(message, reply_tx);
 
     tx.send(cmd)
         .await
@@ -1021,14 +1020,13 @@ pub async fn get_forwarder_config(
     state: &AppState,
     forwarder_id: String,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let request_id = generate_request_id();
     let msg = rt_protocol::WsMessage::ReceiverProxyConfigGetRequest(
         rt_protocol::ReceiverProxyConfigGetRequest {
-            request_id: request_id.clone(),
+            request_id: generate_request_id(),
             forwarder_id,
         },
     );
-    let response = send_ws_command(state, request_id, msg).await?;
+    let response = send_ws_command(state, msg).await?;
     match response {
         rt_protocol::WsMessage::ReceiverProxyConfigGetResponse(r) => Ok(serde_json::json!({
             "ok": r.ok,
@@ -1048,16 +1046,15 @@ pub async fn set_forwarder_config(
     section: String,
     data: serde_json::Value,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let request_id = generate_request_id();
     let msg = rt_protocol::WsMessage::ReceiverProxyConfigSetRequest(
         rt_protocol::ReceiverProxyConfigSetRequest {
-            request_id: request_id.clone(),
+            request_id: generate_request_id(),
             forwarder_id,
             section,
             payload: data,
         },
     );
-    let response = send_ws_command(state, request_id, msg).await?;
+    let response = send_ws_command(state, msg).await?;
     match response {
         rt_protocol::WsMessage::ReceiverProxyConfigSetResponse(r) => Ok(serde_json::json!({
             "ok": r.ok,
@@ -1074,14 +1071,13 @@ pub async fn restart_forwarder_service(
     state: &AppState,
     forwarder_id: String,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let request_id = generate_request_id();
     let msg = rt_protocol::WsMessage::ReceiverProxyRestartRequest(
         rt_protocol::ReceiverProxyRestartRequest {
-            request_id: request_id.clone(),
+            request_id: generate_request_id(),
             forwarder_id,
         },
     );
-    let response = send_ws_command(state, request_id, msg).await?;
+    let response = send_ws_command(state, msg).await?;
     match response {
         rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
             "ok": r.ok,
@@ -1097,15 +1093,14 @@ pub async fn restart_forwarder_device(
     state: &AppState,
     forwarder_id: String,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let request_id = generate_request_id();
     let msg = rt_protocol::WsMessage::ReceiverProxyDeviceControlRequest(
         rt_protocol::ReceiverProxyDeviceControlRequest {
-            request_id: request_id.clone(),
+            request_id: generate_request_id(),
             forwarder_id,
             action: rt_protocol::DeviceControlAction::RestartDevice,
         },
     );
-    let response = send_ws_command(state, request_id, msg).await?;
+    let response = send_ws_command(state, msg).await?;
     match response {
         rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
             "ok": r.ok,
@@ -1121,15 +1116,14 @@ pub async fn shutdown_forwarder_device(
     state: &AppState,
     forwarder_id: String,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let request_id = generate_request_id();
     let msg = rt_protocol::WsMessage::ReceiverProxyDeviceControlRequest(
         rt_protocol::ReceiverProxyDeviceControlRequest {
-            request_id: request_id.clone(),
+            request_id: generate_request_id(),
             forwarder_id,
             action: rt_protocol::DeviceControlAction::ShutdownDevice,
         },
     );
-    let response = send_ws_command(state, request_id, msg).await?;
+    let response = send_ws_command(state, msg).await?;
     match response {
         rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
             "ok": r.ok,

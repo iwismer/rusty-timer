@@ -11,8 +11,20 @@ pub enum ProxyError {
     Disconnected,
     Timeout,
     InternalError(String),
-    ForwarderError(String),
 }
+
+impl std::fmt::Display for ProxyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConnected => write!(f, "forwarder not connected"),
+            Self::Disconnected => write!(f, "forwarder disconnected"),
+            Self::Timeout => write!(f, "forwarder did not respond in time"),
+            Self::InternalError(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ProxyError {}
 
 pub async fn proxy_config_get(
     state: &AppState,

@@ -1,7 +1,14 @@
 use crate::state::AppState;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use serde::Serialize;
 use sqlx::Row;
 use std::collections::HashMap;
+
+#[derive(Serialize)]
+struct ReaderEntry {
+    reader_ip: String,
+    connected: bool,
+}
 
 pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse {
     let rows = match sqlx::query(
@@ -32,7 +39,7 @@ pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse
     struct ForwarderInfo {
         display_name: Option<String>,
         online: bool,
-        readers: Vec<serde_json::Value>,
+        readers: Vec<ReaderEntry>,
     }
 
     let mut forwarders: HashMap<String, ForwarderInfo> = HashMap::new();
@@ -59,13 +66,13 @@ pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse
             entry.display_name = display_name;
         }
 
-        entry.readers.push(serde_json::json!({
-            "reader_ip": reader_ip,
-            "connected": reader_connected,
-        }));
+        entry.readers.push(ReaderEntry {
+            reader_ip,
+            connected: reader_connected,
+        });
     }
 
-    // Fetch per-forwarder stats (unique chips + total reads, scoped to each stream's current epoch)
+    // Fetch per-forwarder stats (distinct non-null tag_ids + total reads, scoped to each stream's current epoch)
     let stats_rows = match sqlx::query(
         r#"SELECT s.forwarder_id,
                   COUNT(DISTINCT e.tag_id) AS unique_chips,

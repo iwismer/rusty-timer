@@ -37,10 +37,35 @@ pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 /// The session loop sends `message` over the WebSocket and routes the
 /// server's response back via the oneshot `reply` channel. Responses are
 /// matched to pending requests by `request_id`.
+///
+/// Use [`WsCommand::new`] to construct — it extracts the `request_id` from
+/// the message automatically, preventing mismatches between the two copies.
 pub struct WsCommand {
     pub message: WsMessage,
     pub request_id: String,
     pub reply: oneshot::Sender<WsMessage>,
+}
+
+impl WsCommand {
+    /// Create a new `WsCommand`, extracting `request_id` from the message.
+    ///
+    /// # Panics
+    /// Panics if `message` is not a proxy request variant (i.e. does not
+    /// contain a `request_id` field).
+    pub fn new(message: WsMessage, reply: oneshot::Sender<WsMessage>) -> Self {
+        let request_id = match &message {
+            WsMessage::ReceiverProxyConfigGetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyConfigSetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyRestartRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyDeviceControlRequest(r) => r.request_id.clone(),
+            other => panic!("WsCommand::new called with non-proxy message: {other:?}"),
+        };
+        Self {
+            message,
+            request_id,
+            reply,
+        }
+    }
 }
 
 pub struct SessionLoopDeps {
@@ -148,6 +173,11 @@ where
                 if ws.send(Message::Text(text.into())).await.is_err() {
                     warn!(request_id = %cmd.request_id, pending_count = pending_requests.len(),
                           "WS send failed for proxy command; ending session");
+                    let _ = cmd.reply.send(WsMessage::Error(rt_protocol::ErrorMessage {
+                        code: "WS_SEND_FAILED".into(),
+                        message: "WebSocket send failed".into(),
+                        retryable: true,
+                    }));
                     break;
                 }
                 pending_requests.insert(cmd.request_id, cmd.reply);
@@ -284,8 +314,15 @@ where
     if !pending_requests.is_empty() {
         warn!(
             count = pending_requests.len(),
-            "session ended with pending proxy requests"
+            "session ended with pending proxy requests; notifying callers"
         );
+        for (_request_id, reply_tx) in pending_requests.drain() {
+            let _ = reply_tx.send(WsMessage::Error(rt_protocol::ErrorMessage {
+                code: "SESSION_CLOSED".into(),
+                message: "WS session ended while request was pending".into(),
+                retryable: true,
+            }));
+        }
     }
     Ok(())
 }

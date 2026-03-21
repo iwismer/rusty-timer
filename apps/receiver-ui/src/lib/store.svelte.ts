@@ -59,7 +59,7 @@ export const store = $state({
   streamMetrics: new Map<string, api.StreamMetrics>(),
 
   // Forwarders
-  forwarders: null as api.ForwardersResponse | null,
+  forwarders: null as api.ForwarderEntry[] | null,
   forwardersError: null as string | null,
   selectedForwarderId: null as string | null,
 
@@ -496,7 +496,7 @@ export function applyHydratedMode(mode: ReceiverMode): void {
 
 function syncSelectedForwarder(): void {
   if (!store.selectedForwarderId || !store.forwarders) return;
-  const stillExists = store.forwarders.forwarders.some(
+  const stillExists = store.forwarders.some(
     (fwd) => fwd.forwarder_id === store.selectedForwarderId,
   );
   if (!stillExists) {
@@ -586,7 +586,7 @@ export async function loadAll(): Promise<void> {
       }
     }
     if (nextForwarders.ok) {
-      store.forwarders = nextForwarders.forwarders;
+      store.forwarders = nextForwarders.forwarders.forwarders;
       store.forwardersError = null;
       syncSelectedForwarder();
     } else {
@@ -632,9 +632,10 @@ export async function loadForwarders(): Promise<void> {
   store.forwardersError = null;
   try {
     const result = await api.getForwarders();
-    store.forwarders = result;
+    store.forwarders = result.forwarders;
     syncSelectedForwarder();
   } catch (error) {
+    console.error("Failed to load forwarders:", error);
     store.forwarders = null;
     store.forwardersError = String(error);
     store.selectedForwarderId = null;
@@ -888,15 +889,14 @@ export async function confirmUpdateInstall(): Promise<void> {
 
 function applyForwarderLastRead(forwarderId: string, lastReadAt: string): void {
   if (!store.forwarders) return;
-  const fwds = store.forwarders.forwarders;
-  const idx = fwds.findIndex((f) => f.forwarder_id === forwarderId);
+  const idx = store.forwarders.findIndex((f) => f.forwarder_id === forwarderId);
   if (idx === -1) return;
 
-  const fwd = { ...fwds[idx] };
+  const fwd = { ...store.forwarders[idx] };
   fwd.last_read_at = lastReadAt;
-  const next = [...fwds];
+  const next = [...store.forwarders];
   next[idx] = fwd;
-  store.forwarders = { forwarders: next };
+  store.forwarders = next;
 }
 
 export function initStore(): void {

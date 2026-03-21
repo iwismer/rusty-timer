@@ -164,7 +164,7 @@ async fn proxy_config_get_reply(
         Err(e) => ReceiverProxyConfigGetResponse {
             request_id: req.request_id,
             ok: false,
-            error: Some(proxy_error_message(&e)),
+            error: Some(e.to_string()),
             config: serde_json::Value::Null,
             restart_needed: false,
         },
@@ -203,7 +203,7 @@ async fn proxy_config_set_reply(
         Err(e) => ReceiverProxyConfigSetResponse {
             request_id: req.request_id,
             ok: false,
-            error: Some(proxy_error_message(&e)),
+            error: Some(e.to_string()),
             restart_needed: false,
         },
     };
@@ -233,7 +233,7 @@ async fn proxy_restart_reply(
         Err(e) => ReceiverProxyControlResponse {
             request_id: req.request_id,
             ok: false,
-            error: Some(proxy_error_message(&e)),
+            error: Some(e.to_string()),
         },
     };
     WsMessage::ReceiverProxyControlResponse(resp)
@@ -273,7 +273,7 @@ async fn proxy_device_control_reply(
         Err(e) => ReceiverProxyControlResponse {
             request_id: req.request_id,
             ok: false,
-            error: Some(proxy_error_message(&e)),
+            error: Some(e.to_string()),
         },
     };
     WsMessage::ReceiverProxyControlResponse(resp)
@@ -634,6 +634,18 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                 Ok(t) => t,
                                 Err(e) => {
                                     error!(device_id = %device_id, error = %e, "failed to serialize proxy reply");
+                                    // Send a minimal fallback error so the receiver doesn't hang
+                                    let request_id = match &msg {
+                                        WsMessage::ReceiverProxyConfigGetResponse(r) => &r.request_id,
+                                        WsMessage::ReceiverProxyConfigSetResponse(r) => &r.request_id,
+                                        WsMessage::ReceiverProxyControlResponse(r) => &r.request_id,
+                                        _ => { continue; }
+                                    };
+                                    let fallback = format!(
+                                        r#"{{"kind":"receiver_proxy_control_response","request_id":"{}","ok":false,"error":"server serialization error"}}"#,
+                                        request_id
+                                    );
+                                    let _ = socket.send(Message::Text(fallback.into())).await;
                                     continue;
                                 }
                             };
@@ -642,8 +654,8 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                             }
                         }
                         Some(Err(err)) => {
-                            error!(device_id = %device_id, error = %err, "proxy reply task failed");
-                            break;
+                            error!(device_id = %device_id, error = %err, "proxy reply task panicked; keeping session alive");
+                            continue;
                         }
                         None => {}
                     }
@@ -1420,16 +1432,6 @@ async fn handle_receiver_ack(
     }
 
     Ok(())
-}
-
-fn proxy_error_message(e: &crate::forwarder_proxy::ProxyError) -> String {
-    match e {
-        crate::forwarder_proxy::ProxyError::NotConnected => "forwarder not connected".into(),
-        crate::forwarder_proxy::ProxyError::Disconnected => "forwarder disconnected".into(),
-        crate::forwarder_proxy::ProxyError::Timeout => "forwarder did not respond in time".into(),
-        crate::forwarder_proxy::ProxyError::InternalError(msg) => msg.clone(),
-        crate::forwarder_proxy::ProxyError::ForwarderError(msg) => msg.clone(),
-    }
 }
 
 #[cfg(test)]

@@ -156,7 +156,7 @@ describe("receiver layout SSE updates", () => {
     render(Layout);
 
     await waitFor(() => {
-      expect(store.forwarders?.forwarders[0]?.total_reads).toBe(10);
+      expect(store.forwarders?.[0]?.total_reads).toBe(10);
     });
 
     const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
@@ -179,7 +179,7 @@ describe("receiver layout SSE updates", () => {
       name: null,
     });
 
-    expect(store.forwarders?.forwarders[0]).toMatchObject({
+    expect(store.forwarders?.[0]).toMatchObject({
       unique_chips: 3,
       total_reads: 10,
       last_read_at: "2026-03-21T12:34:56.000Z",

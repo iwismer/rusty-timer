@@ -569,7 +569,7 @@ pub struct ReceiverProxyDeviceControlRequest {
     pub action: DeviceControlAction,
 }
 
-/// Server-to-receiver: result of a forwarder control action (restart/device control).
+/// Server-to-receiver: result of a service restart or device control action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverProxyControlResponse {
     pub request_id: String,
