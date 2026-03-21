@@ -166,6 +166,7 @@ The Tauri shell:
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | "Failed to spawn receiver" / Windows “path not found” | Sidecar path mismatch or binary missing | Ensure Rust uses `sidecar("receiver")` (basename); bundler installs `receiver.exe` beside the main exe. Run `cargo build -p receiver` and copy the triple-named file into `src-tauri/binaries/` |
+| Health check never succeeds / “failed after 3 attempts” | Another process on 9090, receiver crash, or **HTTP proxy** breaking `127.0.0.1` | Quit other receivers; read `crash.log` (now includes HTTP poll details + stderr). On Windows, unset `HTTP_PROXY`/`HTTPS_PROXY` for localhost or rely on the shell’s `reqwest` client using **no proxy** for health checks. |
 | "Port 9090 may be in use" | Another receiver instance running | Kill the other process or check `lsof -i :9090` |
 | Blank window | Receiver crashed after health check | Check terminal output for `[receiver]` log lines |
 | WebView2 error on Windows | Runtime not installed | Download from https://developer.microsoft.com/en-us/microsoft-edge/webview2/ |

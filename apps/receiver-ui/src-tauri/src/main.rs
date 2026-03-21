@@ -1,14 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::{Arc, Mutex};
+
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::CommandEvent;
 
 const RECEIVER_URL: &str = "http://127.0.0.1:9090";
 const DEV_URL: &str = "http://127.0.0.1:5173";
-const HEALTH_URL: &str = "http://127.0.0.1:9090/api/v1/version";
+/// Prefer `version`, then `status` — both return 200 when the control API is up.
+const HEALTH_URLS: &[&str] = &[
+    "http://127.0.0.1:9090/api/v1/version",
+    "http://127.0.0.1:9090/api/v1/status",
+];
 const HEALTH_POLL_INTERVAL_MS: u64 = 200;
-const HEALTH_TIMEOUT_MS: u64 = 10_000;
+const HEALTH_TIMEOUT_MS: u64 = 30_000;
+const MAX_STDERR_CAPTURE: usize = 8192;
 const MAX_RESTART_ATTEMPTS: u32 = 3;
 
 fn main() {
@@ -82,12 +90,13 @@ fn main() {
 
 async fn run_sidecar_lifecycle(handle: &AppHandle) -> Result<(), String> {
     let mut attempts = 0;
+    let mut last_failure = String::new();
 
     loop {
         attempts += 1;
         if attempts > MAX_RESTART_ATTEMPTS {
             return Err(format!(
-                "Receiver failed to start after {MAX_RESTART_ATTEMPTS} attempts"
+                "Receiver failed to start after {MAX_RESTART_ATTEMPTS} attempts. Last error: {last_failure}"
             ));
         }
 
@@ -106,15 +115,30 @@ async fn run_sidecar_lifecycle(handle: &AppHandle) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("Failed to spawn receiver: {e}"))?;
 
+        let stderr_capture: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
         // Monitor sidecar stdout/stderr in background
+        let cap = Arc::clone(&stderr_capture);
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    tauri_plugin_shell::process::CommandEvent::Stdout(line) => {
+                    CommandEvent::Stdout(line) => {
                         print!("[receiver] {}", String::from_utf8_lossy(&line));
                     }
-                    tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
+                    CommandEvent::Stderr(line) => {
                         eprint!("[receiver] {}", String::from_utf8_lossy(&line));
+                        if let Ok(mut g) = cap.lock() {
+                            let room = MAX_STDERR_CAPTURE.saturating_sub(g.len());
+                            if room > 0 {
+                                g.extend_from_slice(&line[..line.len().min(room)]);
+                            }
+                        }
+                    }
+                    CommandEvent::Terminated(p) => {
+                        eprintln!("[receiver] process exited with code {:?}", p.code);
+                    }
+                    CommandEvent::Error(e) => {
+                        eprintln!("[receiver] command error: {e}");
                     }
                     _ => {}
                 }
@@ -126,7 +150,17 @@ async fn run_sidecar_lifecycle(handle: &AppHandle) -> Result<(), String> {
             Ok(()) => {}
             Err(e) => {
                 let _ = child.kill();
-                eprintln!("Health check failed: {e}");
+                let tail = stderr_capture
+                    .lock()
+                    .map(|g| String::from_utf8_lossy(&g).into_owned())
+                    .unwrap_or_default();
+                let detail = if tail.trim().is_empty() {
+                    e
+                } else {
+                    format!("{e}\nReceiver output (stderr tail):\n{}", tail.trim())
+                };
+                last_failure = detail.clone();
+                eprintln!("Health check failed: {detail}");
                 continue;
             }
         }
@@ -171,26 +205,46 @@ async fn run_sidecar_lifecycle(handle: &AppHandle) -> Result<(), String> {
 }
 
 async fn wait_for_healthy() -> Result<(), String> {
+    // Disable system proxy: on Windows, HTTP_PROXY / corporate proxy can break
+    // requests to 127.0.0.1 and cause spurious health-check failures.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
+        .no_proxy()
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(HEALTH_TIMEOUT_MS);
 
+    let mut last_detail = String::new();
+
     loop {
         if tokio::time::Instant::now() >= deadline {
-            return Err("Receiver did not become healthy within 10 seconds. \
-                 Port 9090 may be in use by another process."
-                .to_string());
+            return Err(format!(
+                "Receiver did not become healthy within {}s. Last poll: {}. \
+                 If another app uses port 9090, quit it or stop the standalone receiver.exe.",
+                HEALTH_TIMEOUT_MS / 1000,
+                if last_detail.is_empty() {
+                    "(no successful HTTP response)".to_string()
+                } else {
+                    last_detail
+                }
+            ));
         }
 
-        match client.get(HEALTH_URL).send().await {
-            Ok(resp) if resp.status().is_success() => return Ok(()),
-            _ => {
-                tokio::time::sleep(std::time::Duration::from_millis(HEALTH_POLL_INTERVAL_MS)).await;
+        last_detail.clear();
+        for url in HEALTH_URLS {
+            match client.get(*url).send().await {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                Ok(resp) => {
+                    last_detail.push_str(&format!("{} -> HTTP {}; ", url, resp.status().as_u16()));
+                }
+                Err(e) => {
+                    last_detail.push_str(&format!("{} -> {e}; ", url));
+                }
             }
         }
+
+        tokio::time::sleep(std::time::Duration::from_millis(HEALTH_POLL_INTERVAL_MS)).await;
     }
 }
