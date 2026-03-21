@@ -494,6 +494,16 @@ export function applyHydratedMode(mode: ReceiverMode): void {
   modeHydrationVersion += 1;
 }
 
+function syncSelectedForwarder(): void {
+  if (!store.selectedForwarderId || !store.forwarders) return;
+  const stillExists = store.forwarders.forwarders.some(
+    (fwd) => fwd.forwarder_id === store.selectedForwarderId,
+  );
+  if (!stillExists) {
+    store.selectedForwarderId = null;
+  }
+}
+
 export function markModeEdited(): void {
   store.modeEditedSinceHydration = true;
   modeEditVersion += 1;
@@ -578,8 +588,11 @@ export async function loadAll(): Promise<void> {
     if (nextForwarders.ok) {
       store.forwarders = nextForwarders.forwarders;
       store.forwardersError = null;
+      syncSelectedForwarder();
     } else {
+      store.forwarders = null;
       store.forwardersError = nextForwarders.error;
+      store.selectedForwarderId = null;
     }
     if (
       nextMode &&
@@ -620,8 +633,11 @@ export async function loadForwarders(): Promise<void> {
   try {
     const result = await api.getForwarders();
     store.forwarders = result;
+    syncSelectedForwarder();
   } catch (error) {
+    store.forwarders = null;
     store.forwardersError = String(error);
+    store.selectedForwarderId = null;
   }
 }
 
@@ -870,84 +886,17 @@ export async function confirmUpdateInstall(): Promise<void> {
 
 // --------------- SSE + Init ---------------
 
-// Track chips seen per forwarder so unique_chips increments correctly
-const seenChipsByForwarder = new Map<string, Set<string>>();
-
-function applyForwarderLastRead(
-  forwarderId: string,
-  lastReadAt: string,
-  chipId: string,
-): void {
+function applyForwarderLastRead(forwarderId: string, lastReadAt: string): void {
   if (!store.forwarders) return;
   const fwds = store.forwarders.forwarders;
   const idx = fwds.findIndex((f) => f.forwarder_id === forwarderId);
   if (idx === -1) return;
 
-  let seen = seenChipsByForwarder.get(forwarderId);
-  if (!seen) {
-    seen = new Set<string>();
-    seenChipsByForwarder.set(forwarderId, seen);
-  }
-  const isNewChip = !seen.has(chipId);
-  seen.add(chipId);
-
   const fwd = { ...fwds[idx] };
   fwd.last_read_at = lastReadAt;
-  fwd.total_reads = fwd.total_reads + 1;
-  if (isNewChip) {
-    fwd.unique_chips = fwd.unique_chips + 1;
-  }
   const next = [...fwds];
   next[idx] = fwd;
   store.forwarders = { forwarders: next };
-}
-
-// Track per-stream read totals so we can compute forwarder-level aggregates
-const streamReadTotals = new Map<
-  string,
-  { forwarderId: string; total: number }
->();
-
-function applyForwarderStreamCounts(updates: api.StreamCountUpdate[]): void {
-  if (!store.forwarders) return;
-
-  // Group updates by forwarder and compute new forwarder totals
-  const affectedForwarders = new Set<string>();
-  for (const u of updates) {
-    const key = streamKey(u.forwarder_id, u.reader_ip);
-    streamReadTotals.set(key, {
-      forwarderId: u.forwarder_id,
-      total: u.reads_total,
-    });
-    affectedForwarders.add(u.forwarder_id);
-  }
-
-  if (affectedForwarders.size === 0) return;
-
-  const fwds = store.forwarders.forwarders;
-  let changed = false;
-  const next = fwds.map((fwd) => {
-    if (!affectedForwarders.has(fwd.forwarder_id)) return fwd;
-
-    // Sum reads_total across all known streams for this forwarder
-    let sum = 0;
-    for (const [, entry] of streamReadTotals) {
-      if (entry.forwarderId === fwd.forwarder_id) {
-        sum += entry.total;
-      }
-    }
-    // Only update if the computed sum exceeds the current total
-    // (we may not know about all streams yet from SSE alone)
-    if (sum > fwd.total_reads) {
-      changed = true;
-      return { ...fwd, total_reads: sum };
-    }
-    return fwd;
-  });
-
-  if (changed) {
-    store.forwarders = { forwarders: next };
-  }
 }
 
 export function initStore(): void {
@@ -1036,7 +985,6 @@ export function initStore(): void {
     onStreamCountsUpdated: (updates) => {
       const needsResync = applyStreamCountUpdates(updates);
       if (needsResync) void loadAll();
-      applyForwarderStreamCounts(updates);
     },
     onModeChanged: (mode) => {
       applyHydratedMode(mode);
@@ -1046,11 +994,7 @@ export function initStore(): void {
       const next = new Map(store.lastReads);
       next.set(key, read);
       store.lastReads = next;
-      applyForwarderLastRead(
-        read.forwarder_id,
-        new Date().toISOString(),
-        read.chip_id,
-      );
+      applyForwarderLastRead(read.forwarder_id, read.timestamp);
     },
     onStreamMetricsUpdated: (metrics) => {
       const key = streamKey(metrics.forwarder_id, metrics.reader_ip);

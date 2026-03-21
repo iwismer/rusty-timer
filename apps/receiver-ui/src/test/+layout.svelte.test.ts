@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Layout from "../routes/+layout.svelte";
 import LayoutChildrenHarness from "./LayoutChildrenHarness.svelte";
+import { store } from "$lib/store.svelte";
 
 const apiMocks = vi.hoisted(() => ({
   getStatus: vi.fn().mockResolvedValue({
@@ -79,6 +80,10 @@ describe("receiver layout SSE updates", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     pageState.pathname = "/";
+    store.activeTab = "streams";
+    store.forwarders = null;
+    store.forwardersError = null;
+    store.selectedForwarderId = null;
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -131,6 +136,93 @@ describe("receiver layout SSE updates", () => {
     await waitFor(() => {
       expect(screen.getByText("15 reads")).toBeInTheDocument();
     });
+  });
+
+  it("keeps forwarder totals authoritative and updates last_read_at from SSE timestamp", async () => {
+    apiMocks.getForwarders.mockResolvedValueOnce({
+      forwarders: [
+        {
+          forwarder_id: "fwd-1",
+          display_name: "Forwarder 1",
+          online: true,
+          readers: [{ reader_ip: "10.0.0.1:10000", connected: true }],
+          unique_chips: 3,
+          total_reads: 10,
+          last_read_at: null,
+        },
+      ],
+    });
+
+    render(Layout);
+
+    await waitFor(() => {
+      expect(store.forwarders?.forwarders[0]?.total_reads).toBe(10);
+    });
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+
+    callbacks.onStreamCountsUpdated([
+      {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        reads_total: 15,
+        reads_epoch: 4,
+      },
+    ]);
+    callbacks.onLastRead({
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      chip_id: "chip-4",
+      timestamp: "2026-03-21T12:34:56.000Z",
+      bib: null,
+      name: null,
+    });
+
+    expect(store.forwarders?.forwarders[0]).toMatchObject({
+      unique_chips: 3,
+      total_reads: 10,
+      last_read_at: "2026-03-21T12:34:56.000Z",
+    });
+  });
+
+  it("clears stale forwarders on refresh failure so the error state is shown", async () => {
+    apiMocks.getForwarders.mockResolvedValueOnce({
+      forwarders: [
+        {
+          forwarder_id: "fwd-1",
+          display_name: "Forwarder 1",
+          online: true,
+          readers: [{ reader_ip: "10.0.0.1:10000", connected: true }],
+          unique_chips: 3,
+          total_reads: 10,
+          last_read_at: null,
+        },
+      ],
+    });
+
+    render(Layout);
+    store.activeTab = "forwarders";
+
+    await waitFor(() => {
+      expect(screen.getByText("Forwarder 1")).toBeInTheDocument();
+    });
+
+    apiMocks.getForwarders.mockRejectedValueOnce(new Error("server offline"));
+
+    const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
+    expect(callbacks).toBeTruthy();
+    callbacks.onResync();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Unable to load forwarders. Check the server connection.",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Forwarder 1")).not.toBeInTheDocument();
+    expect(store.forwarders).toBeNull();
   });
 
   it("renders nested route content", async () => {
