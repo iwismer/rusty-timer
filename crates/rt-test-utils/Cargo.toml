@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 rt-protocol = { path = "../rt-protocol" }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 serde_json = "1"
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }

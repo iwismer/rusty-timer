@@ -26,7 +26,7 @@ struct Cli {
 
 fn generate_receiver_id() -> String {
     let mut bytes = [0u8; 4];
-    getrandom::getrandom(&mut bytes).expect("failed to generate random bytes");
+    getrandom::fill(&mut bytes).expect("failed to generate random bytes");
     format!("recv-{:08x}", u32::from_be_bytes(bytes))
 }
 
