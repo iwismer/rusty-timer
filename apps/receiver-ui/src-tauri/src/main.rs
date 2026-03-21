@@ -284,10 +284,9 @@ fn main() {
             });
 
             // Initialize receiver runtime
-            let rt = tokio::runtime::Handle::current();
-            let (state, shutdown_rx) = rt
-                .block_on(async { receiver::runtime::init(None).await })
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let (state, shutdown_rx) =
+                tauri::async_runtime::block_on(async { receiver::runtime::init(None).await })
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
             // Register state for commands
             app.manage(state.clone());
