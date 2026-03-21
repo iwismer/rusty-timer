@@ -157,9 +157,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
             Ok(_) => {}
             Err(e) => {
                 tracing::error!(error = %e, "failed to load DBF config at startup, DBF writer will not start");
-                state
-                    .logger
-                    .log(&format!("DBF writer failed to start: {e}"));
+                state.logger.log(format!("DBF writer failed to start: {e}"));
             }
         }
     }
@@ -402,10 +400,10 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                     // Error means receiver dropped (task already exited), which is fine.
                     let _ = cancel_tx.send(true);
                 }
-                if let Some(handle) = dbf_writer_task.take() {
-                    if tokio::time::timeout(std::time::Duration::from_secs(2), handle).await.is_err() {
-                        tracing::warn!("DBF writer task did not shut down within 2 seconds");
-                    }
+                if let Some(handle) = dbf_writer_task.take()
+                    && tokio::time::timeout(std::time::Duration::from_secs(2), handle).await.is_err()
+                {
+                    tracing::warn!("DBF writer task did not shut down within 2 seconds");
                 }
 
                 // Start new writer if enabled
@@ -434,13 +432,12 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         // Error means receiver dropped (task already exited), which is fine.
         let _ = cancel_tx.send(true);
     }
-    if let Some(handle) = dbf_writer_task.take() {
-        if tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+    if let Some(handle) = dbf_writer_task.take()
+        && tokio::time::timeout(std::time::Duration::from_secs(2), handle)
             .await
             .is_err()
-        {
-            tracing::warn!("DBF writer task did not shut down within 2 seconds");
-        }
+    {
+        tracing::warn!("DBF writer task did not shut down within 2 seconds");
     }
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");
