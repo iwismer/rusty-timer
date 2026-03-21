@@ -278,38 +278,38 @@
                         {@const options = store.earliestEpochOptions[key] ?? []}
                         {@const selectedEarliest =
                           selectedEarliestEpochValue(stream)}
-                        <label class="text-xs text-text-secondary mr-1"
-                          >From epoch:</label
-                        >
-                        <select
-                          data-testid="earliest-epoch-{key}"
-                          class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
-                          value={selectedEarliest}
-                          onchange={(e) => {
-                            e.stopPropagation();
-                            void changeEarliestEpoch(
-                              stream,
-                              e.currentTarget.value,
-                            );
-                          }}
-                          onclick={(e) => e.stopPropagation()}
-                          disabled={store.modeDraft === "race" ||
-                            store.earliestEpochSaving[key]}
-                        >
-                          {#if store.earliestEpochLoading[key]}
-                            <option value="">Loading epochs...</option>
-                          {:else if store.earliestEpochLoadErrors[key]}
-                            <option value="">Epochs unavailable</option>
-                          {:else if options.length === 0}
-                            <option value="">No epochs available</option>
-                          {:else}
-                            {#each options as option}
-                              <option value={String(option.stream_epoch)}>
-                                {formatEarliestEpochOption(option)}
-                              </option>
-                            {/each}
-                          {/if}
-                        </select>
+                        <label class="text-xs text-text-secondary mr-1">
+                          From epoch:
+                          <select
+                            data-testid="earliest-epoch-{key}"
+                            class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                            value={selectedEarliest}
+                            onchange={(e) => {
+                              e.stopPropagation();
+                              void changeEarliestEpoch(
+                                stream,
+                                e.currentTarget.value,
+                              );
+                            }}
+                            onclick={(e) => e.stopPropagation()}
+                            disabled={store.modeDraft === "race" ||
+                              store.earliestEpochSaving[key]}
+                          >
+                            {#if store.earliestEpochLoading[key]}
+                              <option value="">Loading epochs...</option>
+                            {:else if store.earliestEpochLoadErrors[key]}
+                              <option value="">Epochs unavailable</option>
+                            {:else if options.length === 0}
+                              <option value="">No epochs available</option>
+                            {:else}
+                              {#each options as option}
+                                <option value={String(option.stream_epoch)}>
+                                  {formatEarliestEpochOption(option)}
+                                </option>
+                              {/each}
+                            {/if}
+                          </select>
+                        </label>
                       {/if}
 
                       <button
