@@ -8,7 +8,7 @@ export interface SubscriptionBuildStream {
   reader_ip: string;
   subscribed: boolean;
   local_port: number | null;
-  event_type?: string;
+  event_type?: "start" | "finish";
 }
 
 export interface BuildUpdatedSubscriptionsParams {
@@ -26,7 +26,7 @@ export interface BuildUpdatedSubscriptionsResult {
     forwarder_id: string;
     reader_ip: string;
     local_port_override: number | null;
-    event_type: string;
+    event_type: "start" | "finish";
   }> | null;
   error: string | null;
 }

@@ -141,19 +141,26 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     let mut dbf_writer_task: Option<tokio::task::JoinHandle<()>> = None;
     {
         let db = state.db.lock().await;
-        if let Ok(dbf_config) = db.load_dbf_config()
-            && dbf_config.enabled
-        {
-            let (cancel_tx, cancel_rx) = watch::channel(false);
-            let rx = global_event_tx.subscribe();
-            let db_arc = Arc::clone(&state.db);
-            let path = dbf_config.path.clone();
-            let handle = tokio::spawn(async move {
-                crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
-            });
-            dbf_writer_cancel_tx = Some(cancel_tx);
-            dbf_writer_task = Some(handle);
-            state.logger.log("DBF writer started");
+        match db.load_dbf_config() {
+            Ok(dbf_config) if dbf_config.enabled => {
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let rx = global_event_tx.subscribe();
+                let db_arc = Arc::clone(&state.db);
+                let path = dbf_config.path.clone();
+                let handle = tokio::spawn(async move {
+                    crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
+                });
+                dbf_writer_cancel_tx = Some(cancel_tx);
+                dbf_writer_task = Some(handle);
+                state.logger.log("DBF writer started");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load DBF config at startup, DBF writer will not start");
+                state
+                    .logger
+                    .log(&format!("DBF writer failed to start: {e}"));
+            }
         }
     }
 
@@ -381,18 +388,24 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
 
             _ = dbf_config_rx.changed() => {
                 let db = state.db.lock().await;
-                let dbf_config = db.load_dbf_config().unwrap_or(crate::db::DbfConfig {
-                    enabled: false,
-                    path: r"C:\winrace\Files\IPICO.DBF".to_owned(),
-                });
+                let dbf_config = match db.load_dbf_config() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to reload DBF config, keeping current state");
+                        continue;
+                    }
+                };
                 drop(db);
 
                 // Stop existing writer if running
                 if let Some(cancel_tx) = dbf_writer_cancel_tx.take() {
+                    // Error means receiver dropped (task already exited), which is fine.
                     let _ = cancel_tx.send(true);
                 }
                 if let Some(handle) = dbf_writer_task.take() {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+                    if tokio::time::timeout(std::time::Duration::from_secs(2), handle).await.is_err() {
+                        tracing::warn!("DBF writer task did not shut down within 2 seconds");
+                    }
                 }
 
                 // Start new writer if enabled
@@ -418,10 +431,16 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     state.logger.log("shutdown signal received");
     cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
     if let Some(cancel_tx) = dbf_writer_cancel_tx.take() {
+        // Error means receiver dropped (task already exited), which is fine.
         let _ = cancel_tx.send(true);
     }
     if let Some(handle) = dbf_writer_task.take() {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        if tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!("DBF writer task did not shut down within 2 seconds");
+        }
     }
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");
@@ -1231,7 +1250,7 @@ mod tests {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: Some(first_port),
-            event_type: "finish".to_owned(),
+            event_type: crate::db::EventType::Finish,
         }];
         reconcile_proxies(&initial, &mut proxies, &event_bus, &state.logger).await;
 
@@ -1242,7 +1261,7 @@ mod tests {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: Some(second_port),
-            event_type: "finish".to_owned(),
+            event_type: crate::db::EventType::Finish,
         }];
         reconcile_proxies(&updated, &mut proxies, &event_bus, &state.logger).await;
 
@@ -1478,7 +1497,7 @@ mod tests {
             forwarder_id: "sub-fwd".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
-            event_type: "finish".to_owned(),
+            event_type: crate::db::EventType::Finish,
         }];
         let mode = ReceiverMode::Live {
             streams: vec![
@@ -1509,7 +1528,7 @@ mod tests {
             forwarder_id: "sub-fwd".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
-            event_type: "finish".to_owned(),
+            event_type: crate::db::EventType::Finish,
         }];
         let mode = ReceiverMode::TargetedReplay {
             targets: vec![

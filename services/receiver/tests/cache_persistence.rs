@@ -62,7 +62,7 @@ fn subscriptions_replace_all_replaces_existing() {
         forwarder_id: "f2".to_owned(),
         reader_ip: "10.0.0.1:10000".to_owned(),
         local_port_override: Some(9900),
-        event_type: "finish".to_owned(),
+        event_type: receiver::EventType::Finish,
     }])
     .unwrap();
     let s = db.load_subscriptions().unwrap();
@@ -78,13 +78,13 @@ fn replace_subscriptions_is_atomic_on_duplicate_input() {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1".to_owned(),
             local_port_override: None,
-            event_type: "finish".to_owned(),
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "f2".to_owned(),
             reader_ip: "10.0.0.2".to_owned(),
             local_port_override: Some(9900),
-            event_type: "finish".to_owned(),
+            event_type: receiver::EventType::Finish,
         },
     ];
     db.replace_subscriptions(&baseline).unwrap();
@@ -94,13 +94,13 @@ fn replace_subscriptions_is_atomic_on_duplicate_input() {
             forwarder_id: "dup".to_owned(),
             reader_ip: "10.0.0.3".to_owned(),
             local_port_override: None,
-            event_type: "finish".to_owned(),
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "dup".to_owned(),
             reader_ip: "10.0.0.3".to_owned(),
             local_port_override: Some(9950),
-            event_type: "finish".to_owned(),
+            event_type: receiver::EventType::Finish,
         },
     ];
 

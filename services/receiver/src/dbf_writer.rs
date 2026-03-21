@@ -1,11 +1,11 @@
-//! DBF writer module for IPICO chip read records.
+//! Maps parsed IPICO chip reads to Race Director-compatible DBF records and
+//! manages DBF file I/O using the `dbase` crate.
 //!
-//! Converts IPICO raw frames into Visual FoxPro DBF records and manages DBF
-//! file I/O using the `dbase` crate.
+//! Each append writes directly to the end of the DBF file and updates the
+//! header record count, avoiding a full file rewrite.
 
 use std::convert::TryFrom;
-use std::io::Cursor;
-use std::io::Write;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -14,15 +14,18 @@ use ipico_core::read::ChipRead;
 use rt_protocol::ReadEvent;
 use tokio::sync::{Mutex, broadcast, watch};
 
-use crate::db::Db;
+use crate::db::{Db, EventType};
 
 #[cfg(test)]
 const VISUAL_FOXPRO_VERSION: u8 = 0x30;
 const DBF_TEMPLATE_BYTES: &[u8] = include_bytes!("../../../docs/race-director/IPICO-sample.DBF");
 
-// ---------------------------------------------------------------------------
-// DbfRecord
-// ---------------------------------------------------------------------------
+/// Field widths for the IPICO DBF schema (inherited from the embedded
+/// `docs/race-director/IPICO-sample.DBF` template).
+const FIELD_WIDTHS: &[usize] = &[1, 2, 12, 8, 5, 6, 3, 2, 1]; // EVENT, DIVISION, CHIP, TIME, RUNERNO, DAYCODE, LAPNO, TPOINT, READER
+const RECORD_DATA_LEN: usize = 40; // sum of FIELD_WIDTHS
+const DBF_EOF_MARKER: u8 = 0x1A;
+const DBF_RECORD_NOT_DELETED: u8 = 0x20;
 
 /// A single record in the IPICO DBF output file.
 ///
@@ -32,23 +35,23 @@ const DBF_TEMPLATE_BYTES: &[u8] = include_bytes!("../../../docs/race-director/IP
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbfRecord {
     /// "S" for start, "F" for finish
-    pub event: String,
+    event: String,
     /// Two-character division code (space-padded)
-    pub division: String,
+    division: String,
     /// Tag/chip ID (12 characters)
-    pub chip: String,
+    chip: String,
     /// `HHMMSSHH` format (centiseconds in last two digits)
-    pub time: String,
+    time: String,
     /// Runner number (5 chars, space-padded)
-    pub runerno: String,
+    runerno: String,
     /// `YYMMDD` format
-    pub daycode: String,
+    daycode: String,
     /// Lap number (3 chars, space-padded)
-    pub lapno: String,
+    lapno: String,
     /// "S " or "F " (with trailing space)
-    pub tpoint: String,
+    tpoint: String,
     /// Reader index as string (1 char)
-    pub reader: String,
+    reader: String,
 }
 
 impl WritableRecord for DbfRecord {
@@ -69,35 +72,39 @@ impl WritableRecord for DbfRecord {
     }
 }
 
-// ---------------------------------------------------------------------------
-// map_to_dbf_fields
-// ---------------------------------------------------------------------------
-
 /// Parse a raw IPICO frame and map it to a [`DbfRecord`].
 ///
-/// Returns `None` if the frame cannot be parsed as a valid IPICO chip read.
+/// Returns `None` if:
+/// - the frame cannot be parsed as a valid IPICO chip read
+/// - `reader_index` > 9 (READER field is 1 character wide)
 ///
 /// # Arguments
 ///
-/// * `raw_frame` – the raw bytes of the IPICO frame (ASCII hex string)
-/// * `event_type` – `"start"` or `"finish"`
-/// * `reader_index` – the reader index (0-based)
+/// * `raw_frame` – the IPICO frame as UTF-8 encoded ASCII hex (e.g., `b"aa4000..."`)
+/// * `event_type` – start or finish
+/// * `reader_index` – the subscription index (0-based position in the subscription
+///   list, used as the READER field value)
 pub fn map_to_dbf_fields(
     raw_frame: &[u8],
-    event_type: &str,
+    event_type: EventType,
     reader_index: u8,
 ) -> Option<DbfRecord> {
+    // READER field is 1 character wide; skip subscriptions beyond index 9
+    if reader_index > 9 {
+        return None;
+    }
+
     let frame_str = std::str::from_utf8(raw_frame).ok()?;
     let chip_read = ChipRead::try_from(frame_str).ok()?;
 
     let event = match event_type {
-        "start" => "S",
-        "finish" => "F",
-        _ => "F",
+        EventType::Start => "S",
+        EventType::Finish => "F",
     };
 
     let ts = &chip_read.timestamp;
-    // centiseconds = millis / 10
+    // millis is always a multiple of 10 (parsed from centisecond wire format),
+    // so this division is lossless.
     let centisec = ts.millis() / 10;
     // TIME: HHMMSSHH (last two digits are centiseconds)
     let time = format!(
@@ -112,6 +119,11 @@ pub fn map_to_dbf_fields(
 
     let tpoint = format!("{} ", event);
 
+    debug_assert!(
+        chip_read.tag_id.len() <= 12,
+        "chip ID exceeds CHIP field width"
+    );
+
     Some(DbfRecord {
         event: event.to_owned(),
         division: "  ".to_owned(),
@@ -125,6 +137,34 @@ pub fn map_to_dbf_fields(
     })
 }
 
+/// Serialize a [`DbfRecord`] into raw bytes for direct file append.
+///
+/// Each field is right-padded with spaces to its defined width.
+/// Returns RECORD_DATA_LEN bytes (no deletion flag prefix).
+fn serialize_record(record: &DbfRecord) -> [u8; RECORD_DATA_LEN] {
+    let fields: [&str; 9] = [
+        &record.event,
+        &record.division,
+        &record.chip,
+        &record.time,
+        &record.runerno,
+        &record.daycode,
+        &record.lapno,
+        &record.tpoint,
+        &record.reader,
+    ];
+
+    let mut buf = [b' '; RECORD_DATA_LEN]; // fill with spaces for padding
+    let mut offset = 0;
+    for (field, &width) in fields.iter().zip(FIELD_WIDTHS.iter()) {
+        let bytes = field.as_bytes();
+        let copy_len = bytes.len().min(width);
+        buf[offset..offset + copy_len].copy_from_slice(&bytes[..copy_len]);
+        offset += width;
+    }
+    buf
+}
+
 fn template_writer(
     path: &Path,
 ) -> std::io::Result<dbase::TableWriter<std::io::BufWriter<std::fs::File>>> {
@@ -134,17 +174,6 @@ fn template_writer(
         .build_with_file_dest(path)
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
-
-fn replace_file(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    std::fs::rename(tmp_path, path)
-}
-
-// ---------------------------------------------------------------------------
-// create_empty_dbf
-// ---------------------------------------------------------------------------
 
 /// Create a new empty DBF file at `path` with the IPICO 9-field schema.
 ///
@@ -157,55 +186,56 @@ pub fn create_empty_dbf(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// append_record
-// ---------------------------------------------------------------------------
-
-/// Append a [`DbfRecord`] to the DBF file at `path`.
+/// Append a [`DbfRecord`] to the DBF file at `path` using in-place append.
 ///
-/// If the file does not exist it is created first. All existing records are
-/// read, the writer is rebuilt from the reader's schema, and all records
-/// (existing + new) are written to a fresh file.
+/// If the file does not exist it is created first. The record is written
+/// directly to the end of the file and the header record count is updated,
+/// avoiding a full file rewrite.
 pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
     if !path.exists() {
         create_empty_dbf(path)?;
     }
 
-    // Read all existing records and capture the table info for schema reuse.
-    let mut reader =
-        dbase::Reader::from_path(path).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let existing: Vec<dbase::Record> = reader
-        .read()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let table_info = reader.into_table_info();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
 
-    // Write to a temp file next to the target, then rename atomically.
-    let tmp_path = path.with_extension("dbf.tmp");
-    {
-        let mut writer = TableWriterBuilder::from_table_info(table_info)
-            .build_with_file_dest(&tmp_path)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    // Read header fields: record_count (bytes 4-7), header_size (bytes 8-9),
+    // record_size (bytes 10-11), all little-endian.
+    let mut header_buf = [0u8; 12];
+    file.read_exact(&mut header_buf)?;
+    let record_count =
+        u32::from_le_bytes([header_buf[4], header_buf[5], header_buf[6], header_buf[7]]);
+    let header_size = u16::from_le_bytes([header_buf[8], header_buf[9]]) as u64;
+    let record_size = u16::from_le_bytes([header_buf[10], header_buf[11]]) as u64;
 
-        for rec in &existing {
-            writer
-                .write_record(rec)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-        }
-        writer
-            .write_record(record)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        writer
-            .finalize()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    // Sanity check: record_size should be 1 (deletion flag) + RECORD_DATA_LEN
+    if record_size != (1 + RECORD_DATA_LEN as u64) {
+        return Err(std::io::Error::other(format!(
+            "unexpected DBF record size: expected {}, got {record_size}",
+            1 + RECORD_DATA_LEN
+        )));
     }
 
-    replace_file(&tmp_path, path)?;
+    // Seek to where the new record should go: after all existing records
+    let write_pos = header_size + (record_count as u64) * record_size;
+    file.seek(SeekFrom::Start(write_pos))?;
+
+    // Write: deletion flag + record data + EOF marker
+    let record_bytes = serialize_record(record);
+    file.write_all(&[DBF_RECORD_NOT_DELETED])?;
+    file.write_all(&record_bytes)?;
+    file.write_all(&[DBF_EOF_MARKER])?;
+
+    // Update record count in header (bytes 4-7)
+    let new_count = record_count + 1;
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(&new_count.to_le_bytes())?;
+
+    file.flush()?;
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// clear_dbf
-// ---------------------------------------------------------------------------
 
 /// Rewrite the DBF file at `path` as empty (header only, zero records).
 ///
@@ -214,12 +244,9 @@ pub fn clear_dbf(path: &Path) -> std::io::Result<()> {
     create_empty_dbf(path)
 }
 
-// ---------------------------------------------------------------------------
-// run_dbf_writer
-// ---------------------------------------------------------------------------
-
-/// Run the DBF writer loop. Receives ReadEvents from the global broadcast
-/// channel and appends them to the DBF file.
+/// Receives ReadEvents from the global broadcast channel, filters out sentinel
+/// types and unsubscribed/overflow readers, maps each event to a DBF record
+/// using the subscription's event type, and appends the record to the DBF file.
 pub async fn run_dbf_writer(
     mut event_rx: broadcast::Receiver<ReadEvent>,
     db: Arc<Mutex<Db>>,
@@ -241,7 +268,7 @@ pub async fn run_dbf_writer(
             result = event_rx.recv() => {
                 match result {
                     Ok(event) => {
-                        // Skip sentinel read types
+                        // Skip sentinel read types (e.g., __checkpoint)
                         if event.read_type.starts_with("__") {
                             continue;
                         }
@@ -249,7 +276,13 @@ pub async fn run_dbf_writer(
                         // Look up subscription for this event to get event_type and reader index
                         let subs = {
                             let db = db.lock().await;
-                            db.load_subscriptions().unwrap_or_default()
+                            match db.load_subscriptions() {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to load subscriptions for DBF writer, skipping event");
+                                    continue;
+                                }
+                            }
                         };
 
                         let sub_index = subs.iter().position(|s| {
@@ -261,23 +294,23 @@ pub async fn run_dbf_writer(
                             continue;
                         };
 
-                        // Skip if reader index > 9
-                        if idx > 9 {
-                            tracing::debug!(idx, "reader index > 9, skipping DBF write");
-                            continue;
-                        }
-
-                        let event_type = &subs[idx].event_type;
+                        let event_type = subs[idx].event_type;
                         let reader_index = idx as u8;
 
                         match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
                             Some(record) => {
-                                if let Err(e) = append_record(&path, &record) {
-                                    tracing::error!(error = %e, "DBF write failed, skipping record");
+                                let p = path.clone();
+                                if let Err(e) = tokio::task::spawn_blocking(move || append_record(&p, &record)).await.unwrap() {
+                                    tracing::error!(error = %e, path = %path.display(), "DBF write failed, skipping record");
                                 }
                             }
                             None => {
-                                tracing::warn!("failed to parse raw frame for DBF record, skipping");
+                                tracing::warn!(
+                                    forwarder_id = %event.forwarder_id,
+                                    reader_ip = %event.reader_ip,
+                                    raw_frame_len = event.raw_frame.len(),
+                                    "failed to parse raw frame for DBF record, skipping"
+                                );
                             }
                         }
                     }
@@ -294,10 +327,6 @@ pub async fn run_dbf_writer(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,7 +339,7 @@ mod tests {
     #[test]
     fn map_to_dbf_fields_finish_event() {
         let raw = sample_raw_frame();
-        let record = map_to_dbf_fields(&raw, "finish", 4).unwrap();
+        let record = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
         assert_eq!(record.event, "F");
         assert_eq!(record.chip, "000000012345");
         assert_eq!(record.time, "18455939");
@@ -325,7 +354,7 @@ mod tests {
     #[test]
     fn map_to_dbf_fields_start_event() {
         let raw = sample_raw_frame();
-        let record = map_to_dbf_fields(&raw, "start", 0).unwrap();
+        let record = map_to_dbf_fields(&raw, EventType::Start, 0).unwrap();
         assert_eq!(record.event, "S");
         assert_eq!(record.tpoint, "S ");
         assert_eq!(record.reader, "0");
@@ -333,14 +362,21 @@ mod tests {
 
     #[test]
     fn map_to_dbf_fields_invalid_frame_returns_none() {
-        assert!(map_to_dbf_fields(b"not a valid frame", "finish", 0).is_none());
+        assert!(map_to_dbf_fields(b"not a valid frame", EventType::Finish, 0).is_none());
     }
 
     #[test]
     fn map_to_dbf_fields_non_ipico_prefix_returns_none() {
         let mut raw = sample_raw_frame();
         raw[0] = b'b';
-        assert!(map_to_dbf_fields(&raw, "finish", 0).is_none());
+        assert!(map_to_dbf_fields(&raw, EventType::Finish, 0).is_none());
+    }
+
+    #[test]
+    fn map_to_dbf_fields_reader_index_over_9_returns_none() {
+        let raw = sample_raw_frame();
+        assert!(map_to_dbf_fields(&raw, EventType::Finish, 10).is_none());
+        assert!(map_to_dbf_fields(&raw, EventType::Finish, 255).is_none());
     }
 
     #[test]
@@ -355,7 +391,7 @@ mod tests {
         assert_eq!(records.len(), 0);
         // Append
         let raw = sample_raw_frame();
-        let rec = map_to_dbf_fields(&raw, "finish", 4).unwrap();
+        let rec = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
         append_record(&path, &rec).unwrap();
         // Read back
         let mut reader = dbase::Reader::from_path(&path).unwrap();
@@ -379,11 +415,39 @@ mod tests {
     }
 
     #[test]
+    fn append_record_auto_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.dbf");
+        assert!(!path.exists());
+        let raw = sample_raw_frame();
+        let rec = map_to_dbf_fields(&raw, EventType::Finish, 0).unwrap();
+        append_record(&path, &rec).unwrap();
+        assert!(path.exists());
+        let mut reader = dbase::Reader::from_path(&path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn append_multiple_records_increments_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.dbf");
+        let raw = sample_raw_frame();
+        let rec = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
+        append_record(&path, &rec).unwrap();
+        append_record(&path, &rec).unwrap();
+        append_record(&path, &rec).unwrap();
+        let mut reader = dbase::Reader::from_path(&path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
     fn clear_dbf_removes_records() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.dbf");
         let raw = sample_raw_frame();
-        let rec = map_to_dbf_fields(&raw, "finish", 4).unwrap();
+        let rec = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
         append_record(&path, &rec).unwrap();
         append_record(&path, &rec).unwrap();
         let mut reader = dbase::Reader::from_path(&path).unwrap();
@@ -408,7 +472,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.dbf");
         let raw = sample_raw_frame();
-        let rec = map_to_dbf_fields(&raw, "finish", 4).unwrap();
+        let rec = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
         append_record(&path, &rec).unwrap();
 
         clear_dbf(&path).unwrap();
@@ -449,7 +513,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.dbf");
         let raw = sample_raw_frame();
-        let rec = map_to_dbf_fields(&raw, "finish", 4).unwrap();
+        let rec = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
         append_record(&path, &rec).unwrap();
 
         let mut our_reader = dbase::Reader::from_path(&path).unwrap();
@@ -461,6 +525,20 @@ mod tests {
         let mut our_sorted = our_fields.clone();
         our_sorted.sort();
         assert_eq!(sample_sorted, our_sorted, "field names should match");
+    }
+
+    #[test]
+    fn serialize_record_produces_correct_bytes() {
+        let raw = sample_raw_frame();
+        let record = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
+        let bytes = serialize_record(&record);
+        assert_eq!(bytes.len(), RECORD_DATA_LEN);
+        // EVENT = "F" (1 byte)
+        assert_eq!(bytes[0], b'F');
+        // DIVISION = "  " (2 bytes)
+        assert_eq!(&bytes[1..3], b"  ");
+        // CHIP starts at offset 3, 12 bytes
+        assert_eq!(&bytes[3..15], b"000000012345");
     }
 
     #[tokio::test]
@@ -503,6 +581,104 @@ mod tests {
         assert!(
             !dbf_path.exists(),
             "DBF file should not be created for sentinel events"
+        );
+    }
+
+    #[tokio::test]
+    async fn dbf_writer_writes_valid_event() {
+        use std::sync::Arc;
+        use tokio::sync::{Mutex, broadcast, watch};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let dbf_path = dir.path().join("test.dbf");
+        let db = crate::db::Db::open(&db_path).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+
+        let db = Arc::new(Mutex::new(db));
+        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let rx = tx.subscribe();
+
+        let path = dbf_path.to_str().unwrap().to_owned();
+        let db_clone = Arc::clone(&db);
+        let handle = tokio::spawn(async move {
+            run_dbf_writer(rx, db_clone, shutdown_rx, path).await;
+        });
+
+        tx.send(rt_protocol::ReadEvent {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "T".to_owned(),
+            raw_frame: sample_raw_frame(),
+            read_type: "RAW".to_owned(),
+        })
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        assert!(
+            dbf_path.exists(),
+            "DBF file should be created for valid events"
+        );
+        let mut reader = dbase::Reader::from_path(&dbf_path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert_eq!(records.len(), 1, "should have exactly one record");
+        let r = &records[0];
+        assert_eq!(
+            r.get("CHIP").and_then(|v| match v {
+                FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
+                _ => None,
+            }),
+            Some("000000012345".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn dbf_writer_skips_unsubscribed_event() {
+        use std::sync::Arc;
+        use tokio::sync::{Mutex, broadcast, watch};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let dbf_path = dir.path().join("test.dbf");
+        let db = crate::db::Db::open(&db_path).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+
+        let db = Arc::new(Mutex::new(db));
+        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let rx = tx.subscribe();
+
+        let path = dbf_path.to_str().unwrap().to_owned();
+        let db_clone = Arc::clone(&db);
+        let handle = tokio::spawn(async move {
+            run_dbf_writer(rx, db_clone, shutdown_rx, path).await;
+        });
+
+        // Send event for a forwarder/reader that is NOT subscribed
+        tx.send(rt_protocol::ReadEvent {
+            forwarder_id: "f-unknown".to_owned(),
+            reader_ip: "10.0.0.99".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "T".to_owned(),
+            raw_frame: sample_raw_frame(),
+            read_type: "RAW".to_owned(),
+        })
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        assert!(
+            !dbf_path.exists(),
+            "DBF file should not be created for unsubscribed events"
         );
     }
 }

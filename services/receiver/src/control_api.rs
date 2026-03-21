@@ -269,7 +269,7 @@ impl AppState {
                     reader_ip: si.reader_ip.clone(),
                     subscribed: local.is_some(),
                     local_port: port,
-                    event_type: local.map(|s| s.event_type.clone()),
+                    event_type: local.map(|s| s.event_type),
                     online: Some(si.online),
                     display_alias: si.display_alias.clone(),
                     stream_epoch: Some(si.stream_epoch),
@@ -299,7 +299,7 @@ impl AppState {
                 reader_ip: sub.reader_ip.clone(),
                 subscribed: true,
                 local_port: port,
-                event_type: Some(sub.event_type.clone()),
+                event_type: Some(sub.event_type),
                 online: None,
                 display_alias: None,
                 stream_epoch: None,
@@ -383,7 +383,7 @@ pub struct SubscriptionRequest {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub local_port_override: Option<u16>,
-    pub event_type: Option<String>,
+    pub event_type: Option<crate::db::EventType>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -411,7 +411,7 @@ pub struct StreamEntry {
     pub subscribed: bool,
     pub local_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_type: Option<String>,
+    pub event_type: Option<crate::db::EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -510,20 +510,8 @@ struct UpstreamRaceStreamMapping {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DbfConfigResponse {
-    pub enabled: bool,
-    pub path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DbfConfigRequest {
-    pub enabled: bool,
-    pub path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct EventTypeRequest {
-    pub event_type: String,
+    pub event_type: crate::db::EventType,
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,7 +1144,7 @@ pub async fn put_subscriptions(
             forwarder_id: s.forwarder_id,
             reader_ip: s.reader_ip,
             local_port_override: s.local_port_override,
-            event_type: s.event_type.unwrap_or_else(|| "finish".to_owned()),
+            event_type: s.event_type.unwrap_or(crate::db::EventType::Finish),
         })
         .collect();
     let mut db = state.db.lock().await;
@@ -1245,18 +1233,23 @@ pub async fn disconnect(state: &AppState) {
     state.request_disconnect_shutdown();
 }
 
-pub async fn get_dbf_config(state: &AppState) -> Result<DbfConfigResponse, ReceiverError> {
+pub async fn get_dbf_config(state: &AppState) -> Result<crate::db::DbfConfig, ReceiverError> {
     let db = state.db.lock().await;
     match db.load_dbf_config() {
-        Ok(config) => Ok(DbfConfigResponse {
-            enabled: config.enabled,
-            path: config.path,
-        }),
+        Ok(config) => Ok(config),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-pub async fn put_dbf_config(state: &AppState, body: DbfConfigRequest) -> Result<(), ReceiverError> {
+pub async fn put_dbf_config(
+    state: &AppState,
+    body: crate::db::DbfConfig,
+) -> Result<(), ReceiverError> {
+    if body.path.trim().is_empty() {
+        return Err(ReceiverError::BadRequest(
+            "DBF path must not be empty".to_owned(),
+        ));
+    }
     let db = state.db.lock().await;
     match db.save_dbf_config(body.enabled, &body.path) {
         Ok(()) => {
@@ -1284,13 +1277,8 @@ pub async fn update_subscription_event_type(
     reader_ip: &str,
     body: EventTypeRequest,
 ) -> Result<(), ReceiverError> {
-    if body.event_type != "start" && body.event_type != "finish" {
-        return Err(ReceiverError::BadRequest(
-            "event_type must be 'start' or 'finish'".to_owned(),
-        ));
-    }
     let db = state.db.lock().await;
-    match db.update_subscription_event_type(forwarder_id, reader_ip, &body.event_type) {
+    match db.update_subscription_event_type(forwarder_id, reader_ip, body.event_type) {
         Ok(true) => Ok(()),
         Ok(false) => Err(ReceiverError::BadRequest(
             "subscription not found".to_owned(),

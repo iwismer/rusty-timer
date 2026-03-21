@@ -293,7 +293,7 @@ async fn admin_factory_reset(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
 #[tauri::command]
 async fn get_dbf_config(
     state: tauri::State<'_, Arc<AppState>>,
-) -> CmdResult<receiver::control_api::DbfConfigResponse> {
+) -> CmdResult<receiver::db::DbfConfig> {
     receiver::control_api::get_dbf_config(&state)
         .await
         .map_err(|e| e.to_string())
@@ -302,7 +302,7 @@ async fn get_dbf_config(
 #[tauri::command]
 async fn put_dbf_config(
     state: tauri::State<'_, Arc<AppState>>,
-    body: receiver::control_api::DbfConfigRequest,
+    body: receiver::db::DbfConfig,
 ) -> CmdResult<()> {
     receiver::control_api::put_dbf_config(&state, body)
         .await

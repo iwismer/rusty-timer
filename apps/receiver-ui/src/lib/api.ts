@@ -16,7 +16,7 @@ export interface StreamEntry {
   reader_ip: string;
   subscribed: boolean;
   local_port: number | null;
-  event_type?: string;
+  event_type?: "start" | "finish";
   online?: boolean;
   display_alias?: string;
   stream_epoch?: number;
@@ -68,7 +68,7 @@ export interface SubscriptionItem {
   forwarder_id: string;
   reader_ip: string;
   local_port_override: number | null;
-  event_type?: string;
+  event_type?: "start" | "finish";
 }
 
 export type ConnectionState =

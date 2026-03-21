@@ -6,6 +6,44 @@ use std::path::Path;
 use thiserror::Error;
 const SCHEMA_SQL: &str = include_str!("storage/schema.sql");
 pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
+
+/// The default path for DBF output files (Race Director convention).
+pub const DEFAULT_DBF_PATH: &str = r"C:\winrace\Files\IPICO.DBF";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EventType {
+    Start,
+    Finish,
+}
+
+impl EventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventType::Start => "start",
+            EventType::Finish => "finish",
+        }
+    }
+}
+
+impl std::str::FromStr for EventType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "start" => Ok(EventType::Start),
+            "finish" => Ok(EventType::Finish),
+            other => Err(format!(
+                "invalid event type: '{other}', must be 'start' or 'finish'"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("SQLite: {0}")]
@@ -32,7 +70,7 @@ pub struct Subscription {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub local_port_override: Option<u16>,
-    pub event_type: String,
+    pub event_type: EventType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,7 +221,10 @@ impl Db {
                 forwarder_id: r.get(0)?,
                 reader_ip: r.get(1)?,
                 local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
-                event_type: r.get(3)?,
+                event_type: r
+                    .get::<_, String>(3)?
+                    .parse::<EventType>()
+                    .unwrap_or(EventType::Finish),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -193,11 +234,11 @@ impl Db {
         fwd: &str,
         ip: &str,
         port: Option<u16>,
-        event_type: Option<&str>,
+        event_type: Option<EventType>,
     ) -> DbResult<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![fwd, ip, port.map(|p| p as i64), event_type.unwrap_or("finish")],
+            rusqlite::params![fwd, ip, port.map(|p| p as i64), event_type.unwrap_or(EventType::Finish).as_str()],
         )?;
         Ok(())
     }
@@ -207,7 +248,7 @@ impl Db {
         for s in subs {
             tx.execute(
                 "INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64), &s.event_type],
+                rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64), s.event_type.as_str()],
             )?;
         }
         tx.commit()?;
@@ -364,7 +405,7 @@ impl Db {
             },
             None => DbfConfig {
                 enabled: false,
-                path: r"C:\winrace\Files\IPICO.DBF".to_owned(),
+                path: DEFAULT_DBF_PATH.to_owned(),
             },
         })
     }
@@ -381,11 +422,11 @@ impl Db {
         &self,
         fwd: &str,
         ip: &str,
-        event_type: &str,
+        event_type: EventType,
     ) -> DbResult<bool> {
         let count = self.conn.execute(
             "UPDATE subscriptions SET event_type = ?1 WHERE forwarder_id = ?2 AND reader_ip = ?3",
-            rusqlite::params![event_type, fwd, ip],
+            rusqlite::params![event_type.as_str(), fwd, ip],
         )?;
         Ok(count > 0)
     }
@@ -812,15 +853,15 @@ mod tests {
             .unwrap();
         let subs = db.load_subscriptions().unwrap();
         assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].event_type, "finish");
+        assert_eq!(subs[0].event_type, EventType::Finish);
         db.replace_subscriptions(&[Subscription {
             forwarder_id: "fwd1".to_owned(),
             reader_ip: "10.0.0.1".to_owned(),
             local_port_override: None,
-            event_type: "start".to_owned(),
+            event_type: EventType::Start,
         }])
         .unwrap();
         let subs = db.load_subscriptions().unwrap();
-        assert_eq!(subs[0].event_type, "start");
+        assert_eq!(subs[0].event_type, EventType::Start);
     }
 }

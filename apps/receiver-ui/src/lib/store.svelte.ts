@@ -776,6 +776,7 @@ export async function loadDbfConfig() {
     store.editDbfPath = config.path;
   } catch (e) {
     console.error("Failed to load DBF config:", e);
+    store.error = `Failed to load DBF config: ${e}`;
   }
 }
 
