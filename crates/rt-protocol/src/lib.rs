@@ -214,6 +214,26 @@ pub struct ReceiverModeApplied {
     pub warnings: Vec<String>,
 }
 
+/// Per-stream metrics delivered over the authenticated WS connection.
+///
+/// Sent server→receiver after mode application and on live metric updates.
+/// Contains both lifetime and current-epoch counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverStreamMetrics {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub raw_count: i64,
+    pub dedup_count: i64,
+    pub retransmit_count: i64,
+    pub lag_ms: Option<u64>,
+    pub epoch_raw_count: i64,
+    pub epoch_dedup_count: i64,
+    pub epoch_retransmit_count: i64,
+    pub epoch_lag_ms: Option<u64>,
+    pub epoch_last_received_at: Option<String>,
+    pub unique_chips: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Server -> Receiver messages
 // ---------------------------------------------------------------------------
@@ -505,6 +525,7 @@ pub enum WsMessage {
     ReceiverModeApplied(ReceiverModeApplied),
     ReceiverEventBatch(ReceiverEventBatch),
     ReceiverAck(ReceiverAck),
+    ReceiverStreamMetrics(ReceiverStreamMetrics),
     Heartbeat(Heartbeat),
     Error(ErrorMessage),
     EpochResetCommand(EpochResetCommand),
