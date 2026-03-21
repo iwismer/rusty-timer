@@ -230,5 +230,5 @@ export async function updateLocalPort(
 export async function getSubscriptions(): Promise<{
   subscriptions: SubscriptionItem[];
 }> {
-  return invoke("get_subscriptions");
+  return invoke<{ subscriptions: SubscriptionItem[] }>("get_subscriptions");
 }

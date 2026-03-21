@@ -7,6 +7,31 @@ import type {
   StreamsResponse,
 } from "./api";
 
+// Payload types matching the Rust ReceiverUiEvent serde output.
+// Each variant serializes with #[serde(tag = "type", rename_all = "snake_case")].
+type StatusChangedPayload = {
+  connection_state: StatusResponse["connection_state"];
+  local_ok?: boolean;
+  streams_count: number;
+  receiver_id?: string;
+};
+type StreamsSnapshotPayload = {
+  streams: StreamsResponse["streams"];
+  degraded: boolean;
+  upstream_error?: string | null;
+};
+type LogEntryPayload = { entry: string };
+type StreamCountsUpdatedPayload = { updates?: StreamCountUpdate[] };
+type ModeChangedPayload = { mode: ReceiverMode };
+type LastReadPayload = {
+  forwarder_id: string;
+  reader_ip: string;
+  chip_id: string;
+  timestamp: string;
+  bib?: string | null;
+  name?: string | null;
+};
+
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;
   onStreamsSnapshot: (streams: StreamsResponse) => void;
@@ -27,7 +52,7 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
   callbacks.onConnectionChange(true);
 
   unlistenFns = await Promise.all([
-    listen<any>("status_changed", (event) => {
+    listen<StatusChangedPayload>("status_changed", (event) => {
       callbacks.onStatusChanged({
         connection_state: event.payload.connection_state,
         local_ok: event.payload.local_ok ?? true,
@@ -35,26 +60,26 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
         receiver_id: event.payload.receiver_id ?? "",
       });
     }),
-    listen<any>("streams_snapshot", (event) => {
+    listen<StreamsSnapshotPayload>("streams_snapshot", (event) => {
       callbacks.onStreamsSnapshot({
         streams: event.payload.streams,
         degraded: event.payload.degraded,
         upstream_error: event.payload.upstream_error ?? null,
       });
     }),
-    listen<any>("log_entry", (event) => {
+    listen<LogEntryPayload>("log_entry", (event) => {
       callbacks.onLogEntry(event.payload.entry);
     }),
     listen("resync", () => {
       callbacks.onResync();
     }),
-    listen<any>("stream_counts_updated", (event) => {
+    listen<StreamCountsUpdatedPayload>("stream_counts_updated", (event) => {
       callbacks.onStreamCountsUpdated(event.payload.updates ?? []);
     }),
-    listen<any>("mode_changed", (event) => {
+    listen<ModeChangedPayload>("mode_changed", (event) => {
       callbacks.onModeChanged(event.payload.mode);
     }),
-    listen<any>("last_read", (event) => {
+    listen<LastReadPayload>("last_read", (event) => {
       callbacks.onLastRead({
         forwarder_id: event.payload.forwarder_id,
         reader_ip: event.payload.reader_ip,

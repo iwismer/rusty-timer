@@ -1,9 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use receiver::control_api::{self, AppState, ShutdownSignal};
 use receiver::ui_events::ReceiverUiEvent;
+use tauri::async_runtime::JoinHandle;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{Emitter, Manager, RunEvent, State};
 use tokio_stream::StreamExt;
@@ -41,6 +42,9 @@ fn bridge_action_from_item(
     item: Result<ReceiverUiEvent, BroadcastStreamRecvError>,
 ) -> BridgeAction {
     match item {
+        // Library-emitted Resync goes through the same path as lag-induced resync
+        // so the frontend always receives an identical empty-payload "resync" event.
+        Ok(ReceiverUiEvent::Resync) => BridgeAction::EmitResync,
         Ok(event) => BridgeAction::EmitEvent {
             name: ui_event_name(&event),
             event,
@@ -321,7 +325,9 @@ fn main() {
                 _ => {}
             });
 
-            // Initialize receiver runtime
+            // Initialize receiver runtime.
+            // block_on is safe here because setup() runs before the Tauri event
+            // loop starts, so we won't deadlock the async runtime.
             let (state, shutdown_rx) =
                 tauri::async_runtime::block_on(async { receiver::runtime::init(None).await })
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -332,8 +338,11 @@ fn main() {
             // Start event bridge
             spawn_event_bridge(handle, &state);
 
-            // Spawn receiver runtime
-            tauri::async_runtime::spawn(receiver::runtime::run(state, shutdown_rx));
+            // Spawn receiver runtime, keeping the handle so we can await
+            // graceful shutdown (cancel session, stop proxies) before exit.
+            let runtime_handle: JoinHandle<()> =
+                tauri::async_runtime::spawn(receiver::runtime::run(state, shutdown_rx));
+            app.manage(Mutex::new(Some(runtime_handle)));
 
             Ok(())
         })
@@ -368,6 +377,16 @@ fn main() {
             if let RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                     let _ = state.shutdown_tx.send(ShutdownSignal::Terminate);
+                }
+                // Wait for receiver runtime to finish graceful cleanup
+                // (cancel WS session, stop local proxies) before the process exits.
+                if let Some(guard) = app_handle.try_state::<Mutex<Option<JoinHandle<()>>>>() {
+                    if let Some(handle) = guard.lock().ok().and_then(|mut g| g.take()) {
+                        tauri::async_runtime::block_on(async {
+                            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                                .await;
+                        });
+                    }
                 }
             }
         });

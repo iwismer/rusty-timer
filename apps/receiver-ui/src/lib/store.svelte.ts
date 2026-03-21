@@ -862,7 +862,7 @@ export function initStore(): void {
       // Not running in Tauri (e.g., dev server in browser) — ignore
     });
 
-  void initSSE({
+  initSSE({
     onStatusChanged: (s) => {
       store.status = s;
     },
@@ -894,7 +894,7 @@ export function initStore(): void {
       next.set(key, read);
       store.lastReads = next;
     },
-  });
+  })?.catch((e: unknown) => console.error("initSSE failed:", e));
 }
 
 export function destroyStore(): void {
