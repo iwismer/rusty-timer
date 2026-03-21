@@ -1,4 +1,4 @@
-import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   LastRead,
   ReceiverMode,
@@ -6,6 +6,31 @@ import type {
   StreamCountUpdate,
   StreamsResponse,
 } from "./api";
+
+// Payload types matching the Rust ReceiverUiEvent serde output.
+// Each variant serializes with #[serde(tag = "type", rename_all = "snake_case")].
+type StatusChangedPayload = {
+  connection_state: StatusResponse["connection_state"];
+  local_ok?: boolean;
+  streams_count: number;
+  receiver_id?: string;
+};
+type StreamsSnapshotPayload = {
+  streams: StreamsResponse["streams"];
+  degraded: boolean;
+  upstream_error?: string | null;
+};
+type LogEntryPayload = { entry: string };
+type StreamCountsUpdatedPayload = { updates?: StreamCountUpdate[] };
+type ModeChangedPayload = { mode: ReceiverMode };
+type LastReadPayload = {
+  forwarder_id: string;
+  reader_ip: string;
+  chip_id: string;
+  timestamp: string;
+  bib?: string | null;
+  name?: string | null;
+};
 
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;
@@ -18,62 +43,58 @@ export type SseCallbacks = {
   onLastRead: (read: LastRead) => void;
 };
 
-let handle: SseHandle | null = null;
+let unlistenFns: UnlistenFn[] = [];
 
-export function initSSE(callbacks: SseCallbacks): void {
-  if (handle) return;
+export async function initSSE(callbacks: SseCallbacks): Promise<void> {
+  if (unlistenFns.length > 0) return;
 
-  handle = createSSE(
-    "/api/v1/events",
-    {
-      status_changed: (data: any) => {
-        callbacks.onStatusChanged({
-          connection_state: data.connection_state,
-          local_ok: data.local_ok ?? true,
-          streams_count: data.streams_count,
-          receiver_id: data.receiver_id ?? "",
-        });
-      },
-      streams_snapshot: (data: any) => {
-        callbacks.onStreamsSnapshot({
-          streams: data.streams,
-          degraded: data.degraded,
-          upstream_error: data.upstream_error ?? null,
-        });
-      },
-      log_entry: (data: any) => {
-        callbacks.onLogEntry(data.entry);
-      },
-      resync: () => {
-        callbacks.onResync();
-      },
-      stream_counts_updated: (data: any) => {
-        callbacks.onStreamCountsUpdated(data.updates ?? []);
-      },
-      mode_changed: (data: any) => {
-        callbacks.onModeChanged(data.mode);
-      },
-      last_read: (data: any) => {
-        callbacks.onLastRead({
-          forwarder_id: data.forwarder_id,
-          reader_ip: data.reader_ip,
-          chip_id: data.chip_id,
-          timestamp: data.timestamp,
-          bib: data.bib ?? null,
-          name: data.name ?? null,
-        });
-      },
-    },
-    (connected) => {
-      callbacks.onConnectionChange(connected);
-      if (connected) callbacks.onResync();
-    },
-  );
+  // Tauri events are always connected (in-process)
+  callbacks.onConnectionChange(true);
+
+  unlistenFns = await Promise.all([
+    listen<StatusChangedPayload>("status_changed", (event) => {
+      callbacks.onStatusChanged({
+        connection_state: event.payload.connection_state,
+        local_ok: event.payload.local_ok ?? true,
+        streams_count: event.payload.streams_count,
+        receiver_id: event.payload.receiver_id ?? "",
+      });
+    }),
+    listen<StreamsSnapshotPayload>("streams_snapshot", (event) => {
+      callbacks.onStreamsSnapshot({
+        streams: event.payload.streams,
+        degraded: event.payload.degraded,
+        upstream_error: event.payload.upstream_error ?? null,
+      });
+    }),
+    listen<LogEntryPayload>("log_entry", (event) => {
+      callbacks.onLogEntry(event.payload.entry);
+    }),
+    listen("resync", () => {
+      callbacks.onResync();
+    }),
+    listen<StreamCountsUpdatedPayload>("stream_counts_updated", (event) => {
+      callbacks.onStreamCountsUpdated(event.payload.updates ?? []);
+    }),
+    listen<ModeChangedPayload>("mode_changed", (event) => {
+      callbacks.onModeChanged(event.payload.mode);
+    }),
+    listen<LastReadPayload>("last_read", (event) => {
+      callbacks.onLastRead({
+        forwarder_id: event.payload.forwarder_id,
+        reader_ip: event.payload.reader_ip,
+        chip_id: event.payload.chip_id,
+        timestamp: event.payload.timestamp,
+        bib: event.payload.bib ?? null,
+        name: event.payload.name ?? null,
+      });
+    }),
+  ]);
 }
 
 export function destroySSE(): void {
-  if (handle) {
-    handle.destroy();
-    handle = null;
+  for (const unlisten of unlistenFns) {
+    unlisten();
   }
+  unlistenFns = [];
 }

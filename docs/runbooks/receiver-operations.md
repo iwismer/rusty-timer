@@ -22,7 +22,7 @@ The receiver is a client service that:
 - Connects to the rt-server via WebSocket.
 - Subscribes to one or more timing streams (identified by `forwarder_id + reader_ip`).
 - Maintains a local SQLite cursor for durable resume on reconnect.
-- Exposes a local control API and forwards events to the local timing display.
+- Provides a desktop UI (Tauri app) for configuration and monitoring.
 
 **Local durability**: The receiver uses SQLite with WAL+FULL sync. On startup,
 it runs `PRAGMA integrity_check` and exits if it fails.
@@ -59,10 +59,8 @@ rt-receiver &
 
 ### Verify startup
 
-```bash
-# The receiver control API is always on port 9090.
-curl http://localhost:9090/api/v1/status
-```
+Launch the Rusty Timer Receiver desktop app. If the app opens successfully,
+the receiver is running. Check the status in the UI.
 
 ---
 
@@ -70,7 +68,7 @@ curl http://localhost:9090/api/v1/status
 
 The receiver is configured via its SQLite profile database. On first run,
 the receiver creates a default profile. Configuration is managed via the
-control API or the receiver UI (Tauri desktop app, if applicable).
+receiver UI (Tauri desktop app).
 
 ### Profile settings
 
@@ -93,18 +91,10 @@ is required. Collisions are logged as errors at startup.
 
 ## Monitoring and Health
 
-### Health endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/v1/status` | Receiver control API is reachable and returns `connection_state`, DB health (`local_ok`), and stream count. |
-
 ### Check connection status
 
-```bash
-# Via the control API.
-curl http://localhost:9090/api/v1/status
-```
+Check the connection status in the receiver desktop UI. The status indicator
+shows `connection_state`, DB health (`local_ok`), and stream count.
 
 ### Log monitoring
 
@@ -197,25 +187,12 @@ Receiver UI stream rows now show the current `stream epoch` and current epoch na
 The receiver applies stream subscriptions during the v1.2 hello handshake.
 Updating subscriptions triggers reconnect-based re-resolution/replay.
 
-Using the control API:
-
-```bash
-curl -X PUT http://localhost:9090/api/v1/subscriptions \
-  -H "Content-Type: application/json" \
-  -d '{"subscriptions": [{"forwarder_id": "fwd-001", "reader_ip": "192.168.1.100:10000", "local_port_override": null}]}'
-```
-
-Note: `PUT /api/v1/subscriptions` replaces the entire subscription list atomically.
-To add a stream without removing existing ones, read the current list first with
-`GET /api/v1/subscriptions`, then include all subscriptions in the PUT body.
-
-Or restart the receiver with the updated profile to pick up new subscriptions.
+Use the receiver desktop UI to manage subscriptions. Updating subscriptions
+replaces the entire subscription list atomically.
 
 ### View current subscriptions
 
-```bash
-curl http://localhost:9090/api/v1/subscriptions
-```
+Current subscriptions are visible in the receiver desktop UI.
 
 ### Replay modes and targeted replay semantics
 

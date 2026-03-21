@@ -423,18 +423,6 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Cargo.toml receiver version matches tag
-        run: |
-          CARGO_VERSION=$(python3 -c "
-          import tomllib
-          with open('services/receiver/Cargo.toml', 'rb') as f:
-              print(tomllib.load(f)['package']['version'])
-          ")
-          if [ "$CARGO_VERSION" != "${{ steps.parse.outputs.version }}" ]; then
-            echo "::error::services/receiver/Cargo.toml version ($CARGO_VERSION) != tag version (${{ steps.parse.outputs.version }})"
-            exit 1
-          fi
-
   receiver-tauri-build:
     name: Receiver Tauri — build Windows installer
     needs: receiver-tauri-validate
@@ -457,16 +445,6 @@ jobs:
 
       - name: Build receiver UI (SvelteKit)
         run: npm run build --workspace "apps/receiver-ui"
-
-      - name: Build receiver binary
-        run: cargo build --release --target x86_64-pc-windows-msvc -p receiver --features receiver/embed-ui
-
-      - name: Stage sidecar binary
-        shell: bash
-        run: |
-          mkdir -p apps/receiver-ui/src-tauri/binaries
-          cp target/x86_64-pc-windows-msvc/release/receiver.exe \
-             apps/receiver-ui/src-tauri/binaries/receiver-x86_64-pc-windows-msvc.exe
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"

@@ -1,14 +1,15 @@
 pub mod cache;
 pub mod control_api;
 pub mod db;
+pub mod error;
 pub mod local_proxy;
 pub mod ports;
+pub mod runtime;
 pub mod session;
-pub mod sse;
 pub mod ui_events;
-pub mod ui_server;
 pub use cache::{EventBus, StreamCounts, StreamKey};
 pub use db::{Db, DbError, DbResult, Profile, Subscription};
+pub use error::ReceiverError;
 pub use ui_events::ReceiverUiEvent;
 
 /// Converts `url` into a WebSocket client request with an

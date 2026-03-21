@@ -8,11 +8,6 @@ export default defineConfig({
   define: {
     __BUILD_DATE__: JSON.stringify(new Date().toISOString().split("T")[0]),
   },
-  server: {
-    proxy: {
-      "/api": "http://127.0.0.1:9090",
-    },
-  },
   test: {
     environment: "jsdom",
     include: ["src/**/*.{test,spec}.{js,ts}"],

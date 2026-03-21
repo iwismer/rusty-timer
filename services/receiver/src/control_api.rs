@@ -1,35 +1,12 @@
-//! Localhost control API for the receiver.
+//! Receiver control API — business logic for the receiver.
 //!
-//! Binds to 127.0.0.1:9090 (or a caller-supplied address for tests).
-//! Routes:
-//!   GET  /api/v1/profile        - read current profile
-//!   PUT  /api/v1/profile        - update profile
-//!   GET  /api/v1/streams        - list streams (merges server + local subs)
-//!   GET  /api/v1/subscriptions  - list subscription list
-//!   PUT  /api/v1/subscriptions  - replace subscription list
-//!   GET  /api/v1/status         - runtime status
-//!   GET  /api/v1/logs           - recent log entries
-//!   POST /api/v1/connect        - initiate WS connection (async, 202)
-//!   POST /api/v1/disconnect     - close WS connection (async, 202)
-//!   GET  /api/v1/events         - SSE stream of receiver UI events
-//!   POST /api/v1/admin/cursors/reset     - reset one stream cursor
-//!   POST /api/v1/admin/cursors/reset-all - reset all stream cursors
-//!   POST /api/v1/admin/earliest-epochs/reset     - reset one earliest epoch
-//!   POST /api/v1/admin/earliest-epochs/reset-all - reset all earliest epochs
-//!   POST /api/v1/admin/subscriptions/purge - delete all subscriptions
-//!   POST /api/v1/admin/subscriptions/port  - update subscription local port
-//!   POST /api/v1/admin/profile/reset   - reset profile to defaults
-//!   POST /api/v1/admin/factory-reset   - full factory reset
+//! All handler functions are plain async functions that take `&AppState`
+//! and return `Result<T, ReceiverError>`.  The Tauri app wraps these as
+//! IPC commands.
 
 use crate::db::{DEFAULT_UPDATE_MODE, Db, Subscription};
+use crate::error::ReceiverError;
 use crate::ui_events::ReceiverUiEvent;
-use axum::routing::{get, post};
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-};
 use rt_protocol::ReceiverMode;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -37,16 +14,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tracing::warn;
-
-const ADMIN_INTENT_HEADER: &str = "x-rt-receiver-admin-intent";
-const ADMIN_RESET_CURSOR_INTENT: &str = "reset-stream-cursor";
-const ADMIN_RESET_ALL_CURSORS_INTENT: &str = "reset-all-cursors";
-const ADMIN_RESET_ALL_EPOCHS_INTENT: &str = "reset-all-earliest-epochs";
-const ADMIN_RESET_EPOCH_INTENT: &str = "reset-earliest-epoch";
-const ADMIN_PURGE_SUBSCRIPTIONS_INTENT: &str = "purge-subscriptions";
-const ADMIN_RESET_PROFILE_INTENT: &str = "reset-profile";
-const ADMIN_FACTORY_RESET_INTENT: &str = "factory-reset";
-const ADMIN_UPDATE_PORT_INTENT: &str = "update-local-port";
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -342,7 +309,7 @@ impl AppState {
         }
     }
 
-    /// Build and broadcast a streams snapshot to SSE clients.
+    /// Build and broadcast a streams snapshot to UI clients.
     pub async fn emit_streams_snapshot(&self) {
         let response = self.build_streams_response().await;
         let _ = self.ui_tx.send(ReceiverUiEvent::StreamsSnapshot {
@@ -414,11 +381,11 @@ pub struct CursorResetRequest {
     pub reader_ip: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct UpdatePortRequest {
-    forwarder_id: String,
-    reader_ip: String,
-    local_port_override: Option<u16>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdatePortRequest {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub local_port_override: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -465,13 +432,7 @@ pub struct LogsResponse {
     pub entries: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ReplayTargetEpochsQuery {
-    forwarder_id: String,
-    reader_ip: String,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EarliestEpochRequest {
     pub forwarder_id: String,
     pub reader_ip: String,
@@ -553,7 +514,7 @@ pub struct UpstreamStreamInfo {
 
 /// Normalize a server URL by prepending `ws://` if no scheme is present.
 /// Use `wss://` explicitly in the URL for a TLS connection.
-pub(crate) fn normalize_server_url(raw: &str) -> String {
+pub fn normalize_server_url(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
         trimmed.to_owned()
@@ -564,8 +525,8 @@ pub(crate) fn normalize_server_url(raw: &str) -> String {
 
 /// Derive the HTTP base URL from the stored server base URL.
 ///
-/// `ws://host:port`  → `http://host:port`
-/// `wss://host:port` → `https://host:port`
+/// `ws://host:port`  -> `http://host:port`
+/// `wss://host:port` -> `https://host:port`
 pub fn http_base_url(base_url: &str) -> Option<String> {
     let url = reqwest::Url::parse(base_url).ok()?;
     let scheme = match url.scheme() {
@@ -606,10 +567,10 @@ pub async fn fetch_server_streams(
     Ok(body.streams)
 }
 
-/// Flat chip_id → (bib, name) map for a single race.
+/// Flat chip_id -> (bib, name) map for a single race.
 type FlatChipMap = HashMap<String, (String, String)>;
 
-/// Parse a participants JSON response into a flat chip_id → (bib, name) map.
+/// Parse a participants JSON response into a flat chip_id -> (bib, name) map.
 fn parse_participants(body: &serde_json::Value) -> FlatChipMap {
     let mut map = FlatChipMap::new();
     if let Some(participants) = body.get("participants").and_then(|v| v.as_array()) {
@@ -732,7 +693,7 @@ pub async fn fetch_chip_lookup_for_forwarders(
 
     let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
 
-    // Fetch all forwarder→race assignments in one call.
+    // Fetch all forwarder->race assignments in one call.
     let url = format!("{base}/api/v1/forwarder-races");
     let resp = client
         .get(&url)
@@ -750,7 +711,7 @@ pub async fn fetch_chip_lookup_for_forwarders(
         .await
         .map_err(|e| format!("invalid forwarder-races JSON: {e}"))?;
 
-    // Build forwarder_id → race_id mapping for our subscribed forwarders.
+    // Build forwarder_id -> race_id mapping for our subscribed forwarders.
     let forwarder_set: std::collections::HashSet<&str> =
         forwarder_ids.iter().map(|s| s.as_str()).collect();
     let mut fwd_to_race: HashMap<String, String> = HashMap::new();
@@ -795,37 +756,33 @@ pub async fn fetch_chip_lookup_for_forwarders(
 }
 
 // ---------------------------------------------------------------------------
-// Route handlers
+// Handler functions (plain async, no Axum)
 // ---------------------------------------------------------------------------
 
-async fn get_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_profile(state: &AppState) -> Result<ProfileResponse, ReceiverError> {
     let receiver_id = state.receiver_id.read().await.clone();
     let db = state.db.lock().await;
     match db.load_profile() {
-        Ok(Some(p)) => Json(ProfileResponse {
+        Ok(Some(p)) => Ok(ProfileResponse {
             server_url: p.server_url,
             token: p.token,
             receiver_id,
-        })
-        .into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "no profile").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }),
+        Ok(None) => Err(ReceiverError::NotFound("no profile".to_owned())),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn get_mode(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_mode(state: &AppState) -> Result<ReceiverMode, ReceiverError> {
     let db = state.db.lock().await;
     match db.load_receiver_mode() {
-        Ok(Some(mode)) => Json(mode).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "no mode configured").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Some(mode)) => Ok(mode),
+        Ok(None) => Err(ReceiverError::NotFound("no mode configured".to_owned())),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn put_profile(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<ProfileRequest>,
-) -> impl IntoResponse {
+pub async fn put_profile(state: &AppState, body: ProfileRequest) -> Result<(), ReceiverError> {
     let url = normalize_server_url(&body.server_url);
 
     let new_receiver_id = body
@@ -838,11 +795,9 @@ async fn put_profile(
     if let Some(ref id) = new_receiver_id
         && !is_valid_receiver_id(id)
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            "receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only",
-        )
-            .into_response();
+        return Err(ReceiverError::BadRequest(
+            "receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only".to_owned(),
+        ));
     }
 
     let mut db = state.db.lock().await;
@@ -862,30 +817,23 @@ async fn put_profile(
             if let Some(id) = new_receiver_id {
                 *state.receiver_id.write().await = id;
             }
-            StatusCode::NO_CONTENT.into_response()
+            Ok(())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn put_mode(
-    State(state): State<Arc<AppState>>,
-    Json(mode): Json<ReceiverMode>,
-) -> impl IntoResponse {
+pub async fn put_mode(state: &AppState, mode: ReceiverMode) -> Result<(), ReceiverError> {
     if let ReceiverMode::Race { race_id } = &mode {
         if race_id.trim().is_empty() {
-            return (
-                StatusCode::BAD_REQUEST,
-                "race_id must not be empty when mode is race",
-            )
-                .into_response();
+            return Err(ReceiverError::BadRequest(
+                "race_id must not be empty when mode is race".to_owned(),
+            ));
         }
         if !is_uuid_format(race_id) {
-            return (
-                StatusCode::BAD_REQUEST,
-                "race_id must be a valid UUID when mode is race",
-            )
-                .into_response();
+            return Err(ReceiverError::BadRequest(
+                "race_id must be a valid UUID when mode is race".to_owned(),
+            ));
         }
     }
 
@@ -898,25 +846,23 @@ async fn put_mode(
                 .send(crate::ui_events::ReceiverUiEvent::ModeChanged { mode: mode.clone() });
             state.emit_streams_snapshot().await;
             state.request_connect().await;
-            StatusCode::NO_CONTENT.into_response()
+            Ok(())
         }
         Err(crate::db::DbError::ProfileMissing) => {
-            (StatusCode::NOT_FOUND, "no profile").into_response()
+            Err(ReceiverError::NotFound("no profile".to_owned()))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn put_earliest_epoch(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<EarliestEpochRequest>,
-) -> impl IntoResponse {
+pub async fn put_earliest_epoch(
+    state: &AppState,
+    body: EarliestEpochRequest,
+) -> Result<(), ReceiverError> {
     if body.earliest_epoch < 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            "earliest_epoch must be a non-negative integer",
-        )
-            .into_response();
+        return Err(ReceiverError::BadRequest(
+            "earliest_epoch must be a non-negative integer".to_owned(),
+        ));
     }
 
     let db = state.db.lock().await;
@@ -924,28 +870,28 @@ async fn put_earliest_epoch(
         Ok(()) => {
             drop(db);
             let _ = state.request_reconnect_if_connected().await;
-            StatusCode::NO_CONTENT.into_response()
+            Ok(())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn get_streams(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.build_streams_response().await).into_response()
+pub async fn get_streams(state: &AppState) -> StreamsResponse {
+    state.build_streams_response().await
 }
 
-async fn get_races(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
     let profile = {
         let db = state.db.lock().await;
         match db.load_profile() {
             Ok(Some(p)) => p,
-            Ok(None) => return (StatusCode::NOT_FOUND, "no profile").into_response(),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Ok(None) => return Err(ReceiverError::NotFound("no profile".to_owned())),
+            Err(e) => return Err(ReceiverError::Internal(e.to_string())),
         }
     };
 
     let Some(base) = http_base_url(&profile.server_url) else {
-        return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
+        return Err(ReceiverError::BadRequest("invalid upstream URL".to_owned()));
     };
     let url = format!("{base}/api/v1/races");
 
@@ -957,36 +903,42 @@ async fn get_races(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+        Err(e) => {
+            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
+        }
     };
 
-    let status =
-        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if !response.status().is_success() {
+        return Err(ReceiverError::UpstreamError(format!(
+            "server returned {}",
+            response.status()
+        )));
+    }
+
     match response.json::<serde_json::Value>().await {
-        Ok(body) => (status, Json(body)).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("invalid JSON from upstream: {e}"),
-        )
-            .into_response(),
+        Ok(body) => Ok(body),
+        Err(e) => Err(ReceiverError::UpstreamError(format!(
+            "invalid JSON from upstream: {e}"
+        ))),
     }
 }
 
-async fn get_replay_target_epochs(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<ReplayTargetEpochsQuery>,
-) -> impl IntoResponse {
+pub async fn get_replay_target_epochs(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<ReplayTargetEpochsResponse, ReceiverError> {
     let profile = {
         let db = state.db.lock().await;
         match db.load_profile() {
             Ok(Some(p)) => p,
-            Ok(None) => return (StatusCode::NOT_FOUND, "no profile").into_response(),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Ok(None) => return Err(ReceiverError::NotFound("no profile".to_owned())),
+            Err(e) => return Err(ReceiverError::Internal(e.to_string())),
         }
     };
 
     let Some(base) = http_base_url(&profile.server_url) else {
-        return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
+        return Err(ReceiverError::BadRequest("invalid upstream URL".to_owned()));
     };
 
     let streams_url = format!("{base}/api/v1/streams");
@@ -998,29 +950,29 @@ async fn get_replay_target_epochs(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+        Err(e) => {
+            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
+        }
     };
     if !streams_response.status().is_success() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            format!("upstream streams returned {}", streams_response.status()),
-        )
-            .into_response();
+        return Err(ReceiverError::UpstreamError(format!(
+            "upstream streams returned {}",
+            streams_response.status()
+        )));
     }
     let upstream_streams = match streams_response.json::<ServerStreamsResponse>().await {
         Ok(body) => body.streams,
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("invalid streams JSON from upstream: {e}"),
-            )
-                .into_response();
+            return Err(ReceiverError::UpstreamError(format!(
+                "invalid streams JSON from upstream: {e}"
+            )));
         }
     };
-    let Some(stream) = upstream_streams.iter().find(|stream| {
-        stream.forwarder_id == query.forwarder_id && stream.reader_ip == query.reader_ip
-    }) else {
-        return (StatusCode::NOT_FOUND, "stream not found").into_response();
+    let Some(stream) = upstream_streams
+        .iter()
+        .find(|stream| stream.forwarder_id == forwarder_id && stream.reader_ip == reader_ip)
+    else {
+        return Err(ReceiverError::NotFound("stream not found".to_owned()));
     };
 
     let epochs_url = format!("{base}/api/v1/streams/{}/epochs", stream.stream_id);
@@ -1032,14 +984,15 @@ async fn get_replay_target_epochs(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+        Err(e) => {
+            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
+        }
     };
     if !epochs_response.status().is_success() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            format!("upstream epochs returned {}", epochs_response.status()),
-        )
-            .into_response();
+        return Err(ReceiverError::UpstreamError(format!(
+            "upstream epochs returned {}",
+            epochs_response.status()
+        )));
     }
     let upstream_epochs = match epochs_response
         .json::<Vec<UpstreamStreamEpochOption>>()
@@ -1047,11 +1000,9 @@ async fn get_replay_target_epochs(
     {
         Ok(body) => body,
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("invalid epochs JSON from upstream: {e}"),
-            )
-                .into_response();
+            return Err(ReceiverError::UpstreamError(format!(
+                "invalid epochs JSON from upstream: {e}"
+            )));
         }
     };
 
@@ -1064,23 +1015,22 @@ async fn get_replay_target_epochs(
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response(),
+        Err(e) => {
+            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
+        }
     };
     if !races_response.status().is_success() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            format!("upstream races returned {}", races_response.status()),
-        )
-            .into_response();
+        return Err(ReceiverError::UpstreamError(format!(
+            "upstream races returned {}",
+            races_response.status()
+        )));
     }
     let races = match races_response.json::<UpstreamRacesResponse>().await {
         Ok(body) => body.races,
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("invalid races JSON from upstream: {e}"),
-            )
-                .into_response();
+            return Err(ReceiverError::UpstreamError(format!(
+                "invalid races JSON from upstream: {e}"
+            )));
         }
     };
 
@@ -1096,17 +1046,14 @@ async fn get_replay_target_epochs(
             {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err((StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")));
+                    return Err(format!("fetch failed: {e}"));
                 }
             };
             if !mappings_response.status().is_success() {
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    format!(
-                        "upstream stream-epochs for race {} returned {}",
-                        race_id,
-                        mappings_response.status()
-                    ),
+                return Err(format!(
+                    "upstream stream-epochs for race {} returned {}",
+                    race_id,
+                    mappings_response.status()
                 ));
             }
             let mappings = match mappings_response
@@ -1115,10 +1062,7 @@ async fn get_replay_target_epochs(
             {
                 Ok(body) => body.mappings,
                 Err(e) => {
-                    return Err((
-                        StatusCode::BAD_GATEWAY,
-                        format!("invalid stream-epochs JSON from upstream: {e}"),
-                    ));
+                    return Err(format!("invalid stream-epochs JSON from upstream: {e}"));
                 }
             };
             Ok((race_name, mappings))
@@ -1130,7 +1074,7 @@ async fn get_replay_target_epochs(
     for race_mappings_result in race_mappings {
         let (race_name, mappings) = match race_mappings_result {
             Ok(value) => value,
-            Err((status, message)) => return (status, message).into_response(),
+            Err(message) => return Err(ReceiverError::UpstreamError(message)),
         };
         for mapping in mappings {
             if mapping.stream_id == stream.stream_id {
@@ -1154,17 +1098,19 @@ async fn get_replay_target_epochs(
         })
         .collect();
 
-    Json(ReplayTargetEpochsResponse { epochs }).into_response()
+    Ok(ReplayTargetEpochsResponse { epochs })
 }
 
-async fn put_subscriptions(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<SubscriptionsBody>,
-) -> impl IntoResponse {
+pub async fn put_subscriptions(
+    state: &AppState,
+    body: SubscriptionsBody,
+) -> Result<(), ReceiverError> {
     let mut seen = std::collections::HashSet::new();
     for s in &body.subscriptions {
         if !seen.insert((s.forwarder_id.clone(), s.reader_ip.clone())) {
-            return (StatusCode::BAD_REQUEST, "duplicate subscriptions").into_response();
+            return Err(ReceiverError::BadRequest(
+                "duplicate subscriptions".to_owned(),
+            ));
         }
     }
 
@@ -1201,16 +1147,16 @@ async fn put_subscriptions(
             ) {
                 state.request_connect().await;
             }
-            StatusCode::NO_CONTENT.into_response()
+            Ok(())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn get_subscriptions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_subscriptions(state: &AppState) -> Result<SubscriptionsBody, ReceiverError> {
     let db = state.db.lock().await;
     match db.load_subscriptions() {
-        Ok(subscriptions) => Json(SubscriptionsBody {
+        Ok(subscriptions) => Ok(SubscriptionsBody {
             subscriptions: subscriptions
                 .into_iter()
                 .map(|s| SubscriptionRequest {
@@ -1219,122 +1165,92 @@ async fn get_subscriptions(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     local_port_override: s.local_port_override,
                 })
                 .collect(),
-        })
-        .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_status(state: &AppState) -> StatusResponse {
     let receiver_id = state.receiver_id.read().await.clone();
     let conn = state.connection_state.borrow().clone();
     let db = state.db.lock().await;
     let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = state.db_integrity_ok;
-    Json(StatusResponse {
+    StatusResponse {
         receiver_id,
         connection_state: conn,
         local_ok,
         streams_count,
-    })
-    .into_response()
+    }
 }
 
-async fn get_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_logs(state: &AppState) -> LogsResponse {
     let entries = state.logger.entries();
-    Json(LogsResponse { entries }).into_response()
+    LogsResponse { entries }
 }
 
-async fn post_connect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+
+pub async fn connect(state: &AppState) {
     state.request_connect().await;
-    StatusCode::ACCEPTED.into_response()
 }
 
-async fn post_disconnect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn disconnect(state: &AppState) {
     let current = state.connection_state.borrow().clone();
     if current == ConnectionState::Disconnected {
-        return StatusCode::OK.into_response();
+        return;
     }
     state
         .set_connection_state(ConnectionState::Disconnecting)
         .await;
     state.request_disconnect_shutdown();
-    StatusCode::ACCEPTED.into_response()
 }
 
-fn check_admin_intent(headers: &HeaderMap, expected: &str) -> bool {
-    headers
-        .get(ADMIN_INTENT_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == expected)
-}
-
-async fn post_admin_reset_cursor(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<CursorResetRequest>,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_RESET_CURSOR_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
-
+pub async fn admin_reset_cursor(
+    state: &AppState,
+    body: CursorResetRequest,
+) -> Result<(), ReceiverError> {
     let db = state.db.lock().await;
     match db.delete_cursor(&body.forwarder_id, &body.reader_ip) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(()) => Ok(()),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn post_admin_reset_all_cursors(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_RESET_ALL_CURSORS_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
+pub async fn admin_reset_all_cursors(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
     let db = state.db.lock().await;
     match db.delete_all_cursors() {
-        Ok(count) => Json(serde_json::json!({ "deleted": count })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(count) => Ok(serde_json::json!({ "deleted": count })),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn post_admin_reset_all_earliest_epochs(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_RESET_ALL_EPOCHS_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
+pub async fn admin_reset_all_earliest_epochs(
+    state: &AppState,
+) -> Result<serde_json::Value, ReceiverError> {
     let db = state.db.lock().await;
     match db.delete_all_earliest_epochs() {
-        Ok(count) => Json(serde_json::json!({ "deleted": count })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(count) => Ok(serde_json::json!({ "deleted": count })),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn post_admin_reset_earliest_epoch(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<CursorResetRequest>,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_RESET_EPOCH_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
+pub async fn admin_reset_earliest_epoch(
+    state: &AppState,
+    body: CursorResetRequest,
+) -> Result<(), ReceiverError> {
     let db = state.db.lock().await;
     match db.delete_earliest_epoch(&body.forwarder_id, &body.reader_ip) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(()) => Ok(()),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn post_admin_purge_subscriptions(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_PURGE_SUBSCRIPTIONS_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
+pub async fn admin_purge_subscriptions(
+    state: &AppState,
+) -> Result<serde_json::Value, ReceiverError> {
     let db = state.db.lock().await;
     match db.delete_all_subscriptions() {
         Ok(count) => {
@@ -1359,19 +1275,13 @@ async fn post_admin_purge_subscriptions(
             ) {
                 state.request_connect().await;
             }
-            Json(serde_json::json!({ "deleted": count })).into_response()
+            Ok(serde_json::json!({ "deleted": count }))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn post_admin_reset_profile(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_RESET_PROFILE_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
+pub async fn admin_reset_profile(state: &AppState) -> Result<(), ReceiverError> {
     let current = state.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
@@ -1386,19 +1296,13 @@ async fn post_admin_reset_profile(
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
             state.emit_streams_snapshot().await;
-            StatusCode::NO_CONTENT.into_response()
+            Ok(())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn post_admin_factory_reset(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_FACTORY_RESET_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
+pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> {
     let current = state.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {
         state
@@ -1413,22 +1317,18 @@ async fn post_admin_factory_reset(
             *state.upstream_url.write().await = None;
             *state.receiver_id.write().await = String::new();
             state.emit_streams_snapshot().await;
-            StatusCode::NO_CONTENT.into_response()
+            Ok(())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
 }
 
-async fn post_admin_update_port(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<UpdatePortRequest>,
-) -> impl IntoResponse {
-    if !check_admin_intent(&headers, ADMIN_UPDATE_PORT_INTENT) {
-        return (StatusCode::FORBIDDEN, "missing or invalid admin intent").into_response();
-    }
+pub async fn admin_update_port(
+    state: &AppState,
+    body: UpdatePortRequest,
+) -> Result<(), ReceiverError> {
     if let Some(0) = body.local_port_override {
-        return (StatusCode::BAD_REQUEST, "port must be 1-65535").into_response();
+        return Err(ReceiverError::BadRequest("port must be 1-65535".to_owned()));
     }
     let db = state.db.lock().await;
     match db.update_subscription_port(
@@ -1436,75 +1336,10 @@ async fn post_admin_update_port(
         &body.reader_ip,
         body.local_port_override,
     ) {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "subscription not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ReceiverError::NotFound("subscription not found".to_owned())),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
-}
-
-async fn get_version() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
-}
-
-// ---------------------------------------------------------------------------
-// Router builder
-// ---------------------------------------------------------------------------
-
-pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/v1/profile", get(get_profile).put(put_profile))
-        .route("/api/v1/mode", get(get_mode).put(put_mode))
-        .route("/api/v1/streams", get(get_streams))
-        .route(
-            "/api/v1/streams/earliest-epoch",
-            axum::routing::put(put_earliest_epoch),
-        )
-        .route("/api/v1/races", get(get_races))
-        .route(
-            "/api/v1/replay-targets/epochs",
-            get(get_replay_target_epochs),
-        )
-        .route(
-            "/api/v1/subscriptions",
-            get(get_subscriptions).put(put_subscriptions),
-        )
-        .route("/api/v1/status", get(get_status))
-        .route("/api/v1/version", get(get_version))
-        .route("/api/v1/logs", get(get_logs))
-        .route("/api/v1/connect", post(post_connect))
-        .route("/api/v1/disconnect", post(post_disconnect))
-        .route("/api/v1/events", get(crate::sse::receiver_sse))
-        .route("/api/v1/admin/cursors/reset", post(post_admin_reset_cursor))
-        .route(
-            "/api/v1/admin/cursors/reset-all",
-            post(post_admin_reset_all_cursors),
-        )
-        .route(
-            "/api/v1/admin/earliest-epochs/reset",
-            post(post_admin_reset_earliest_epoch),
-        )
-        .route(
-            "/api/v1/admin/earliest-epochs/reset-all",
-            post(post_admin_reset_all_earliest_epochs),
-        )
-        .route(
-            "/api/v1/admin/subscriptions/purge",
-            post(post_admin_purge_subscriptions),
-        )
-        .route(
-            "/api/v1/admin/profile/reset",
-            post(post_admin_reset_profile),
-        )
-        .route(
-            "/api/v1/admin/factory-reset",
-            post(post_admin_factory_reset),
-        )
-        .route(
-            "/api/v1/admin/subscriptions/port",
-            post(post_admin_update_port),
-        )
-        .fallback(crate::ui_server::serve_ui)
-        .with_state(state)
 }
 
 #[cfg(test)]

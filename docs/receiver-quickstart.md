@@ -6,22 +6,12 @@ sees the data as if the reader were plugged in directly.
 
 ## Download
 
-### Recommended: Desktop App (Windows)
-
 Download the latest `Rusty-Timer-Receiver_*_x64-setup.exe` from the
 [Releases](https://github.com/iwismer/rusty-timer/releases) page.
 
 Run the installer. It will install the app and download WebView2 if needed.
 
 Launch "Rusty Timer Receiver" from the Start Menu.
-
-### Alternative: Standalone Binary
-
-Download `receiver-*-x86_64-pc-windows-msvc.zip` from the
-[Releases](https://github.com/iwismer/rusty-timer/releases) page.
-
-Extract the archive and double-click `receiver.exe`. The receiver opens a
-web UI in your browser at **http://localhost:9090**.
 
 ## Configure
 
@@ -69,17 +59,15 @@ fresh, delete this file and restart the receiver.
 | Port collision warning | Two streams have the same default port. Set a manual port override for one of them. |
 | Receiver shows "degraded" | One or more streams have a port conflict. Resolve the conflict in the UI. |
 
-### Desktop app (Tauri) exits immediately or shows no window
+### Desktop app exits immediately or shows no window
 
-The standalone `receiver.exe` and the **Rusty Timer Receiver** desktop app both bind the control API to **127.0.0.1:9090**. Only **one** can run at a time. If the standalone receiver is already running, quit it (or close the browser tab and stop the process) before launching the desktop app.
-
-The desktop shell logs fatal startup errors next to app data (written when the bundled receiver fails to start or the health check times out):
+If the app fails to start, check for a crash log at:
 
 ```
 %LOCALAPPDATA%\com.rusty-timer.receiver\crash.log
 ```
 
-Open that file in Notepad. Typical messages include port **9090** already in use, failure to spawn the sidecar binary, or failure to create the webview window (often **WebView2** — install or repair the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)).
+Open that file in Notepad. Typical causes include failure to create the webview window (often **WebView2** -- install or repair the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)) or SQLite database corruption.
 
 More detail: [Receiver Tauri development guide](receiver-tauri-dev.md#troubleshooting).
 

@@ -19,7 +19,6 @@ def make_args(**overrides: object) -> argparse.Namespace:
         "bibchip": None,
         "ppl": None,
         "log_level": "info",
-        "tauri": False,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -161,7 +160,6 @@ class MainValidationTests(unittest.TestCase):
             bibchip_path=None,
             ppl_path=None,
             log_level="info",
-            tauri=False,
         )
 
     @patch("scripts.dev.console.input")
@@ -261,53 +259,6 @@ class CheckPrereqsTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit):
             dev.check_prereqs()
-
-
-class ConfigureReceiverDevTests(unittest.TestCase):
-    @patch("scripts.dev.urllib.request.urlopen")
-    def test_configure_receiver_dev_success_calls_expected_endpoints(self, urlopen_mock) -> None:
-        urlopen_mock.side_effect = [object(), object(), object()]
-
-        dev.configure_receiver_dev()
-
-        self.assertEqual(urlopen_mock.call_count, 3)
-
-        health_args, health_kwargs = urlopen_mock.call_args_list[0]
-        self.assertEqual(health_args[0], "http://127.0.0.1:9090/healthz")
-        self.assertEqual(health_kwargs["timeout"], 2)
-
-        profile_req = urlopen_mock.call_args_list[1].args[0]
-        self.assertEqual(profile_req.get_method(), "PUT")
-        self.assertEqual(profile_req.full_url, "http://127.0.0.1:9090/api/v1/profile")
-        self.assertEqual(profile_req.get_header("Content-type"), "application/json")
-        self.assertEqual(profile_req.data, b'{"server_url": "ws://127.0.0.1:8080", "token": "rusty-dev-receiver", "log_level": "info"}')
-        self.assertEqual(urlopen_mock.call_args_list[1].kwargs["timeout"], 5)
-
-        connect_req = urlopen_mock.call_args_list[2].args[0]
-        self.assertEqual(connect_req.get_method(), "POST")
-        self.assertEqual(connect_req.full_url, "http://127.0.0.1:9090/api/v1/connect")
-        self.assertEqual(connect_req.data, b"")
-        self.assertEqual(urlopen_mock.call_args_list[2].kwargs["timeout"], 5)
-
-    @patch("scripts.dev.time.sleep")
-    @patch("scripts.dev.urllib.request.urlopen")
-    def test_configure_receiver_dev_returns_after_health_timeout(
-        self, urlopen_mock, sleep_mock
-    ) -> None:
-        urlopen_mock.side_effect = urllib.error.URLError("down")
-
-        dev.configure_receiver_dev()
-
-        self.assertEqual(urlopen_mock.call_count, 60)
-        self.assertEqual(sleep_mock.call_count, 60)
-
-    @patch("scripts.dev.urllib.request.urlopen")
-    def test_configure_receiver_dev_stops_when_profile_fails(self, urlopen_mock) -> None:
-        urlopen_mock.side_effect = [object(), urllib.error.URLError("bad profile")]
-
-        dev.configure_receiver_dev()
-
-        self.assertEqual(urlopen_mock.call_count, 2)
 
 
 class CheckExistingInstanceTests(unittest.TestCase):
@@ -537,36 +488,30 @@ class CheckExistingInstanceTests(unittest.TestCase):
 
 class DetectAndLaunchTests(unittest.TestCase):
     @patch("scripts.dev.launch_tmux")
-    @patch("scripts.dev.start_receiver_auto_config")
     @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
-    def test_detect_and_launch_tmux_starts_auto_config(
-        self, _which_mock, auto_config_mock, launch_tmux_mock
+    def test_detect_and_launch_tmux_launches_panes(
+        self, _which_mock, launch_tmux_mock
     ) -> None:
         dev.detect_and_launch([dev.EmulatorSpec(port=10001)])
 
-        auto_config_mock.assert_called_once_with()
         launch_tmux_mock.assert_called_once()
 
     @patch("scripts.dev.launch_iterm2")
     @patch("scripts.dev.Path.exists", return_value=True)
-    @patch("scripts.dev.start_receiver_auto_config")
     @patch("scripts.dev.shutil.which", return_value=None)
-    def test_detect_and_launch_iterm_starts_auto_config(
-        self, _which_mock, auto_config_mock, _exists_mock, launch_iterm2_mock
+    def test_detect_and_launch_iterm_launches_panes(
+        self, _which_mock, _exists_mock, launch_iterm2_mock
     ) -> None:
         dev.detect_and_launch([dev.EmulatorSpec(port=10001)])
 
-        auto_config_mock.assert_called_once_with()
         launch_iterm2_mock.assert_called_once()
 
     @patch("scripts.dev.start_race_data_setup")
     @patch("scripts.dev.launch_tmux")
-    @patch("scripts.dev.start_receiver_auto_config")
     @patch("scripts.dev.shutil.which", return_value="/usr/bin/tmux")
     def test_detect_and_launch_starts_race_data_setup_when_paths_provided(
         self,
         _which_mock,
-        auto_config_mock,
         launch_tmux_mock,
         race_setup_mock,
     ) -> None:
@@ -578,9 +523,9 @@ class DetectAndLaunchTests(unittest.TestCase):
             ppl_path=ppl,
         )
 
-        auto_config_mock.assert_called_once_with()
         launch_tmux_mock.assert_called_once()
         race_setup_mock.assert_called_once_with(bibchip, ppl)
+        race_setup_mock.return_value.join.assert_called_once_with()
 
 
 class SetupOrderingTests(unittest.TestCase):
@@ -610,9 +555,7 @@ class SetupOrderingTests(unittest.TestCase):
         build_dashboard_mock.side_effect = lambda skip_build: call_order.append(
             f"build_dashboard({skip_build})"
         )
-        build_rust_mock.side_effect = lambda skip_build, tauri=False: call_order.append(
-            f"build_rust({skip_build})"
-        )
+        build_rust_mock.side_effect = lambda skip_build: call_order.append(f"build_rust({skip_build})")
 
         dev.setup(skip_build=False, emulators=[dev.EmulatorSpec(port=10001)])
 
@@ -674,27 +617,33 @@ class BuildDashboardTests(unittest.TestCase):
 
 class BuildRustTests(unittest.TestCase):
     @patch("scripts.dev.subprocess.run")
-    def test_build_rust_prewarms_tauri_shell_when_requested(self, run_mock) -> None:
-        def run_side_effect(cmd, **kwargs):
-            if cmd == ["rustc", "--print", "host-tuple"]:
-                return subprocess.CompletedProcess(cmd, 0, stdout="x86_64-apple-darwin\n")
-            return subprocess.CompletedProcess(cmd, 0)
+    def test_build_rust_builds_receiver_tauri_shell(self, run_mock) -> None:
+        dev.build_rust(skip_build=False)
 
-        run_mock.side_effect = run_side_effect
+        self.assertEqual(len(run_mock.call_args_list), 2)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            repo_root = Path(tmp)
-            receiver_bin = "receiver.exe" if sys.platform == "win32" else "receiver"
-            receiver_path = repo_root / "target" / "debug" / receiver_bin
-            receiver_path.parent.mkdir(parents=True)
-            receiver_path.write_text("receiver", encoding="utf-8")
+        workspace_build = run_mock.call_args_list[0].args[0]
+        self.assertEqual(
+            workspace_build,
+            [
+                "cargo",
+                "build",
+                "-p",
+                "server",
+                "-p",
+                "forwarder",
+                "--features",
+                "forwarder/embed-ui",
+                "-p",
+                "emulator",
+            ],
+        )
 
-            with patch.object(dev, "REPO_ROOT", repo_root):
-                dev.build_rust(skip_build=False, tauri=True)
-
-        build_cmd = run_mock.call_args_list[0].args[0]
-        self.assertIn("-p", build_cmd)
-        self.assertIn("receiver-tauri", build_cmd)
+        tauri_build = run_mock.call_args_list[1].args[0]
+        self.assertEqual(
+            tauri_build,
+            ["cargo", "build", "-p", "receiver-tauri", "--no-default-features"],
+        )
 
 
 class BuildPanesTests(unittest.TestCase):
@@ -727,19 +676,13 @@ class BuildPanesTests(unittest.TestCase):
         server_cmd = next(cmd for title, cmd in panes if title == "Server")
         self.assertIn("LOG_LEVEL='server=debug; echo unsafe'", server_cmd)
 
+    def test_receiver_pane_exports_fixed_dev_receiver_id(self) -> None:
+        panes = dev.build_panes([dev.EmulatorSpec(port=10001)])
 
-class StartReceiverAutoConfigTests(unittest.TestCase):
-    @patch("threading.Thread")
-    def test_start_receiver_auto_config_spawns_daemon_thread(self, thread_cls) -> None:
-        thread_mock = thread_cls.return_value
-
-        dev.start_receiver_auto_config()
-
-        thread_cls.assert_called_once_with(
-            target=dev.configure_receiver_dev,
-            name="receiver-auto-config",
-        )
-        thread_mock.start.assert_called_once_with()
+        receiver_cmd = next(cmd for title, cmd in panes if title == "Receiver")
+        self.assertIn("RT_RECEIVER_ID=recv-dev", receiver_cmd)
+        self.assertIn('cd "', receiver_cmd)
+        self.assertIn("cargo tauri dev", receiver_cmd)
 
 
 class ParseArgsRaceDataFlagTests(unittest.TestCase):

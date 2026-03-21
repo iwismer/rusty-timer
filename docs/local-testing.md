@@ -236,12 +236,12 @@ Notes:
 
 ## Step 6: Run the Receiver
 
-The receiver is a Windows-targeted service that subscribes to streams from the server
-and re-exposes them as local TCP listeners. It can be compiled and run on any platform
-for development.
+The receiver is a Tauri desktop app that subscribes to streams from the server
+and re-exposes them as local TCP listeners. The receiver library is embedded
+directly in the Tauri process.
 
 ```bash
-cargo run --release -p receiver
+cd apps/receiver-ui && cargo tauri dev
 ```
 
 The receiver stores its SQLite profile in the platform's local data directory
@@ -249,145 +249,33 @@ The receiver stores its SQLite profile in the platform's local data directory
 `%LOCALAPPDATA%\rusty-timer\receiver\receiver.sqlite3` on Windows). The directory is
 created automatically.
 
-The control API listens on **127.0.0.1:9090**.
-
-### Running via Tauri (Native Window)
-
-Instead of opening the receiver UI in a browser, you can run it as a desktop
-app via Tauri:
-
-```bash
-# Build the receiver
-cargo build -p receiver
-
-# Copy to sidecar location
-mkdir -p apps/receiver-ui/src-tauri/binaries
-cp target/debug/receiver apps/receiver-ui/src-tauri/binaries/receiver-$(rustc --print host-tuple)
-
-# Run Tauri dev mode
-cd apps/receiver-ui && cargo tauri dev
-```
-
-The dev server copies the staged sidecar from `src-tauri/binaries/` into
-`target/debug/receiver` (see `npm run copy-receiver-tauri-sidecar`).
-
-This opens a native window instead of a browser tab. The receiver API is
-identical — all the control API steps below work the same way.
+Configure the receiver using the UI (profile, subscriptions, connect/disconnect).
 
 See `docs/receiver-tauri-dev.md` for more details.
 
 ---
 
-## Step 7: Subscribe to a Stream via the Control API
+## Step 7: Configure the Receiver
 
-All control API calls go to `http://127.0.0.1:9090`.
-
-> **Note:** When using `uv run scripts/dev.py` (tmux or iTerm2 launch), the
-> receiver profile is configured automatically with the dev token and server URL,
-> and a connect request is sent. You can skip the profile and connect steps
-> below and go straight to subscribing. To re-run the configuration manually:
-> `/tmp/rusty-timer-dev/configure-receiver.sh`
+The receiver is configured through its desktop UI (Tauri app). There is no
+standalone HTTP control API.
 
 ### Set the server profile (credentials)
 
-```bash
-curl -s -X PUT http://127.0.0.1:9090/api/v1/profile \
-  -H 'Content-Type: application/json' \
-  -d '{"server_url":"ws://127.0.0.1:8080","token":"rusty-dev-receiver","log_level":"info"}'
-```
-
-Returns `204 No Content` on success.
+1. In the receiver UI, enter the **Server URL** (`ws://127.0.0.1:8080`) and
+   the **auth token** (`rusty-dev-receiver`).
+2. Click **Save**, then **Connect**.
 
 The `server_url` is the base URL of the server (just the scheme, host, and port). The
 receiver automatically appends `/ws/v1.2/receivers` when connecting, so the full WebSocket
 URL becomes `ws://127.0.0.1:8080/ws/v1.2/receivers`.
 
-The default dev token for the receiver is `rusty-dev-receiver`.
-
-### Connect to the server
-
-```bash
-curl -s -X POST http://127.0.0.1:9090/api/v1/connect
-```
-
-Returns `202 Accepted` (connection attempt is asynchronous).
-
-### Check connection status
-
-```bash
-curl -s http://127.0.0.1:9090/api/v1/status | jq .
-```
-
-Example response:
-
-```json
-{
-  "connection_state": "connected",
-  "local_ok": true,
-  "streams_count": 0
-}
-```
-
 ### Subscribe to a stream
 
-Replace `forwarder-001` and `192.168.1.1` with actual values visible in
-`GET /api/v1/streams` on the server.
+Once connected, the stream list shows available timing streams. Subscribe to the
+streams you need. Each subscribed stream gets a local TCP port (shown in the UI).
 
-```bash
-curl -s -X PUT http://127.0.0.1:9090/api/v1/subscriptions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "subscriptions": [
-      {
-        "forwarder_id": "forwarder-001",
-        "reader_ip": "192.168.1.1"
-      }
-    ]
-  }' | jq .
-```
-
-Returns `204 No Content`. The receiver opens a local TCP listener on port
-`10000 + last_octet(reader_ip)` (e.g. port `10001` for `192.168.1.1`) and forwards
-incoming events to any client connected to that port.
-
-Use `local_port_override` to choose a specific port:
-
-```json
-{
-  "subscriptions": [
-    {
-      "forwarder_id": "forwarder-001",
-      "reader_ip": "192.168.1.1",
-      "local_port_override": 9500
-    }
-  ]
-}
-```
-
-### List streams (merged server + local subscriptions)
-
-```bash
-curl -s http://127.0.0.1:9090/api/v1/streams | jq .
-```
-
-### Disconnect
-
-```bash
-curl -s -X POST http://127.0.0.1:9090/api/v1/disconnect
-```
-
-### Full control API reference
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/profile` | Read current profile |
-| `PUT` | `/api/v1/profile` | Save server URL, token, log level |
-| `GET` | `/api/v1/streams` | List streams (server + local subs) |
-| `PUT` | `/api/v1/subscriptions` | Replace subscription list |
-| `GET` | `/api/v1/status` | Runtime connection state |
-| `GET` | `/api/v1/logs` | Recent log entries |
-| `POST` | `/api/v1/connect` | Initiate WS connection (async, 202) |
-| `POST` | `/api/v1/disconnect` | Close WS connection (async, 202) |
+Use `local_port_override` to choose a specific port for a stream.
 
 ---
 
@@ -403,7 +291,7 @@ curl -s -X POST http://127.0.0.1:9090/api/v1/disconnect
                                     +─────────────+──────────────+
                                     |                            |
                               dashboard (HTTP API)        receiver ──> local TCP
-                              (:5173 dev)                 (:9090 ctrl)  (:10000+N)
+                              (:5173 dev)                 (Tauri app)   (:10000+N)
 ```
 
 Flow description:
@@ -453,6 +341,9 @@ cd apps/server-ui
 npx playwright install --with-deps
 npm run test:e2e
 ```
+
+The receiver UI does not have a standalone browser-mode Playwright suite anymore.
+It is Tauri-only and its unit coverage lives in `apps/receiver-ui/src/**/*.test.ts`.
 
 ### Packaging validation
 

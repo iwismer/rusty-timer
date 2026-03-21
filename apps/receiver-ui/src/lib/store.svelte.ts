@@ -894,7 +894,7 @@ export function initStore(): void {
       next.set(key, read);
       store.lastReads = next;
     },
-  });
+  })?.catch((e: unknown) => console.error("initSSE failed:", e));
 }
 
 export function destroyStore(): void {

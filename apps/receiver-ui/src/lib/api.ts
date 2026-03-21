@@ -1,8 +1,8 @@
 // Receiver UI - Control API client
 // All UI-to-receiver communication goes through this module exclusively.
-// Uses same-origin requests (UI is served by the receiver's axum server).
+// Uses Tauri IPC invoke() for direct in-process communication.
 
-import { apiFetch } from "@rusty-timer/shared-ui/lib/api-helpers";
+import { invoke } from "@tauri-apps/api/core";
 
 export interface Profile {
   server_url: string;
@@ -38,7 +38,7 @@ export interface LastRead {
   reader_ip: string;
   chip_id: string;
   timestamp: string;
-  bib?: number | null;
+  bib?: string | null;
   name?: string | null;
 }
 
@@ -126,159 +126,109 @@ export interface ReplayTargetEpochsResponse {
 }
 
 export async function getProfile(): Promise<Profile> {
-  return apiFetch<Profile>("/api/v1/profile");
+  return invoke<Profile>("get_profile");
 }
 
 export async function putProfile(profile: Profile): Promise<void> {
-  await apiFetch("/api/v1/profile", {
-    method: "PUT",
-    body: JSON.stringify(profile),
-  });
+  await invoke("put_profile", { body: profile });
 }
 
 export async function getStreams(): Promise<StreamsResponse> {
-  return apiFetch<StreamsResponse>("/api/v1/streams");
+  return invoke<StreamsResponse>("get_streams");
 }
 
 export async function putSubscriptions(
   subscriptions: SubscriptionItem[],
 ): Promise<void> {
-  await apiFetch("/api/v1/subscriptions", {
-    method: "PUT",
-    body: JSON.stringify({ subscriptions }),
-  });
+  await invoke("put_subscriptions", { body: { subscriptions } });
 }
 
 export async function getStatus(): Promise<StatusResponse> {
-  return apiFetch<StatusResponse>("/api/v1/status");
+  return invoke<StatusResponse>("get_status");
 }
 
 export async function getLogs(): Promise<LogsResponse> {
-  return apiFetch<LogsResponse>("/api/v1/logs");
+  return invoke<LogsResponse>("get_logs");
 }
 
 export async function getMode(): Promise<ReceiverMode> {
-  return apiFetch<ReceiverMode>("/api/v1/mode");
+  return invoke<ReceiverMode>("get_mode");
 }
 
 export async function putMode(mode: ReceiverMode): Promise<void> {
-  await apiFetch("/api/v1/mode", {
-    method: "PUT",
-    body: JSON.stringify(mode),
-  });
+  await invoke("put_mode", { mode });
 }
 
 export async function putEarliestEpoch(
-  override: EarliestEpochOverride,
+  epochOverride: EarliestEpochOverride,
 ): Promise<void> {
-  await apiFetch("/api/v1/streams/earliest-epoch", {
-    method: "PUT",
-    body: JSON.stringify(override),
-  });
+  await invoke("put_earliest_epoch", { body: epochOverride });
 }
 
 export async function getRaces(): Promise<RacesResponse> {
-  return apiFetch<RacesResponse>("/api/v1/races");
+  return invoke<RacesResponse>("get_races");
 }
 
 export async function getReplayTargetEpochs(
   stream: StreamRef,
 ): Promise<ReplayTargetEpochsResponse> {
-  const params = new URLSearchParams({
+  return invoke<ReplayTargetEpochsResponse>("get_replay_target_epochs", {
     forwarder_id: stream.forwarder_id,
     reader_ip: stream.reader_ip,
-  });
-  return apiFetch<ReplayTargetEpochsResponse>(
-    `/api/v1/replay-targets/epochs?${params.toString()}`,
-  );
-}
-
-export async function resetStreamCursor(stream: StreamRef): Promise<void> {
-  await apiFetch("/api/v1/admin/cursors/reset", {
-    method: "POST",
-    headers: {
-      "x-rt-receiver-admin-intent": "reset-stream-cursor",
-    },
-    body: JSON.stringify(stream),
   });
 }
 
 export async function connect(): Promise<void> {
-  const resp = await fetch("/api/v1/connect", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!resp.ok) throw new Error(`connect -> ${resp.status}`);
+  await invoke("connect");
 }
 
 export async function disconnect(): Promise<void> {
-  const resp = await fetch("/api/v1/disconnect", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!resp.ok) throw new Error(`disconnect -> ${resp.status}`);
+  await invoke("disconnect");
+}
+
+export async function resetStreamCursor(stream: StreamRef): Promise<void> {
+  await invoke("admin_reset_cursor", { body: stream });
 }
 
 export async function resetAllCursors(): Promise<{ deleted: number }> {
-  return apiFetch("/api/v1/admin/cursors/reset-all", {
-    method: "POST",
-    headers: { "x-rt-receiver-admin-intent": "reset-all-cursors" },
-  });
+  return invoke("admin_reset_all_cursors");
 }
 
 export async function resetEarliestEpoch(stream: StreamRef): Promise<void> {
-  await apiFetch("/api/v1/admin/earliest-epochs/reset", {
-    method: "POST",
-    headers: { "x-rt-receiver-admin-intent": "reset-earliest-epoch" },
-    body: JSON.stringify(stream),
-  });
+  await invoke("admin_reset_earliest_epoch", { body: stream });
 }
 
 export async function resetAllEarliestEpochs(): Promise<{ deleted: number }> {
-  return apiFetch("/api/v1/admin/earliest-epochs/reset-all", {
-    method: "POST",
-    headers: { "x-rt-receiver-admin-intent": "reset-all-earliest-epochs" },
-  });
+  return invoke("admin_reset_all_earliest_epochs");
 }
 
 export async function purgeSubscriptions(): Promise<{ deleted: number }> {
-  return apiFetch("/api/v1/admin/subscriptions/purge", {
-    method: "POST",
-    headers: { "x-rt-receiver-admin-intent": "purge-subscriptions" },
-  });
+  return invoke("admin_purge_subscriptions");
 }
 
 export async function resetProfile(): Promise<void> {
-  await apiFetch("/api/v1/admin/profile/reset", {
-    method: "POST",
-    headers: { "x-rt-receiver-admin-intent": "reset-profile" },
-  });
+  await invoke("admin_reset_profile");
 }
 
 export async function factoryReset(): Promise<void> {
-  await apiFetch("/api/v1/admin/factory-reset", {
-    method: "POST",
-    headers: { "x-rt-receiver-admin-intent": "factory-reset" },
-  });
+  await invoke("admin_factory_reset");
 }
 
 export async function updateLocalPort(
   stream: StreamRef,
   localPortOverride: number | null,
 ): Promise<void> {
-  await apiFetch("/api/v1/admin/subscriptions/port", {
-    method: "POST",
-    headers: { "x-rt-receiver-admin-intent": "update-local-port" },
-    body: JSON.stringify({
+  await invoke("admin_update_port", {
+    body: {
       forwarder_id: stream.forwarder_id,
       reader_ip: stream.reader_ip,
       local_port_override: localPortOverride,
-    }),
+    },
   });
 }
 
 export async function getSubscriptions(): Promise<{
   subscriptions: SubscriptionItem[];
 }> {
-  return apiFetch("/api/v1/subscriptions");
+  return invoke<{ subscriptions: SubscriptionItem[] }>("get_subscriptions");
 }
