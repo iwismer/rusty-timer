@@ -1167,6 +1167,7 @@ mod tests {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: Some(first_port),
+            event_type: "finish".to_owned(),
         }];
         reconcile_proxies(&initial, &mut proxies, &event_bus, &state.logger).await;
 
@@ -1177,6 +1178,7 @@ mod tests {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: Some(second_port),
+            event_type: "finish".to_owned(),
         }];
         reconcile_proxies(&updated, &mut proxies, &event_bus, &state.logger).await;
 
@@ -1412,6 +1414,7 @@ mod tests {
             forwarder_id: "sub-fwd".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
+            event_type: "finish".to_owned(),
         }];
         let mode = ReceiverMode::Live {
             streams: vec![
@@ -1442,6 +1445,7 @@ mod tests {
             forwarder_id: "sub-fwd".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
+            event_type: "finish".to_owned(),
         }];
         let mode = ReceiverMode::TargetedReplay {
             targets: vec![

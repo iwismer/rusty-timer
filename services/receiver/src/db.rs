@@ -32,6 +32,13 @@ pub struct Subscription {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub local_port_override: Option<u16>,
+    pub event_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbfConfig {
+    pub enabled: bool,
+    pub path: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorRecord {
@@ -90,11 +97,12 @@ impl Db {
         receiver_id: Option<&str>,
     ) -> DbResult<()> {
         let receiver_mode_json = self.load_receiver_mode_json_raw()?;
+        let dbf_config = self.load_dbf_config()?;
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, dbf_config.path],
         )?;
         tx.commit()?;
         Ok(())
@@ -169,25 +177,38 @@ impl Db {
         Ok(())
     }
     pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
-        let mut s = self.conn.prepare("SELECT forwarder_id, reader_ip, local_port_override FROM subscriptions ORDER BY forwarder_id, reader_ip")?;
+        let mut s = self.conn.prepare("SELECT forwarder_id, reader_ip, local_port_override, event_type FROM subscriptions ORDER BY forwarder_id, reader_ip")?;
         let rows = s.query_map([], |r| {
             Ok(Subscription {
                 forwarder_id: r.get(0)?,
                 reader_ip: r.get(1)?,
                 local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
+                event_type: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-    pub fn save_subscription(&self, fwd: &str, ip: &str, port: Option<u16>) -> DbResult<()> {
-        self.conn.execute("INSERT OR IGNORE INTO subscriptions (forwarder_id, reader_ip, local_port_override) VALUES (?1, ?2, ?3)", rusqlite::params![fwd, ip, port.map(|p| p as i64)])?;
+    pub fn save_subscription(
+        &self,
+        fwd: &str,
+        ip: &str,
+        port: Option<u16>,
+        event_type: Option<&str>,
+    ) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![fwd, ip, port.map(|p| p as i64), event_type.unwrap_or("finish")],
+        )?;
         Ok(())
     }
     pub fn replace_subscriptions(&mut self, subs: &[Subscription]) -> DbResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM subscriptions")?;
         for s in subs {
-            tx.execute("INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override) VALUES (?1, ?2, ?3)", rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64)])?;
+            tx.execute(
+                "INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64), &s.event_type],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -258,6 +279,21 @@ impl Db {
             "ALTER TABLE profile ADD COLUMN receiver_id TEXT;",
             "receiver_id",
         )?;
+        apply_profile_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN dbf_enabled INTEGER NOT NULL DEFAULT 0;",
+            "dbf_enabled",
+        )?;
+        apply_profile_column_migration(
+            &self.conn,
+            r"ALTER TABLE profile ADD COLUMN dbf_path TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF';",
+            "dbf_path",
+        )?;
+        apply_profile_column_migration(
+            &self.conn,
+            "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
+            "event_type",
+        )?;
         Ok(())
     }
 
@@ -310,6 +346,48 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn load_dbf_config(&self) -> DbResult<DbfConfig> {
+        let result: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT dbf_enabled, dbf_path FROM profile LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(match result {
+            Some((enabled, path)) => DbfConfig {
+                enabled: enabled != 0,
+                path,
+            },
+            None => DbfConfig {
+                enabled: false,
+                path: r"C:\winrace\Files\IPICO.DBF".to_owned(),
+            },
+        })
+    }
+
+    pub fn save_dbf_config(&self, enabled: bool, path: &str) -> DbResult<()> {
+        self.conn.execute(
+            "UPDATE profile SET dbf_enabled = ?1, dbf_path = ?2",
+            rusqlite::params![enabled as i64, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_subscription_event_type(
+        &self,
+        fwd: &str,
+        ip: &str,
+        event_type: &str,
+    ) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "UPDATE subscriptions SET event_type = ?1 WHERE forwarder_id = ?2 AND reader_ip = ?3",
+            rusqlite::params![event_type, fwd, ip],
+        )?;
+        Ok(count > 0)
     }
 
     fn load_receiver_mode_json_raw(&self) -> DbResult<Option<String>> {
@@ -544,8 +622,9 @@ mod tests {
     #[test]
     fn delete_all_subscriptions_removes_every_row() {
         let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
-        db.save_subscription("f2", "10.0.0.2", Some(9000)).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        db.save_subscription("f2", "10.0.0.2", Some(9000), None)
+            .unwrap();
         let count = db.delete_all_subscriptions().unwrap();
         assert_eq!(count, 2);
         assert!(db.load_subscriptions().unwrap().is_empty());
@@ -583,7 +662,7 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
         db.factory_reset().unwrap();
@@ -599,7 +678,7 @@ mod tests {
     #[test]
     fn update_subscription_port_changes_existing() {
         let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         let updated = db
             .update_subscription_port("f1", "10.0.0.1", Some(9000))
             .unwrap();
@@ -611,7 +690,8 @@ mod tests {
     #[test]
     fn update_subscription_port_clears_override() {
         let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", Some(9000)).unwrap();
+        db.save_subscription("f1", "10.0.0.1", Some(9000), None)
+            .unwrap();
         let updated = db.update_subscription_port("f1", "10.0.0.1", None).unwrap();
         assert!(updated);
         let subs = db.load_subscriptions().unwrap();
@@ -702,5 +782,45 @@ mod tests {
             "cursor must advance to higher epoch"
         );
         assert_eq!(rows[0].last_seq, 1);
+    }
+
+    #[test]
+    fn dbf_config_defaults_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
+        db.save_profile("https://example.com", "tok", "check-and-download", None)
+            .unwrap();
+        let config = db.load_dbf_config().unwrap();
+        assert_eq!(config.enabled, false);
+        assert_eq!(config.path, r"C:\winrace\Files\IPICO.DBF");
+        db.save_dbf_config(true, r"D:\race\output.dbf").unwrap();
+        let config = db.load_dbf_config().unwrap();
+        assert_eq!(config.enabled, true);
+        assert_eq!(config.path, r"D:\race\output.dbf");
+        db.save_profile("https://new.com", "tok2", "check-and-download", None)
+            .unwrap();
+        let config = db.load_dbf_config().unwrap();
+        assert_eq!(config.enabled, true);
+        assert_eq!(config.path, r"D:\race\output.dbf");
+    }
+
+    #[test]
+    fn subscription_event_type_defaults_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
+        db.save_subscription("fwd1", "10.0.0.1", None, None)
+            .unwrap();
+        let subs = db.load_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].event_type, "finish");
+        db.replace_subscriptions(&[Subscription {
+            forwarder_id: "fwd1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            local_port_override: None,
+            event_type: "start".to_owned(),
+        }])
+        .unwrap();
+        let subs = db.load_subscriptions().unwrap();
+        assert_eq!(subs[0].event_type, "start");
     }
 }

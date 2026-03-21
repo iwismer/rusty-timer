@@ -39,9 +39,9 @@ fn profile_load_returns_none_when_empty() {
 #[test]
 fn subscriptions_save_and_load() {
     let db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100:10000", Some(10100))
+    db.save_subscription("f", "192.168.1.100:10000", Some(10100), None)
         .unwrap();
-    db.save_subscription("f", "192.168.1.200:10000", None)
+    db.save_subscription("f", "192.168.1.200:10000", None, None)
         .unwrap();
     let s = db.load_subscriptions().unwrap();
     assert_eq!(s.len(), 2);
@@ -56,12 +56,13 @@ fn subscriptions_save_and_load() {
 #[test]
 fn subscriptions_replace_all_replaces_existing() {
     let mut db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100:10000", None)
+    db.save_subscription("f", "192.168.1.100:10000", None, None)
         .unwrap();
     db.replace_subscriptions(&[Subscription {
         forwarder_id: "f2".to_owned(),
         reader_ip: "10.0.0.1:10000".to_owned(),
         local_port_override: Some(9900),
+        event_type: "finish".to_owned(),
     }])
     .unwrap();
     let s = db.load_subscriptions().unwrap();
@@ -77,11 +78,13 @@ fn replace_subscriptions_is_atomic_on_duplicate_input() {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1".to_owned(),
             local_port_override: None,
+            event_type: "finish".to_owned(),
         },
         Subscription {
             forwarder_id: "f2".to_owned(),
             reader_ip: "10.0.0.2".to_owned(),
             local_port_override: Some(9900),
+            event_type: "finish".to_owned(),
         },
     ];
     db.replace_subscriptions(&baseline).unwrap();
@@ -91,11 +94,13 @@ fn replace_subscriptions_is_atomic_on_duplicate_input() {
             forwarder_id: "dup".to_owned(),
             reader_ip: "10.0.0.3".to_owned(),
             local_port_override: None,
+            event_type: "finish".to_owned(),
         },
         Subscription {
             forwarder_id: "dup".to_owned(),
             reader_ip: "10.0.0.3".to_owned(),
             local_port_override: Some(9950),
+            event_type: "finish".to_owned(),
         },
     ];
 

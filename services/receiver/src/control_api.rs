@@ -368,6 +368,7 @@ pub struct SubscriptionRequest {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub local_port_override: Option<u16>,
+    pub event_type: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1121,6 +1122,7 @@ pub async fn put_subscriptions(
             forwarder_id: s.forwarder_id,
             reader_ip: s.reader_ip,
             local_port_override: s.local_port_override,
+            event_type: s.event_type.unwrap_or_else(|| "finish".to_owned()),
         })
         .collect();
     let mut db = state.db.lock().await;
@@ -1163,6 +1165,7 @@ pub async fn get_subscriptions(state: &AppState) -> Result<SubscriptionsBody, Re
                     forwarder_id: s.forwarder_id,
                     reader_ip: s.reader_ip,
                     local_port_override: s.local_port_override,
+                    event_type: Some(s.event_type),
                 })
                 .collect(),
         }),
