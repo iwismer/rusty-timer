@@ -1,4 +1,4 @@
-import { createSSE, type SseHandle } from "@rusty-timer/shared-ui/lib/sse";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   LastRead,
   ReceiverMode,
@@ -18,62 +18,58 @@ export type SseCallbacks = {
   onLastRead: (read: LastRead) => void;
 };
 
-let handle: SseHandle | null = null;
+let unlistenFns: UnlistenFn[] = [];
 
-export function initSSE(callbacks: SseCallbacks): void {
-  if (handle) return;
+export async function initSSE(callbacks: SseCallbacks): Promise<void> {
+  if (unlistenFns.length > 0) return;
 
-  handle = createSSE(
-    "/api/v1/events",
-    {
-      status_changed: (data: any) => {
-        callbacks.onStatusChanged({
-          connection_state: data.connection_state,
-          local_ok: data.local_ok ?? true,
-          streams_count: data.streams_count,
-          receiver_id: data.receiver_id ?? "",
-        });
-      },
-      streams_snapshot: (data: any) => {
-        callbacks.onStreamsSnapshot({
-          streams: data.streams,
-          degraded: data.degraded,
-          upstream_error: data.upstream_error ?? null,
-        });
-      },
-      log_entry: (data: any) => {
-        callbacks.onLogEntry(data.entry);
-      },
-      resync: () => {
-        callbacks.onResync();
-      },
-      stream_counts_updated: (data: any) => {
-        callbacks.onStreamCountsUpdated(data.updates ?? []);
-      },
-      mode_changed: (data: any) => {
-        callbacks.onModeChanged(data.mode);
-      },
-      last_read: (data: any) => {
-        callbacks.onLastRead({
-          forwarder_id: data.forwarder_id,
-          reader_ip: data.reader_ip,
-          chip_id: data.chip_id,
-          timestamp: data.timestamp,
-          bib: data.bib ?? null,
-          name: data.name ?? null,
-        });
-      },
-    },
-    (connected) => {
-      callbacks.onConnectionChange(connected);
-      if (connected) callbacks.onResync();
-    },
-  );
+  // Tauri events are always connected (in-process)
+  callbacks.onConnectionChange(true);
+
+  unlistenFns = await Promise.all([
+    listen<any>("status_changed", (event) => {
+      callbacks.onStatusChanged({
+        connection_state: event.payload.connection_state,
+        local_ok: event.payload.local_ok ?? true,
+        streams_count: event.payload.streams_count,
+        receiver_id: event.payload.receiver_id ?? "",
+      });
+    }),
+    listen<any>("streams_snapshot", (event) => {
+      callbacks.onStreamsSnapshot({
+        streams: event.payload.streams,
+        degraded: event.payload.degraded,
+        upstream_error: event.payload.upstream_error ?? null,
+      });
+    }),
+    listen<any>("log_entry", (event) => {
+      callbacks.onLogEntry(event.payload.entry);
+    }),
+    listen("resync", () => {
+      callbacks.onResync();
+    }),
+    listen<any>("stream_counts_updated", (event) => {
+      callbacks.onStreamCountsUpdated(event.payload.updates ?? []);
+    }),
+    listen<any>("mode_changed", (event) => {
+      callbacks.onModeChanged(event.payload.mode);
+    }),
+    listen<any>("last_read", (event) => {
+      callbacks.onLastRead({
+        forwarder_id: event.payload.forwarder_id,
+        reader_ip: event.payload.reader_ip,
+        chip_id: event.payload.chip_id,
+        timestamp: event.payload.timestamp,
+        bib: event.payload.bib ?? null,
+        name: event.payload.name ?? null,
+      });
+    }),
+  ]);
 }
 
 export function destroySSE(): void {
-  if (handle) {
-    handle.destroy();
-    handle = null;
+  for (const unlisten of unlistenFns) {
+    unlisten();
   }
+  unlistenFns = [];
 }

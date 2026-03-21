@@ -1,23 +1,20 @@
 # Receiver
 
-The receiver subscribes to live timing streams from a rusty-timer server over
-WebSocket, re-exposes each stream as a local TCP port for race-management
-software, and provides an embedded web UI for configuration and monitoring.
+The receiver is a library crate that subscribes to live timing streams from a
+rusty-timer server over WebSocket, re-exposes each stream as a local TCP port
+for race-management software, and provides the business logic for configuration
+and monitoring.
 
-It is designed to run on end-user machines (laptops, desktops) and requires no
-CLI arguments -- all configuration is stored in a local SQLite profile and
-managed through the control API or the web UI.
+It is embedded in the Tauri desktop app (`apps/receiver-ui/src-tauri`). All
+configuration is stored in a local SQLite profile and managed through the
+Tauri UI via IPC commands.
 
 ## Build
 
-```bash
-cargo build --release -p receiver
-```
-
-To include the embedded web UI in the binary:
+The receiver is built as a library dependency of the Tauri app:
 
 ```bash
-cargo build --release -p receiver --features embed-ui
+cd apps/receiver-ui && cargo tauri build
 ```
 
 ## Data storage
@@ -33,81 +30,10 @@ database at a platform-specific data directory:
 
 The directory is created automatically on first run.
 
-## Control API
+## API
 
-The control API binds to `127.0.0.1:9090` and is not configurable. All
-endpoints are JSON unless otherwise noted.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET`  | `/api/v1/profile` | Read the current profile (server URL, token, log level). Returns `404` if no profile is configured. |
-| `PUT`  | `/api/v1/profile` | Create or replace the profile. |
-| `GET`  | `/api/v1/streams` | List all known streams, merging upstream server data with local subscriptions. |
-| `GET`  | `/api/v1/subscriptions` | Read the current subscription list. |
-| `PUT`  | `/api/v1/subscriptions` | Replace the full subscription list (atomic). |
-| `GET`  | `/api/v1/mode` | Read the current receiver mode configuration. Returns `404` if no mode is configured. |
-| `PUT`  | `/api/v1/mode` | Set receiver mode (`live`, `race`, or `targeted_replay`). |
-| `GET`  | `/api/v1/races` | List available races for race-mode selection. |
-| `GET`  | `/api/v1/replay-targets/epochs` | List available stream epochs for targeted replay. |
-| `GET`  | `/api/v1/status` | Runtime status: connection state, stream count, DB health. |
-| `GET`  | `/api/v1/logs` | Recent log entries (up to 500, in-memory ring buffer). |
-| `POST` | `/api/v1/connect` | Initiate a WebSocket connection to the server (asynchronous). |
-| `POST` | `/api/v1/disconnect` | Close the active WebSocket connection (asynchronous). |
-| `GET`  | `/api/v1/events` | SSE stream of real-time UI events (`status_changed`, `streams_snapshot`, `log_entry`, `update_available`). |
-| `GET`  | `/api/v1/update/status` | Check for available software updates. |
-| `POST` | `/api/v1/update/apply` | Apply a previously downloaded update. Returns `404` if no update is staged. |
-
-Any path not matching an API route is served by the embedded web UI (when built
-with `--features embed-ui`).
-
-### `PUT /api/v1/profile`
-
-```json
-{
-  "server_url": "ws://timing.example.com:8080",
-  "token": "your-auth-token",
-  "update_mode": "check-and-download"
-}
-```
-
-The `server_url` is normalized on save: a `ws://` scheme is prepended if no
-scheme is provided, and trailing slashes are stripped.
-
-### `GET /api/v1/status`
-
-```json
-{
-  "connection_state": "connected",
-  "local_ok": true,
-  "streams_count": 3
-}
-```
-
-`connection_state` is one of `disconnected`, `connecting`, `connected`, or
-`disconnecting`.
-
-### `GET /api/v1/streams`
-
-```json
-{
-  "streams": [
-    {
-      "forwarder_id": "fwd-001",
-      "reader_ip": "192.168.1.100:10000",
-      "subscribed": true,
-      "local_port": 10100,
-      "online": true,
-      "display_alias": "Start Line"
-    }
-  ],
-  "degraded": false,
-  "upstream_error": null
-}
-```
-
-The response merges locally subscribed streams with upstream availability data.
-When the receiver is not connected to the server, `degraded` is `true` and
-`upstream_error` explains why.
+The receiver exposes its functionality as plain async functions in `control_api.rs`.
+These are called by the Tauri app via IPC commands. There is no standalone HTTP API.
 
 ## Subscription model
 

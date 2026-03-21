@@ -1,8 +1,8 @@
 # Receiver Tauri Development Guide
 
-The receiver can run as a standalone binary (opens in browser) or as a Tauri
-desktop app (native window). Both modes use the same receiver binary and
-SvelteKit UI — Tauri is a thin shell that spawns the receiver as a sidecar.
+The receiver runs as a Tauri desktop app with the receiver library embedded
+directly in the Tauri process. The SvelteKit UI communicates with the receiver
+via Tauri IPC (invoke/listen), not HTTP.
 
 ## Prerequisites
 
@@ -14,12 +14,8 @@ SvelteKit UI — Tauri is a thin shell that spawns the receiver as a sidecar.
 
 ## Running in Dev Mode
 
-### Option 1: Standalone (browser)
-
 ```bash
-cargo build -p receiver --features embed-ui
-./target/debug/receiver
-# Opens http://127.0.0.1:9090 in your default browser
+cd apps/receiver-ui && cargo tauri dev
 ```
 
 Or with `dev.py`:
@@ -28,42 +24,14 @@ Or with `dev.py`:
 uv run scripts/dev.py
 ```
 
-### Option 2: Tauri (native window)
-
-```bash
-# Build the receiver binary
-cargo build -p receiver
-
-# Copy to sidecar location
-mkdir -p apps/receiver-ui/src-tauri/binaries
-cp target/debug/receiver apps/receiver-ui/src-tauri/binaries/receiver-$(rustc --print host-tuple)
-
-# Run Tauri dev mode
-cd apps/receiver-ui && cargo tauri dev
-```
-
-`beforeDevCommand` runs `npm run copy-receiver-tauri-sidecar`, which copies
-`src-tauri/binaries/receiver-<triple>` to `target/debug/receiver` (same folder as
-`receiver-tauri`, matching the NSIS install layout).
-
-Or with `dev.py`:
-
-```bash
-uv run scripts/dev.py --tauri
-```
-
 In Tauri dev mode, the SvelteKit frontend is served by Vite (with hot-reload)
-and API calls are proxied to the receiver on port 9090.
+and the receiver library runs in-process.
 
 ## Building a Release Installer
 
 ```bash
-# Build the receiver with embedded UI
-cargo build --release -p receiver --features receiver/embed-ui
-
-# Copy to sidecar location
-mkdir -p apps/receiver-ui/src-tauri/binaries
-cp target/release/receiver.exe apps/receiver-ui/src-tauri/binaries/receiver-x86_64-pc-windows-msvc.exe
+# Build the SvelteKit frontend
+npm run build --workspace apps/receiver-ui
 
 # Build the NSIS installer
 cd apps/receiver-ui && cargo tauri build
@@ -73,7 +41,7 @@ The installer is at `target/release/bundle/nsis/`.
 
 `src-tauri/icons/icon.ico` must be a valid multi-size ICO (an empty or truncated
 file makes `cargo tauri build` fail on Windows). To regenerate all bundle
-icons from a square master PNG (for example 1024×1024), run from
+icons from a square master PNG (for example 1024x1024), run from
 `apps/receiver-ui/src-tauri`: `cargo tauri icon path/to/icon.png`.
 
 Note: building the installer requires the Tauri signing key. In CI, this is
@@ -86,8 +54,7 @@ secrets. For local builds without signing, set `"active": false` in
 The [Release workflow](../.github/workflows/release.yml) includes a **Receiver
 Tauri** job that runs on tags matching `receiver-ui-vMAJOR.MINOR.PATCH` (for
 example `receiver-ui-v0.1.0`). The value after `receiver-ui-v` must match
-`version` in `apps/receiver-ui/src-tauri/tauri.conf.json` and match
-`services/receiver/Cargo.toml` (same semver).
+`version` in `apps/receiver-ui/src-tauri/tauri.conf.json`.
 
 ### One-time: signing key and repository secrets
 
@@ -104,30 +71,30 @@ example `receiver-ui-v0.1.0`). The value after `receiver-ui-v` must match
    `cargo tauri signer generate --ci -w ~/.tauri/rusty-timer-receiver.key`
    (no password; protect the private key exclusively via GitHub Secrets).
 
-2. **Public key in the repo** — `plugins.updater.pubkey` in
+2. **Public key in the repo** -- `plugins.updater.pubkey` in
    `apps/receiver-ui/src-tauri/tauri.conf.json` must be the **entire** contents
    of the generated `*.key.pub` file (one base64 line), matching the private key
    you use in CI.
 
-3. **GitHub Actions secrets** (repository → *Settings* → *Secrets and variables*
-   → *Actions*):
+3. **GitHub Actions secrets** (repository -> *Settings* -> *Secrets and variables*
+   -> *Actions*):
 
-   - `TAURI_SIGNING_PRIVATE_KEY` — paste the **full** contents of the private
+   - `TAURI_SIGNING_PRIVATE_KEY` -- paste the **full** contents of the private
      key file (`*.key`), as a single string.
-   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the key password, or leave the
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` -- the key password, or leave the
      secret **unset** if the key has no password.
 
 ### Cut a release
 
-**Recommended:** use the repo release helper so `services/receiver`, Tauri
-`tauri.conf.json`, and both tags stay aligned:
+**Recommended:** use the repo release helper so Tauri
+`tauri.conf.json` and the tag stay aligned:
 
 ```bash
 uv run scripts/release.py receiver --patch   # or --minor / --major / --version X.Y.Z
 ```
 
-That bumps the receiver crate and `apps/receiver-ui/src-tauri/tauri.conf.json`
-to the same version, then creates and pushes `receiver-ui-vX.Y.Z` (single tag;
+That bumps `apps/receiver-ui/src-tauri/tauri.conf.json`
+to the target version, then creates and pushes `receiver-ui-vX.Y.Z` (single tag;
 triggers the Tauri Windows build in [`.github/workflows/release.yml`](../.github/workflows/release.yml)).
 
 **Manual alternative:** bump `version` in `tauri.conf.json` to match the tag you
@@ -138,7 +105,7 @@ git tag receiver-ui-v0.1.0
 git push origin receiver-ui-v0.1.0
 ```
 
-Or run the workflow manually (*Actions* → *Release* → *Run workflow*) and pass
+Or run the workflow manually (*Actions* -> *Release* -> *Run workflow*) and pass
 an **existing** `receiver-ui-v*` tag name.
 
 The Tauri workflow uploads the NSIS installer to a GitHub Release for
@@ -149,30 +116,25 @@ The Tauri workflow uploads the NSIS installer to a GitHub Release for
 ## Architecture
 
 ```
-Tauri Shell (src-tauri/)
-  └── spawns receiver binary as sidecar (--no-open-browser)
-       └── receiver serves SvelteKit SPA on 127.0.0.1:9090
-            └── Tauri WebView loads http://127.0.0.1:9090
+Tauri App (src-tauri/)
+  +-- embeds receiver library (services/receiver)
+  +-- SvelteKit UI communicates via Tauri IPC (invoke/listen)
 ```
 
-The Tauri shell:
-1. Spawns the receiver binary with `--no-open-browser`
-2. Polls `http://127.0.0.1:9090/api/v1/version` until healthy
-3. Creates a native window loading `http://127.0.0.1:9090`
-4. Kills the receiver when the window is closed
+The Tauri app:
+1. Initializes the receiver runtime (opens SQLite DB, restores profile)
+2. Spawns the receiver event loop as a tokio task
+3. Bridges receiver events to the frontend via Tauri event emitter
+4. Exposes receiver API as Tauri IPC commands
 
 ## Troubleshooting
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| "Failed to spawn receiver" / Windows “path not found” | Sidecar path mismatch or binary missing | Ensure Rust uses `sidecar("receiver")` (basename); bundler installs `receiver.exe` beside the main exe. Run `cargo build -p receiver` and copy the triple-named file into `src-tauri/binaries/` |
-| Health check never succeeds / “failed after 3 attempts” | Another process on 9090, receiver crash, or **HTTP proxy** breaking `127.0.0.1` | Quit other receivers; read `crash.log` (now includes HTTP poll details + stderr). On Windows, unset `HTTP_PROXY`/`HTTPS_PROXY` for localhost or rely on the shell’s `reqwest` client using **no proxy** for health checks. |
-| "Port 9090 may be in use" | Another receiver instance running | Kill the other process or check `lsof -i :9090` |
-| Blank window | Receiver crashed after health check | Check terminal output for `[receiver]` log lines |
+| App fails to start | SQLite DB corruption or missing data directory | Delete the receiver SQLite DB and restart |
+| Blank window | Receiver runtime panic or WebView error | Check terminal output for error logs |
 | WebView2 error on Windows | Runtime not installed | Download from https://developer.microsoft.com/en-us/microsoft-edge/webview2/ |
 
 ### Packaged Windows app (no console)
 
-Release builds use the Windows GUI subsystem, so errors are easy to miss. On failure, the shell writes **`%LOCALAPPDATA%\com.rusty-timer.receiver\crash.log`** (same directory as `app_local_data_dir()`). Read that file first.
-
-The most common issue is **port 9090 already in use**: the standalone `receiver.exe` and the Tauri app cannot run simultaneously because both bind the same control port.
+Release builds use the Windows GUI subsystem, so errors are easy to miss. On failure, the app writes **`%LOCALAPPDATA%\com.rusty-timer.receiver\crash.log`** (same directory as `app_local_data_dir()`). Read that file first.

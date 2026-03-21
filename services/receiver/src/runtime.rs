@@ -1,10 +1,9 @@
-use clap::Parser;
-use receiver::Subscription;
-use receiver::cache::EventBus;
-use receiver::control_api::{AppState, ConnectionState, ShutdownSignal};
-use receiver::db::Db;
-use receiver::local_proxy::LocalProxy;
-use receiver::ports::{PortAssignment, resolve_ports, stream_key};
+use crate::Subscription;
+use crate::cache::EventBus;
+use crate::control_api::{AppState, ConnectionState, ShutdownSignal};
+use crate::db::Db;
+use crate::local_proxy::LocalProxy;
+use crate::ports::{PortAssignment, resolve_ports, stream_key};
 use rt_ui_log::UiLogLevel;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -12,25 +11,13 @@ use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
 use tracing::{error, info, warn};
 
-#[derive(Parser)]
-#[command(name = "receiver", about = "Rusty Timer Receiver")]
-struct Cli {
-    /// Disable automatic browser open on startup
-    #[arg(long)]
-    no_open_browser: bool,
-
-    /// Override the receiver ID (default: auto-generated)
-    #[arg(long)]
-    receiver_id: Option<String>,
-}
-
-fn generate_receiver_id() -> String {
+pub fn generate_receiver_id() -> String {
     let mut bytes = [0u8; 4];
     getrandom::fill(&mut bytes).expect("failed to generate random bytes");
     format!("recv-{:08x}", u32::from_be_bytes(bytes))
 }
 
-fn resolve_receiver_id(cli_id: Option<String>, db: &receiver::db::Db) -> String {
+pub fn resolve_receiver_id(cli_id: Option<String>, db: &Db) -> Result<String, String> {
     // CLI flag takes priority
     if let Some(id) = cli_id
         .map(|s| s.trim().to_owned())
@@ -41,29 +28,29 @@ fn resolve_receiver_id(cli_id: Option<String>, db: &receiver::db::Db) -> String 
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            eprintln!(
-                "FATAL: receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only"
+            return Err(
+                "receiver_id must be 1-64 characters, alphanumeric/hyphens/underscores only"
+                    .to_owned(),
             );
-            std::process::exit(1);
         }
         if let Err(e) = db.save_receiver_id(&id) {
             warn!(error = %e, "failed to persist CLI receiver_id to DB");
         }
-        return id;
+        return Ok(id);
     }
 
     // DB lookup
     match db.load_profile() {
         Ok(Some(p)) => {
             if let Some(id) = p.receiver_id.filter(|id| !id.is_empty()) {
-                return id;
+                return Ok(id);
             }
         }
         Ok(None) => {}
         Err(e) => {
             let id = generate_receiver_id();
             warn!(error = %e, receiver_id = %id, "failed to load profile; using ephemeral receiver ID");
-            return id;
+            return Ok(id);
         }
     }
 
@@ -73,59 +60,48 @@ fn resolve_receiver_id(cli_id: Option<String>, db: &receiver::db::Db) -> String 
         warn!(error = %e, "failed to persist auto-generated receiver ID; ID will not survive restart");
     }
     info!(receiver_id = %id, "auto-generated receiver ID");
-    id
+    Ok(id)
 }
 
-#[tokio::main]
-async fn main() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls CryptoProvider");
+pub fn profile_has_connect_credentials(profile: Option<&crate::db::Profile>) -> bool {
+    profile.is_some_and(|profile| {
+        !profile.server_url.trim().is_empty() && !profile.token.trim().is_empty()
+    })
+}
 
-    let cli = Cli::parse();
-    tracing_subscriber::fmt::init();
-
-    // -------------------------------------------------------------------------
-    // 1. Open SQLite DB
-    // -------------------------------------------------------------------------
+/// Initialize the receiver: open DB, create AppState, restore profile/subscriptions.
+/// Returns the state, a shutdown receiver, and whether auto-connect should happen.
+pub async fn init(
+    receiver_id: Option<String>,
+) -> Result<(Arc<AppState>, watch::Receiver<ShutdownSignal>), String> {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("rusty-timer")
         .join("receiver");
 
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!("FATAL: could not create data directory: {e}");
-        std::process::exit(1);
-    }
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("could not create data directory: {e}"))?;
 
     let db_path = data_dir.join("receiver.sqlite3");
-    let db = Db::open(&db_path).unwrap_or_else(|e| {
-        eprintln!("FATAL: failed to open DB: {e}");
-        std::process::exit(1);
-    });
-    let db_integrity_ok = match db.integrity_check() {
-        Ok(()) => true,
-        Err(e) => {
-            eprintln!("FATAL: integrity_check failed: {e}");
-            std::process::exit(1);
-        }
-    };
+    let db = Db::open(&db_path).map_err(|e| format!("failed to open DB: {e}"))?;
+    let db_integrity_ok = db
+        .integrity_check()
+        .map(|()| true)
+        .map_err(|e| format!("integrity_check failed: {e}"))?;
 
-    // -------------------------------------------------------------------------
-    // 1b. Resolve receiver ID: CLI flag > DB > auto-generate
-    // -------------------------------------------------------------------------
-    let receiver_id = resolve_receiver_id(cli.receiver_id, &db);
+    let receiver_id = resolve_receiver_id(receiver_id, &db)?;
     info!(receiver_id = %receiver_id, "resolved receiver ID");
 
-    // -------------------------------------------------------------------------
-    // 2. Create AppState
-    // -------------------------------------------------------------------------
-    let (state, mut shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok);
+    let (state, shutdown_rx) = AppState::with_integrity(db, receiver_id, db_integrity_ok);
     state.logger.log("Receiver started");
 
-    // -------------------------------------------------------------------------
-    // 4. Load profile and restore subscriptions
-    // -------------------------------------------------------------------------
+    Ok((state, shutdown_rx))
+}
+
+/// Run the receiver event loop. Blocks until shutdown signal.
+/// This should be spawned as a tokio task, not run on the main thread.
+pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<ShutdownSignal>) {
+    // Load profile and restore subscriptions
     let has_profile: bool;
     {
         let db = state.db.lock().await;
@@ -150,7 +126,6 @@ async fn main() {
             }
         }
     };
-    // Map from stream-key -> LocalProxy handle.
     let mut proxies: HashMap<String, LocalProxy> = HashMap::new();
     reconcile_proxies(&initial_subs, &mut proxies, &event_bus, &state.logger).await;
 
@@ -160,45 +135,7 @@ async fn main() {
         state.request_connect().await;
     }
 
-    // -------------------------------------------------------------------------
-    // 3. Start Axum control API on 127.0.0.1:9090
-    // -------------------------------------------------------------------------
-    let router = receiver::control_api::build_router(Arc::clone(&state));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:9090")
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("FATAL: failed to bind control API on 127.0.0.1:9090: {e}");
-            std::process::exit(1);
-        });
-    state.logger.log("Control API listening on 127.0.0.1:9090");
-
-    let url = "http://127.0.0.1:9090";
-    println!("Receiver listening on {url}");
-
-    if !cli.no_open_browser
-        && let Err(e) = open::that(url)
-    {
-        warn!("Failed to open browser: {e}");
-    }
-
-    let api_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
-            error!(error = %e, "control API exited");
-        }
-        // If the control API exits unexpectedly, signal shutdown.
-        api_state.request_process_shutdown();
-    });
-
-    // Dedicated ctrl-c handler — works even when the main select loop is
-    // blocked inside connect_async or do_handshake.
-    let shutdown_for_ctrlc = Arc::clone(&state);
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        info!("received ctrl-c, signaling shutdown");
-        shutdown_for_ctrlc.request_process_shutdown();
-    });
-
+    // Spawn upstream dashboard SSE refresher
     {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -209,32 +146,21 @@ async fn main() {
     // -------------------------------------------------------------------------
     // Event loop: watch connection_state + reconcile subscriptions
     // -------------------------------------------------------------------------
-    // Optional cancel sender for the active WS session task; None when idle.
     let mut session_cancel_tx: Option<watch::Sender<bool>> = None;
     let mut session_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    // Watch receiver for connection state changes (replaces 50ms polling).
     let mut conn_state_rx = state.conn_rx();
 
-    // Interval for subscription reconciliation polling.
     let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_millis(500));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Track last-known subscriptions to detect changes.
     let mut last_subs: Vec<Subscription> = initial_subs;
 
     loop {
         tokio::select! {
             biased;
 
-            // ------------------------------------------------------------------
-            // Shutdown signal from control API (e.g. disconnect sends true)
-            // We only break the outer loop here if it's a process-level shutdown
-            // request (not a disconnect-only signal).  The disconnect path
-            // is handled by the connection_state watcher below.
-            // ------------------------------------------------------------------
             result = shutdown_rx.changed() => {
                 if result.is_err() {
-                    // Sender dropped — exit.
                     info!("shutdown channel closed, exiting");
                     break;
                 }
@@ -244,9 +170,6 @@ async fn main() {
                 }
             }
 
-            // ------------------------------------------------------------------
-            // Subscription reconciliation (polling every 500 ms)
-            // ------------------------------------------------------------------
             _ = reconcile_interval.tick() => {
                 let current_subs = {
                     let db = state.db.lock().await;
@@ -254,9 +177,9 @@ async fn main() {
                 };
                 if current_subs != last_subs {
                     reconcile_proxies(&current_subs, &mut proxies, &event_bus, &state.logger).await;
-                    let keep: HashSet<receiver::StreamKey> = current_subs
+                    let keep: HashSet<crate::StreamKey> = current_subs
                         .iter()
-                        .map(|s| receiver::StreamKey::new(&s.forwarder_id, &s.reader_ip))
+                        .map(|s| crate::StreamKey::new(&s.forwarder_id, &s.reader_ip))
                         .collect();
                     state.stream_counts.retain_keys(&keep);
                     state.logger.log(format!("Subscriptions changed ({} streams)", current_subs.len()));
@@ -265,16 +188,11 @@ async fn main() {
                 }
             }
 
-            // ------------------------------------------------------------------
-            // Connection state changes
-            // ------------------------------------------------------------------
             result = watch_connection_state(&mut conn_state_rx) => {
                 match result {
                     ConnectionState::Connecting => {
                         let attempt = state.current_connect_attempt();
 
-                        // Exponential backoff for automatic retries. Manual connect
-                        // requests reset the retry streak and remain immediate.
                         let retries = state.current_retry_streak();
                         let delay_secs = compute_reconnect_delay_secs(retries);
                         if delay_secs > 0 {
@@ -284,7 +202,6 @@ async fn main() {
                             continue;
                         }
 
-                        // Cancel any existing session first.
                         cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
 
                         let url_opt = state.upstream_url.read().await.clone();
@@ -295,13 +212,10 @@ async fn main() {
                                     set_disconnected_if_attempt_current(&state, attempt).await;
                             }
                             Some(base_url) => {
-                                // Build the full WS URL from the base URL.
                                 let ws_url = format!(
                                     "{}/ws/v1.2/receivers",
                                     base_url.trim_end_matches('/')
                                 );
-                                // Read the token from the saved profile so we can
-                                // authenticate the WebSocket upgrade request.
                                 let token_opt = {
                                     let db = state.db.lock().await;
                                     db.load_profile().ok().flatten().map(|p| p.token)
@@ -314,7 +228,7 @@ async fn main() {
                                   }
                                   Some(token) => {
                                 let ws_request =
-                                    receiver::build_authenticated_request(ws_url.as_str(), &token);
+                                    crate::build_authenticated_request(ws_url.as_str(), &token);
                                 match ws_request {
                                   Err(e) => {
                                     state.logger.log_at(UiLogLevel::Error, format!("Failed to build WS request: {e}"));
@@ -329,9 +243,6 @@ async fn main() {
                                             .await;
                                     }
                                     Ok((ws, _)) => {
-                                        // Perform the receiver hello / heartbeat handshake.
-                                        // NOTE: do_handshake takes Arc<Mutex<Db>> so it can
-                                        // drop the lock before making async HTTP calls.
                                         let (session_result, ws) = {
                                             let receiver_id = state.receiver_id.read().await.clone();
                                             do_handshake(ws, &state.db, &state.ui_tx, &receiver_id, &state.http_client).await
@@ -339,8 +250,7 @@ async fn main() {
                                         match (session_result, ws) {
                                             (Err(e), _) => {
                                                 state.logger.log_at(UiLogLevel::Error, format!("Handshake failed: {e}"));
-                                                if matches!(e, receiver::session::SessionError::ServerError(_)) {
-                                                    // Non-retryable server error (e.g. invalid token) — stop retrying.
+                                                if matches!(e, crate::session::SessionError::ServerError(_)) {
                                                     let _ = set_disconnected_if_attempt_current(&state, attempt).await;
                                                 } else {
                                                     let _ = retry_connect_if_attempt_current(
@@ -361,7 +271,6 @@ async fn main() {
                                                 state.set_connection_state(ConnectionState::Connected).await;
                                                 state.emit_streams_snapshot().await;
 
-                                                // Fetch chip→participant lookup from the server.
                                                 refresh_chip_lookup(&state).await;
 
                                                 let (cancel_tx, cancel_rx) =
@@ -373,7 +282,7 @@ async fn main() {
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
-                                                    let deps = receiver::session::SessionLoopDeps {
+                                                    let deps = crate::session::SessionLoopDeps {
                                                         db: db_arc,
                                                         event_tx,
                                                         stream_counts: counts,
@@ -382,7 +291,7 @@ async fn main() {
                                                         connection_state: st.conn_rx(),
                                                         chip_lookup: Arc::clone(&st.chip_lookup),
                                                     };
-                                                    let result = receiver::session::run_session_loop(
+                                                    let result = crate::session::run_session_loop(
                                                         ws, session_id, deps,
                                                     )
                                                     .await;
@@ -398,13 +307,11 @@ async fn main() {
                                                         }
                                                     }
                                                     if request_reconnect_if_connected(&st).await {
-                                                        // Unexpected drop — auto-reconnect.
                                                         st.logger.log("Connection lost, will reconnect");
                                                         st.emit_streams_snapshot().await;
                                                     } else if *st.connection_state.borrow()
                                                         == ConnectionState::Disconnecting
                                                     {
-                                                        // User-initiated disconnect.
                                                         st.set_connection_state(ConnectionState::Disconnected).await;
                                                         st.emit_streams_snapshot().await;
                                                     }
@@ -446,9 +353,7 @@ async fn main() {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 8. Graceful shutdown — close WS session and release TCP ports
-    // -------------------------------------------------------------------------
+    // Graceful shutdown
     state.logger.log("shutdown signal received");
     cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
     for (key, proxy) in proxies.drain() {
@@ -458,14 +363,11 @@ async fn main() {
     info!("receiver stopped");
 }
 
-fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
+pub fn should_exit_on_shutdown_signal(signal: &ShutdownSignal) -> bool {
     matches!(signal, ShutdownSignal::Terminate)
 }
 
-// ---------------------------------------------------------------------------
-// Helper: watch connection_state and return the new value when it changes.
-// ---------------------------------------------------------------------------
-async fn watch_connection_state(rx: &mut watch::Receiver<ConnectionState>) -> ConnectionState {
+pub async fn watch_connection_state(rx: &mut watch::Receiver<ConnectionState>) -> ConnectionState {
     let current = rx.borrow().clone();
     if current == ConnectionState::Connecting || current == ConnectionState::Disconnecting {
         return current;
@@ -480,12 +382,12 @@ async fn watch_connection_state(rx: &mut watch::Receiver<ConnectionState>) -> Co
     }
 }
 
-async fn is_current_connect_attempt(state: &Arc<AppState>, attempt: u64) -> bool {
+pub async fn is_current_connect_attempt(state: &Arc<AppState>, attempt: u64) -> bool {
     state.current_connect_attempt() == attempt
         && *state.connection_state.borrow() == ConnectionState::Connecting
 }
 
-fn compute_reconnect_delay_secs(retries: u64) -> u64 {
+pub fn compute_reconnect_delay_secs(retries: u64) -> u64 {
     if retries == 0 {
         0
     } else {
@@ -493,7 +395,7 @@ fn compute_reconnect_delay_secs(retries: u64) -> u64 {
     }
 }
 
-async fn wait_for_reconnect_delay_or_abort(
+pub async fn wait_for_reconnect_delay_or_abort(
     state: &Arc<AppState>,
     attempt: u64,
     retries: u64,
@@ -554,10 +456,7 @@ fn collect_lookup_forwarder_ids(
     forwarder_ids
 }
 
-/// Fetch a chip→participant lookup from the server and store it in
-/// `state.chip_lookup`.  Called on connect and when the server pushes a
-/// `forwarder_race_assigned` SSE event.
-async fn refresh_chip_lookup(state: &Arc<AppState>) {
+pub async fn refresh_chip_lookup(state: &Arc<AppState>) {
     let db = state.db.lock().await;
     let mode = db.load_receiver_mode().ok().flatten();
     let profile = db.load_profile().ok().flatten();
@@ -571,7 +470,7 @@ async fn refresh_chip_lookup(state: &Arc<AppState>) {
 
     let forwarder_ids = match mode.as_ref() {
         Some(rt_protocol::ReceiverMode::Race { race_id }) => {
-            match receiver::control_api::fetch_forwarder_ids_for_race(
+            match crate::control_api::fetch_forwarder_ids_for_race(
                 &state.http_client,
                 &p.server_url,
                 &p.token,
@@ -590,7 +489,7 @@ async fn refresh_chip_lookup(state: &Arc<AppState>) {
     };
 
     let result = if let Some(rt_protocol::ReceiverMode::Race { race_id }) = mode {
-        receiver::control_api::fetch_chip_lookup_for_race(
+        crate::control_api::fetch_chip_lookup_for_race(
             &state.http_client,
             &p.server_url,
             &p.token,
@@ -599,7 +498,7 @@ async fn refresh_chip_lookup(state: &Arc<AppState>) {
         )
         .await
     } else {
-        receiver::control_api::fetch_chip_lookup_for_forwarders(
+        crate::control_api::fetch_chip_lookup_for_forwarders(
             &state.http_client,
             &p.server_url,
             &p.token,
@@ -612,14 +511,14 @@ async fn refresh_chip_lookup(state: &Arc<AppState>) {
         Ok(lookup) => lookup,
         Err(e) => {
             warn!(error = %e, "failed to fetch participant lookup");
-            return; // keep the existing lookup on error
+            return;
         }
     };
 
     let total_chips: usize = lookup.values().map(|m| m.len()).sum();
     if total_chips > 0 {
         state.logger.log(format!(
-            "Loaded chip→participant mappings for {} forwarder(s) ({total_chips} chips)",
+            "Loaded chip->participant mappings for {} forwarder(s) ({total_chips} chips)",
             lookup.len()
         ));
     }
@@ -657,8 +556,7 @@ fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) ->
     None
 }
 
-// Use the shared http_base_url from control_api.
-use receiver::control_api::http_base_url;
+use crate::control_api::http_base_url;
 
 async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
     let client = match reqwest::Client::builder()
@@ -701,6 +599,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             continue;
         };
+
         let events_url = format!("{base_url}/api/v1/events");
 
         match consume_upstream_dashboard_events(&state, &client, &events_url, &profile.token).await
@@ -779,17 +678,11 @@ async fn consume_upstream_dashboard_events(
     }
 }
 
-fn profile_has_connect_credentials(profile: Option<&receiver::db::Profile>) -> bool {
-    profile.is_some_and(|profile| {
-        !profile.server_url.trim().is_empty() && !profile.token.trim().is_empty()
-    })
-}
-
-async fn request_reconnect_if_connected(state: &Arc<AppState>) -> bool {
+pub async fn request_reconnect_if_connected(state: &Arc<AppState>) -> bool {
     state.request_reconnect_if_connected().await
 }
 
-async fn retry_connect_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
+pub async fn retry_connect_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
     if !is_current_connect_attempt(state, attempt).await {
         state.logger.log("Ignoring stale connect retry request");
         return false;
@@ -798,7 +691,7 @@ async fn retry_connect_if_attempt_current(state: &Arc<AppState>, attempt: u64) -
     true
 }
 
-async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
+pub async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64) -> bool {
     if !is_current_connect_attempt(state, attempt).await {
         state.logger.log("Ignoring stale connect attempt result");
         return false;
@@ -809,18 +702,14 @@ async fn set_disconnected_if_attempt_current(state: &Arc<AppState>, attempt: u64
     true
 }
 
-// ---------------------------------------------------------------------------
-// Helper: perform ReceiverHello / Heartbeat handshake on an open WS.
-// Returns (Result<session_id>, Option<ws>) — ws is Some on success.
-// ---------------------------------------------------------------------------
 #[allow(clippy::type_complexity)]
-async fn do_handshake<S>(
+pub async fn do_handshake<S>(
     mut ws: S,
     db: &Arc<tokio::sync::Mutex<Db>>,
-    ui_tx: &tokio::sync::broadcast::Sender<receiver::ui_events::ReceiverUiEvent>,
+    ui_tx: &tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     receiver_id: &str,
     http_client: &reqwest::Client,
-) -> (Result<String, receiver::session::SessionError>, Option<S>)
+) -> (Result<String, crate::session::SessionError>, Option<S>)
 where
     S: futures_util::Stream<
             Item = Result<
@@ -838,12 +727,11 @@ where
     };
     use tokio_tungstenite::tungstenite::protocol::Message;
 
-    // Read all DB data we need upfront, then drop the lock before any async HTTP calls.
     let (resume, mut mode, earliest_epochs_rows, profile_url) = {
         let db = db.lock().await;
         let resume = match db.load_resume_cursors() {
             Ok(cursors) => cursors,
-            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            Err(e) => return (Err(crate::session::SessionError::Db(e)), None),
         };
         let mode = match db.load_receiver_mode() {
             Ok(Some(mode)) => mode,
@@ -856,21 +744,20 @@ where
                             reader_ip: s.reader_ip,
                         })
                         .collect(),
-                    Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+                    Err(e) => return (Err(crate::session::SessionError::Db(e)), None),
                 };
                 ReceiverMode::Live {
                     streams,
                     earliest_epochs: vec![],
                 }
             }
-            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            Err(e) => return (Err(crate::session::SessionError::Db(e)), None),
         };
         let earliest_epochs_rows = match db.load_earliest_epochs() {
             Ok(rows) => rows,
-            Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+            Err(e) => return (Err(crate::session::SessionError::Db(e)), None),
         };
         let profile_url = db.load_profile().ok().flatten().map(|p| p.server_url);
-        // If mode is Live with empty streams, load subscriptions
         let mode = if let ReceiverMode::Live { ref streams, .. } = mode {
             if streams.is_empty() {
                 match db.load_subscriptions() {
@@ -894,7 +781,7 @@ where
                             mode
                         }
                     }
-                    Err(e) => return (Err(receiver::session::SessionError::Db(e)), None),
+                    Err(e) => return (Err(crate::session::SessionError::Db(e)), None),
                 }
             } else {
                 mode
@@ -904,7 +791,6 @@ where
         };
         (resume, mode, earliest_epochs_rows, profile_url)
     };
-    // DB lock is now released — safe to make async HTTP calls.
 
     let clear_targeted_mode_after_handshake = matches!(
         &mode,
@@ -923,7 +809,7 @@ where
 
         if let Some(url) = profile_url
             && let Ok(server_streams) =
-                receiver::control_api::fetch_server_streams(http_client, &url).await
+                crate::control_api::fetch_server_streams(http_client, &url).await
         {
             let server_epoch_by_stream: HashMap<(String, String), i64> = server_streams
                 .into_iter()
@@ -966,17 +852,17 @@ where
 
     let hello_text = match serde_json::to_string(&hello) {
         Ok(t) => t,
-        Err(e) => return (Err(receiver::session::SessionError::Json(e)), None),
+        Err(e) => return (Err(crate::session::SessionError::Json(e)), None),
     };
 
     if let Err(e) = ws.send(Message::Text(hello_text.into())).await {
-        return (Err(receiver::session::SessionError::Ws(e)), None);
+        return (Err(crate::session::SessionError::Ws(e)), None);
     }
 
     loop {
         let msg = match ws.next().await {
-            None => return (Err(receiver::session::SessionError::ConnectionClosed), None),
-            Some(Err(e)) => return (Err(receiver::session::SessionError::Ws(e)), None),
+            None => return (Err(crate::session::SessionError::ConnectionClosed), None),
+            Some(Err(e)) => return (Err(crate::session::SessionError::Ws(e)), None),
             Some(Ok(m)) => m,
         };
 
@@ -984,12 +870,12 @@ where
             Message::Text(t) => t,
             Message::Ping(_) | Message::Pong(_) => continue,
             Message::Close(_) => {
-                return (Err(receiver::session::SessionError::ConnectionClosed), None);
+                return (Err(crate::session::SessionError::ConnectionClosed), None);
             }
             other => {
                 error!(msg = ?other, "handshake: unexpected message type");
                 return (
-                    Err(receiver::session::SessionError::UnexpectedFirstMessage),
+                    Err(crate::session::SessionError::UnexpectedFirstMessage),
                     None,
                 );
             }
@@ -1003,7 +889,7 @@ where
                     };
                     let db_guard = db.lock().await;
                     if let Err(e) = db_guard.save_receiver_mode(&clear_mode) {
-                        return (Err(receiver::session::SessionError::Db(e)), None);
+                        return (Err(crate::session::SessionError::Db(e)), None);
                     }
                     drop(db_guard);
                 }
@@ -1012,7 +898,7 @@ where
             }
             Ok(WsMessage::ReceiverModeApplied(applied)) => {
                 info!(mode = %applied.mode_summary, streams = applied.resolved_stream_count, "mode applied before heartbeat");
-                let _ = ui_tx.send(receiver::ui_events::ReceiverUiEvent::LogEntry {
+                let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
                     entry: format!(
                         "server applied mode: {} (resolved streams: {})",
                         applied.mode_summary, applied.resolved_stream_count
@@ -1020,14 +906,14 @@ where
                 });
                 for warning in applied.warnings {
                     warn!(warning = %warning, "server mode warning");
-                    let _ = ui_tx.send(receiver::ui_events::ReceiverUiEvent::LogEntry {
+                    let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::LogEntry {
                         entry: format!("server mode warning: {warning}"),
                     });
                 }
             }
             Ok(WsMessage::Error(err)) => {
                 return (
-                    Err(receiver::session::SessionError::ServerError(format!(
+                    Err(crate::session::SessionError::ServerError(format!(
                         "{}: {}",
                         err.code, err.message
                     ))),
@@ -1037,23 +923,16 @@ where
             Ok(other) => {
                 error!("handshake: unexpected WsMessage variant: {other:?}");
                 return (
-                    Err(receiver::session::SessionError::UnexpectedFirstMessage),
+                    Err(crate::session::SessionError::UnexpectedFirstMessage),
                     None,
                 );
             }
-            Err(e) => return (Err(receiver::session::SessionError::Json(e)), None),
+            Err(e) => return (Err(crate::session::SessionError::Json(e)), None),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helper: create a broadcast sender that routes through the EventBus.
-// run_session_loop takes a broadcast::Sender<ReadEvent>; events sent to it
-// are republished through the EventBus so local proxies can subscribe per key.
-// ---------------------------------------------------------------------------
 fn make_broadcast_sender(bus: &EventBus) -> tokio::sync::broadcast::Sender<rt_protocol::ReadEvent> {
-    // We create a dedicated channel. A relay task fans events from this channel
-    // into the EventBus so per-stream senders are updated.
     let (tx, mut rx) = tokio::sync::broadcast::channel::<rt_protocol::ReadEvent>(256);
     let bus = bus.clone();
     tokio::spawn(async move {
@@ -1070,21 +949,15 @@ fn make_broadcast_sender(bus: &EventBus) -> tokio::sync::broadcast::Sender<rt_pr
     tx
 }
 
-// ---------------------------------------------------------------------------
-// Helper: cancel and join the running WS session task.
-// ---------------------------------------------------------------------------
 async fn cancel_session(
     task: &mut Option<tokio::task::JoinHandle<()>>,
     cancel_tx: &mut Option<watch::Sender<bool>>,
-    logger: &rt_ui_log::UiLogger<receiver::ReceiverUiEvent>,
+    logger: &rt_ui_log::UiLogger<crate::ReceiverUiEvent>,
 ) {
-    // Signal the session loop to stop.
     if let Some(tx) = cancel_tx.take() {
         let _ = tx.send(true);
     }
-    // Await the task; abort it if it doesn't exit within 5s.
     if let Some(handle) = task.take() {
-        // Pin the handle so we can poll it without consuming it on timeout.
         tokio::pin!(handle);
         match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
             Ok(Ok(())) => {}
@@ -1102,19 +975,14 @@ async fn cancel_session(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helper: reconcile running LocalProxy handles against the desired subscription
-// list, stopping removed proxies and starting new ones.
-// ---------------------------------------------------------------------------
-async fn reconcile_proxies(
+pub async fn reconcile_proxies(
     subs: &[Subscription],
     proxies: &mut HashMap<String, LocalProxy>,
     event_bus: &EventBus,
-    logger: &rt_ui_log::UiLogger<receiver::ReceiverUiEvent>,
+    logger: &rt_ui_log::UiLogger<crate::ReceiverUiEvent>,
 ) {
     let assignments = resolve_ports(subs);
 
-    // Determine desired port for each stream key.
     let desired_ports: HashMap<String, u16> = assignments
         .iter()
         .filter_map(|(k, v)| {
@@ -1126,7 +994,6 @@ async fn reconcile_proxies(
         })
         .collect();
 
-    // Stop proxies that are no longer wanted, or whose desired port changed.
     proxies.retain(|key, proxy| match desired_ports.get(key) {
         Some(desired_port) if *desired_port == proxy.port => true,
         Some(desired_port) => {
@@ -1146,7 +1013,6 @@ async fn reconcile_proxies(
         }
     });
 
-    // Start new proxies.
     for sub in subs {
         let key = stream_key(&sub.forwarder_id, &sub.reader_ip);
         if proxies.contains_key(&key) {
@@ -1161,7 +1027,7 @@ async fn reconcile_proxies(
                 logger.log_at(
                     UiLogLevel::Warn,
                     format!(
-                        "port collision for {} (port {} used by {}) — skipping",
+                        "port collision for {} (port {} used by {}) -- skipping",
                         key, wanted, collides_with,
                     ),
                 );
@@ -1171,7 +1037,7 @@ async fn reconcile_proxies(
         };
 
         let stream_key_obj =
-            receiver::cache::StreamKey::new(sub.forwarder_id.clone(), sub.reader_ip.clone());
+            crate::cache::StreamKey::new(sub.forwarder_id.clone(), sub.reader_ip.clone());
         let sender = event_bus.sender_for(&stream_key_obj);
 
         match LocalProxy::bind(port, sender).await {
@@ -1195,8 +1061,13 @@ async fn reconcile_proxies(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::EventBus;
+    use crate::control_api::AppState;
+    use crate::db::Db;
+    use crate::local_proxy::LocalProxy;
+    use crate::ports::stream_key;
+    use crate::ui_events::ReceiverUiEvent;
     use futures_util::{SinkExt, StreamExt};
-    use receiver::ui_events::ReceiverUiEvent;
     use rt_protocol::{Heartbeat, ReceiverMode, ReceiverModeApplied, ReplayTarget, WsMessage};
     use std::future::Future;
     use tokio::net::TcpListener;
@@ -1231,7 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_proxies_rebinds_when_port_changes() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
         let event_bus = EventBus::new();
         let mut proxies: HashMap<String, LocalProxy> = HashMap::new();
@@ -1411,7 +1282,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_session_does_not_reconnect_when_disconnect_in_progress() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1432,7 +1303,7 @@ mod tests {
 
     #[tokio::test]
     async fn recoverable_failure_reissues_connect_for_current_attempt() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1450,7 +1321,7 @@ mod tests {
 
     #[tokio::test]
     async fn recoverable_failure_does_not_reissue_when_attempt_is_stale() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1464,7 +1335,7 @@ mod tests {
 
     #[tokio::test]
     async fn watch_connection_state_observes_current_connecting_state() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1555,17 +1426,13 @@ mod tests {
 
     #[test]
     fn shutdown_signal_exit_helper_only_exits_for_terminate() {
-        assert!(!should_exit_on_shutdown_signal(
-            &receiver::control_api::ShutdownSignal::Disconnect
-        ));
-        assert!(should_exit_on_shutdown_signal(
-            &receiver::control_api::ShutdownSignal::Terminate
-        ));
+        assert!(!should_exit_on_shutdown_signal(&ShutdownSignal::Disconnect));
+        assert!(should_exit_on_shutdown_signal(&ShutdownSignal::Terminate));
     }
 
     #[tokio::test]
     async fn reconnect_backoff_wait_aborts_when_state_changes() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1590,7 +1457,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn reconnect_backoff_wait_completes_when_attempt_stays_current() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1610,7 +1477,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_backoff_wait_aborts_when_attempt_becomes_stale() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1633,7 +1500,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_connect_resets_retry_backoff_state() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;
@@ -1658,9 +1525,8 @@ mod tests {
     fn resolve_receiver_id_prefers_cli() {
         let db = Db::open_in_memory().unwrap();
         db.save_receiver_id("recv-db").unwrap();
-        let id = resolve_receiver_id(Some("recv-cli".to_owned()), &db);
+        let id = resolve_receiver_id(Some("recv-cli".to_owned()), &db).unwrap();
         assert_eq!(id, "recv-cli");
-        // Should also persist to DB
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, Some("recv-cli".to_owned()));
     }
@@ -1669,17 +1535,16 @@ mod tests {
     fn resolve_receiver_id_falls_back_to_db() {
         let db = Db::open_in_memory().unwrap();
         db.save_receiver_id("recv-db").unwrap();
-        let id = resolve_receiver_id(None, &db);
+        let id = resolve_receiver_id(None, &db).unwrap();
         assert_eq!(id, "recv-db");
     }
 
     #[test]
     fn resolve_receiver_id_auto_generates_when_db_empty() {
         let db = Db::open_in_memory().unwrap();
-        let id = resolve_receiver_id(None, &db);
+        let id = resolve_receiver_id(None, &db).unwrap();
         assert!(id.starts_with("recv-"), "expected recv- prefix, got: {id}");
         assert_eq!(id.len(), 13);
-        // Should persist the generated ID
         let p = db.load_profile().unwrap().unwrap();
         assert_eq!(p.receiver_id, Some(id.clone()));
     }
@@ -1688,7 +1553,7 @@ mod tests {
     fn resolve_receiver_id_skips_whitespace_cli() {
         let db = Db::open_in_memory().unwrap();
         db.save_receiver_id("recv-db").unwrap();
-        let id = resolve_receiver_id(Some("  ".to_owned()), &db);
+        let id = resolve_receiver_id(Some("  ".to_owned()), &db).unwrap();
         assert_eq!(id, "recv-db");
     }
 
@@ -1704,7 +1569,7 @@ mod tests {
     fn profile_with_url_and_token_is_required_for_autoconnect() {
         assert!(!profile_has_connect_credentials(None));
         assert!(!profile_has_connect_credentials(Some(
-            &receiver::db::Profile {
+            &crate::db::Profile {
                 server_url: "ws://server".to_owned(),
                 token: String::new(),
                 update_mode: "check-only".to_owned(),
@@ -1712,21 +1577,19 @@ mod tests {
             }
         )));
         assert!(!profile_has_connect_credentials(Some(
-            &receiver::db::Profile {
+            &crate::db::Profile {
                 server_url: String::new(),
                 token: "token".to_owned(),
                 update_mode: "check-only".to_owned(),
                 receiver_id: None,
             }
         )));
-        assert!(profile_has_connect_credentials(Some(
-            &receiver::db::Profile {
-                server_url: "ws://server".to_owned(),
-                token: "token".to_owned(),
-                update_mode: "check-only".to_owned(),
-                receiver_id: None,
-            }
-        )));
+        assert!(profile_has_connect_credentials(Some(&crate::db::Profile {
+            server_url: "ws://server".to_owned(),
+            token: "token".to_owned(),
+            update_mode: "check-only".to_owned(),
+            receiver_id: None,
+        })));
     }
 
     #[test]
@@ -1811,7 +1674,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_connect_attempt_failure_does_not_force_disconnected() {
-        let db = receiver::db::Db::open_in_memory().expect("open db");
+        let db = Db::open_in_memory().expect("open db");
         let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
 
         state.request_connect().await;

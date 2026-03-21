@@ -862,7 +862,7 @@ export function initStore(): void {
       // Not running in Tauri (e.g., dev server in browser) — ignore
     });
 
-  initSSE({
+  void initSSE({
     onStatusChanged: (s) => {
       store.status = s;
     },

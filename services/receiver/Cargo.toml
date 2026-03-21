@@ -3,21 +3,13 @@ name = "receiver"
 version = "0.10.5"
 edition = "2024"
 
-[features]
-embed-ui = ["dep:rust-embed", "rt-ui-http/embed-ui"]
-
 [lib]
 name = "receiver"
 path = "src/lib.rs"
 
-[[bin]]
-name = "receiver"
-path = "src/main.rs"
-
 [dependencies]
 rt-protocol = { path = "../../crates/rt-protocol" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
-rt-ui-http = { path = "../../crates/rt-ui-http" }
 rt-updater = { path = "../../crates/rt-updater" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
@@ -27,20 +19,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-axum = { version = "0.8", features = ["tokio"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 thiserror = "2"
 dirs = "6"
-clap = { version = "4", features = ["derive"] }
-open = "5"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-rust-embed = { version = "8", optional = true }
 getrandom = "0.4"
 
 [dev-dependencies]
@@ -50,3 +35,4 @@ rt-test-utils = { path = "../../crates/rt-test-utils" }
 tokio = { version = "1", features = ["full", "test-util"] }
 axum = { version = "0.8", features = ["ws"] }
 http-body-util = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }

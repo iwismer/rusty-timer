@@ -1,6 +1,6 @@
 [package]
 name = "receiver-tauri"
-version = "0.8.0"
+version = "0.10.5"
 edition = "2024"
 publish = false
 
@@ -9,9 +9,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
+receiver = { path = "../../../services/receiver" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rt-protocol = { path = "../../../crates/rt-protocol" }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["time", "sync"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"

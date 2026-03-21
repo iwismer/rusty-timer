@@ -56,10 +56,6 @@ uv run scripts/dev.py --bibchip test_assets/bibchip/large.txt --ppl test_assets/
 - `--emulator SPEC`: add an emulator instance. Repeat this flag for multiple emulators.
 - `--bibchip PATH`: upload chip file to a new race after startup; can also generate emulator reads.
 - `--ppl PATH`: upload participant file to a new race after startup.
-- `--tauri`: launch the receiver via Tauri desktop app instead of the standalone
-  binary. Requires `cargo install tauri-cli`. In Tauri dev mode the SvelteKit
-  frontend is served by Vite (with hot-reload) and the receiver runs as a sidecar.
-
 `--emulator` format:
 
 ```text
@@ -109,7 +105,7 @@ Default dev tokens:
 ## Runtime Notes
 
 - Server starts on `http://127.0.0.1:8080`.
-- Receiver control API is expected at `http://127.0.0.1:9090`.
+- Receiver runs as a Tauri desktop app (no standalone HTTP API).
 - If `apps/server-ui/build` exists, server is launched with `DASHBOARD_DIR` set to that path.
 - On startup, the script validates collisions across:
   - emulator ports
@@ -129,7 +125,7 @@ After `dev.py` starts, these are the addresses for each component:
 | Announcer screen | `http://localhost:8080/announcer` | Public-facing finisher display |
 | Server API | `http://localhost:8080/api/v1/...` | REST API for streams, races, tokens |
 | Server health | `http://localhost:8080/healthz` | Liveness check |
-| Receiver control API | `http://localhost:9090/api/v1/status` | Receiver status and subscriptions |
+| Receiver | Tauri desktop app | Receiver status and subscriptions (managed via UI) |
 | Forwarder status | `http://localhost:8081/healthz` | Forwarder health check (when running manually; dev.py uses default port) |
 
 The receiver and forwarder UIs are available at their respective status HTTP addresses

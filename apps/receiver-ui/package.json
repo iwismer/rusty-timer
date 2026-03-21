@@ -3,7 +3,6 @@
   "version": "0.8.0",
   "private": true,
   "scripts": {
-    "copy-receiver-tauri-sidecar": "node scripts/copy-receiver-tauri-sidecar.mjs",
     "dev": "vite dev",
     "build": "svelte-kit sync && vite build",
     "preview": "vite preview",

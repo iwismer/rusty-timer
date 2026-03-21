@@ -3,7 +3,7 @@
   "identifier": "com.rusty-timer.receiver",
   "version": "0.10.5",
   "build": {
-    "beforeDevCommand": "npm run copy-receiver-tauri-sidecar && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../build",
     "devUrl": "http://127.0.0.1:5173"
@@ -12,7 +12,6 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": ["nsis"],
-    "externalBin": ["binaries/receiver"],
     "icon": ["icons/icon.ico"],
     "windows": {
       "webviewInstallMode": {
@@ -21,7 +20,15 @@
     }
   },
   "app": {
-    "windows": []
+    "windows": [
+      {
+        "title": "Rusty Timer Receiver",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
   },
   "plugins": {
     "updater": {
