@@ -278,6 +278,9 @@
                         {@const options = store.earliestEpochOptions[key] ?? []}
                         {@const selectedEarliest =
                           selectedEarliestEpochValue(stream)}
+                        <label class="text-xs text-text-secondary mr-1"
+                          >From epoch:</label
+                        >
                         <select
                           data-testid="earliest-epoch-{key}"
                           class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-36 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"

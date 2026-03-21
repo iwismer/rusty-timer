@@ -163,7 +163,7 @@ async fn get_races(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Val
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn get_replay_target_epochs(
     state: State<'_, Arc<AppState>>,
     forwarder_id: String,
