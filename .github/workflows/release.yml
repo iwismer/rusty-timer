@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release. Standard: <service>-v<X.Y.Z> (e.g. server-v0.4.0). Receiver Tauri: receiver-ui-v<X.Y.Z>. Must already exist as a git tag."
+        description: "Tag to release. Standard: <service>-v<X.Y.Z> (e.g. server-v0.4.0, receiver-v0.11.0). Must already exist as a git tag."
         required: true
         type: string
   push:
     tags:
       - "forwarder-v*"
-      - "receiver-ui-v*"
+      - "receiver-v*"
       - "streamer-v*"
       - "emulator-v*"
       - "server-v*"
@@ -40,7 +40,7 @@ jobs:
             TAG="${GITHUB_REF#refs/tags/}"
           fi
           echo "Resolved tag: ${TAG}"
-          if [[ "$TAG" =~ ^receiver-ui-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ "$TAG" =~ ^receiver-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "kind=tauri" >> "$GITHUB_OUTPUT"
           else
             echo "kind=standard" >> "$GITHUB_OUTPUT"
@@ -90,7 +90,7 @@ jobs:
             VERSION="${BASH_REMATCH[2]}"
           else
             echo "::error::Invalid tag format: ${TAG}"
-            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|streamer|emulator|server (receiver app: tag receiver-ui-v<semver>)"
+            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|streamer|emulator|server (receiver app: tag receiver-v<semver>)"
             exit 1
           fi
           echo "service=${SERVICE}" >> "$GITHUB_OUTPUT"
@@ -374,7 +374,7 @@ jobs:
           name: "${{ needs.resolve-matrix.outputs.service }} v${{ needs.resolve-matrix.outputs.version }}"
           generate_release_notes: true
 
-  # Receiver desktop app (Tauri + NSIS). Triggered only by receiver-ui-v* tags.
+  # Receiver desktop app (Tauri + NSIS). Triggered only by receiver-v* tags.
   receiver-tauri-validate:
     name: Receiver Tauri — validate
     needs: route
@@ -395,8 +395,8 @@ jobs:
       - name: Validate tag format
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if [[ ! "$TAG" =~ ^receiver-ui-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag '$TAG' does not match pattern receiver-ui-vX.Y.Z"
+          if [[ ! "$TAG" =~ ^receiver-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' does not match pattern receiver-vX.Y.Z"
             exit 1
           fi
 
@@ -404,7 +404,7 @@ jobs:
         id: parse
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          VERSION="${TAG#receiver-ui-v}"
+          VERSION="${TAG#receiver-v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
@@ -430,7 +430,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: receiver-ui-v${{ needs.receiver-tauri-validate.outputs.version }}
+          ref: receiver-v${{ needs.receiver-tauri-validate.outputs.version }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -483,20 +483,20 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: receiver-ui-v${{ needs.receiver-tauri-validate.outputs.version }}
-          name: "Receiver UI v${{ needs.receiver-tauri-validate.outputs.version }}"
+          tag_name: receiver-v${{ needs.receiver-tauri-validate.outputs.version }}
+          name: "Receiver v${{ needs.receiver-tauri-validate.outputs.version }}"
           files: artifacts/**/*
 
       - name: Update pinned latest release with manifest
         shell: bash
         run: |
           # This job has no git checkout; gh needs an explicit --repo for upload.
-          gh release upload receiver-ui-latest artifacts/update-manifest.json \
+          gh release upload receiver-latest artifacts/update-manifest.json \
             --repo "${{ github.repository }}" \
             --clobber || \
-          gh release create receiver-ui-latest artifacts/update-manifest.json \
+          gh release create receiver-latest artifacts/update-manifest.json \
             --repo "${{ github.repository }}" \
-            --title "Receiver UI Latest" \
+            --title "Receiver Latest" \
             --notes "Auto-updated manifest for Tauri updater. Do not delete this release." \
             --latest=false
         env:

@@ -48,10 +48,10 @@ def main() -> None:
     manifest = {
         "version": f"v{version}",
         "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "notes": f"Receiver UI v{version}",
+        "notes": f"Receiver v{version}",
         "platforms": {
             "windows-x86_64": {
-                "url": f"https://github.com/{REPO}/releases/download/receiver-ui-v{version}/{exe_name}",
+                "url": f"https://github.com/{REPO}/releases/download/receiver-v{version}/{exe_name}",
                 "signature": signature,
             }
         },
