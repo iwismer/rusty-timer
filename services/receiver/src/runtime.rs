@@ -5,6 +5,7 @@ use crate::db::Db;
 use crate::local_proxy::LocalProxy;
 use crate::ports::{PortAssignment, resolve_ports, stream_key};
 use rt_ui_log::UiLogLevel;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -568,6 +569,60 @@ fn consume_sse_line_for_event(
     None
 }
 
+#[derive(Debug, Deserialize)]
+struct UpstreamMetricsPayload {
+    stream_id: String,
+    raw_count: i64,
+    dedup_count: i64,
+    retransmit_count: i64,
+    lag_ms: Option<u64>,
+    epoch_raw_count: i64,
+    epoch_dedup_count: i64,
+    epoch_retransmit_count: i64,
+    epoch_lag_ms: Option<u64>,
+    epoch_last_received_at: Option<String>,
+    unique_chips: i64,
+    // Fields present in payload but not forwarded to UI:
+    #[allow(dead_code)]
+    last_tag_id: Option<String>,
+    #[allow(dead_code)]
+    last_reader_timestamp: Option<String>,
+}
+
+async fn handle_metrics_updated(state: &Arc<AppState>, data: &str) {
+    let payload: UpstreamMetricsPayload = match serde_json::from_str(data) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!("failed to parse metrics_updated payload: {e}");
+            return;
+        }
+    };
+
+    let stream_id_map = state.stream_id_map.read().await;
+    let Some((forwarder_id, reader_ip)) = stream_id_map.get(&payload.stream_id) else {
+        return; // Unknown stream, silently ignore
+    };
+
+    let _ = state
+        .ui_tx
+        .send(crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(
+            crate::ui_events::StreamMetricsPayload {
+                forwarder_id: forwarder_id.clone(),
+                reader_ip: reader_ip.clone(),
+                raw_count: payload.raw_count,
+                dedup_count: payload.dedup_count,
+                retransmit_count: payload.retransmit_count,
+                lag: payload.lag_ms,
+                epoch_raw_count: payload.epoch_raw_count,
+                epoch_dedup_count: payload.epoch_dedup_count,
+                epoch_retransmit_count: payload.epoch_retransmit_count,
+                unique_chips: payload.unique_chips,
+                epoch_last_received_at: payload.epoch_last_received_at,
+                epoch_lag: payload.epoch_lag_ms,
+            },
+        ));
+}
+
 use crate::control_api::http_base_url;
 
 async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
@@ -676,7 +731,7 @@ async fn consume_upstream_dashboard_events(
             }
 
             let line = String::from_utf8_lossy(&line_bytes).into_owned();
-            if let Some((event_name, _data)) =
+            if let Some((event_name, data)) =
                 consume_sse_line_for_event(&line, &mut pending_event, &mut pending_data)
             {
                 if should_refresh_stream_snapshot_for_dashboard_event(&event_name) {
@@ -687,6 +742,11 @@ async fn consume_upstream_dashboard_events(
                 }
                 if should_refresh_chip_lookup_for_dashboard_event(&event_name) {
                     refresh_chip_lookup(state).await;
+                }
+                if event_name == "metrics_updated" {
+                    if let Some(data) = data {
+                        handle_metrics_updated(state, &data).await;
+                    }
                 }
             }
         }
@@ -1748,6 +1808,55 @@ mod tests {
         );
         let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
         assert_eq!(result, Some(("stream_created".to_owned(), None)));
+    }
+
+    #[test]
+    fn parse_metrics_updated_payload() {
+        let json = r#"{
+            "type": "metrics_updated",
+            "stream_id": "aaaa-bbbb",
+            "raw_count": 100,
+            "dedup_count": 80,
+            "retransmit_count": 20,
+            "lag_ms": 1500,
+            "epoch_raw_count": 50,
+            "epoch_dedup_count": 40,
+            "epoch_retransmit_count": 10,
+            "epoch_lag_ms": 500,
+            "epoch_last_received_at": "2026-03-21T12:00:00Z",
+            "unique_chips": 30,
+            "last_tag_id": "AABBCCDD",
+            "last_reader_timestamp": "2026-03-21T12:00:00Z"
+        }"#;
+        let parsed: UpstreamMetricsPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.stream_id, "aaaa-bbbb");
+        assert_eq!(parsed.raw_count, 100);
+        assert_eq!(parsed.lag_ms, Some(1500));
+        assert_eq!(parsed.unique_chips, 30);
+    }
+
+    #[test]
+    fn parse_metrics_updated_payload_with_nulls() {
+        let json = r#"{
+            "type": "metrics_updated",
+            "stream_id": "aaaa-bbbb",
+            "raw_count": 0,
+            "dedup_count": 0,
+            "retransmit_count": 0,
+            "lag_ms": null,
+            "epoch_raw_count": 0,
+            "epoch_dedup_count": 0,
+            "epoch_retransmit_count": 0,
+            "epoch_lag_ms": null,
+            "epoch_last_received_at": null,
+            "unique_chips": 0,
+            "last_tag_id": null,
+            "last_reader_timestamp": null
+        }"#;
+        let parsed: UpstreamMetricsPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.lag_ms, None);
+        assert_eq!(parsed.epoch_lag_ms, None);
+        assert_eq!(parsed.epoch_last_received_at, None);
     }
 
     #[tokio::test]
