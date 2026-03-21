@@ -40,6 +40,7 @@ fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
         ReceiverUiEvent::LastRead(_) => "last_read",
+        ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
     }
 }
 
