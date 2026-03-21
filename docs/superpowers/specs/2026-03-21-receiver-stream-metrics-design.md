@@ -17,9 +17,24 @@ The receiver has no access to these metrics today.
 ### Data Flow
 
 1. **SSE subscription**: The receiver's Rust backend subscribes to the server's SSE endpoint (`/api/v1/sse`) when the WebSocket connection is established. It listens for `metrics_updated` events, parses them, and forwards them to the frontend via a new Tauri native event `stream_metrics_updated`.
-2. **Initial fetch**: On connection (and on resync), the backend fetches `GET /api/v1/streams/{id}/metrics` for each subscribed stream and emits the results as `stream_metrics_updated` events to the frontend.
+2. **Initial fetch**: On connection (and on resync), the backend fetches `GET /api/v1/streams/{id}/metrics` for each subscribed stream (with a concurrency limit of 4 to avoid burst-loading the server) and emits the results as `stream_metrics_updated` events to the frontend.
 3. **Frontend store**: A new reactive map in the store (`streamMetrics: Map<string, StreamMetrics>`) keyed by stream key (`forwarder_id/reader_ip`) holds the latest metrics per stream.
 4. **SSE listener**: `sse.ts` registers a handler for the `stream_metrics_updated` Tauri event that updates the store map.
+
+### Stream ID Resolution
+
+The server's SSE `metrics_updated` events and HTTP metrics endpoint use `stream_id` (UUID), but the receiver indexes streams by `forwarder_id/reader_ip`. The receiver already fetches the stream list from `GET /api/v1/streams`, which returns each stream's `id`, `forwarder_id`, and `reader_ip`. The Rust backend maintains an in-memory map of `stream_id → (forwarder_id, reader_ip)` populated from the streams list response. When an SSE `metrics_updated` event arrives, the backend resolves the UUID to the stream key before emitting the Tauri event. Unknown UUIDs (e.g., streams the receiver isn't subscribed to) are silently dropped.
+
+### SSE Connection Lifecycle
+
+- The SSE connection is established when the WebSocket connects and torn down when it disconnects.
+- The SSE endpoint does not require authentication (it is a read-only dashboard feed with no auth middleware).
+- On SSE connection drop (while WebSocket is still up), the client reconnects with exponential backoff (1s, 2s, 4s, capped at 30s). On reconnect, a full metrics re-fetch is triggered to cover any missed events.
+- If the server's broadcast channel lags (overflow), the SSE stream errors out. The reconnect-and-refetch strategy handles this case.
+
+### Field Name Mapping
+
+The server's SSE payload and HTTP response use `lag_ms` and `epoch_lag_ms`. The receiver's Rust backend normalizes these to `lag` and `epoch_lag` (matching the server-ui's convention) before emitting the Tauri event. This keeps the frontend type consistent with the server-ui's `StreamMetrics` interface.
 
 ### StreamMetrics Type (TypeScript)
 
@@ -37,6 +52,8 @@ interface StreamMetrics {
   epoch_lag: number | null;   // milliseconds, null if no events in epoch
 }
 ```
+
+Fields intentionally excluded: `last_tag_id` and `last_reader_timestamp` (available in the server payload but not displayed in either UI), `backlog` (hardcoded to 0).
 
 ### Expanded Row Layout
 
@@ -62,7 +79,7 @@ The existing info grid (Reader IP, Forwarder, Epoch) remains at the top. Below i
 | Last read | `epoch_last_received_at` | Timestamp of the last unique frame in the current epoch |
 | Time since last read | computed | Live-updating elapsed time since last unique frame |
 
-The existing "Reads (total + epoch)" line in the current expanded row can be removed since that information is now covered by the raw/dedup counts.
+The existing "Reads (total + epoch)" line in the current expanded row is removed since that information is now covered by the raw/dedup counts. Note: the current "Reads" values come from the receiver's local in-memory counters, while the new metrics come from the server. When metrics are unavailable (server unreachable), the "Metrics unavailable" placeholder is shown — the local read counts in the collapsed row remain visible as a fallback.
 
 ### Help Text
 
@@ -97,7 +114,7 @@ When metrics haven't been fetched yet (e.g., server unreachable), the metrics se
 
 **UI (`apps/receiver-ui/src/lib/components/StreamsTab.svelte`)**:
 - Expanded row: add lifetime and current epoch metrics sections
-- `setInterval` for live time-since-last-read counter (scoped to expanded row lifecycle)
+- `setInterval` for live time-since-last-read counter, setup/cleanup via Svelte 5 `$effect` return function (matching server-ui pattern)
 - Remove the existing "Reads" line from the expanded row (superseded by new metrics)
 
 ## Out of Scope
