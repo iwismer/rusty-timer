@@ -85,6 +85,19 @@ async function flushAsyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function mockSseInitWithCallbacks(): {
+  callbacks: Parameters<typeof sseMocks.initSSE>[0] | undefined;
+} {
+  const state: {
+    callbacks: Parameters<typeof sseMocks.initSSE>[0] | undefined;
+  } = { callbacks: undefined };
+  sseMocks.initSSE.mockImplementation((callbacks) => {
+    state.callbacks = callbacks;
+    return Promise.resolve();
+  });
+  return state;
+}
+
 describe("receiver updater store", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -162,5 +175,123 @@ describe("receiver updater store", () => {
     expect(store.savedServerUrl).toBe("wss://receiver.example/ws");
     expect(store.savedToken).toBe("secret-token");
     expect(store.savedReceiverId).toBe("recv-live");
+  });
+
+  it("clears cached metrics for a stream when a snapshot reports a newer epoch", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    store.streamMetrics = new Map([
+      [
+        key,
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          raw_count: 10,
+          dedup_count: 9,
+          retransmit_count: 1,
+          lag: 1000,
+          epoch_raw_count: 4,
+          epoch_dedup_count: 3,
+          epoch_retransmit_count: 1,
+          unique_chips: 2,
+          epoch_last_received_at: "2026-03-21T12:00:00Z",
+          epoch_lag: 250,
+        },
+      ],
+    ]);
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 2,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    expect(store.streamMetrics.has(key)).toBe(false);
+  });
+
+  it("preserves cached metrics for a stream when the snapshot keeps the same epoch", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 10,
+      dedup_count: 9,
+      retransmit_count: 1,
+      lag: 1000,
+      epoch_raw_count: 4,
+      epoch_dedup_count: 3,
+      epoch_retransmit_count: 1,
+      unique_chips: 2,
+      epoch_last_received_at: "2026-03-21T12:00:00Z",
+      epoch_lag: 250,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 2,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 2,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 });

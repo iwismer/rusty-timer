@@ -630,6 +630,33 @@ fn should_emit_initial_metrics(state: &AppState, generation: u64) -> bool {
         && *state.connection_state.borrow() == ConnectionState::Connected
 }
 
+async fn initial_metrics_entries(
+    state: &Arc<AppState>,
+    ws_url: &str,
+) -> Vec<(String, String, String)> {
+    let stream_id_map = state.stream_id_map.read().await;
+    if !stream_id_map.is_empty() {
+        return stream_id_map
+            .iter()
+            .map(|(sid, (fwd, ip))| (sid.clone(), fwd.clone(), ip.clone()))
+            .collect();
+    }
+    drop(stream_id_map);
+
+    let Ok(streams) = crate::control_api::fetch_server_streams(&state.http_client, ws_url).await
+    else {
+        return Vec::new();
+    };
+
+    let new_map = crate::control_api::build_stream_id_map(&streams);
+    *state.stream_id_map.write().await = new_map;
+
+    streams
+        .into_iter()
+        .map(|stream| (stream.stream_id, stream.forwarder_id, stream.reader_ip))
+        .collect()
+}
+
 async fn fetch_initial_metrics(state: &Arc<AppState>, generation: u64) {
     let profile = {
         let db = state.db.lock().await;
@@ -637,17 +664,10 @@ async fn fetch_initial_metrics(state: &Arc<AppState>, generation: u64) {
     };
     let Some(profile) = profile else { return };
 
-    let stream_id_map = state.stream_id_map.read().await;
-    if stream_id_map.is_empty() {
+    let entries = initial_metrics_entries(state, &profile.server_url).await;
+    if entries.is_empty() {
         return;
     }
-
-    // Collect entries to avoid holding the read lock during HTTP calls
-    let entries: Vec<(String, String, String)> = stream_id_map
-        .iter()
-        .map(|(sid, (fwd, ip))| (sid.clone(), fwd.clone(), ip.clone()))
-        .collect();
-    drop(stream_id_map);
 
     // Fetch metrics with concurrency limit of 4
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
@@ -1372,6 +1392,58 @@ mod tests {
         }))
     }
 
+    #[derive(Clone)]
+    struct InitialMetricsRaceState {
+        metrics_called: Arc<AtomicBool>,
+    }
+
+    async fn initial_metrics_race_events()
+    -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+        Sse::new(stream::pending()).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(60))
+                .text("keepalive"),
+        )
+    }
+
+    async fn initial_metrics_race_streams() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "streams": [{
+                "stream_id": "stream-1",
+                "forwarder_id": "fwd-1",
+                "reader_ip": "10.0.0.1:10000",
+                "display_alias": null,
+                "forwarder_display_name": null,
+                "online": true,
+                "reader_connected": true,
+                "stream_epoch": 1,
+                "created_at": "2026-03-21T12:00:00Z",
+                "current_epoch_name": null
+            }]
+        }))
+    }
+
+    async fn initial_metrics_race_metrics(
+        State(state): State<InitialMetricsRaceState>,
+        Path(_stream_id): Path<String>,
+    ) -> Json<serde_json::Value> {
+        state.metrics_called.store(true, Ordering::SeqCst);
+        Json(serde_json::json!({
+            "raw_count": 10,
+            "dedup_count": 8,
+            "retransmit_count": 2,
+            "lag_ms": 500,
+            "epoch_raw_count": 4,
+            "epoch_dedup_count": 3,
+            "epoch_retransmit_count": 1,
+            "epoch_lag_ms": 250,
+            "epoch_last_received_at": "2026-03-21T12:00:00Z",
+            "unique_chips": 2,
+            "last_tag_id": null,
+            "last_reader_timestamp": null
+        }))
+    }
+
     #[tokio::test]
     async fn reconcile_proxies_rebinds_when_port_changes() {
         let db = Db::open_in_memory().expect("open db");
@@ -1943,6 +2015,49 @@ mod tests {
             "expected no StreamMetricsUpdated event after generation invalidation, got: {events:?}"
         );
 
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn initial_metrics_fetch_retries_when_stream_map_arrives_after_sse_connect() {
+        let http_state = InitialMetricsRaceState {
+            metrics_called: Arc::new(AtomicBool::new(false)),
+        };
+        let router = Router::new()
+            .route("/api/v1/events", get(initial_metrics_race_events))
+            .route("/api/v1/streams", get(initial_metrics_race_streams))
+            .route(
+                "/api/v1/streams/{stream_id}/metrics",
+                get(initial_metrics_race_metrics),
+            )
+            .with_state(http_state.clone());
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        state.set_connection_state(ConnectionState::Connected).await;
+
+        let task = tokio::spawn(run_upstream_dashboard_sse_refresher(Arc::clone(&state)));
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        state.emit_streams_snapshot().await;
+
+        wait_for("initial metrics fetch after stream snapshot", || {
+            http_state.metrics_called.load(Ordering::SeqCst)
+        })
+        .await;
+
+        task.abort();
         server_task.abort();
     }
 

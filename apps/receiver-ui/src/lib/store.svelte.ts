@@ -871,6 +871,12 @@ export function initStore(): void {
       }
     },
     onStreamsSnapshot: (s) => {
+      const previousEpochByKey = new Map(
+        (store.streams?.streams ?? []).map((st) => [
+          streamKey(st.forwarder_id, st.reader_ip),
+          st.stream_epoch,
+        ]),
+      );
       const refreshAllKeys = new Set(
         s.streams.map((st) => streamKey(st.forwarder_id, st.reader_ip)),
       );
@@ -884,6 +890,12 @@ export function initStore(): void {
       const prunedMetrics = new Map(store.streamMetrics);
       for (const key of prunedMetrics.keys()) {
         if (!currentKeys.has(key)) prunedMetrics.delete(key);
+      }
+      for (const stream of s.streams) {
+        const key = streamKey(stream.forwarder_id, stream.reader_ip);
+        if (previousEpochByKey.get(key) !== stream.stream_epoch) {
+          prunedMetrics.delete(key);
+        }
       }
       store.streamMetrics = prunedMetrics;
     },
