@@ -60,6 +60,53 @@
     return match?.[1] ?? timestamp;
   }
 
+  function formatLag(lag: number | null): string {
+    if (lag === null) return "N/A (no events yet)";
+    if (lag < 1000) return `${lag} ms`;
+    return `${(lag / 1000).toFixed(1)} s`;
+  }
+
+  function formatDuration(ms: number): string {
+    if (ms < 1000) return "< 1s";
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+
+  let timeSinceLastRead = $state<Record<string, string>>({});
+
+  $effect(() => {
+    if (!expandedKey) return;
+
+    const key = expandedKey;
+    const metrics = store.streamMetrics.get(key);
+
+    if (!metrics?.epoch_last_received_at) {
+      timeSinceLastRead = {
+        ...timeSinceLastRead,
+        [key]: "N/A (no events in epoch)",
+      };
+      return;
+    }
+
+    const update = () => {
+      const now = Date.now();
+      const lastAt = new Date(metrics.epoch_last_received_at!).getTime();
+      timeSinceLastRead = {
+        ...timeSinceLastRead,
+        [key]: formatDuration(now - lastAt),
+      };
+    };
+
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  });
+
   function formatLastRead(key: string): string {
     const read = store.lastReads.get(key);
     if (!read) return "\u2014";
@@ -195,6 +242,9 @@
             </tr>
 
             {#if expandedKey === key}
+              {@const metrics = store.streamMetrics.get(
+                streamKey(stream.forwarder_id, stream.reader_ip),
+              )}
               <tr>
                 <td colspan={showLastReadCol() ? 4 : 3} class="p-0">
                   <div class="bg-surface-1 px-4 py-3 border-b border-border">
@@ -220,16 +270,133 @@
                           </span>
                         </div>
                       {/if}
-                      {#if stream.subscribed && stream.reads_total !== undefined}
-                        <div>
-                          <span class="text-text-muted">Reads:</span>
-                          <span class="font-mono text-text-primary ml-1">
-                            {stream.reads_total} total{#if stream.reads_epoch !== undefined},
-                              {stream.reads_epoch} epoch{/if}
-                          </span>
-                        </div>
-                      {/if}
                     </div>
+
+                    {#if metrics}
+                      <!-- Lifetime Metrics -->
+                      <div class="mt-2">
+                        <p class="text-muted text-xs font-medium mb-1">
+                          Lifetime
+                        </p>
+                        <div class="grid grid-cols-2 gap-x-4 gap-y-1">
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Total frames received including retransmits"
+                            >
+                              Raw count
+                            </dt>
+                            <dd>{metrics.raw_count.toLocaleString()}</dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Unique frames after deduplication"
+                            >
+                              Dedup count
+                            </dt>
+                            <dd>{metrics.dedup_count.toLocaleString()}</dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Duplicate frames that matched existing events"
+                            >
+                              Retransmit
+                            </dt>
+                            <dd>{metrics.retransmit_count.toLocaleString()}</dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Time since the last unique frame was received"
+                            >
+                              Lag
+                            </dt>
+                            <dd>{formatLag(metrics.lag)}</dd>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Current Epoch Metrics -->
+                      <div class="mt-2">
+                        <p class="text-muted text-xs font-medium mb-1">
+                          Current Epoch
+                        </p>
+                        <div class="grid grid-cols-2 gap-x-4 gap-y-1">
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Frames received in the current epoch"
+                            >
+                              Raw (epoch)
+                            </dt>
+                            <dd>{metrics.epoch_raw_count.toLocaleString()}</dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Unique frames in the current epoch"
+                            >
+                              Dedup (epoch)
+                            </dt>
+                            <dd>
+                              {metrics.epoch_dedup_count.toLocaleString()}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Duplicate frames in the current epoch"
+                            >
+                              Retransmit (epoch)
+                            </dt>
+                            <dd>
+                              {metrics.epoch_retransmit_count.toLocaleString()}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Distinct chip IDs detected in the current epoch"
+                            >
+                              Unique chips
+                            </dt>
+                            <dd>{metrics.unique_chips.toLocaleString()}</dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Timestamp of the last unique frame in the current epoch"
+                            >
+                              Last read
+                            </dt>
+                            <dd>
+                              {metrics.epoch_last_received_at
+                                ? new Date(
+                                    metrics.epoch_last_received_at,
+                                  ).toLocaleString()
+                                : "N/A (no events in epoch)"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt
+                              class="text-muted text-xs"
+                              title="Live-updating elapsed time since last unique frame"
+                            >
+                              Time since last read
+                            </dt>
+                            <dd>
+                              {timeSinceLastRead[
+                                streamKey(stream.forwarder_id, stream.reader_ip)
+                              ] ?? "—"}
+                            </dd>
+                          </div>
+                        </div>
+                      </div>
+                    {:else}
+                      <p class="text-muted text-xs mt-2">Metrics unavailable</p>
+                    {/if}
 
                     <div class="flex items-center gap-2 flex-wrap">
                       {#if store.modeDraft === "targeted_replay"}
