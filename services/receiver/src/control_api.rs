@@ -173,6 +173,9 @@ impl AppState {
     }
 
     async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
+        if new_state != ConnectionState::Connected {
+            self.invalidate_dashboard_metrics_generation();
+        }
         let streams_count = {
             let db = self.db.lock().await;
             match db.load_subscriptions() {

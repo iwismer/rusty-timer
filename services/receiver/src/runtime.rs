@@ -634,26 +634,23 @@ async fn initial_metrics_entries(
     state: &Arc<AppState>,
     ws_url: &str,
 ) -> Vec<(String, String, String)> {
-    let stream_id_map = state.stream_id_map.read().await;
-    if !stream_id_map.is_empty() {
-        return stream_id_map
-            .iter()
-            .map(|(sid, (fwd, ip))| (sid.clone(), fwd.clone(), ip.clone()))
+    if let Ok(streams) = crate::control_api::fetch_server_streams(&state.http_client, ws_url).await
+    {
+        let new_map = crate::control_api::build_stream_id_map(&streams);
+        *state.stream_id_map.write().await = new_map;
+
+        return streams
+            .into_iter()
+            .map(|stream| (stream.stream_id, stream.forwarder_id, stream.reader_ip))
             .collect();
     }
-    drop(stream_id_map);
 
-    let Ok(streams) = crate::control_api::fetch_server_streams(&state.http_client, ws_url).await
-    else {
-        return Vec::new();
-    };
-
-    let new_map = crate::control_api::build_stream_id_map(&streams);
-    *state.stream_id_map.write().await = new_map;
-
-    streams
-        .into_iter()
-        .map(|stream| (stream.stream_id, stream.forwarder_id, stream.reader_ip))
+    state
+        .stream_id_map
+        .read()
+        .await
+        .iter()
+        .map(|(sid, (fwd, ip))| (sid.clone(), fwd.clone(), ip.clone()))
         .collect()
 }
 
@@ -1272,6 +1269,7 @@ mod tests {
     use std::convert::Infallible;
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
     use tokio::task::JoinHandle;
@@ -1439,6 +1437,59 @@ mod tests {
             "epoch_lag_ms": 250,
             "epoch_last_received_at": "2026-03-21T12:00:00Z",
             "unique_chips": 2,
+            "last_tag_id": null,
+            "last_reader_timestamp": null
+        }))
+    }
+
+    #[derive(Clone)]
+    struct FreshStreamsState {
+        streams_called: Arc<AtomicBool>,
+        fresh_metrics_called: Arc<AtomicBool>,
+        requested_metrics: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn fresh_streams_list(State(state): State<FreshStreamsState>) -> Json<serde_json::Value> {
+        state.streams_called.store(true, Ordering::SeqCst);
+        Json(serde_json::json!({
+            "streams": [{
+                "stream_id": "stream-fresh",
+                "forwarder_id": "fwd-fresh",
+                "reader_ip": "10.0.0.2:10000",
+                "display_alias": null,
+                "forwarder_display_name": null,
+                "online": true,
+                "reader_connected": true,
+                "stream_epoch": 7,
+                "created_at": "2026-03-21T12:00:00Z",
+                "current_epoch_name": null
+            }]
+        }))
+    }
+
+    async fn fresh_streams_metrics(
+        State(state): State<FreshStreamsState>,
+        Path(stream_id): Path<String>,
+    ) -> Json<serde_json::Value> {
+        state
+            .requested_metrics
+            .lock()
+            .expect("metrics request log")
+            .push(stream_id.clone());
+        if stream_id == "stream-fresh" {
+            state.fresh_metrics_called.store(true, Ordering::SeqCst);
+        }
+        Json(serde_json::json!({
+            "raw_count": 11,
+            "dedup_count": 9,
+            "retransmit_count": 2,
+            "lag_ms": 400,
+            "epoch_raw_count": 5,
+            "epoch_dedup_count": 4,
+            "epoch_retransmit_count": 1,
+            "epoch_lag_ms": 200,
+            "epoch_last_received_at": "2026-03-21T12:00:00Z",
+            "unique_chips": 3,
             "last_tag_id": null,
             "last_reader_timestamp": null
         }))
@@ -2019,6 +2070,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_initial_metrics_drops_late_result_after_reconnect_before_sse_reopens() {
+        let release_metrics = Arc::new(Notify::new());
+        let router = Router::new()
+            .route("/api/v1/streams/{stream_id}/metrics", get(delayed_metrics))
+            .with_state(DelayedMetricsState {
+                release_metrics: Arc::clone(&release_metrics),
+            });
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        *state.stream_id_map.write().await = HashMap::from([(
+            "stream-1".to_owned(),
+            ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()),
+        )]);
+        state.set_connection_state(ConnectionState::Connected).await;
+        let mut ui_rx = state.ui_tx.subscribe();
+        let generation = state.next_dashboard_metrics_generation();
+
+        let fetch_state = Arc::clone(&state);
+        let fetch_task = tokio::spawn(async move {
+            fetch_initial_metrics(&fetch_state, generation).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        state.request_connect().await;
+        state.set_connection_state(ConnectionState::Connected).await;
+        release_metrics.notify_waiters();
+
+        fetch_task.await.expect("fetch task");
+
+        let events: Vec<_> = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ReceiverUiEvent::StreamMetricsUpdated(_))),
+            "expected no StreamMetricsUpdated event after reconnect before SSE reopened, got: {events:?}"
+        );
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn initial_metrics_fetch_retries_when_stream_map_arrives_after_sse_connect() {
         let http_state = InitialMetricsRaceState {
             metrics_called: Arc::new(AtomicBool::new(false)),
@@ -2058,6 +2161,75 @@ mod tests {
         .await;
 
         task.abort();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_initial_metrics_refreshes_server_streams_even_with_cached_stream_id_map() {
+        let http_state = FreshStreamsState {
+            streams_called: Arc::new(AtomicBool::new(false)),
+            fresh_metrics_called: Arc::new(AtomicBool::new(false)),
+            requested_metrics: Arc::new(Mutex::new(Vec::new())),
+        };
+        let router = Router::new()
+            .route("/api/v1/streams", get(fresh_streams_list))
+            .route(
+                "/api/v1/streams/{stream_id}/metrics",
+                get(fresh_streams_metrics),
+            )
+            .with_state(http_state.clone());
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        *state.stream_id_map.write().await = HashMap::from([(
+            "stream-stale".to_owned(),
+            ("fwd-stale".to_owned(), "10.0.0.1:10000".to_owned()),
+        )]);
+        state.set_connection_state(ConnectionState::Connected).await;
+
+        let generation = state.next_dashboard_metrics_generation();
+        fetch_initial_metrics(&state, generation).await;
+
+        assert!(
+            http_state.streams_called.load(Ordering::SeqCst),
+            "expected fetch_initial_metrics to refresh /api/v1/streams"
+        );
+        assert!(
+            http_state.fresh_metrics_called.load(Ordering::SeqCst),
+            "expected metrics fetch for the fresh stream returned by /api/v1/streams"
+        );
+        assert_eq!(
+            state.stream_id_map.read().await.get("stream-fresh"),
+            Some(&("fwd-fresh".to_owned(), "10.0.0.2:10000".to_owned()))
+        );
+        assert!(
+            !state
+                .stream_id_map
+                .read()
+                .await
+                .contains_key("stream-stale"),
+            "expected stale stream_id_map entries to be replaced after refresh"
+        );
+        assert_eq!(
+            http_state
+                .requested_metrics
+                .lock()
+                .expect("metrics request log")
+                .as_slice(),
+            ["stream-fresh"]
+        );
+
         server_task.abort();
     }
 
