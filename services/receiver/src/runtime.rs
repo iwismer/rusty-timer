@@ -141,19 +141,19 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     let mut dbf_writer_task: Option<tokio::task::JoinHandle<()>> = None;
     {
         let db = state.db.lock().await;
-        if let Ok(dbf_config) = db.load_dbf_config() {
-            if dbf_config.enabled {
-                let (cancel_tx, cancel_rx) = watch::channel(false);
-                let rx = global_event_tx.subscribe();
-                let db_arc = Arc::clone(&state.db);
-                let path = dbf_config.path.clone();
-                let handle = tokio::spawn(async move {
-                    crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
-                });
-                dbf_writer_cancel_tx = Some(cancel_tx);
-                dbf_writer_task = Some(handle);
-                state.logger.log("DBF writer started");
-            }
+        if let Ok(dbf_config) = db.load_dbf_config()
+            && dbf_config.enabled
+        {
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            let rx = global_event_tx.subscribe();
+            let db_arc = Arc::clone(&state.db);
+            let path = dbf_config.path.clone();
+            let handle = tokio::spawn(async move {
+                crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
+            });
+            dbf_writer_cancel_tx = Some(cancel_tx);
+            dbf_writer_task = Some(handle);
+            state.logger.log("DBF writer started");
         }
     }
 

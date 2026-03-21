@@ -105,7 +105,7 @@ impl AppState {
     }
 
     pub fn notify_dbf_config_changed(&self) {
-        let _ = self.dbf_config_version.send_modify(|v| *v += 1);
+        self.dbf_config_version.send_modify(|v| *v += 1);
     }
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
