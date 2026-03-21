@@ -317,7 +317,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                                                     let deps = crate::session::SessionLoopDeps {
                                                         db: db_arc,
                                                         event_tx,
-                                                        global_event_tx: Some(gtx),
+                                                        dbf_event_tx: Some(gtx),
                                                         stream_counts: counts,
                                                         ui_tx,
                                                         shutdown: cancel_rx,
@@ -400,10 +400,16 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                     // Error means receiver dropped (task already exited), which is fine.
                     let _ = cancel_tx.send(true);
                 }
-                if let Some(handle) = dbf_writer_task.take()
-                    && tokio::time::timeout(std::time::Duration::from_secs(2), handle).await.is_err()
-                {
-                    tracing::warn!("DBF writer task did not shut down within 2 seconds");
+                if let Some(handle) = dbf_writer_task.take() {
+                    match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(join_err)) => {
+                            tracing::error!(error = %join_err, "DBF writer task panicked");
+                        }
+                        Err(_elapsed) => {
+                            tracing::warn!("DBF writer task did not shut down within 2 seconds");
+                        }
+                    }
                 }
 
                 // Start new writer if enabled
@@ -432,12 +438,16 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         // Error means receiver dropped (task already exited), which is fine.
         let _ = cancel_tx.send(true);
     }
-    if let Some(handle) = dbf_writer_task.take()
-        && tokio::time::timeout(std::time::Duration::from_secs(2), handle)
-            .await
-            .is_err()
-    {
-        tracing::warn!("DBF writer task did not shut down within 2 seconds");
+    if let Some(handle) = dbf_writer_task.take() {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(join_err)) => {
+                tracing::error!(error = %join_err, "DBF writer task panicked");
+            }
+            Err(_elapsed) => {
+                tracing::warn!("DBF writer task did not shut down within 2 seconds");
+            }
+        }
     }
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");

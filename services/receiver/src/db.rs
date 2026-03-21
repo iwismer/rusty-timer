@@ -7,7 +7,9 @@ use thiserror::Error;
 const SCHEMA_SQL: &str = include_str!("storage/schema.sql");
 pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
 
-/// The default path for DBF output files (Race Director convention).
+/// The default path for DBF output files (Race Director convention on Windows).
+/// This path is only meaningful on the target Windows deployment; tests and
+/// non-Windows environments should override it.
 pub const DEFAULT_DBF_PATH: &str = r"C:\winrace\Files\IPICO.DBF";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,7 +142,7 @@ impl Db {
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
             "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, dbf_config.path],
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path],
         )?;
         tx.commit()?;
         Ok(())
@@ -221,10 +223,13 @@ impl Db {
                 forwarder_id: r.get(0)?,
                 reader_ip: r.get(1)?,
                 local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
-                event_type: r
-                    .get::<_, String>(3)?
-                    .parse::<EventType>()
-                    .unwrap_or(EventType::Finish),
+                event_type: {
+                    let raw = r.get::<_, String>(3)?;
+                    raw.parse::<EventType>().unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, value = %raw, "invalid event_type in database, defaulting to Finish");
+                        EventType::Finish
+                    })
+                },
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -410,11 +415,14 @@ impl Db {
         })
     }
 
-    pub fn save_dbf_config(&self, enabled: bool, path: &str) -> DbResult<()> {
-        self.conn.execute(
+    pub fn save_dbf_config(&self, config: &DbfConfig) -> DbResult<()> {
+        let changed = self.conn.execute(
             "UPDATE profile SET dbf_enabled = ?1, dbf_path = ?2",
-            rusqlite::params![enabled as i64, path],
+            rusqlite::params![config.enabled as i64, config.path],
         )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
         Ok(())
     }
 
@@ -832,16 +840,20 @@ mod tests {
         db.save_profile("https://example.com", "tok", "check-and-download", None)
             .unwrap();
         let config = db.load_dbf_config().unwrap();
-        assert_eq!(config.enabled, false);
+        assert!(!config.enabled);
         assert_eq!(config.path, r"C:\winrace\Files\IPICO.DBF");
-        db.save_dbf_config(true, r"D:\race\output.dbf").unwrap();
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            path: r"D:\race\output.dbf".to_owned(),
+        })
+        .unwrap();
         let config = db.load_dbf_config().unwrap();
-        assert_eq!(config.enabled, true);
+        assert!(config.enabled);
         assert_eq!(config.path, r"D:\race\output.dbf");
         db.save_profile("https://new.com", "tok2", "check-and-download", None)
             .unwrap();
         let config = db.load_dbf_config().unwrap();
-        assert_eq!(config.enabled, true);
+        assert!(config.enabled);
         assert_eq!(config.path, r"D:\race\output.dbf");
     }
 

@@ -1,5 +1,6 @@
-//! Maps parsed IPICO chip reads to Race Director-compatible DBF records and
-//! manages DBF file I/O using the `dbase` crate.
+//! Maps parsed IPICO chip reads to Race Director-compatible DBF records,
+//! manages low-level DBF file I/O (create, append, clear), and provides an
+//! async writer task that bridges the broadcast channel to disk.
 //!
 //! Each append writes directly to the end of the DBF file and updates the
 //! header record count, avoiding a full file rewrite.
@@ -18,6 +19,9 @@ use crate::db::{Db, EventType};
 
 #[cfg(test)]
 const VISUAL_FOXPRO_VERSION: u8 = 0x30;
+/// Embedded reference DBF file used to derive the Visual FoxPro schema when
+/// creating new empty DBF files. The template's field definitions (9 fields,
+/// version byte 0x30) are preserved by `TableWriterBuilder::from_reader()`.
 const DBF_TEMPLATE_BYTES: &[u8] = include_bytes!("../../../docs/race-director/IPICO-sample.DBF");
 
 /// Field widths for the IPICO DBF schema (inherited from the embedded
@@ -89,13 +93,28 @@ pub fn map_to_dbf_fields(
     event_type: EventType,
     reader_index: u8,
 ) -> Option<DbfRecord> {
-    // READER field is 1 character wide; skip subscriptions beyond index 9
     if reader_index > 9 {
+        tracing::debug!(
+            reader_index,
+            "reader_index exceeds single-digit limit for DBF READER field"
+        );
         return None;
     }
 
-    let frame_str = std::str::from_utf8(raw_frame).ok()?;
-    let chip_read = ChipRead::try_from(frame_str).ok()?;
+    let frame_str = match std::str::from_utf8(raw_frame) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, "raw frame is not valid UTF-8");
+            return None;
+        }
+    };
+    let chip_read = match ChipRead::try_from(frame_str) {
+        Ok(cr) => cr,
+        Err(e) => {
+            tracing::debug!(error = %e, "raw frame is not a valid IPICO chip read");
+            return None;
+        }
+    };
 
     let event = match event_type {
         EventType::Start => "S",
@@ -103,8 +122,8 @@ pub fn map_to_dbf_fields(
     };
 
     let ts = &chip_read.timestamp;
-    // millis is always a multiple of 10 (parsed from centisecond wire format),
-    // so this division is lossless.
+    // millis is always a multiple of 10 (see `ipico_core::read` parsing at
+    // `(millis * 10) as u16`), so this division is lossless.
     let centisec = ts.millis() / 10;
     // TIME: HHMMSSHH (last two digits are centiseconds)
     let time = format!(
@@ -119,10 +138,13 @@ pub fn map_to_dbf_fields(
 
     let tpoint = format!("{} ", event);
 
-    debug_assert!(
-        chip_read.tag_id.len() <= 12,
-        "chip ID exceeds CHIP field width"
-    );
+    if chip_read.tag_id.len() > 12 {
+        tracing::debug!(
+            chip_len = chip_read.tag_id.len(),
+            "chip ID exceeds CHIP field width (12)"
+        );
+        return None;
+    }
 
     Some(DbfRecord {
         event: event.to_owned(),
@@ -229,7 +251,9 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
     file.write_all(&[DBF_EOF_MARKER])?;
 
     // Update record count in header (bytes 4-7)
-    let new_count = record_count + 1;
+    let new_count = record_count
+        .checked_add(1)
+        .ok_or_else(|| std::io::Error::other("DBF record count overflow"))?;
     file.seek(SeekFrom::Start(4))?;
     file.write_all(&new_count.to_le_bytes())?;
 
@@ -300,8 +324,15 @@ pub async fn run_dbf_writer(
                         match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
                             Some(record) => {
                                 let p = path.clone();
-                                if let Err(e) = tokio::task::spawn_blocking(move || append_record(&p, &record)).await.unwrap() {
-                                    tracing::error!(error = %e, path = %path.display(), "DBF write failed, skipping record");
+                                match tokio::task::spawn_blocking(move || append_record(&p, &record)).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => {
+                                        tracing::error!(error = %e, path = %path.display(), "DBF write failed, skipping record");
+                                    }
+                                    Err(join_err) => {
+                                        tracing::error!(error = %join_err, path = %path.display(), "DBF write task panicked or was cancelled");
+                                        break;
+                                    }
                                 }
                             }
                             None => {
@@ -490,7 +521,7 @@ mod tests {
         }
         let mut reader = dbase::Reader::from_path(&sample_path).unwrap();
         let records: Vec<dbase::Record> = reader.read().unwrap();
-        assert!(records.len() > 0, "sample should have records");
+        assert!(!records.is_empty(), "sample should have records");
         let first = &records[0];
         assert!(first.get("EVENT").is_some(), "missing EVENT field");
         assert!(first.get("CHIP").is_some(), "missing CHIP field");

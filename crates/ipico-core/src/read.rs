@@ -59,6 +59,7 @@ impl Timestamp {
         )
     }
 
+    /// Returns the two-digit year (e.g. 26 for 2026).
     pub fn year(&self) -> u16 {
         self.year
     }

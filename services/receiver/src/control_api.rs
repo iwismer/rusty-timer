@@ -52,7 +52,10 @@ pub struct AppState {
     pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
+    /// Monotonic counter incremented when DBF config changes; subscribers
+    /// (runtime.rs) use this to restart the DBF writer.
     pub dbf_config_version: watch::Sender<u64>,
+    /// Keepalive receiver so that `dbf_config_version.send_modify()` never fails.
     _dbf_config_keepalive: watch::Receiver<u64>,
 }
 
@@ -1245,13 +1248,24 @@ pub async fn put_dbf_config(
     state: &AppState,
     body: crate::db::DbfConfig,
 ) -> Result<(), ReceiverError> {
-    if body.path.trim().is_empty() {
+    let trimmed = body.path.trim();
+    if trimmed.is_empty() {
         return Err(ReceiverError::BadRequest(
             "DBF path must not be empty".to_owned(),
         ));
     }
+    let p = std::path::Path::new(trimmed);
+    if let Some(parent) = p.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        return Err(ReceiverError::BadRequest(format!(
+            "parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
     let db = state.db.lock().await;
-    match db.save_dbf_config(body.enabled, &body.path) {
+    match db.save_dbf_config(&body) {
         Ok(()) => {
             drop(db);
             state.notify_dbf_config_changed();
@@ -1267,7 +1281,20 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
         .load_dbf_config()
         .map_err(|e| ReceiverError::Internal(e.to_string()))?;
     drop(db);
-    crate::dbf_writer::clear_dbf(std::path::Path::new(&config.path))
+    let path = config.path.clone();
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        return Err(ReceiverError::BadRequest(format!(
+            "DBF directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    tokio::task::spawn_blocking(move || crate::dbf_writer::clear_dbf(std::path::Path::new(&path)))
+        .await
+        .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))?
         .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))
 }
 
