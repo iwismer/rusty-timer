@@ -20,6 +20,10 @@ const MAX_STDERR_CAPTURE: usize = 8192;
 const MAX_RESTART_ATTEMPTS: u32 = 3;
 
 fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls CryptoProvider");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
