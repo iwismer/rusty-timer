@@ -17,10 +17,6 @@
     );
   }
 
-  function dotClass(online: boolean): string {
-    return online ? "bg-status-ok" : "bg-status-err";
-  }
-
   function readerDotClass(connected: boolean): string {
     return connected ? "bg-status-ok" : "bg-status-err";
   }
@@ -190,7 +186,7 @@
       <div
         class="flex-1 flex items-center justify-center text-text-muted text-sm"
       >
-        Unable to load forwarders. Check the server connection.
+        Unable to load forwarders: {store.forwardersError}
       </div>
     {:else if !store.forwarders}
       <div

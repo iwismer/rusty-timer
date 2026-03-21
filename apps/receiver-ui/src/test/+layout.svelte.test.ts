@@ -216,9 +216,7 @@ describe("receiver layout SSE updates", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(
-          "Unable to load forwarders. Check the server connection.",
-        ),
+        screen.getByText(/Unable to load forwarders:/),
       ).toBeInTheDocument();
     });
     expect(screen.queryByText("Forwarder 1")).not.toBeInTheDocument();

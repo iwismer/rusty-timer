@@ -156,8 +156,8 @@ async fn proxy_config_get_reply(
     let resp = match proxy_result {
         Ok(r) => ReceiverProxyConfigGetResponse {
             request_id: req.request_id,
-            ok: true,
-            error: None,
+            ok: r.ok,
+            error: r.error,
             config: r.config,
             restart_needed: r.restart_needed,
         },
@@ -244,17 +244,11 @@ async fn proxy_device_control_reply(
     device_id: String,
     req: rt_protocol::ReceiverProxyDeviceControlRequest,
 ) -> WsMessage {
-    let action_value = match req.action.as_str() {
-        "restart_device" | "shutdown_device" => req.action.clone(),
-        _ => {
-            return WsMessage::ReceiverProxyControlResponse(ReceiverProxyControlResponse {
-                request_id: req.request_id,
-                ok: false,
-                error: Some("unknown device control action".into()),
-            });
-        }
+    let action_str = match req.action {
+        rt_protocol::DeviceControlAction::RestartDevice => "restart_device",
+        rt_protocol::DeviceControlAction::ShutdownDevice => "shutdown_device",
     };
-    let payload = serde_json::json!({ "action": action_value });
+    let payload = serde_json::json!({ "action": action_str });
     let proxy_result = crate::forwarder_proxy::proxy_config_set(
         &state,
         &req.forwarder_id,
@@ -267,7 +261,7 @@ async fn proxy_device_control_reply(
             if r.ok {
                 state.logger.log(format!(
                     "forwarder \"{}\" {} requested via receiver {}",
-                    req.forwarder_id, action_value, device_id
+                    req.forwarder_id, action_str, device_id
                 ));
             }
             ReceiverProxyControlResponse {
@@ -636,7 +630,13 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 joined = pending_proxy_replies.join_next(), if !pending_proxy_replies.is_empty() => {
                     match joined {
                         Some(Ok(msg)) => {
-                            let text = serde_json::to_string(&msg).unwrap();
+                            let text = match serde_json::to_string(&msg) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    error!(device_id = %device_id, error = %e, "failed to serialize proxy reply");
+                                    continue;
+                                }
+                            };
                             if socket.send(Message::Text(text.into())).await.is_err() {
                                 break;
                             }

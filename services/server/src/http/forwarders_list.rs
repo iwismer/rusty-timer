@@ -4,7 +4,6 @@ use sqlx::Row;
 use std::collections::HashMap;
 
 pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse {
-    // Fetch all streams grouped by forwarder
     let rows = match sqlx::query(
         r#"SELECT s.forwarder_id,
                   s.forwarder_display_name,
@@ -66,8 +65,8 @@ pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse
         }));
     }
 
-    // Fetch per-forwarder stats (unique chips + total reads for current epoch)
-    let stats_rows = sqlx::query(
+    // Fetch per-forwarder stats (unique chips + total reads, scoped to each stream's current epoch)
+    let stats_rows = match sqlx::query(
         r#"SELECT s.forwarder_id,
                   COUNT(DISTINCT e.tag_id) AS unique_chips,
                   COUNT(*) AS total_reads,
@@ -78,7 +77,17 @@ pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch forwarder stats");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to load forwarder stats"})),
+            )
+                .into_response();
+        }
+    };
 
     let mut stats_map: HashMap<String, (i64, i64, Option<chrono::DateTime<chrono::Utc>>)> =
         HashMap::new();

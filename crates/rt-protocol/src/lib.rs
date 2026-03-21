@@ -503,8 +503,16 @@ pub struct ReaderDownloadProgress {
 }
 
 // ---------------------------------------------------------------------------
-// Receiver proxy messages (receiver <-> server, for proxied forwarder config)
+// Receiver proxy messages (receiver <-> server, for proxied forwarder config and control)
 // ---------------------------------------------------------------------------
+
+/// Actions that can be requested on a forwarder device via the proxy channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceControlAction {
+    RestartDevice,
+    ShutdownDevice,
+}
 
 /// Receiver-to-server: request a forwarder's current config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,8 +566,7 @@ pub struct ReceiverProxyRestartRequest {
 pub struct ReceiverProxyDeviceControlRequest {
     pub request_id: String,
     pub forwarder_id: String,
-    /// "restart_device" or "shutdown_device"
-    pub action: String,
+    pub action: DeviceControlAction,
 }
 
 /// Server-to-receiver: result of a forwarder control action (restart/device control).
@@ -576,7 +583,8 @@ pub struct ReceiverProxyControlResponse {
 // ---------------------------------------------------------------------------
 
 /// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
-/// status tracking and reader control extensions.
+/// status tracking, reader control extensions, and receiver-to-server
+/// proxy messages for remote forwarder config and control.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -890,7 +898,7 @@ mod tests {
         let msg = WsMessage::ReceiverProxyDeviceControlRequest(ReceiverProxyDeviceControlRequest {
             request_id: "req-4".into(),
             forwarder_id: "fwd-abc".into(),
-            action: "restart_device".into(),
+            action: DeviceControlAction::RestartDevice,
         });
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();

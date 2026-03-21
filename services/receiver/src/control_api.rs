@@ -928,7 +928,7 @@ pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverEr
 }
 
 // ---------------------------------------------------------------------------
-// Forwarder list + config proxy commands
+// Forwarder list + proxy commands (config, restart, device control)
 // ---------------------------------------------------------------------------
 
 /// Generate a unique request ID for WS proxy commands.
@@ -987,7 +987,7 @@ pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, Recei
     }
 }
 
-/// Send a WS command through the active session and wait for a response.
+/// Send a WS command through the active session and wait for a response (15s timeout).
 async fn send_ws_command(
     state: &AppState,
     request_id: String,
@@ -1102,7 +1102,7 @@ pub async fn restart_forwarder_device(
         rt_protocol::ReceiverProxyDeviceControlRequest {
             request_id: request_id.clone(),
             forwarder_id,
-            action: "restart_device".to_owned(),
+            action: rt_protocol::DeviceControlAction::RestartDevice,
         },
     );
     let response = send_ws_command(state, request_id, msg).await?;
@@ -1126,7 +1126,7 @@ pub async fn shutdown_forwarder_device(
         rt_protocol::ReceiverProxyDeviceControlRequest {
             request_id: request_id.clone(),
             forwarder_id,
-            action: "shutdown_device".to_owned(),
+            action: rt_protocol::DeviceControlAction::ShutdownDevice,
         },
     );
     let response = send_ws_command(state, request_id, msg).await?;

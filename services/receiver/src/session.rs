@@ -35,7 +35,8 @@ pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
 /// A request sent from a Tauri command handler to the WS session loop.
 /// The session loop sends `message` over the WebSocket and routes the
-/// server's response back via the oneshot `reply` channel.
+/// server's response back via the oneshot `reply` channel. Responses are
+/// matched to pending requests by `request_id`.
 pub struct WsCommand {
     pub message: WsMessage,
     pub request_id: String,
@@ -133,15 +134,20 @@ where
                 let text = match serde_json::to_string(&cmd.message) {
                     Ok(t) => t,
                     Err(e) => {
-                        let _ = cmd.reply.send(WsMessage::Error(rt_protocol::ErrorMessage {
+                        warn!(error = %e, request_id = %cmd.request_id, "failed to serialize WS command");
+                        if cmd.reply.send(WsMessage::Error(rt_protocol::ErrorMessage {
                             code: "SERIALIZE_ERROR".into(),
                             message: e.to_string(),
                             retryable: false,
-                        }));
+                        })).is_err() {
+                            warn!(request_id = %cmd.request_id, "proxy error reply dropped (caller already gone)");
+                        }
                         continue;
                     }
                 };
                 if ws.send(Message::Text(text.into())).await.is_err() {
+                    warn!(request_id = %cmd.request_id, pending_count = pending_requests.len(),
+                          "WS send failed for proxy command; ending session");
                     break;
                 }
                 pending_requests.insert(cmd.request_id, cmd.reply);
@@ -155,7 +161,9 @@ where
                             Ok(ref parsed) if proxy_response_request_id(parsed).is_some() => {
                                 let request_id = proxy_response_request_id(parsed).unwrap().to_owned();
                                 if let Some(reply_tx) = pending_requests.remove(&request_id) {
-                                    let _ = reply_tx.send(parsed.clone());
+                                    if reply_tx.send(parsed.clone()).is_err() {
+                                        warn!(request_id = %request_id, "proxy response arrived but caller already gone (likely timeout)");
+                                    }
                                 } else {
                                     warn!(request_id = %request_id, "received proxy response with no pending request");
                                 }
@@ -272,6 +280,12 @@ where
                 }
             }
         }
+    }
+    if !pending_requests.is_empty() {
+        warn!(
+            count = pending_requests.len(),
+            "session ended with pending proxy requests"
+        );
     }
     Ok(())
 }

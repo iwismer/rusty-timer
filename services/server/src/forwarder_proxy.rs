@@ -1,6 +1,7 @@
 use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
 use rt_protocol::{ConfigGetResponse, ConfigSetResponse, RestartResponse};
 use std::time::Duration;
+use tracing::warn;
 
 const PROXY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -26,15 +27,7 @@ pub async fn proxy_config_get(
     };
     send_command(&tx, cmd).await?;
     match await_reply(reply_rx).await? {
-        ForwarderProxyReply::Response(resp) => {
-            if resp.ok {
-                Ok(resp)
-            } else {
-                Err(ProxyError::ForwarderError(resp.error.unwrap_or_else(
-                    || "forwarder failed to read config".into(),
-                )))
-            }
-        }
+        ForwarderProxyReply::Response(resp) => Ok(resp),
         ForwarderProxyReply::Timeout => Err(ProxyError::Timeout),
         ForwarderProxyReply::InternalError(msg) => Err(ProxyError::InternalError(msg)),
     }
@@ -89,7 +82,10 @@ async fn get_command_sender(
     let senders = state.forwarder_command_senders.read().await;
     match senders.get(forwarder_id) {
         Some(tx) => Ok(tx.clone()),
-        None => Err(ProxyError::NotConnected),
+        None => {
+            warn!(forwarder_id = %forwarder_id, "proxy request for disconnected forwarder");
+            Err(ProxyError::NotConnected)
+        }
     }
 }
 
@@ -99,8 +95,14 @@ async fn send_command(
 ) -> Result<(), ProxyError> {
     match tokio::time::timeout(PROXY_TIMEOUT, tx.send(cmd)).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) => Err(ProxyError::Disconnected),
-        Err(_) => Err(ProxyError::Timeout),
+        Ok(Err(_)) => {
+            warn!("forwarder command channel closed during proxy send");
+            Err(ProxyError::Disconnected)
+        }
+        Err(_) => {
+            warn!("proxy command send timed out (channel backpressure)");
+            Err(ProxyError::Timeout)
+        }
     }
 }
 
@@ -109,7 +111,13 @@ async fn await_reply<T>(
 ) -> Result<ForwarderProxyReply<T>, ProxyError> {
     match tokio::time::timeout(PROXY_TIMEOUT, rx).await {
         Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(_)) => Err(ProxyError::Disconnected),
-        Err(_) => Err(ProxyError::Timeout),
+        Ok(Err(_)) => {
+            warn!("forwarder proxy reply channel closed (forwarder disconnected)");
+            Err(ProxyError::Disconnected)
+        }
+        Err(_) => {
+            warn!("forwarder proxy reply timed out");
+            Err(ProxyError::Timeout)
+        }
     }
 }

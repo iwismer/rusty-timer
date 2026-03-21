@@ -29,9 +29,7 @@ describe("ForwardersTab", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(
-          "Unable to load forwarders. Check the server connection.",
-        ),
+        screen.getByText(/Unable to load forwarders:/),
       ).toBeInTheDocument();
     });
     expect(screen.queryByText("Loading forwarders...")).not.toBeInTheDocument();
