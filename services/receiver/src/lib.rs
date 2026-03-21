@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod control_api;
 pub mod db;
+pub mod dbf_writer;
 pub mod error;
 pub mod local_proxy;
 pub mod ports;
