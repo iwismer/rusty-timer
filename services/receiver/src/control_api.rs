@@ -505,6 +505,23 @@ struct UpstreamRaceStreamMapping {
     forwarder_id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DbfConfigResponse {
+    pub enabled: bool,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DbfConfigRequest {
+    pub enabled: bool,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventTypeRequest {
+    pub event_type: String,
+}
+
 // ---------------------------------------------------------------------------
 // Server stream fetching helpers
 // ---------------------------------------------------------------------------
@@ -1222,6 +1239,60 @@ pub async fn disconnect(state: &AppState) {
         .set_connection_state(ConnectionState::Disconnecting)
         .await;
     state.request_disconnect_shutdown();
+}
+
+pub async fn get_dbf_config(state: &AppState) -> Result<DbfConfigResponse, ReceiverError> {
+    let db = state.db.lock().await;
+    match db.load_dbf_config() {
+        Ok(config) => Ok(DbfConfigResponse {
+            enabled: config.enabled,
+            path: config.path,
+        }),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
+}
+
+pub async fn put_dbf_config(state: &AppState, body: DbfConfigRequest) -> Result<(), ReceiverError> {
+    let db = state.db.lock().await;
+    match db.save_dbf_config(body.enabled, &body.path) {
+        Ok(()) => {
+            drop(db);
+            state.notify_dbf_config_changed();
+            Ok(())
+        }
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
+}
+
+pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
+    let db = state.db.lock().await;
+    let config = db
+        .load_dbf_config()
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    drop(db);
+    crate::dbf_writer::clear_dbf(std::path::Path::new(&config.path))
+        .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))
+}
+
+pub async fn update_subscription_event_type(
+    state: &AppState,
+    forwarder_id: &str,
+    reader_ip: &str,
+    body: EventTypeRequest,
+) -> Result<(), ReceiverError> {
+    if body.event_type != "start" && body.event_type != "finish" {
+        return Err(ReceiverError::BadRequest(
+            "event_type must be 'start' or 'finish'".to_owned(),
+        ));
+    }
+    let db = state.db.lock().await;
+    match db.update_subscription_event_type(forwarder_id, reader_ip, &body.event_type) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ReceiverError::BadRequest(
+            "subscription not found".to_owned(),
+        )),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
 }
 
 pub async fn admin_reset_cursor(
