@@ -208,7 +208,7 @@ async fn admin_factory_reset(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
 fn spawn_event_bridge(app_handle: tauri::AppHandle, state: &Arc<AppState>) {
     let rx = state.ui_tx.subscribe();
     let handle = app_handle.clone();
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut stream = BroadcastStream::new(rx);
         while let Some(Ok(event)) = stream.next().await {
             let event_name = match &event {
@@ -295,7 +295,7 @@ fn main() {
             spawn_event_bridge(handle, &state);
 
             // Spawn receiver runtime
-            tokio::spawn(receiver::runtime::run(state, shutdown_rx));
+            tauri::async_runtime::spawn(receiver::runtime::run(state, shutdown_rx));
 
             Ok(())
         })
