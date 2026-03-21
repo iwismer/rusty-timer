@@ -96,9 +96,11 @@ async fn run_sidecar_lifecycle(handle: &AppHandle) -> Result<(), String> {
         }
 
         // Spawn the sidecar
+        // Basename only: `externalBin` is `binaries/receiver`, but the bundler installs
+        // the sidecar as `receiver.exe` next to the main exe (no `binaries/` prefix).
         let (mut rx, child) = handle
             .shell()
-            .sidecar("binaries/receiver")
+            .sidecar("receiver")
             .map_err(|e| format!("Failed to create sidecar command: {e}"))?
             .args(["--no-open-browser"])
             .spawn()

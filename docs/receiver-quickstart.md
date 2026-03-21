@@ -69,5 +69,19 @@ fresh, delete this file and restart the receiver.
 | Port collision warning | Two streams have the same default port. Set a manual port override for one of them. |
 | Receiver shows "degraded" | One or more streams have a port conflict. Resolve the conflict in the UI. |
 
+### Desktop app (Tauri) exits immediately or shows no window
+
+The standalone `receiver.exe` and the **Rusty Timer Receiver** desktop app both bind the control API to **127.0.0.1:9090**. Only **one** can run at a time. If the standalone receiver is already running, quit it (or close the browser tab and stop the process) before launching the desktop app.
+
+The desktop shell logs fatal startup errors next to app data (written when the bundled receiver fails to start or the health check times out):
+
+```
+%LOCALAPPDATA%\com.rusty-timer.receiver\crash.log
+```
+
+Open that file in Notepad. Typical messages include port **9090** already in use, failure to spawn the sidecar binary, or failure to create the webview window (often **WebView2** — install or repair the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)).
+
+More detail: [Receiver Tauri development guide](receiver-tauri-dev.md#troubleshooting).
+
 For full operational procedures, see the
 [receiver operations runbook](runbooks/receiver-operations.md).

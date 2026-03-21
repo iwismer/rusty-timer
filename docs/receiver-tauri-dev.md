@@ -42,6 +42,10 @@ cp target/debug/receiver apps/receiver-ui/src-tauri/binaries/receiver-$(rustc --
 cd apps/receiver-ui && cargo tauri dev
 ```
 
+`beforeDevCommand` runs `npm run copy-receiver-tauri-sidecar`, which copies
+`src-tauri/binaries/receiver-<triple>` to `target/debug/receiver` (same folder as
+`receiver-tauri`, matching the NSIS install layout).
+
 Or with `dev.py`:
 
 ```bash
@@ -161,7 +165,13 @@ The Tauri shell:
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| "Failed to spawn receiver" | Sidecar binary missing | Run `cargo build -p receiver` and copy to `src-tauri/binaries/` |
+| "Failed to spawn receiver" / Windows “path not found” | Sidecar path mismatch or binary missing | Ensure Rust uses `sidecar("receiver")` (basename); bundler installs `receiver.exe` beside the main exe. Run `cargo build -p receiver` and copy the triple-named file into `src-tauri/binaries/` |
 | "Port 9090 may be in use" | Another receiver instance running | Kill the other process or check `lsof -i :9090` |
 | Blank window | Receiver crashed after health check | Check terminal output for `[receiver]` log lines |
 | WebView2 error on Windows | Runtime not installed | Download from https://developer.microsoft.com/en-us/microsoft-edge/webview2/ |
+
+### Packaged Windows app (no console)
+
+Release builds use the Windows GUI subsystem, so errors are easy to miss. On failure, the shell writes **`%LOCALAPPDATA%\com.rusty-timer.receiver\crash.log`** (same directory as `app_local_data_dir()`). Read that file first.
+
+The most common issue is **port 9090 already in use**: the standalone `receiver.exe` and the Tauri app cannot run simultaneously because both bind the same control port.

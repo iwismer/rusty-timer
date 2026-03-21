@@ -268,6 +268,9 @@ cp target/debug/receiver apps/receiver-ui/src-tauri/binaries/receiver-$(rustc --
 cd apps/receiver-ui && cargo tauri dev
 ```
 
+The dev server copies the staged sidecar from `src-tauri/binaries/` into
+`target/debug/receiver` (see `npm run copy-receiver-tauri-sidecar`).
+
 This opens a native window instead of a browser tab. The receiver API is
 identical — all the control API steps below work the same way.
 
