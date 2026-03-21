@@ -147,17 +147,27 @@ A sample DBF file is included at
 
 ### Writing from the Receiver
 
-The `dbase` Rust crate (v0.7, `dbase-rs`) supports reading and writing Visual
-FoxPro DBF files. Add to `Cargo.toml`:
+The `dbase` Rust crate (v0.7, `dbase-rs`) can be used to read this file and to
+write records when starting from an existing Visual FoxPro table definition. To
+read the sample file, enable an encoding feature in addition to `serde`:
 
 ```toml
-dbase = { version = "0.7", features = ["serde"] }
+dbase = { version = "0.7", features = ["serde", "yore"] }
 ```
+
+Notes:
+
+- `serde` alone is not enough to read the sample file because code page byte
+  `0x03` (Windows-1252 / ANSI) is otherwise reported as unsupported.
+- `TableWriterBuilder::new()` creates a dBase III file (`0x03` header), not the
+  Visual FoxPro format (`0x30`) used by IPICO Direct.
+- `TableWriterBuilder::from_reader(...)` preserves the Visual FoxPro schema when
+  cloning an existing `IPICO.DBF`, so that is the safer starting point.
 
 The receiver would need to:
 
-1. Create or open `C:\winrace\Files\IPICO.DBF` with the correct header and field
-   descriptors
+1. Open an existing `C:\winrace\Files\IPICO.DBF` template, or otherwise write the
+   Visual FoxPro header and field descriptors manually
 2. Append records as reads arrive, using the lock → write → unlock pattern observed
    from IPICO Direct
 3. Map the raw IPICO frame fields to the DBF record format:
