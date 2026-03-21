@@ -38,7 +38,7 @@ export interface LastRead {
   reader_ip: string;
   chip_id: string;
   timestamp: string;
-  bib?: number | null;
+  bib?: string | null;
   name?: string | null;
 }
 

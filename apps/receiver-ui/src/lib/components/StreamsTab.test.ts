@@ -53,7 +53,7 @@ describe("StreamsTab", () => {
           reader_ip: "10.0.0.1:10000",
           chip_id: "AA:BB:CC:DD",
           timestamp: "2026-03-20T14:23:05.123Z",
-          bib: 42,
+          bib: "42",
           name: "Ada Lovelace",
         },
       ],

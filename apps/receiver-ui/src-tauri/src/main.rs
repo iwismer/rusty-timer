@@ -2,18 +2,58 @@
 
 use std::sync::Arc;
 
-use receiver::control_api::{self, AppState};
+use receiver::control_api::{self, AppState, ShutdownSignal};
 use receiver::ui_events::ReceiverUiEvent;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager, RunEvent, State};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Result alias for Tauri commands
 // ---------------------------------------------------------------------------
 
 type CmdResult<T> = Result<T, String>;
+
+enum BridgeAction {
+    EmitEvent {
+        name: &'static str,
+        event: ReceiverUiEvent,
+    },
+    EmitResync,
+}
+
+fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
+    match event {
+        ReceiverUiEvent::Resync => "resync",
+        ReceiverUiEvent::StatusChanged { .. } => "status_changed",
+        ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
+        ReceiverUiEvent::LogEntry { .. } => "log_entry",
+        ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
+        ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
+        ReceiverUiEvent::LastRead(_) => "last_read",
+    }
+}
+
+fn bridge_action_from_item(
+    item: Result<ReceiverUiEvent, BroadcastStreamRecvError>,
+) -> BridgeAction {
+    match item {
+        Ok(event) => BridgeAction::EmitEvent {
+            name: ui_event_name(&event),
+            event,
+        },
+        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+            warn!(
+                skipped,
+                "receiver UI event bridge lagged; requesting resync"
+            );
+            BridgeAction::EmitResync
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tauri commands — thin wrappers around receiver library functions
@@ -210,17 +250,15 @@ fn spawn_event_bridge(app_handle: tauri::AppHandle, state: &Arc<AppState>) {
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let mut stream = BroadcastStream::new(rx);
-        while let Some(Ok(event)) = stream.next().await {
-            let event_name = match &event {
-                ReceiverUiEvent::Resync => "resync",
-                ReceiverUiEvent::StatusChanged { .. } => "status_changed",
-                ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
-                ReceiverUiEvent::LogEntry { .. } => "log_entry",
-                ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
-                ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
-                ReceiverUiEvent::LastRead(_) => "last_read",
-            };
-            let _ = handle.emit(event_name, &event);
+        while let Some(item) = stream.next().await {
+            match bridge_action_from_item(item) {
+                BridgeAction::EmitEvent { name, event } => {
+                    let _ = handle.emit(name, &event);
+                }
+                BridgeAction::EmitResync => {
+                    let _ = handle.emit("resync", ());
+                }
+            }
         }
     });
 }
@@ -324,6 +362,41 @@ fn main() {
             admin_reset_profile,
             admin_factory_reset,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                    let _ = state.shutdown_tx.send(ShutdownSignal::Terminate);
+                }
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use receiver::control_api::ConnectionState;
+
+    #[test]
+    fn lagged_broadcast_requests_resync_instead_of_stopping_bridge() {
+        let action = bridge_action_from_item(Err(BroadcastStreamRecvError::Lagged(3)));
+        assert!(matches!(action, BridgeAction::EmitResync));
+    }
+
+    #[test]
+    fn status_changed_maps_to_expected_event_name() {
+        let action = bridge_action_from_item(Ok(ReceiverUiEvent::StatusChanged {
+            connection_state: ConnectionState::Connected,
+            streams_count: 2,
+            receiver_id: "recv-1".to_owned(),
+        }));
+        assert!(matches!(
+            action,
+            BridgeAction::EmitEvent {
+                name: "status_changed",
+                ..
+            }
+        ));
+    }
 }

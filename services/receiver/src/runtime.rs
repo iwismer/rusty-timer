@@ -135,7 +135,10 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         state.request_connect().await;
     }
 
-    // Spawn upstream dashboard SSE refresher
+    // Spawn upstream dashboard SSE refresher.
+    // Uses tokio::spawn (not tauri::async_runtime::spawn) because this is a
+    // library crate with no Tauri dependency — the caller spawns `run()` onto
+    // the Tauri async runtime, so tokio::spawn here runs on the same executor.
     {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
