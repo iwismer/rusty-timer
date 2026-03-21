@@ -18,7 +18,7 @@ Usage:
     uv run scripts/release.py forwarder --patch --dry-run
 
 For `receiver`, also bumps `apps/receiver-ui/src-tauri/tauri.conf.json` to the
-same version and creates tag `receiver-ui-vX.Y.Z` (triggers the Windows Tauri
+same version and creates tag `receiver-vX.Y.Z` (triggers the Windows Tauri
 NSIS build in the unified Release workflow).
 """
 
@@ -512,10 +512,7 @@ def main() -> None:
             else:
                 print(style(f"    Committed: {commit_msg}", role="success"))
 
-            if service == "receiver":
-                tag = f"receiver-ui-v{new}"
-            else:
-                tag = f"{service}-v{new}"
+            tag = f"{service}-v{new}"
             print(style(f"  [{step}] Create release tag(s)", role="step"))
             step += 1
             log_command(["git", "tag", tag], execute=not args.dry_run)
@@ -535,10 +532,7 @@ def main() -> None:
         if args.dry_run:
             push_tags = []
             for svc, _, new in plan:
-                if svc == "receiver":
-                    push_tags.append(f"receiver-ui-v{new}")
-                else:
-                    push_tags.append(f"{svc}-v{new}")
+                push_tags.append(f"{svc}-v{new}")
         else:
             push_tags = tags
 

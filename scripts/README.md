@@ -242,10 +242,9 @@ For each requested service, the script:
 6. Stages `services/<service>/Cargo.toml` and `Cargo.lock` (and for `receiver`,
    `apps/receiver-ui/src-tauri/tauri.conf.json`).
 7. Creates commit: `chore(<service>): bump version to <new_version>`.
-8. Creates tag: `<service>-v<new_version>`. For `receiver`, also creates
-   `receiver-ui-v<new_version>` on the same commit (triggers
-   `.github/workflows/release.yml` (Receiver Tauri jobs) for the NSIS installer and updater
-   manifest).
+8. Creates tag: `<service>-v<new_version>` (for `receiver`, the `receiver-v<new_version>`
+   tag triggers `.github/workflows/release.yml` Receiver Tauri jobs for the NSIS installer
+   and updater manifest).
 
 The script prints each step and the exact command before execution.
 In `--dry-run`, it still runs the checks/build commands, but prints and skips
