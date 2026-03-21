@@ -22,7 +22,13 @@ import {
 
 // --------------- Tab enum ---------------
 
-export type TabId = "streams" | "config" | "mode" | "logs" | "admin";
+export type TabId =
+  | "streams"
+  | "forwarders"
+  | "mode"
+  | "config"
+  | "logs"
+  | "admin";
 
 export type UpdateState = {
   status: "available" | "downloaded";
@@ -51,6 +57,10 @@ export const store = $state({
   streams: null as StreamsResponse | null,
   lastReads: new Map<string, LastRead>(),
   streamMetrics: new Map<string, api.StreamMetrics>(),
+
+  // Forwarders
+  forwarders: null as api.ForwardersResponse | null,
+  selectedForwarderId: null as string | null,
 
   // Logs
   logEntries: [] as string[],
@@ -525,14 +535,21 @@ export async function loadAll(): Promise<void> {
     const modeEditVersionAtStart = modeEditVersion;
     const modeMutationVersionAtStart = modeMutationVersion;
     const streamRefreshVersionAtStart = streamRefreshVersion;
-    const [nextStatus, nextStreams, nextLogs, nextMode, nextRaces] =
-      await Promise.all([
-        api.getStatus(),
-        api.getStreams(),
-        api.getLogs(),
-        api.getMode().catch(() => null),
-        api.getRaces().catch(() => null),
-      ]);
+    const [
+      nextStatus,
+      nextStreams,
+      nextLogs,
+      nextMode,
+      nextRaces,
+      nextForwarders,
+    ] = await Promise.all([
+      api.getStatus(),
+      api.getStreams(),
+      api.getLogs(),
+      api.getMode().catch(() => null),
+      api.getRaces().catch(() => null),
+      api.getForwarders().catch(() => null),
+    ]);
 
     store.status = nextStatus;
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
@@ -550,6 +567,9 @@ export async function loadAll(): Promise<void> {
       ) {
         store.raceIdDraft = prevRaceId;
       }
+    }
+    if (nextForwarders) {
+      store.forwarders = nextForwarders;
     }
     if (
       nextMode &&
@@ -583,6 +603,19 @@ export async function loadAll(): Promise<void> {
       void loadAll();
     }
   }
+}
+
+export async function loadForwarders(): Promise<void> {
+  try {
+    const result = await api.getForwarders();
+    store.forwarders = result;
+  } catch {
+    // Silently fail — forwarders tab will show loading/error state
+  }
+}
+
+export function selectForwarder(forwarderId: string | null): void {
+  store.selectedForwarderId = forwarderId;
 }
 
 export async function applyMode(): Promise<void> {

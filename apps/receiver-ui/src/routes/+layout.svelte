@@ -10,6 +10,7 @@
   import HelpModal from "$lib/components/HelpModal.svelte";
   import UpdateModal from "$lib/components/UpdateModal.svelte";
   import StreamsTab from "$lib/components/StreamsTab.svelte";
+  import ForwardersTab from "$lib/components/ForwardersTab.svelte";
   import ConfigTab from "$lib/components/ConfigTab.svelte";
   import ModeTab from "$lib/components/ModeTab.svelte";
   import LogsTab from "$lib/components/LogsTab.svelte";
@@ -57,6 +58,8 @@
       {@render children()}
     {:else if store.activeTab === "streams"}
       <StreamsTab />
+    {:else if store.activeTab === "forwarders"}
+      <ForwardersTab />
     {:else if store.activeTab === "config"}
       <ConfigTab />
     {:else if store.activeTab === "mode"}

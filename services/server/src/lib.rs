@@ -2,6 +2,7 @@ pub mod announcer;
 pub mod auth;
 pub mod dashboard_events;
 pub mod db;
+pub mod forwarder_proxy;
 pub mod http;
 pub mod repo;
 pub mod state;
@@ -94,6 +95,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::announcer::public_announcer_sse),
         )
         .route("/api/v1/logs", get(http::logs::get_logs))
+        .route(
+            "/api/v1/forwarders",
+            get(http::forwarders_list::list_forwarders),
+        )
         .route(
             "/api/v1/forwarders/{forwarder_id}/config",
             get(http::forwarder_config::get_forwarder_config),

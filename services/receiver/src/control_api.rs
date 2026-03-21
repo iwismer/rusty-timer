@@ -50,6 +50,9 @@ pub struct AppState {
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
     pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
+    /// Channel for sending WS commands from Tauri handlers into the active session.
+    /// `None` when no session is active.
+    pub ws_cmd_tx: RwLock<Option<tokio::sync::mpsc::Sender<crate::session::WsCommand>>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -88,6 +91,7 @@ impl AppState {
             db_integrity_ok,
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
+            ws_cmd_tx: RwLock::new(None),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -920,6 +924,220 @@ pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverEr
         Err(e) => Err(ReceiverError::UpstreamError(format!(
             "invalid JSON from upstream: {e}"
         ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Forwarder list + config proxy commands
+// ---------------------------------------------------------------------------
+
+/// Generate a unique request ID for WS proxy commands.
+fn generate_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("req-{ts}-{seq}")
+}
+
+pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
+    let profile = {
+        let db = state.db.lock().await;
+        match db.load_profile() {
+            Ok(Some(p)) => p,
+            Ok(None) => return Err(ReceiverError::NotFound("no profile".to_owned())),
+            Err(e) => return Err(ReceiverError::Internal(e.to_string())),
+        }
+    };
+
+    let Some(base) = http_base_url(&profile.server_url) else {
+        return Err(ReceiverError::BadRequest("invalid upstream URL".to_owned()));
+    };
+    let url = format!("{base}/api/v1/forwarders");
+
+    let response = match state
+        .http_client
+        .get(&url)
+        .bearer_auth(profile.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
+        }
+    };
+
+    if !response.status().is_success() {
+        return Err(ReceiverError::UpstreamError(format!(
+            "server returned {}",
+            response.status()
+        )));
+    }
+
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => Ok(body),
+        Err(e) => Err(ReceiverError::UpstreamError(format!(
+            "invalid JSON from upstream: {e}"
+        ))),
+    }
+}
+
+/// Send a WS command through the active session and wait for a response.
+async fn send_ws_command(
+    state: &AppState,
+    request_id: String,
+    message: rt_protocol::WsMessage,
+) -> Result<rt_protocol::WsMessage, ReceiverError> {
+    let tx = {
+        let guard = state.ws_cmd_tx.read().await;
+        guard
+            .clone()
+            .ok_or_else(|| ReceiverError::NotConnected("no active WS session".to_owned()))?
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let cmd = crate::session::WsCommand {
+        message,
+        request_id,
+        reply: reply_tx,
+    };
+
+    tx.send(cmd)
+        .await
+        .map_err(|_| ReceiverError::NotConnected("WS session closed".to_owned()))?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
+        .await
+        .map_err(|_| ReceiverError::UpstreamError("forwarder response timeout".to_owned()))?
+        .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))
+}
+
+pub async fn get_forwarder_config(
+    state: &AppState,
+    forwarder_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let request_id = generate_request_id();
+    let msg = rt_protocol::WsMessage::ReceiverProxyConfigGetRequest(
+        rt_protocol::ReceiverProxyConfigGetRequest {
+            request_id: request_id.clone(),
+            forwarder_id,
+        },
+    );
+    let response = send_ws_command(state, request_id, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyConfigGetResponse(r) => Ok(serde_json::json!({
+            "ok": r.ok,
+            "error": r.error,
+            "config": r.config,
+            "restart_needed": r.restart_needed,
+        })),
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn set_forwarder_config(
+    state: &AppState,
+    forwarder_id: String,
+    section: String,
+    data: serde_json::Value,
+) -> Result<serde_json::Value, ReceiverError> {
+    let request_id = generate_request_id();
+    let msg = rt_protocol::WsMessage::ReceiverProxyConfigSetRequest(
+        rt_protocol::ReceiverProxyConfigSetRequest {
+            request_id: request_id.clone(),
+            forwarder_id,
+            section,
+            payload: data,
+        },
+    );
+    let response = send_ws_command(state, request_id, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyConfigSetResponse(r) => Ok(serde_json::json!({
+            "ok": r.ok,
+            "error": r.error,
+            "restart_needed": r.restart_needed,
+        })),
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn restart_forwarder_service(
+    state: &AppState,
+    forwarder_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let request_id = generate_request_id();
+    let msg = rt_protocol::WsMessage::ReceiverProxyRestartRequest(
+        rt_protocol::ReceiverProxyRestartRequest {
+            request_id: request_id.clone(),
+            forwarder_id,
+        },
+    );
+    let response = send_ws_command(state, request_id, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
+            "ok": r.ok,
+            "error": r.error,
+        })),
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn restart_forwarder_device(
+    state: &AppState,
+    forwarder_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let request_id = generate_request_id();
+    let msg = rt_protocol::WsMessage::ReceiverProxyDeviceControlRequest(
+        rt_protocol::ReceiverProxyDeviceControlRequest {
+            request_id: request_id.clone(),
+            forwarder_id,
+            action: "restart_device".to_owned(),
+        },
+    );
+    let response = send_ws_command(state, request_id, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
+            "ok": r.ok,
+            "error": r.error,
+        })),
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn shutdown_forwarder_device(
+    state: &AppState,
+    forwarder_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let request_id = generate_request_id();
+    let msg = rt_protocol::WsMessage::ReceiverProxyDeviceControlRequest(
+        rt_protocol::ReceiverProxyDeviceControlRequest {
+            request_id: request_id.clone(),
+            forwarder_id,
+            action: "shutdown_device".to_owned(),
+        },
+    );
+    let response = send_ws_command(state, request_id, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyControlResponse(r) => Ok(serde_json::json!({
+            "ok": r.ok,
+            "error": r.error,
+        })),
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
     }
 }
 

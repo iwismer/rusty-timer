@@ -1,0 +1,117 @@
+use crate::state::AppState;
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use sqlx::Row;
+use std::collections::HashMap;
+
+pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse {
+    // Fetch all streams grouped by forwarder
+    let rows = match sqlx::query(
+        r#"SELECT s.forwarder_id,
+                  s.forwarder_display_name,
+                  s.reader_ip,
+                  s.online,
+                  s.reader_connected,
+                  s.stream_epoch
+           FROM streams s
+           ORDER BY s.forwarder_id, s.reader_ip"#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to list forwarders");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Group streams by forwarder_id
+    struct ForwarderInfo {
+        display_name: Option<String>,
+        online: bool,
+        readers: Vec<serde_json::Value>,
+    }
+
+    let mut forwarders: HashMap<String, ForwarderInfo> = HashMap::new();
+
+    for row in &rows {
+        let forwarder_id: String = row.get("forwarder_id");
+        let display_name: Option<String> = row.get("forwarder_display_name");
+        let reader_ip: String = row.get("reader_ip");
+        let online: bool = row.get("online");
+        let reader_connected: bool = row.get("reader_connected");
+
+        let entry = forwarders
+            .entry(forwarder_id)
+            .or_insert_with(|| ForwarderInfo {
+                display_name: display_name.clone(),
+                online: false,
+                readers: Vec::new(),
+            });
+
+        if online {
+            entry.online = true;
+        }
+        if display_name.is_some() && entry.display_name.is_none() {
+            entry.display_name = display_name;
+        }
+
+        entry.readers.push(serde_json::json!({
+            "reader_ip": reader_ip,
+            "connected": reader_connected,
+        }));
+    }
+
+    // Fetch per-forwarder stats (unique chips + total reads for current epoch)
+    let stats_rows = sqlx::query(
+        r#"SELECT s.forwarder_id,
+                  COUNT(DISTINCT e.raw_frame) AS unique_chips,
+                  COUNT(*) AS total_reads,
+                  MAX(e.received_at) AS last_read_at
+           FROM streams s
+           JOIN events e ON e.stream_id = s.stream_id AND e.stream_epoch = s.stream_epoch
+           GROUP BY s.forwarder_id"#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut stats_map: HashMap<String, (i64, i64, Option<chrono::DateTime<chrono::Utc>>)> =
+        HashMap::new();
+    for row in &stats_rows {
+        let fwd_id: String = row.get("forwarder_id");
+        let unique_chips: i64 = row.get("unique_chips");
+        let total_reads: i64 = row.get("total_reads");
+        let last_read_at: Option<chrono::DateTime<chrono::Utc>> = row.get("last_read_at");
+        stats_map.insert(fwd_id, (unique_chips, total_reads, last_read_at));
+    }
+
+    // Build response sorted by forwarder_id
+    let mut result: Vec<serde_json::Value> = forwarders
+        .into_iter()
+        .map(|(fwd_id, info)| {
+            let (unique_chips, total_reads, last_read_at) =
+                stats_map.remove(&fwd_id).unwrap_or((0, 0, None));
+            serde_json::json!({
+                "forwarder_id": fwd_id,
+                "display_name": info.display_name,
+                "online": info.online,
+                "readers": info.readers,
+                "unique_chips": unique_chips,
+                "total_reads": total_reads,
+                "last_read_at": last_read_at.map(|t| t.to_rfc3339()),
+            })
+        })
+        .collect();
+    result.sort_by(|a, b| a["forwarder_id"].as_str().cmp(&b["forwarder_id"].as_str()));
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "forwarders": result })),
+    )
+        .into_response()
+}

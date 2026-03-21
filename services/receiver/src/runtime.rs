@@ -282,6 +282,12 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                                                 let bus = event_bus.clone();
                                                 let counts = state.stream_counts.clone();
                                                 let ui_tx = state.ui_tx.clone();
+                                                let (ws_cmd_tx, ws_cmd_rx) =
+                                                    tokio::sync::mpsc::channel(16);
+                                                {
+                                                    let mut guard = state.ws_cmd_tx.write().await;
+                                                    *guard = Some(ws_cmd_tx);
+                                                }
                                                 let st = Arc::clone(&state);
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
@@ -293,11 +299,18 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                                                         shutdown: cancel_rx,
                                                         connection_state: st.conn_rx(),
                                                         chip_lookup: Arc::clone(&st.chip_lookup),
+                                                        ws_cmd_rx,
                                                     };
                                                     let result = crate::session::run_session_loop(
                                                         ws, session_id, deps,
                                                     )
                                                     .await;
+                                                    // Clear the WS command sender so Tauri commands
+                                                    // know the session is gone.
+                                                    {
+                                                        let mut guard = st.ws_cmd_tx.write().await;
+                                                        *guard = None;
+                                                    }
                                                     match result {
                                                         Ok(()) => {
                                                             info!("WS session ended normally");

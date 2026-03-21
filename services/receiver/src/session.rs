@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, WsMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, error, info, warn};
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +33,15 @@ pub struct Session {
 /// have entries; reads from other forwarders are not enriched.
 pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
+/// A request sent from a Tauri command handler to the WS session loop.
+/// The session loop sends `message` over the WebSocket and routes the
+/// server's response back via the oneshot `reply` channel.
+pub struct WsCommand {
+    pub message: WsMessage,
+    pub request_id: String,
+    pub reply: oneshot::Sender<WsMessage>,
+}
+
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
@@ -41,6 +50,7 @@ pub struct SessionLoopDeps {
     pub shutdown: watch::Receiver<bool>,
     pub connection_state: watch::Receiver<ConnectionState>,
     pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
+    pub ws_cmd_rx: mpsc::Receiver<WsCommand>,
 }
 
 fn apply_batch_counts(
@@ -93,6 +103,16 @@ fn apply_batch_counts(
     updates
 }
 
+/// Extract the request_id from a proxy response message, if applicable.
+fn proxy_response_request_id(msg: &WsMessage) -> Option<&str> {
+    match msg {
+        WsMessage::ReceiverProxyConfigGetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyConfigSetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyControlResponse(r) => Some(&r.request_id),
+        _ => None,
+    }
+}
+
 pub async fn run_session_loop<S>(
     mut ws: S,
     session_id: String,
@@ -103,16 +123,43 @@ where
         + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
         + Unpin,
 {
+    let mut pending_requests: HashMap<String, oneshot::Sender<WsMessage>> = HashMap::new();
+
     loop {
         tokio::select! {
             biased;
             _ = deps.shutdown.changed() => { if *deps.shutdown.borrow() { break; } }
+            Some(cmd) = deps.ws_cmd_rx.recv() => {
+                let text = match serde_json::to_string(&cmd.message) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = cmd.reply.send(WsMessage::Error(rt_protocol::ErrorMessage {
+                            code: "SERIALIZE_ERROR".into(),
+                            message: e.to_string(),
+                            retryable: false,
+                        }));
+                        continue;
+                    }
+                };
+                if ws.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+                pending_requests.insert(cmd.request_id, cmd.reply);
+            }
             msg = ws.next() => {
                 match msg {
                     None => break,
                     Some(Err(e)) => return Err(SessionError::Ws(e)),
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<WsMessage>(&t) {
+                            Ok(ref parsed) if proxy_response_request_id(parsed).is_some() => {
+                                let request_id = proxy_response_request_id(parsed).unwrap().to_owned();
+                                if let Some(reply_tx) = pending_requests.remove(&request_id) {
+                                    let _ = reply_tx.send(parsed.clone());
+                                } else {
+                                    warn!(request_id = %request_id, "received proxy response with no pending request");
+                                }
+                            }
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
                                 let reconnect_pending =
