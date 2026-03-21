@@ -98,7 +98,7 @@ jobs:
           echo "Parsed tag: service=${SERVICE}, version=${VERSION}"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -190,7 +190,7 @@ jobs:
       matrix: ${{ fromJson(needs.resolve-matrix.outputs.matrix) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -221,7 +221,7 @@ jobs:
 
       - name: Setup Node.js (UI-embedded services)
         if: env.SERVICE == 'forwarder'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
@@ -295,7 +295,7 @@ jobs:
           PY
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARCHIVE }}
           path: |
@@ -310,7 +310,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -348,7 +348,7 @@ jobs:
     steps:
       - name: Download all artifacts
         if: needs.resolve-matrix.outputs.service != 'server'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -407,7 +407,7 @@ jobs:
           VERSION="${TAG#receiver-ui-v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
@@ -440,7 +440,7 @@ jobs:
     needs: receiver-tauri-validate
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: receiver-ui-v${{ needs.receiver-tauri-validate.outputs.version }}
 
@@ -448,7 +448,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
 
@@ -482,7 +482,7 @@ jobs:
         run: python scripts/generate-tauri-update-manifest.py ${{ needs.receiver-tauri-validate.outputs.version }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tauri-installer
           path: |
@@ -497,7 +497,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tauri-installer
           path: artifacts/
@@ -512,7 +512,10 @@ jobs:
       - name: Update pinned latest release with manifest
         shell: bash
         run: |
-          gh release upload receiver-ui-latest artifacts/update-manifest.json --clobber 2>/dev/null || \
+          # This job has no git checkout; gh needs an explicit --repo for upload.
+          gh release upload receiver-ui-latest artifacts/update-manifest.json \
+            --repo "${{ github.repository }}" \
+            --clobber || \
           gh release create receiver-ui-latest artifacts/update-manifest.json \
             --repo "${{ github.repository }}" \
             --title "Receiver UI Latest" \
