@@ -904,7 +904,6 @@ export function initStore(): void {
     },
     onResync: () => {
       void loadAll();
-      store.streamMetrics = new Map();
     },
     onConnectionChange: () => {},
     onStreamCountsUpdated: (updates) => {

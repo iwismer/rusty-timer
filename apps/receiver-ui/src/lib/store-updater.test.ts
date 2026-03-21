@@ -294,4 +294,37 @@ describe("receiver updater store", () => {
 
     expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
+
+  it("keeps cached metrics across resync until replacement data arrives", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 10,
+      dedup_count: 9,
+      retransmit_count: 1,
+      lag: 1000,
+      epoch_raw_count: 4,
+      epoch_dedup_count: 3,
+      epoch_retransmit_count: 1,
+      unique_chips: 2,
+      epoch_last_received_at: "2026-03-21T12:00:00Z",
+      epoch_lag: 250,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+
+    callbacks?.onResync();
+    await flushAsyncWork();
+
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+  });
 });

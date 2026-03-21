@@ -542,6 +542,19 @@ fn should_emit_receiver_resync_for_dashboard_event(event_name: &str) -> bool {
     matches!(event_name, "resync")
 }
 
+fn spawn_initial_metrics_fetch(state: &Arc<AppState>, generation: u64) {
+    let fetch_state = Arc::clone(state);
+    tokio::spawn(async move {
+        fetch_initial_metrics(&fetch_state, generation).await;
+    });
+}
+
+async fn refresh_dashboard_snapshot_and_metrics(state: &Arc<AppState>) {
+    let generation = state.next_dashboard_metrics_generation();
+    state.emit_streams_snapshot().await;
+    spawn_initial_metrics_fetch(state, generation);
+}
+
 fn consume_sse_line_for_event(
     line: &str,
     pending_event: &mut Option<String>,
@@ -791,10 +804,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
             };
 
         let generation = state.next_dashboard_metrics_generation();
-        let fetch_state = Arc::clone(&state);
-        tokio::spawn(async move {
-            fetch_initial_metrics(&fetch_state, generation).await;
-        });
+        spawn_initial_metrics_fetch(&state, generation);
 
         match consume_upstream_dashboard_events(&state, response).await {
             Ok(()) => {}
@@ -848,14 +858,13 @@ async fn consume_upstream_dashboard_events(
                 consume_sse_line_for_event(&line, &mut pending_event, &mut pending_data)
             {
                 if should_refresh_stream_snapshot_for_dashboard_event(&event_name) {
-                    state.emit_streams_snapshot().await;
-                }
-                if should_emit_receiver_resync_for_dashboard_event(&event_name) {
-                    state.invalidate_dashboard_metrics_generation();
-                    state.emit_resync();
+                    refresh_dashboard_snapshot_and_metrics(state).await;
                 }
                 if should_refresh_chip_lookup_for_dashboard_event(&event_name) {
                     refresh_chip_lookup(state).await;
+                }
+                if should_emit_receiver_resync_for_dashboard_event(&event_name) {
+                    state.emit_resync();
                 }
                 if event_name == "metrics_updated"
                     && let Some(data) = data
@@ -1268,11 +1277,12 @@ mod tests {
     use std::collections::HashMap;
     use std::convert::Infallible;
     use std::future::Future;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
     use tokio::task::JoinHandle;
+    use tokio_stream::wrappers::UnboundedReceiverStream;
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::protocol::Message;
 
@@ -1320,6 +1330,20 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    type TestEventStreamItem = Result<Event, Infallible>;
+    type TestEventStreamReceiver = tokio::sync::mpsc::UnboundedReceiver<TestEventStreamItem>;
+    type SharedTestEventStreamReceiver = Arc<tokio::sync::Mutex<Option<TestEventStreamReceiver>>>;
+
+    fn controlled_sse(
+        rx: TestEventStreamReceiver,
+    ) -> Sse<impl futures_util::Stream<Item = TestEventStreamItem>> {
+        Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(60))
+                .text("keepalive"),
+        )
     }
 
     #[derive(Clone)]
@@ -1490,6 +1514,152 @@ mod tests {
             "epoch_lag_ms": 200,
             "epoch_last_received_at": "2026-03-21T12:00:00Z",
             "unique_chips": 3,
+            "last_tag_id": null,
+            "last_reader_timestamp": null
+        }))
+    }
+
+    #[derive(Clone)]
+    struct ResyncMetricsRefreshState {
+        event_rx: SharedTestEventStreamReceiver,
+        events_tx: tokio::sync::mpsc::UnboundedSender<TestEventStreamItem>,
+        metrics_requests: Arc<AtomicUsize>,
+    }
+
+    async fn resync_metrics_events(
+        State(state): State<ResyncMetricsRefreshState>,
+    ) -> Sse<impl futures_util::Stream<Item = TestEventStreamItem>> {
+        let rx = state
+            .event_rx
+            .lock()
+            .await
+            .take()
+            .expect("single SSE connection");
+        controlled_sse(rx)
+    }
+
+    async fn resync_metrics_streams() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "streams": [{
+                "stream_id": "stream-1",
+                "forwarder_id": "fwd-1",
+                "reader_ip": "10.0.0.1:10000",
+                "display_alias": null,
+                "forwarder_display_name": null,
+                "online": true,
+                "reader_connected": true,
+                "stream_epoch": 1,
+                "created_at": "2026-03-21T12:00:00Z",
+                "current_epoch_name": null
+            }]
+        }))
+    }
+
+    async fn resync_metrics_handler(
+        State(state): State<ResyncMetricsRefreshState>,
+        Path(_stream_id): Path<String>,
+    ) -> Json<serde_json::Value> {
+        let request_num = state.metrics_requests.fetch_add(1, Ordering::SeqCst) + 1;
+        if request_num == 1 {
+            let _ = state
+                .events_tx
+                .send(Ok(Event::default().event("resync").data("{}")));
+        }
+        Json(serde_json::json!({
+            "raw_count": request_num as i64,
+            "dedup_count": request_num as i64,
+            "retransmit_count": 0,
+            "lag_ms": 100,
+            "epoch_raw_count": request_num as i64,
+            "epoch_dedup_count": request_num as i64,
+            "epoch_retransmit_count": 0,
+            "epoch_lag_ms": 100,
+            "epoch_last_received_at": "2026-03-21T12:00:00Z",
+            "unique_chips": request_num as i64,
+            "last_tag_id": null,
+            "last_reader_timestamp": null
+        }))
+    }
+
+    #[derive(Clone)]
+    struct StreamUpdatedMetricsRefreshState {
+        event_rx: SharedTestEventStreamReceiver,
+        events_tx: tokio::sync::mpsc::UnboundedSender<TestEventStreamItem>,
+        metrics_requests: Arc<AtomicUsize>,
+        streams_requests: Arc<AtomicUsize>,
+        release_first_metrics: Arc<Notify>,
+    }
+
+    async fn stream_updated_metrics_events(
+        State(state): State<StreamUpdatedMetricsRefreshState>,
+    ) -> Sse<impl futures_util::Stream<Item = TestEventStreamItem>> {
+        let rx = state
+            .event_rx
+            .lock()
+            .await
+            .take()
+            .expect("single SSE connection");
+        controlled_sse(rx)
+    }
+
+    async fn stream_updated_metrics_streams(
+        State(state): State<StreamUpdatedMetricsRefreshState>,
+    ) -> Json<serde_json::Value> {
+        let request_num = state.streams_requests.fetch_add(1, Ordering::SeqCst) + 1;
+        let stream_epoch = if request_num == 1 { 1 } else { 2 };
+        Json(serde_json::json!({
+            "streams": [{
+                "stream_id": "stream-1",
+                "forwarder_id": "fwd-1",
+                "reader_ip": "10.0.0.1:10000",
+                "display_alias": null,
+                "forwarder_display_name": null,
+                "online": true,
+                "reader_connected": true,
+                "stream_epoch": stream_epoch,
+                "created_at": "2026-03-21T12:00:00Z",
+                "current_epoch_name": null
+            }]
+        }))
+    }
+
+    async fn stream_updated_metrics_handler(
+        State(state): State<StreamUpdatedMetricsRefreshState>,
+        Path(_stream_id): Path<String>,
+    ) -> Json<serde_json::Value> {
+        let request_num = state.metrics_requests.fetch_add(1, Ordering::SeqCst) + 1;
+        if request_num == 1 {
+            let _ = state
+                .events_tx
+                .send(Ok(Event::default().event("stream_updated").data("{}")));
+            state.release_first_metrics.notified().await;
+            return Json(serde_json::json!({
+                "raw_count": 1,
+                "dedup_count": 1,
+                "retransmit_count": 0,
+                "lag_ms": 100,
+                "epoch_raw_count": 1,
+                "epoch_dedup_count": 1,
+                "epoch_retransmit_count": 0,
+                "epoch_lag_ms": 100,
+                "epoch_last_received_at": "2026-03-21T12:00:00Z",
+                "unique_chips": 1,
+                "last_tag_id": null,
+                "last_reader_timestamp": null
+            }));
+        }
+
+        Json(serde_json::json!({
+            "raw_count": 2,
+            "dedup_count": 2,
+            "retransmit_count": 0,
+            "lag_ms": 100,
+            "epoch_raw_count": 2,
+            "epoch_dedup_count": 2,
+            "epoch_retransmit_count": 0,
+            "epoch_lag_ms": 100,
+            "epoch_last_received_at": "2026-03-21T12:00:00Z",
+            "unique_chips": 2,
             "last_tag_id": null,
             "last_reader_timestamp": null
         }))
@@ -2230,6 +2400,121 @@ mod tests {
             ["stream-fresh"]
         );
 
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn resync_event_triggers_metrics_refetch() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let http_state = ResyncMetricsRefreshState {
+            event_rx: Arc::new(tokio::sync::Mutex::new(Some(events_rx))),
+            events_tx,
+            metrics_requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let router = Router::new()
+            .route("/api/v1/events", get(resync_metrics_events))
+            .route("/api/v1/streams", get(resync_metrics_streams))
+            .route(
+                "/api/v1/streams/{stream_id}/metrics",
+                get(resync_metrics_handler),
+            )
+            .with_state(http_state.clone());
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        state.set_connection_state(ConnectionState::Connected).await;
+
+        let task = tokio::spawn(run_upstream_dashboard_sse_refresher(Arc::clone(&state)));
+
+        wait_for("metrics refetch after resync", || {
+            http_state.metrics_requests.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+
+        task.abort();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stream_updated_event_invalidates_inflight_metrics_fetch() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let http_state = StreamUpdatedMetricsRefreshState {
+            event_rx: Arc::new(tokio::sync::Mutex::new(Some(events_rx))),
+            events_tx,
+            metrics_requests: Arc::new(AtomicUsize::new(0)),
+            streams_requests: Arc::new(AtomicUsize::new(0)),
+            release_first_metrics: Arc::new(Notify::new()),
+        };
+        let router = Router::new()
+            .route("/api/v1/events", get(stream_updated_metrics_events))
+            .route("/api/v1/streams", get(stream_updated_metrics_streams))
+            .route(
+                "/api/v1/streams/{stream_id}/metrics",
+                get(stream_updated_metrics_handler),
+            )
+            .with_state(http_state.clone());
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        state.set_connection_state(ConnectionState::Connected).await;
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        let task = tokio::spawn(run_upstream_dashboard_sse_refresher(Arc::clone(&state)));
+
+        wait_for("fresh metrics fetch after stream_updated", || {
+            http_state.metrics_requests.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+
+        http_state.release_first_metrics.notify_waiters();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut saw_fresh = false;
+        let mut saw_stale = false;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), ui_rx.recv()).await {
+                Ok(Ok(ReceiverUiEvent::StreamMetricsUpdated(payload))) => {
+                    if payload.raw_count == 1 {
+                        saw_stale = true;
+                    }
+                    if payload.raw_count == 2 {
+                        saw_fresh = true;
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => {}
+            }
+        }
+
+        assert!(saw_fresh, "expected fresh metrics after stream_updated");
+        assert!(
+            !saw_stale,
+            "expected stale metrics result to be dropped after stream_updated"
+        );
+
+        task.abort();
         server_task.abort();
     }
 
