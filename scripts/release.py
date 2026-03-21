@@ -34,7 +34,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VALID_SERVICES = ("forwarder", "receiver", "streamer", "emulator", "server")
-EMBED_UI_SERVICES = ("forwarder", "receiver")
+EMBED_UI_SERVICES = ("forwarder",)
 UI_WORKSPACES = {
     "forwarder": "apps/forwarder-ui",
     "receiver": "apps/receiver-ui",
@@ -319,9 +319,11 @@ def run_release_workflow_checks(
         "--release",
         "--package",
         service,
-        "--bin",
-        service,
     ]
+    # receiver is a library crate (Tauri app builds the binary in CI);
+    # other services have a standalone binary target.
+    if service != "receiver":
+        build_cmd.extend(["--bin", service])
     if service_uses_embed_ui(service):
         build_cmd.extend(["--features", "embed-ui"])
 
