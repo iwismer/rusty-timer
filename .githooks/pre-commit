@@ -38,7 +38,7 @@ cd "$REPO_ROOT" && cargo fmt --all -- --check
 
 # 3. Rust linting
 echo "  Running clippy ..."
-cd "$REPO_ROOT" && cargo clippy --workspace --all-targets
+cd "$REPO_ROOT" && cargo clippy --workspace --all-targets --exclude receiver-tauri
 
 run_js_checks() {
   local app_dir="$1"

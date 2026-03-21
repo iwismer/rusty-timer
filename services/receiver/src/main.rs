@@ -78,6 +78,10 @@ fn resolve_receiver_id(cli_id: Option<String>, db: &receiver::db::Db) -> String 
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls CryptoProvider");
+
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
 

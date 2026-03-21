@@ -75,6 +75,10 @@ fn detect_local_ip(target_ip: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls CryptoProvider");
+
     // Initialize tracing subscriber for structured logging to stdout.
     tracing_subscriber::fmt()
         .with_env_filter(

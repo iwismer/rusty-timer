@@ -30,6 +30,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rt-protocol = { path = "../../crates/rt-protocol" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-ui-http = { path = "../../crates/rt-ui-http" }
