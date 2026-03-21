@@ -229,8 +229,8 @@ export async function getReplayTargetEpochs(
   stream: StreamRef,
 ): Promise<ReplayTargetEpochsResponse> {
   return invoke<ReplayTargetEpochsResponse>("get_replay_target_epochs", {
-    forwarder_id: stream.forwarder_id,
-    reader_ip: stream.reader_ip,
+    forwarderId: stream.forwarder_id,
+    readerIp: stream.reader_ip,
   });
 }
 
@@ -293,7 +293,7 @@ export async function getForwarderConfig(
   forwarderId: string,
 ): Promise<ForwarderConfigResponse> {
   return invoke<ForwarderConfigResponse>("get_forwarder_config", {
-    forwarder_id: forwarderId,
+    forwarderId,
   });
 }
 
@@ -303,7 +303,7 @@ export async function setForwarderConfig(
   data: Record<string, unknown>,
 ): Promise<ForwarderConfigSaveResponse> {
   return invoke<ForwarderConfigSaveResponse>("set_forwarder_config", {
-    forwarder_id: forwarderId,
+    forwarderId,
     section,
     data,
   });
@@ -313,7 +313,7 @@ export async function restartForwarderService(
   forwarderId: string,
 ): Promise<ForwarderControlResponse> {
   return invoke<ForwarderControlResponse>("restart_forwarder_service", {
-    forwarder_id: forwarderId,
+    forwarderId,
   });
 }
 
@@ -321,7 +321,7 @@ export async function restartForwarderDevice(
   forwarderId: string,
 ): Promise<ForwarderControlResponse> {
   return invoke<ForwarderControlResponse>("restart_forwarder_device", {
-    forwarder_id: forwarderId,
+    forwarderId,
   });
 }
 
@@ -329,7 +329,7 @@ export async function shutdownForwarderDevice(
   forwarderId: string,
 ): Promise<ForwarderControlResponse> {
   return invoke<ForwarderControlResponse>("shutdown_forwarder_device", {
-    forwarder_id: forwarderId,
+    forwarderId,
   });
 }
 
