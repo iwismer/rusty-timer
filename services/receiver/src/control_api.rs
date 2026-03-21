@@ -52,6 +52,8 @@ pub struct AppState {
     pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
+    pub dbf_config_version: watch::Sender<u64>,
+    _dbf_config_keepalive: watch::Receiver<u64>,
 }
 
 impl AppState {
@@ -67,6 +69,7 @@ impl AppState {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
         let (conn_tx, conn_keepalive_rx) = watch::channel(ConnectionState::Disconnected);
+        let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
@@ -90,6 +93,8 @@ impl AppState {
             chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
+            dbf_config_version,
+            _dbf_config_keepalive,
         });
         (state, shutdown_rx)
     }
@@ -97,6 +102,14 @@ impl AppState {
     /// Subscribe to connection state changes.
     pub fn conn_rx(&self) -> watch::Receiver<ConnectionState> {
         self.connection_state.subscribe()
+    }
+
+    pub fn notify_dbf_config_changed(&self) {
+        let _ = self.dbf_config_version.send_modify(|v| *v += 1);
+    }
+
+    pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
+        self.dbf_config_version.subscribe()
     }
 
     pub fn request_disconnect_shutdown(&self) {

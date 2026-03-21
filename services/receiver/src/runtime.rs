@@ -114,6 +114,8 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     }
 
     let event_bus = EventBus::new();
+    let (global_event_tx, _global_event_rx) =
+        tokio::sync::broadcast::channel::<rt_protocol::ReadEvent>(256);
 
     // Start local proxies for any saved subscriptions on startup.
     let initial_subs = {
@@ -135,6 +137,26 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         state.request_connect().await;
     }
 
+    let mut dbf_writer_cancel_tx: Option<watch::Sender<bool>> = None;
+    let mut dbf_writer_task: Option<tokio::task::JoinHandle<()>> = None;
+    {
+        let db = state.db.lock().await;
+        if let Ok(dbf_config) = db.load_dbf_config() {
+            if dbf_config.enabled {
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let rx = global_event_tx.subscribe();
+                let db_arc = Arc::clone(&state.db);
+                let path = dbf_config.path.clone();
+                let handle = tokio::spawn(async move {
+                    crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
+                });
+                dbf_writer_cancel_tx = Some(cancel_tx);
+                dbf_writer_task = Some(handle);
+                state.logger.log("DBF writer started");
+            }
+        }
+    }
+
     // Spawn upstream dashboard SSE refresher.
     // Uses tokio::spawn (not tauri::async_runtime::spawn) because this is a
     // library crate with no Tauri dependency — the caller spawns `run()` onto
@@ -153,6 +175,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     let mut session_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut conn_state_rx = state.conn_rx();
+    let mut dbf_config_rx = state.dbf_config_rx();
 
     let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_millis(500));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -283,11 +306,13 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                                                 let counts = state.stream_counts.clone();
                                                 let ui_tx = state.ui_tx.clone();
                                                 let st = Arc::clone(&state);
+                                                let gtx = global_event_tx.clone();
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
                                                     let deps = crate::session::SessionLoopDeps {
                                                         db: db_arc,
                                                         event_tx,
+                                                        global_event_tx: Some(gtx),
                                                         stream_counts: counts,
                                                         ui_tx,
                                                         shutdown: cancel_rx,
@@ -353,12 +378,51 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                     }
                 }
             }
+
+            _ = dbf_config_rx.changed() => {
+                let db = state.db.lock().await;
+                let dbf_config = db.load_dbf_config().unwrap_or(crate::db::DbfConfig {
+                    enabled: false,
+                    path: r"C:\winrace\Files\IPICO.DBF".to_owned(),
+                });
+                drop(db);
+
+                // Stop existing writer if running
+                if let Some(cancel_tx) = dbf_writer_cancel_tx.take() {
+                    let _ = cancel_tx.send(true);
+                }
+                if let Some(handle) = dbf_writer_task.take() {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+                }
+
+                // Start new writer if enabled
+                if dbf_config.enabled {
+                    let (cancel_tx, cancel_rx) = watch::channel(false);
+                    let rx = global_event_tx.subscribe();
+                    let db_arc = Arc::clone(&state.db);
+                    let path = dbf_config.path.clone();
+                    let handle = tokio::spawn(async move {
+                        crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
+                    });
+                    dbf_writer_cancel_tx = Some(cancel_tx);
+                    dbf_writer_task = Some(handle);
+                    state.logger.log("DBF writer started");
+                } else {
+                    state.logger.log("DBF writer stopped");
+                }
+            }
         }
     }
 
     // Graceful shutdown
     state.logger.log("shutdown signal received");
     cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
+    if let Some(cancel_tx) = dbf_writer_cancel_tx.take() {
+        let _ = cancel_tx.send(true);
+    }
+    if let Some(handle) = dbf_writer_task.take() {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");
         proxy.shutdown();

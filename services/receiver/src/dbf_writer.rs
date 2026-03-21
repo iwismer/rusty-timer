@@ -6,9 +6,14 @@
 use std::convert::TryFrom;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use dbase::{FieldIOError, FieldName, TableWriterBuilder, WritableRecord};
 use ipico_core::read::ChipRead;
+use rt_protocol::ReadEvent;
+use tokio::sync::{Mutex, broadcast, watch};
+
+use crate::db::Db;
 
 // ---------------------------------------------------------------------------
 // DbfRecord
@@ -201,6 +206,86 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
 /// If the file does not exist it is created.
 pub fn clear_dbf(path: &Path) -> std::io::Result<()> {
     create_empty_dbf(path)
+}
+
+// ---------------------------------------------------------------------------
+// run_dbf_writer
+// ---------------------------------------------------------------------------
+
+/// Run the DBF writer loop. Receives ReadEvents from the global broadcast
+/// channel and appends them to the DBF file.
+pub async fn run_dbf_writer(
+    mut event_rx: broadcast::Receiver<ReadEvent>,
+    db: Arc<Mutex<Db>>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    dbf_path: String,
+) {
+    let path = std::path::PathBuf::from(&dbf_path);
+    tracing::debug!(path = %path.display(), "DBF writer started");
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    tracing::debug!("DBF writer shutting down");
+                    break;
+                }
+            }
+            result = event_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        // Skip sentinel read types
+                        if event.read_type.starts_with("__") {
+                            continue;
+                        }
+
+                        // Look up subscription for this event to get event_type and reader index
+                        let subs = {
+                            let db = db.lock().await;
+                            db.load_subscriptions().unwrap_or_default()
+                        };
+
+                        let sub_index = subs.iter().position(|s| {
+                            s.forwarder_id == event.forwarder_id && s.reader_ip == event.reader_ip
+                        });
+
+                        let Some(idx) = sub_index else {
+                            tracing::debug!(fwd = %event.forwarder_id, ip = %event.reader_ip, "no subscription for event, skipping DBF write");
+                            continue;
+                        };
+
+                        // Skip if reader index > 9
+                        if idx > 9 {
+                            tracing::debug!(idx, "reader index > 9, skipping DBF write");
+                            continue;
+                        }
+
+                        let event_type = &subs[idx].event_type;
+                        let reader_index = idx as u8;
+
+                        match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
+                            Some(record) => {
+                                if let Err(e) = append_record(&path, &record) {
+                                    tracing::error!(error = %e, "DBF write failed, skipping record");
+                                }
+                            }
+                            None => {
+                                tracing::warn!("failed to parse raw frame for DBF record, skipping");
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(n, "DBF writer lagged, {n} events dropped");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("DBF writer channel closed");
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
