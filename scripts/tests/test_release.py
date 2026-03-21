@@ -280,9 +280,8 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
             ],
             calls,
         )
-        self.assertIn(["git", "tag", "receiver-v0.1.1"], calls)
         self.assertIn(["git", "tag", "receiver-ui-v0.1.1"], calls)
-        self.assertIn(["git", "push", "origin", "receiver-v0.1.1"], calls)
+        self.assertNotIn(["git", "tag", "receiver-v0.1.1"], calls)
         self.assertIn(["git", "push", "origin", "receiver-ui-v0.1.1"], calls)
 
     @patch("scripts.release.write_version")

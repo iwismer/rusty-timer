@@ -18,8 +18,8 @@ Usage:
     uv run scripts/release.py forwarder --patch --dry-run
 
 For `receiver`, also bumps `apps/receiver-ui/src-tauri/tauri.conf.json` to the
-same version and creates tags `receiver-vX.Y.Z` and `receiver-ui-vX.Y.Z` on the
-same commit (the latter triggers the Windows Tauri NSIS build in CI).
+same version and creates tag `receiver-ui-vX.Y.Z` (triggers the Windows Tauri
+NSIS build in the unified Release workflow).
 """
 
 import argparse
@@ -510,27 +510,18 @@ def main() -> None:
             else:
                 print(style(f"    Committed: {commit_msg}", role="success"))
 
-            tag = f"{service}-v{new}"
+            if service == "receiver":
+                tag = f"receiver-ui-v{new}"
+            else:
+                tag = f"{service}-v{new}"
             print(style(f"  [{step}] Create release tag(s)", role="step"))
             step += 1
             log_command(["git", "tag", tag], execute=not args.dry_run)
             if args.dry_run:
                 print(style(f"    (dry-run) would tag: {tag}", role="dry_run"))
-                if service == "receiver":
-                    print(
-                        style(
-                            f"    (dry-run) would tag: receiver-ui-v{new}",
-                            role="dry_run",
-                        )
-                    )
             else:
                 print(style(f"    Tagged: {tag}", role="success"))
                 tags.append(tag)
-                if service == "receiver":
-                    tag_ui = f"receiver-ui-v{new}"
-                    log_command(["git", "tag", tag_ui], execute=True)
-                    print(style(f"    Tagged: {tag_ui}", role="success"))
-                    tags.append(tag_ui)
 
         # --- Push ---
         # Push commits first, then each tag individually.  GitHub's push.tags
@@ -542,9 +533,10 @@ def main() -> None:
         if args.dry_run:
             push_tags = []
             for svc, _, new in plan:
-                push_tags.append(f"{svc}-v{new}")
                 if svc == "receiver":
                     push_tags.append(f"receiver-ui-v{new}")
+                else:
+                    push_tags.append(f"{svc}-v{new}")
         else:
             push_tags = tags
 

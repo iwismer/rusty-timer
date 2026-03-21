@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release. Format: <service>-v<X.Y.Z> (e.g. server-v0.4.0). Must already exist as a git tag."
+        description: "Tag to release. Standard: <service>-v<X.Y.Z> (e.g. server-v0.4.0). Receiver Tauri: receiver-ui-v<X.Y.Z>. Must already exist as a git tag."
         required: true
         type: string
   push:
     tags:
       - "forwarder-v*"
-      - "receiver-v*"
+      - "receiver-ui-v*"
       - "streamer-v*"
       - "emulator-v*"
       - "server-v*"
@@ -23,8 +23,33 @@ env:
   SERVER_DOCKER_IMAGE: iwismer/rt-server
 
 jobs:
+  route:
+    name: Route release kind
+    runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.kind.outputs.kind }}
+    steps:
+      - name: Resolve kind (standard binary vs receiver Tauri)
+        id: kind
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${INPUT_TAG}" ]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "Resolved tag: ${TAG}"
+          if [[ "$TAG" =~ ^receiver-ui-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "kind=tauri" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=standard" >> "$GITHUB_OUTPUT"
+          fi
+
   resolve-matrix:
     name: Resolve build matrix
+    needs: route
+    if: needs.route.outputs.kind == 'standard'
     runs-on: ubuntu-latest
     outputs:
       service: ${{ steps.parse.outputs.service }}
@@ -41,7 +66,7 @@ jobs:
             echo "::error::Tag input is empty."
             exit 1
           fi
-          if ! [[ "$INPUT_TAG" =~ ^(forwarder|receiver|streamer|emulator|server)-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$INPUT_TAG" =~ ^(forwarder|streamer|emulator|server)-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Invalid tag format: '$INPUT_TAG'. Expected: <service>-v<X.Y.Z>"
             exit 1
           fi
@@ -60,12 +85,12 @@ jobs:
           else
             TAG="${GITHUB_REF#refs/tags/}"
           fi
-          if [[ "$TAG" =~ ^(forwarder|receiver|streamer|emulator|server)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          if [[ "$TAG" =~ ^(forwarder|streamer|emulator|server)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             SERVICE="${BASH_REMATCH[1]}"
             VERSION="${BASH_REMATCH[2]}"
           else
             echo "::error::Invalid tag format: ${TAG}"
-            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|receiver|streamer|emulator|server"
+            echo "::error::Expected: <service>-v<semver> where service is one of forwarder|streamer|emulator|server (receiver app: tag receiver-ui-v<semver>)"
             exit 1
           fi
           echo "service=${SERVICE}" >> "$GITHUB_OUTPUT"
@@ -118,7 +143,7 @@ jobs:
           JSON
               ) || { echo "::error::jq failed to parse forwarder/emulator build matrix"; exit 1; }
               ;;
-            receiver|streamer)
+            streamer)
               MATRIX=$(jq -c . <<'JSON'
           {
             "include": [
@@ -127,7 +152,7 @@ jobs:
             ]
           }
           JSON
-              ) || { echo "::error::jq failed to parse receiver/streamer build matrix"; exit 1; }
+              ) || { echo "::error::jq failed to parse streamer build matrix"; exit 1; }
               ;;
             server)
               # Keep a valid matrix output, but skip binary build/package jobs.
@@ -195,15 +220,15 @@ jobs:
           cross --version
 
       - name: Setup Node.js (UI-embedded services)
-        if: env.SERVICE == 'forwarder' || env.SERVICE == 'receiver'
+        if: env.SERVICE == 'forwarder'
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: UI checks (forwarder/receiver only)
-        if: env.SERVICE == 'forwarder' || env.SERVICE == 'receiver'
+      - name: UI checks (forwarder only)
+        if: env.SERVICE == 'forwarder'
         run: |
           npm ci
           npm run lint --workspace "apps/${{ env.SERVICE }}-ui"
@@ -211,7 +236,7 @@ jobs:
           npm test --workspace "apps/${{ env.SERVICE }}-ui"
 
       - name: Pre-build UI for cross-compilation
-        if: matrix.use_cross == 'true' && (env.SERVICE == 'forwarder' || env.SERVICE == 'receiver')
+        if: matrix.use_cross == 'true' && env.SERVICE == 'forwarder'
         shell: bash
         run: |
           npm run build --workspace "apps/${{ env.SERVICE }}-ui"
@@ -222,7 +247,7 @@ jobs:
           BUILD_CMD=${{ matrix.use_cross == 'true' && '"cross"' || '"cargo"' }}
           FEATURES=""
           case "${{ env.SERVICE }}" in
-            forwarder|receiver)
+            forwarder)
               FEATURES="--features embed-ui"
               ;;
           esac
@@ -348,3 +373,150 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: "${{ needs.resolve-matrix.outputs.service }} v${{ needs.resolve-matrix.outputs.version }}"
           generate_release_notes: true
+
+  # Receiver desktop app (Tauri + NSIS). Triggered only by receiver-ui-v* tags.
+  receiver-tauri-validate:
+    name: Receiver Tauri — validate
+    needs: route
+    if: needs.route.outputs.kind == 'tauri'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate tag format
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if [[ ! "$TAG" =~ ^receiver-ui-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' does not match pattern receiver-ui-vX.Y.Z"
+            exit 1
+          fi
+
+      - name: Parse version
+        id: parse
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${TAG#receiver-ui-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Verify tauri.conf.json version matches tag
+        run: |
+          CONF_VERSION=$(python3 -c "
+          import json
+          with open('apps/receiver-ui/src-tauri/tauri.conf.json') as f:
+              print(json.load(f)['version'])
+          ")
+          if [ "$CONF_VERSION" != "${{ steps.parse.outputs.version }}" ]; then
+            echo "::error::tauri.conf.json version ($CONF_VERSION) != tag version (${{ steps.parse.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Verify Cargo.toml receiver version matches tag
+        run: |
+          CARGO_VERSION=$(python3 -c "
+          import tomllib
+          with open('services/receiver/Cargo.toml', 'rb') as f:
+              print(tomllib.load(f)['package']['version'])
+          ")
+          if [ "$CARGO_VERSION" != "${{ steps.parse.outputs.version }}" ]; then
+            echo "::error::services/receiver/Cargo.toml version ($CARGO_VERSION) != tag version (${{ steps.parse.outputs.version }})"
+            exit 1
+          fi
+
+  receiver-tauri-build:
+    name: Receiver Tauri — build Windows installer
+    needs: receiver-tauri-validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: receiver-ui-v${{ needs.receiver-tauri-validate.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build receiver UI (SvelteKit)
+        run: npm run build --workspace "apps/receiver-ui"
+
+      - name: Build receiver binary
+        run: cargo build --release --target x86_64-pc-windows-msvc -p receiver --features receiver/embed-ui
+
+      - name: Stage sidecar binary
+        shell: bash
+        run: |
+          mkdir -p apps/receiver-ui/src-tauri/binaries
+          cp target/x86_64-pc-windows-msvc/release/receiver.exe \
+             apps/receiver-ui/src-tauri/binaries/receiver-x86_64-pc-windows-msvc.exe
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build Tauri app
+        run: cargo tauri build --target x86_64-pc-windows-msvc
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Generate update manifest
+        shell: bash
+        run: python scripts/generate-tauri-update-manifest.py ${{ needs.receiver-tauri-validate.outputs.version }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-installer
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
+            update-manifest.json
+          retention-days: 1
+
+  receiver-tauri-release:
+    name: Receiver Tauri — publish GitHub release
+    needs: [receiver-tauri-validate, receiver-tauri-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-installer
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: receiver-ui-v${{ needs.receiver-tauri-validate.outputs.version }}
+          name: "Receiver UI v${{ needs.receiver-tauri-validate.outputs.version }}"
+          files: artifacts/**/*
+
+      - name: Update pinned latest release with manifest
+        shell: bash
+        run: |
+          gh release upload receiver-ui-latest artifacts/update-manifest.json --clobber 2>/dev/null || \
+          gh release create receiver-ui-latest artifacts/update-manifest.json \
+            --repo "${{ github.repository }}" \
+            --title "Receiver UI Latest" \
+            --notes "Auto-updated manifest for Tauri updater. Do not delete this release." \
+            --latest=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

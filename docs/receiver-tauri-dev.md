@@ -79,10 +79,11 @@ secrets. For local builds without signing, set `"active": false` in
 
 ## Shipping a GitHub release (CI)
 
-The workflow [`.github/workflows/release-tauri.yml`](../.github/workflows/release-tauri.yml)
-runs on tags matching `receiver-ui-vMAJOR.MINOR.PATCH` (for example
-`receiver-ui-v0.1.0`). The value after `receiver-ui-v` must match `version` in
-`apps/receiver-ui/src-tauri/tauri.conf.json`.
+The [Release workflow](../.github/workflows/release.yml) includes a **Receiver
+Tauri** job that runs on tags matching `receiver-ui-vMAJOR.MINOR.PATCH` (for
+example `receiver-ui-v0.1.0`). The value after `receiver-ui-v` must match
+`version` in `apps/receiver-ui/src-tauri/tauri.conf.json` and match
+`services/receiver/Cargo.toml` (same semver).
 
 ### One-time: signing key and repository secrets
 
@@ -122,9 +123,8 @@ uv run scripts/release.py receiver --patch   # or --minor / --major / --version 
 ```
 
 That bumps the receiver crate and `apps/receiver-ui/src-tauri/tauri.conf.json`
-to the same version, then creates and pushes `receiver-vX.Y.Z` and
-`receiver-ui-vX.Y.Z`. The `receiver-v*` tag runs the standard binary release
-workflow; `receiver-ui-v*` runs [`.github/workflows/release-tauri.yml`](../.github/workflows/release-tauri.yml).
+to the same version, then creates and pushes `receiver-ui-vX.Y.Z` (single tag;
+triggers the Tauri Windows build in [`.github/workflows/release.yml`](../.github/workflows/release.yml)).
 
 **Manual alternative:** bump `version` in `tauri.conf.json` to match the tag you
 will use, commit, then:
@@ -134,8 +134,8 @@ git tag receiver-ui-v0.1.0
 git push origin receiver-ui-v0.1.0
 ```
 
-Or run the workflow manually (*Actions* → *Release Tauri Receiver* → *Run
-workflow*) and pass an **existing** tag name.
+Or run the workflow manually (*Actions* → *Release* → *Run workflow*) and pass
+an **existing** `receiver-ui-v*` tag name.
 
 The Tauri workflow uploads the NSIS installer to a GitHub Release for
 `receiver-ui-v*` and publishes `update-manifest.json` to the

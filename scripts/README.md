@@ -249,7 +249,7 @@ For each requested service, the script:
 7. Creates commit: `chore(<service>): bump version to <new_version>`.
 8. Creates tag: `<service>-v<new_version>`. For `receiver`, also creates
    `receiver-ui-v<new_version>` on the same commit (triggers
-   `.github/workflows/release-tauri.yml` for the NSIS installer and updater
+   `.github/workflows/release.yml` (Receiver Tauri jobs) for the NSIS installer and updater
    manifest).
 
 The script prints each step and the exact command before execution.

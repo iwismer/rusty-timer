@@ -121,9 +121,9 @@ Note on hot-reload: `cargo tauri dev` hot-reloads the Tauri Rust shell code. The
 
 The `--tauri` flag is informational in the build step — if `--no-build` is passed, the user is responsible for having built both binaries.
 
-### New: `.github/workflows/release-tauri.yml`
+### Receiver Tauri jobs in `.github/workflows/release.yml`
 
-Triggered by tags matching `receiver-ui-v*`.
+Triggered by tags matching `receiver-ui-v*` (same workflow file as other service releases; a `route` job selects Tauri vs standard binary builds).
 
 ```yaml
 name: Release Tauri Receiver
@@ -305,8 +305,8 @@ Add `apps/receiver-ui/src-tauri/binaries/` to prevent accidentally committing si
 - `services/receiver/` — zero code changes
 - `apps/receiver-ui/` SvelteKit code — zero changes
 - `crates/rt-updater/` — zero changes (forwarder + standalone receiver keep using it)
-- `.github/workflows/release.yml` — unchanged
-- `.github/workflows/ci.yml` — unchanged (Tauri build is only in release-tauri.yml)
+- `.github/workflows/release.yml` — extended with Receiver Tauri jobs (Windows NSIS) on `receiver-ui-v*` tags
+- `.github/workflows/ci.yml` — unchanged (Tauri release build is only in `release.yml`, not CI)
 - Forwarder, server, emulator — unaffected
 
 ## Risks and Mitigations
@@ -317,7 +317,7 @@ Add `apps/receiver-ui/src-tauri/binaries/` to prevent accidentally committing si
 | WebView2 missing (old Win10) | App won't launch | NSIS installer downloads bootstrapper automatically |
 | Sidecar crashes | Blank window | Detect exit via `CommandChild`, show restart prompt, auto-retry up to 3 times |
 | SmartScreen warning | User friction on first install | Accept for now; EV code signing cert is a later investment |
-| Two release tags | Operational overhead | Document in scripts/README.md; consider unifying later |
+| ~~Two release tags~~ | ~~Operational overhead~~ | Unified: only `receiver-ui-v*` (see `scripts/release.py`) |
 | `cargo tauri build` is slow | CI time | Acceptable — runs only on tagged releases, not PRs |
 | Duplicate receiver instance | Tauri sidecar + standalone running simultaneously | Tauri shell could check if port 9090 is already occupied before spawning sidecar; if occupied, show "already running" dialog |
 
@@ -327,7 +327,7 @@ Add `apps/receiver-ui/src-tauri/binaries/` to prevent accidentally committing si
 |------|----------|
 | Tauri scaffold (`src-tauri/`) | 2-3 hours |
 | Sidecar lifecycle in `main.rs` | 2-3 hours |
-| `release-tauri.yml` workflow | 2-3 hours |
+| Receiver Tauri jobs in `release.yml` | 2-3 hours |
 | `generate-tauri-update-manifest.py` | 1 hour |
 | `dev.py` `--tauri` flag | 1-2 hours |
 | Documentation updates | 1-2 hours |
