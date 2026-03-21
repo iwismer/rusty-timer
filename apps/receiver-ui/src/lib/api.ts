@@ -42,6 +42,21 @@ export interface LastRead {
   name?: string | null;
 }
 
+export interface StreamMetrics {
+  forwarder_id: string;
+  reader_ip: string;
+  raw_count: number;
+  dedup_count: number;
+  retransmit_count: number;
+  lag: number | null;
+  epoch_raw_count: number;
+  epoch_dedup_count: number;
+  epoch_retransmit_count: number;
+  unique_chips: number;
+  epoch_last_received_at: string | null;
+  epoch_lag: number | null;
+}
+
 export interface StreamsResponse {
   streams: StreamEntry[];
   degraded: boolean;

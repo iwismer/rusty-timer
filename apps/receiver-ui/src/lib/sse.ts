@@ -31,6 +31,20 @@ type LastReadPayload = {
   bib?: string | null;
   name?: string | null;
 };
+type StreamMetricsPayload = {
+  forwarder_id: string;
+  reader_ip: string;
+  raw_count: number;
+  dedup_count: number;
+  retransmit_count: number;
+  lag: number | null;
+  epoch_raw_count: number;
+  epoch_dedup_count: number;
+  epoch_retransmit_count: number;
+  unique_chips: number;
+  epoch_last_received_at: string | null;
+  epoch_lag: number | null;
+};
 
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;
@@ -41,6 +55,7 @@ export type SseCallbacks = {
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;
+  onStreamMetricsUpdated: (metrics: import("./api").StreamMetrics) => void;
 };
 
 let unlistenFns: UnlistenFn[] = [];
@@ -88,6 +103,9 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
         bib: event.payload.bib ?? null,
         name: event.payload.name ?? null,
       });
+    }),
+    listen<StreamMetricsPayload>("stream_metrics_updated", (event) => {
+      callbacks.onStreamMetricsUpdated(event.payload);
     }),
   ]);
 }
