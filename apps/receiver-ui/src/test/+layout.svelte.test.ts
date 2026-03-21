@@ -39,6 +39,7 @@ const apiMocks = vi.hoisted(() => ({
       { stream_epoch: 5, name: "Main", first_seen_at: null, race_names: [] },
     ],
   }),
+  getForwarders: vi.fn().mockResolvedValue({ forwarders: [] }),
   putMode: vi.fn().mockResolvedValue(undefined),
   putProfile: vi.fn().mockResolvedValue(undefined),
   connect: vi.fn().mockResolvedValue(undefined),
