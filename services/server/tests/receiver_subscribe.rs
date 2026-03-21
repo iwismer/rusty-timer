@@ -344,6 +344,107 @@ async fn receiver_v12_live_uses_persisted_then_earliest_then_current_precedence(
 }
 
 #[tokio::test]
+async fn receiver_v12_live_keeps_streaming_while_forwarder_proxy_request_is_pending() {
+    let (pool, addr) = start_server().await;
+    insert_token(
+        &pool,
+        "fwd-proxy-live",
+        "forwarder",
+        b"fwd-proxy-live-token",
+    )
+    .await;
+    insert_token(&pool, "rcv-proxy-live", "receiver", b"rcv-proxy-live-token").await;
+
+    let mut fwd = connect_forwarder(
+        addr,
+        "fwd-proxy-live-token",
+        "fwd-proxy-live",
+        "10.12.0.1:10000",
+    )
+    .await;
+    let fwd_session = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected initial heartbeat, got {other:?}"),
+    };
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-proxy-live".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![StreamRef {
+                forwarder_id: "fwd-proxy-live".to_owned(),
+                reader_ip: "10.12.0.1:10000".to_owned(),
+            }],
+            earliest_epochs: vec![],
+        },
+        resume: vec![],
+    };
+
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-proxy-live-token", hello).await;
+
+    rcv.send_message(&WsMessage::ReceiverProxyConfigGetRequest(
+        ReceiverProxyConfigGetRequest {
+            request_id: "proxy-get-1".to_owned(),
+            forwarder_id: "fwd-proxy-live".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let proxied_request_id = match tokio::time::timeout(Duration::from_secs(5), fwd.recv_message())
+        .await
+        .expect("timed out waiting for proxied config get")
+        .unwrap()
+    {
+        WsMessage::ConfigGetRequest(req) => req.request_id,
+        other => panic!("expected ConfigGetRequest, got {other:?}"),
+    };
+
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-proxy-live",
+        "10.12.0.1:10000",
+        1,
+        1,
+        "LIVE_DURING_PROXY",
+    )
+    .await;
+
+    let batch = recv_first_event_batch(&mut rcv, Duration::from_secs(1)).await;
+    let lines: Vec<String> = batch
+        .events
+        .iter()
+        .map(|event| String::from_utf8_lossy(&event.raw_frame).to_string())
+        .collect();
+    assert_eq!(lines, vec!["LIVE_DURING_PROXY"]);
+
+    fwd.send_message(&WsMessage::ConfigGetResponse(ConfigGetResponse {
+        request_id: proxied_request_id,
+        ok: true,
+        error: None,
+        config: serde_json::json!({"general": {"display_name": "Proxy Live"}}),
+        restart_needed: false,
+    }))
+    .await
+    .unwrap();
+
+    let proxy_response = loop {
+        match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message())
+            .await
+            .expect("timed out waiting for proxy response")
+            .unwrap()
+        {
+            WsMessage::ReceiverProxyConfigGetResponse(resp) => break resp,
+            WsMessage::ReceiverModeApplied(_) | WsMessage::Heartbeat(_) => continue,
+            other => panic!("expected proxy response, got {other:?}"),
+        }
+    };
+
+    assert_eq!(proxy_response.request_id, "proxy-get-1");
+    assert!(proxy_response.ok);
+}
+
+#[tokio::test]
 async fn receiver_v12_targeted_replay_stays_open_but_does_not_stream_live_after_replay() {
     let (pool, addr) = start_server().await;
     insert_token(&pool, "fwd-tr", "forwarder", b"fwd-tr-token").await;

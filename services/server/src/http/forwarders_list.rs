@@ -69,7 +69,7 @@ pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse
     // Fetch per-forwarder stats (unique chips + total reads for current epoch)
     let stats_rows = sqlx::query(
         r#"SELECT s.forwarder_id,
-                  COUNT(DISTINCT e.raw_frame) AS unique_chips,
+                  COUNT(DISTINCT e.tag_id) AS unique_chips,
                   COUNT(*) AS total_reads,
                   MAX(e.received_at) AS last_read_at
            FROM streams s

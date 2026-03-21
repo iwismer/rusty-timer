@@ -30,6 +30,7 @@ use rt_protocol::{
 use sqlx::{Row, types::Uuid as SqlUuid};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -145,6 +146,143 @@ impl RaceBaseline {
 
 fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
     (left_epoch, left_seq) > (right_epoch, right_seq)
+}
+
+async fn proxy_config_get_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyConfigGetRequest,
+) -> WsMessage {
+    let proxy_result = crate::forwarder_proxy::proxy_config_get(&state, &req.forwarder_id).await;
+    let resp = match proxy_result {
+        Ok(r) => ReceiverProxyConfigGetResponse {
+            request_id: req.request_id,
+            ok: true,
+            error: None,
+            config: r.config,
+            restart_needed: r.restart_needed,
+        },
+        Err(e) => ReceiverProxyConfigGetResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(proxy_error_message(&e)),
+            config: serde_json::Value::Null,
+            restart_needed: false,
+        },
+    };
+    WsMessage::ReceiverProxyConfigGetResponse(resp)
+}
+
+async fn proxy_config_set_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyConfigSetRequest,
+) -> WsMessage {
+    let log_section = req.section.clone();
+    let proxy_result = crate::forwarder_proxy::proxy_config_set(
+        &state,
+        &req.forwarder_id,
+        req.section,
+        req.payload,
+    )
+    .await;
+    let resp = match proxy_result {
+        Ok(r) => {
+            if r.ok {
+                state.logger.log(format!(
+                    "forwarder \"{}\" config/{} updated via receiver {}",
+                    req.forwarder_id, log_section, device_id
+                ));
+            }
+            ReceiverProxyConfigSetResponse {
+                request_id: req.request_id,
+                ok: r.ok,
+                error: r.error,
+                restart_needed: r.restart_needed,
+            }
+        }
+        Err(e) => ReceiverProxyConfigSetResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(proxy_error_message(&e)),
+            restart_needed: false,
+        },
+    };
+    WsMessage::ReceiverProxyConfigSetResponse(resp)
+}
+
+async fn proxy_restart_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyRestartRequest,
+) -> WsMessage {
+    let proxy_result = crate::forwarder_proxy::proxy_restart(&state, &req.forwarder_id).await;
+    let resp = match proxy_result {
+        Ok(r) => {
+            if r.ok {
+                state.logger.log(format!(
+                    "forwarder \"{}\" restart requested via receiver {}",
+                    req.forwarder_id, device_id
+                ));
+            }
+            ReceiverProxyControlResponse {
+                request_id: req.request_id,
+                ok: r.ok,
+                error: r.error,
+            }
+        }
+        Err(e) => ReceiverProxyControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(proxy_error_message(&e)),
+        },
+    };
+    WsMessage::ReceiverProxyControlResponse(resp)
+}
+
+async fn proxy_device_control_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyDeviceControlRequest,
+) -> WsMessage {
+    let action_value = match req.action.as_str() {
+        "restart_device" | "shutdown_device" => req.action.clone(),
+        _ => {
+            return WsMessage::ReceiverProxyControlResponse(ReceiverProxyControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("unknown device control action".into()),
+            });
+        }
+    };
+    let payload = serde_json::json!({ "action": action_value });
+    let proxy_result = crate::forwarder_proxy::proxy_config_set(
+        &state,
+        &req.forwarder_id,
+        "control".to_owned(),
+        payload,
+    )
+    .await;
+    let resp = match proxy_result {
+        Ok(r) => {
+            if r.ok {
+                state.logger.log(format!(
+                    "forwarder \"{}\" {} requested via receiver {}",
+                    req.forwarder_id, action_value, device_id
+                ));
+            }
+            ReceiverProxyControlResponse {
+                request_id: req.request_id,
+                ok: r.ok,
+                error: r.error,
+            }
+        }
+        Err(e) => ReceiverProxyControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(proxy_error_message(&e)),
+        },
+    };
+    WsMessage::ReceiverProxyControlResponse(resp)
 }
 
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
@@ -312,6 +450,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
         heartbeat_interval.tick().await;
         let mut race_refresh_interval = tokio::time::interval(RACE_REFRESH_INTERVAL);
         race_refresh_interval.tick().await;
+        let mut pending_proxy_replies = JoinSet::new();
 
         loop {
             let mut events_to_send: Vec<ReadEvent> = Vec::new();
@@ -427,156 +566,29 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     break;
                                 }
                                 Ok(WsMessage::ReceiverProxyConfigGetRequest(req)) => {
-                                    let proxy_state = state.clone();
-                                    let proxy_result = crate::forwarder_proxy::proxy_config_get(
-                                        &proxy_state,
-                                        &req.forwarder_id,
-                                    )
-                                    .await;
-                                    let resp = match proxy_result {
-                                        Ok(r) => ReceiverProxyConfigGetResponse {
-                                            request_id: req.request_id,
-                                            ok: true,
-                                            error: None,
-                                            config: r.config,
-                                            restart_needed: r.restart_needed,
-                                        },
-                                        Err(e) => ReceiverProxyConfigGetResponse {
-                                            request_id: req.request_id,
-                                            ok: false,
-                                            error: Some(proxy_error_message(&e)),
-                                            config: serde_json::Value::Null,
-                                            restart_needed: false,
-                                        },
-                                    };
-                                    let msg = WsMessage::ReceiverProxyConfigGetResponse(resp);
-                                    let text = serde_json::to_string(&msg).unwrap();
-                                    if socket.send(Message::Text(text.into())).await.is_err() {
-                                        break;
-                                    }
+                                    pending_proxy_replies
+                                        .spawn(proxy_config_get_reply(state.clone(), req));
                                 }
                                 Ok(WsMessage::ReceiverProxyConfigSetRequest(req)) => {
-                                    let proxy_state = state.clone();
-                                    let log_section = req.section.clone();
-                                    let proxy_result = crate::forwarder_proxy::proxy_config_set(
-                                        &proxy_state,
-                                        &req.forwarder_id,
-                                        req.section,
-                                        req.payload,
-                                    )
-                                    .await;
-                                    let resp = match proxy_result {
-                                        Ok(r) => {
-                                            if r.ok {
-                                                state.logger.log(format!(
-                                                    "forwarder \"{}\" config/{} updated via receiver {}",
-                                                    req.forwarder_id, log_section, device_id
-                                                ));
-                                            }
-                                            ReceiverProxyConfigSetResponse {
-                                                request_id: req.request_id,
-                                                ok: r.ok,
-                                                error: r.error,
-                                                restart_needed: r.restart_needed,
-                                            }
-                                        }
-                                        Err(e) => ReceiverProxyConfigSetResponse {
-                                            request_id: req.request_id,
-                                            ok: false,
-                                            error: Some(proxy_error_message(&e)),
-                                            restart_needed: false,
-                                        },
-                                    };
-                                    let msg = WsMessage::ReceiverProxyConfigSetResponse(resp);
-                                    let text = serde_json::to_string(&msg).unwrap();
-                                    if socket.send(Message::Text(text.into())).await.is_err() {
-                                        break;
-                                    }
+                                    pending_proxy_replies.spawn(proxy_config_set_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
                                 }
                                 Ok(WsMessage::ReceiverProxyRestartRequest(req)) => {
-                                    let proxy_state = state.clone();
-                                    let proxy_result = crate::forwarder_proxy::proxy_restart(
-                                        &proxy_state,
-                                        &req.forwarder_id,
-                                    )
-                                    .await;
-                                    let resp = match proxy_result {
-                                        Ok(r) => {
-                                            if r.ok {
-                                                state.logger.log(format!(
-                                                    "forwarder \"{}\" restart requested via receiver {}",
-                                                    req.forwarder_id, device_id
-                                                ));
-                                            }
-                                            ReceiverProxyControlResponse {
-                                                request_id: req.request_id,
-                                                ok: r.ok,
-                                                error: r.error,
-                                            }
-                                        }
-                                        Err(e) => ReceiverProxyControlResponse {
-                                            request_id: req.request_id,
-                                            ok: false,
-                                            error: Some(proxy_error_message(&e)),
-                                        },
-                                    };
-                                    let msg = WsMessage::ReceiverProxyControlResponse(resp);
-                                    let text = serde_json::to_string(&msg).unwrap();
-                                    if socket.send(Message::Text(text.into())).await.is_err() {
-                                        break;
-                                    }
+                                    pending_proxy_replies.spawn(proxy_restart_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
                                 }
                                 Ok(WsMessage::ReceiverProxyDeviceControlRequest(req)) => {
-                                    let proxy_state = state.clone();
-                                    let action_value = match req.action.as_str() {
-                                        "restart_device" | "shutdown_device" => req.action.clone(),
-                                        _ => {
-                                            let resp = ReceiverProxyControlResponse {
-                                                request_id: req.request_id,
-                                                ok: false,
-                                                error: Some("unknown device control action".into()),
-                                            };
-                                            let msg = WsMessage::ReceiverProxyControlResponse(resp);
-                                            let text = serde_json::to_string(&msg).unwrap();
-                                            if socket.send(Message::Text(text.into())).await.is_err() {
-                                                break;
-                                            }
-                                            continue;
-                                        }
-                                    };
-                                    let payload = serde_json::json!({ "action": action_value });
-                                    let proxy_result = crate::forwarder_proxy::proxy_config_set(
-                                        &proxy_state,
-                                        &req.forwarder_id,
-                                        "control".to_owned(),
-                                        payload,
-                                    )
-                                    .await;
-                                    let resp = match proxy_result {
-                                        Ok(r) => {
-                                            if r.ok {
-                                                state.logger.log(format!(
-                                                    "forwarder \"{}\" {} requested via receiver {}",
-                                                    req.forwarder_id, action_value, device_id
-                                                ));
-                                            }
-                                            ReceiverProxyControlResponse {
-                                                request_id: req.request_id,
-                                                ok: r.ok,
-                                                error: r.error,
-                                            }
-                                        }
-                                        Err(e) => ReceiverProxyControlResponse {
-                                            request_id: req.request_id,
-                                            ok: false,
-                                            error: Some(proxy_error_message(&e)),
-                                        },
-                                    };
-                                    let msg = WsMessage::ReceiverProxyControlResponse(resp);
-                                    let text = serde_json::to_string(&msg).unwrap();
-                                    if socket.send(Message::Text(text.into())).await.is_err() {
-                                        break;
-                                    }
+                                    pending_proxy_replies.spawn(proxy_device_control_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
                                 }
                                 Ok(_) => {
                                     send_ws_error(
@@ -619,6 +631,21 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 _ = heartbeat_interval.tick() => {
                     if !send_heartbeat(&mut socket, &session_id, &device_id).await {
                         break;
+                    }
+                }
+                joined = pending_proxy_replies.join_next(), if !pending_proxy_replies.is_empty() => {
+                    match joined {
+                        Some(Ok(msg)) => {
+                            let text = serde_json::to_string(&msg).unwrap();
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Err(err)) => {
+                            error!(device_id = %device_id, error = %err, "proxy reply task failed");
+                            break;
+                        }
+                        None => {}
                     }
                 }
                 _ = race_refresh_interval.tick() => {

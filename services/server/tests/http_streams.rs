@@ -45,6 +45,28 @@ async fn insert_event(pool: &sqlx::PgPool, stream_id: uuid::Uuid, epoch: i64, se
     .unwrap();
 }
 
+async fn insert_event_with_tag(
+    pool: &sqlx::PgPool,
+    stream_id: uuid::Uuid,
+    epoch: i64,
+    seq: i64,
+    raw_frame: &str,
+    tag_id: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO events (stream_id, stream_epoch, seq, raw_frame, read_type, tag_id) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(stream_id)
+    .bind(epoch)
+    .bind(seq)
+    .bind(raw_frame.as_bytes())
+    .bind("RAW")
+    .bind(tag_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn make_server(pool: sqlx::PgPool) -> std::net::SocketAddr {
     let app_state = server::AppState::new(pool);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -204,6 +226,33 @@ async fn test_list_streams_empty() {
         "response must have 'streams' array"
     );
     assert_eq!(body["streams"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_list_forwarders_counts_unique_tag_ids_not_raw_frames() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
+    let pool = server::db::create_pool(&db_url).await;
+    server::db::run_migrations(&pool).await;
+    let addr = make_server(pool.clone()).await;
+
+    let stream_id = insert_stream(&pool, "fwd-forwarders-list", "10.20.0.1:10000").await;
+    insert_event_with_tag(&pool, stream_id, 1, 1, "FRAME_A", Some("chip-1")).await;
+    insert_event_with_tag(&pool, stream_id, 1, 2, "FRAME_B", Some("chip-1")).await;
+    insert_event_with_tag(&pool, stream_id, 1, 3, "FRAME_C", Some("chip-2")).await;
+
+    let resp = reqwest::get(format!("http://{}/api/v1/forwarders", addr))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let forwarders = body["forwarders"].as_array().unwrap();
+    assert_eq!(forwarders.len(), 1);
+    assert_eq!(forwarders[0]["forwarder_id"], "fwd-forwarders-list");
+    assert_eq!(forwarders[0]["unique_chips"], 2);
+    assert_eq!(forwarders[0]["total_reads"], 3);
 }
 
 #[tokio::test]

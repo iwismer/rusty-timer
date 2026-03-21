@@ -186,7 +186,13 @@
     </div>
   {:else}
     <!-- List view -->
-    {#if !store.forwarders}
+    {#if !store.forwarders && store.forwardersError}
+      <div
+        class="flex-1 flex items-center justify-center text-text-muted text-sm"
+      >
+        Unable to load forwarders. Check the server connection.
+      </div>
+    {:else if !store.forwarders}
       <div
         class="flex-1 flex items-center justify-center text-text-muted text-sm"
       >

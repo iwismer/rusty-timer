@@ -60,6 +60,7 @@ export const store = $state({
 
   // Forwarders
   forwarders: null as api.ForwardersResponse | null,
+  forwardersError: null as string | null,
   selectedForwarderId: null as string | null,
 
   // Logs
@@ -548,7 +549,13 @@ export async function loadAll(): Promise<void> {
       api.getLogs(),
       api.getMode().catch(() => null),
       api.getRaces().catch(() => null),
-      api.getForwarders().catch(() => null),
+      api
+        .getForwarders()
+        .then((forwarders) => ({ ok: true as const, forwarders }))
+        .catch((error: unknown) => ({
+          ok: false as const,
+          error: String(error),
+        })),
     ]);
 
     store.status = nextStatus;
@@ -568,8 +575,11 @@ export async function loadAll(): Promise<void> {
         store.raceIdDraft = prevRaceId;
       }
     }
-    if (nextForwarders) {
-      store.forwarders = nextForwarders;
+    if (nextForwarders.ok) {
+      store.forwarders = nextForwarders.forwarders;
+      store.forwardersError = null;
+    } else {
+      store.forwardersError = nextForwarders.error;
     }
     if (
       nextMode &&
@@ -606,11 +616,12 @@ export async function loadAll(): Promise<void> {
 }
 
 export async function loadForwarders(): Promise<void> {
+  store.forwardersError = null;
   try {
     const result = await api.getForwarders();
     store.forwarders = result;
-  } catch {
-    // Silently fail — forwarders tab will show loading/error state
+  } catch (error) {
+    store.forwardersError = String(error);
   }
 }
 
