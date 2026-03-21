@@ -386,4 +386,93 @@ mod tests {
         let mut reader = dbase::Reader::from_path(&path).unwrap();
         assert_eq!(reader.read().unwrap().len(), 0);
     }
+
+    #[test]
+    fn read_sample_dbf_file() {
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/race-director/IPICO-sample.DBF");
+        if !sample_path.exists() {
+            return;
+        }
+        let mut reader = dbase::Reader::from_path(&sample_path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert!(records.len() > 0, "sample should have records");
+        let first = &records[0];
+        assert!(first.get("EVENT").is_some(), "missing EVENT field");
+        assert!(first.get("CHIP").is_some(), "missing CHIP field");
+        assert!(first.get("TIME").is_some(), "missing TIME field");
+        assert!(first.get("DAYCODE").is_some(), "missing DAYCODE field");
+        assert!(first.get("READER").is_some(), "missing READER field");
+    }
+
+    #[test]
+    fn written_dbf_has_same_fields_as_sample() {
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/race-director/IPICO-sample.DBF");
+        if !sample_path.exists() {
+            return;
+        }
+        let mut sample_reader = dbase::Reader::from_path(&sample_path).unwrap();
+        let sample_records: Vec<dbase::Record> = sample_reader.read().unwrap();
+        let sample_fields: Vec<String> = sample_records[0].as_ref().keys().cloned().collect();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.dbf");
+        let raw = sample_raw_frame();
+        let rec = map_to_dbf_fields(&raw, "finish", 4).unwrap();
+        append_record(&path, &rec).unwrap();
+
+        let mut our_reader = dbase::Reader::from_path(&path).unwrap();
+        let our_records: Vec<dbase::Record> = our_reader.read().unwrap();
+        let our_fields: Vec<String> = our_records[0].as_ref().keys().cloned().collect();
+
+        let mut sample_sorted = sample_fields.clone();
+        sample_sorted.sort();
+        let mut our_sorted = our_fields.clone();
+        our_sorted.sort();
+        assert_eq!(sample_sorted, our_sorted, "field names should match");
+    }
+
+    #[tokio::test]
+    async fn dbf_writer_skips_sentinel_read_types() {
+        use std::sync::Arc;
+        use tokio::sync::{Mutex, broadcast, watch};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let dbf_path = dir.path().join("test.dbf");
+        let db = crate::db::Db::open(&db_path).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+
+        let db = Arc::new(Mutex::new(db));
+        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let rx = tx.subscribe();
+
+        let path = dbf_path.to_str().unwrap().to_owned();
+        let db_clone = Arc::clone(&db);
+        let handle = tokio::spawn(async move {
+            run_dbf_writer(rx, db_clone, shutdown_rx, path).await;
+        });
+
+        tx.send(rt_protocol::ReadEvent {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "T".to_owned(),
+            raw_frame: sample_raw_frame(),
+            read_type: "__checkpoint".to_owned(),
+        })
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        assert!(
+            !dbf_path.exists(),
+            "DBF file should not be created for sentinel events"
+        );
+    }
 }
