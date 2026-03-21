@@ -4,16 +4,21 @@
 //! file I/O using the `dbase` crate.
 
 use std::convert::TryFrom;
+use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use dbase::{FieldIOError, FieldName, TableWriterBuilder, WritableRecord};
+use dbase::{FieldIOError, TableWriterBuilder, WritableRecord};
 use ipico_core::read::ChipRead;
 use rt_protocol::ReadEvent;
 use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::db::Db;
+
+#[cfg(test)]
+const VISUAL_FOXPRO_VERSION: u8 = 0x30;
+const DBF_TEMPLATE_BYTES: &[u8] = include_bytes!("../../../docs/race-director/IPICO-sample.DBF");
 
 // ---------------------------------------------------------------------------
 // DbfRecord
@@ -120,21 +125,21 @@ pub fn map_to_dbf_fields(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Schema builder helper
-// ---------------------------------------------------------------------------
+fn template_writer(
+    path: &Path,
+) -> std::io::Result<dbase::TableWriter<std::io::BufWriter<std::fs::File>>> {
+    let reader = dbase::Reader::new(Cursor::new(DBF_TEMPLATE_BYTES))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    TableWriterBuilder::from_reader(reader)
+        .build_with_file_dest(path)
+        .map_err(|e| std::io::Error::other(e.to_string()))
+}
 
-fn schema_builder() -> TableWriterBuilder {
-    TableWriterBuilder::new()
-        .add_character_field(FieldName::try_from("EVENT").unwrap(), 1)
-        .add_character_field(FieldName::try_from("DIVISION").unwrap(), 2)
-        .add_character_field(FieldName::try_from("CHIP").unwrap(), 12)
-        .add_character_field(FieldName::try_from("TIME").unwrap(), 8)
-        .add_character_field(FieldName::try_from("RUNERNO").unwrap(), 5)
-        .add_character_field(FieldName::try_from("DAYCODE").unwrap(), 6)
-        .add_character_field(FieldName::try_from("LAPNO").unwrap(), 3)
-        .add_character_field(FieldName::try_from("TPOINT").unwrap(), 2)
-        .add_character_field(FieldName::try_from("READER").unwrap(), 1)
+fn replace_file(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    std::fs::rename(tmp_path, path)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +150,9 @@ fn schema_builder() -> TableWriterBuilder {
 ///
 /// If a file already exists at `path` it will be overwritten.
 pub fn create_empty_dbf(path: &Path) -> std::io::Result<()> {
-    schema_builder()
-        .build_with_file_dest(path)
+    let mut writer = template_writer(path)?;
+    writer
+        .finalize()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(())
 }
@@ -193,7 +199,7 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
     }
 
-    std::fs::rename(&tmp_path, path)?;
+    replace_file(&tmp_path, path)?;
     Ok(())
 }
 
@@ -385,6 +391,30 @@ mod tests {
         clear_dbf(&path).unwrap();
         let mut reader = dbase::Reader::from_path(&path).unwrap();
         assert_eq!(reader.read().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn created_dbf_uses_visual_foxpro_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.dbf");
+        create_empty_dbf(&path).unwrap();
+
+        let header = std::fs::read(&path).unwrap();
+        assert_eq!(header.first().copied(), Some(VISUAL_FOXPRO_VERSION));
+    }
+
+    #[test]
+    fn cleared_dbf_preserves_visual_foxpro_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.dbf");
+        let raw = sample_raw_frame();
+        let rec = map_to_dbf_fields(&raw, "finish", 4).unwrap();
+        append_record(&path, &rec).unwrap();
+
+        clear_dbf(&path).unwrap();
+
+        let header = std::fs::read(&path).unwrap();
+        assert_eq!(header.first().copied(), Some(VISUAL_FOXPRO_VERSION));
     }
 
     #[test]

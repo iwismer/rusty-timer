@@ -269,6 +269,7 @@ impl AppState {
                     reader_ip: si.reader_ip.clone(),
                     subscribed: local.is_some(),
                     local_port: port,
+                    event_type: local.map(|s| s.event_type.clone()),
                     online: Some(si.online),
                     display_alias: si.display_alias.clone(),
                     stream_epoch: Some(si.stream_epoch),
@@ -298,6 +299,7 @@ impl AppState {
                 reader_ip: sub.reader_ip.clone(),
                 subscribed: true,
                 local_port: port,
+                event_type: Some(sub.event_type.clone()),
                 online: None,
                 display_alias: None,
                 stream_epoch: None,
@@ -408,6 +410,8 @@ pub struct StreamEntry {
     pub reader_ip: String,
     pub subscribed: bool,
     pub local_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

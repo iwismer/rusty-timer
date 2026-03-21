@@ -16,6 +16,7 @@ export interface StreamEntry {
   reader_ip: string;
   subscribed: boolean;
   local_port: number | null;
+  event_type?: string;
   online?: boolean;
   display_alias?: string;
   stream_epoch?: number;
