@@ -27,6 +27,9 @@ const apiMocks = vi.hoisted(() => ({
   getSubscriptions: vi.fn().mockResolvedValue({ subscriptions: [] }),
   resetStreamCursor: vi.fn().mockResolvedValue(undefined),
   updateLocalPort: vi.fn().mockResolvedValue(undefined),
+  getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
+  putDbfConfig: vi.fn().mockResolvedValue(undefined),
+  clearDbf: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("$lib/api", () => apiMocks);

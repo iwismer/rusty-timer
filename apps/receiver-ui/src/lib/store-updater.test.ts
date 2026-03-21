@@ -25,6 +25,9 @@ const apiMocks = vi.hoisted(() => ({
   checkForUpdate: vi.fn().mockResolvedValue({ status: "up_to_date" }),
   downloadUpdate: vi.fn().mockResolvedValue({ status: "downloaded" }),
   applyUpdate: vi.fn().mockResolvedValue(undefined),
+  getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
+  putDbfConfig: vi.fn().mockResolvedValue(undefined),
+  clearDbf: vi.fn().mockResolvedValue(undefined),
 }));
 
 const desktopUpdaterMocks = vi.hoisted(() => ({

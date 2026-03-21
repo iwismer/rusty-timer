@@ -44,6 +44,9 @@ const apiMocks = vi.hoisted(() => ({
   connect: vi.fn().mockResolvedValue(undefined),
   disconnect: vi.fn().mockResolvedValue(undefined),
   putEarliestEpoch: vi.fn().mockResolvedValue(undefined),
+  getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
+  putDbfConfig: vi.fn().mockResolvedValue(undefined),
+  clearDbf: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("$lib/api", () => apiMocks);
@@ -115,6 +118,8 @@ describe("receiver layout SSE updates", () => {
     expect(screen.queryByTestId("connect-toggle-btn")).not.toBeInTheDocument();
 
     expect(await screen.findByText("0 reads")).toBeInTheDocument();
+    // Wait for loadAll to fully complete (streams table populated)
+    await screen.findByText("fwd-1");
 
     const callbacks = sseMocks.initSSE.mock.calls[0]?.[0];
     expect(callbacks).toBeTruthy();
