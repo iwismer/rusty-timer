@@ -342,6 +342,9 @@ npx playwright install --with-deps
 npm run test:e2e
 ```
 
+The receiver UI does not have a standalone browser-mode Playwright suite anymore.
+It is Tauri-only and its unit coverage lives in `apps/receiver-ui/src/**/*.test.ts`.
+
 ### Packaging validation
 
 ```bash

@@ -83,7 +83,7 @@ When run normally (`--clear` not set), `dev.py` does the following:
 9. Builds dashboard (`apps/server-ui`) unless `--no-build`.
 10. Builds Rust binaries unless `--no-build`.
 11. Launches panes in `tmux` (or iTerm2 fallback).
-12. Auto-configures receiver profile/connect over control API.
+12. Launches the receiver Tauri app with `RT_RECEIVER_ID=recv-dev` so it matches the seeded dev receiver token.
 13. Optionally creates a race and uploads bibchip/PPL files.
 
 ## Generated Dev Files
@@ -93,7 +93,6 @@ Created under `/tmp/rusty-timer-dev`:
 - `forwarder.toml`
 - `forwarder-token.txt`
 - `receiver-token.txt`
-- `configure-receiver.sh`
 - `forwarder.sqlite3` (forwarder journal)
 - `race-setup.log` (if race upload requested)
 - `iterm-window-id.txt` (when launched via iTerm2)

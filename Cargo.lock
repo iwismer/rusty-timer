@@ -4011,6 +4011,7 @@ dependencies = [
 name = "receiver-tauri"
 version = "0.10.5"
 dependencies = [
+ "dirs",
  "futures-util",
  "receiver",
  "reqwest 0.13.2",

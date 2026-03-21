@@ -212,7 +212,10 @@ def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> li
         emu_panes = [
             (f"Emulator {i + 1}", e.to_cmd()) for i, e in enumerate(emulators)
         ]
-    receiver_cmd = f'cd "{REPO_ROOT}/apps/receiver-ui" && cargo tauri dev'
+    receiver_cmd = (
+        f'cd "{REPO_ROOT}/apps/receiver-ui" && '
+        f"RT_RECEIVER_ID={shlex.quote(RECEIVER_DEVICE_ID)} cargo tauri dev"
+    )
     panes_after_emulator = PANES_AFTER_EMULATOR + [("Receiver", receiver_cmd)]
     return panes_before_emulator + emu_panes + panes_after_emulator
 

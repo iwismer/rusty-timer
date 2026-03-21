@@ -68,7 +68,7 @@ the receiver is running. Check the status in the UI.
 
 The receiver is configured via its SQLite profile database. On first run,
 the receiver creates a default profile. Configuration is managed via the
-control API or the receiver UI (Tauri desktop app, if applicable).
+receiver UI (Tauri desktop app).
 
 ### Profile settings
 

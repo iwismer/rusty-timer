@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use receiver::control_api::{self, AppState, ShutdownSignal};
@@ -17,6 +18,10 @@ use tracing::warn;
 // ---------------------------------------------------------------------------
 
 type CmdResult<T> = Result<T, String>;
+
+const APP_IDENTIFIER: &str = "com.rusty-timer.receiver";
+const CRASH_LOG_FILENAME: &str = "crash.log";
+const DEV_RECEIVER_ID_ENV: &str = "RT_RECEIVER_ID";
 
 enum BridgeAction {
     EmitEvent {
@@ -57,6 +62,45 @@ fn bridge_action_from_item(
             BridgeAction::EmitResync
         }
     }
+}
+
+fn parsed_receiver_id_override(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn receiver_id_override_from_env() -> Option<String> {
+    parsed_receiver_id_override(std::env::var(DEV_RECEIVER_ID_ENV).ok())
+}
+
+fn fallback_app_local_data_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|dir| dir.join(APP_IDENTIFIER))
+}
+
+fn write_crash_log(log_dir: &Path, message: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(log_dir)?;
+    let path = log_dir.join(CRASH_LOG_FILENAME);
+    std::fs::write(&path, message)?;
+    Ok(path)
+}
+
+fn write_crash_log_best_effort(log_dir: Option<&Path>, message: &str) {
+    if let Some(log_dir) = log_dir {
+        let _ = write_crash_log(log_dir, message);
+    } else if let Some(log_dir) = fallback_app_local_data_dir() {
+        let _ = write_crash_log(&log_dir, message);
+    }
+}
+
+fn record_startup_failure(message: &str) {
+    eprintln!("{message}");
+    write_crash_log_best_effort(None, message);
+}
+
+fn record_app_failure(app: &tauri::AppHandle, message: &str) {
+    eprintln!("{message}");
+    let log_dir = app.path().app_local_data_dir().ok();
+    write_crash_log_best_effort(log_dir.as_deref(), message);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,8 +322,7 @@ fn main() {
 
     tracing_subscriber::fmt::init();
 
-
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -328,9 +371,15 @@ fn main() {
             // Initialize receiver runtime.
             // block_on is safe here because setup() runs before the Tauri event
             // loop starts, so we won't deadlock the async runtime.
-            let (state, shutdown_rx) =
-                tauri::async_runtime::block_on(async { receiver::runtime::init(None).await })
-                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let receiver_id_override = receiver_id_override_from_env();
+            let (state, shutdown_rx) = tauri::async_runtime::block_on(async {
+                receiver::runtime::init(receiver_id_override).await
+            })
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                let msg = format!("Fatal: failed to initialize receiver runtime: {e}");
+                record_app_failure(&handle, &msg);
+                Box::new(std::io::Error::other(msg))
+            })?;
 
             // Register state for commands
             app.manage(state.clone());
@@ -371,31 +420,41 @@ fn main() {
             admin_reset_profile,
             admin_factory_reset,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let RunEvent::Exit = event {
-                if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
-                    let _ = state.shutdown_tx.send(ShutdownSignal::Terminate);
-                }
-                // Wait for receiver runtime to finish graceful cleanup
-                // (cancel WS session, stop local proxies) before the process exits.
-                if let Some(guard) = app_handle.try_state::<Mutex<Option<JoinHandle<()>>>>() {
-                    if let Some(handle) = guard.lock().ok().and_then(|mut g| g.take()) {
-                        tauri::async_runtime::block_on(async {
-                            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-                                .await;
-                        });
-                    }
+        .build(tauri::generate_context!());
+
+    let app = match app {
+        Ok(app) => app,
+        Err(e) => {
+            let msg = format!("Fatal: failed to build tauri application: {e}");
+            record_startup_failure(&msg);
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                let _ = state.shutdown_tx.send(ShutdownSignal::Terminate);
+            }
+            // Wait for receiver runtime to finish graceful cleanup
+            // (cancel WS session, stop local proxies) before the process exits.
+            if let Some(guard) = app_handle.try_state::<Mutex<Option<JoinHandle<()>>>>() {
+                if let Some(handle) = guard.lock().ok().and_then(|mut g| g.take()) {
+                    tauri::async_runtime::block_on(async {
+                        let _ =
+                            tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+                    });
                 }
             }
-        });
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use receiver::control_api::ConnectionState;
+    use std::fs;
 
     #[test]
     fn lagged_broadcast_requests_resync_instead_of_stopping_bridge() {
@@ -417,5 +476,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parsed_receiver_id_override_trims_and_filters_empty_values() {
+        assert_eq!(
+            parsed_receiver_id_override(Some(" recv-dev ".to_owned())),
+            Some("recv-dev".to_owned())
+        );
+        assert_eq!(parsed_receiver_id_override(Some("   ".to_owned())), None);
+        assert_eq!(parsed_receiver_id_override(None), None);
+    }
+
+    #[test]
+    fn write_crash_log_creates_expected_file() {
+        let unique = format!(
+            "receiver-tauri-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        let path = write_crash_log(&dir, "fatal startup error").expect("write crash log");
+
+        assert_eq!(path, dir.join("crash.log"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("read crash log"),
+            "fatal startup error"
+        );
+
+        fs::remove_file(&path).expect("remove crash log");
+        fs::remove_dir(&dir).expect("remove crash dir");
     }
 }
