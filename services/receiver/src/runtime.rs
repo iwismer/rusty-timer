@@ -625,7 +625,12 @@ async fn handle_metrics_updated(state: &Arc<AppState>, data: &str) {
 
 use crate::control_api::http_base_url;
 
-async fn fetch_initial_metrics(state: &Arc<AppState>) {
+fn should_emit_initial_metrics(state: &AppState, generation: u64) -> bool {
+    state.current_dashboard_metrics_generation() == generation
+        && *state.connection_state.borrow() == ConnectionState::Connected
+}
+
+async fn fetch_initial_metrics(state: &Arc<AppState>, generation: u64) {
     let profile = {
         let db = state.db.lock().await;
         db.load_profile().ok().flatten()
@@ -652,6 +657,7 @@ async fn fetch_initial_metrics(state: &Arc<AppState>) {
         let sem = Arc::clone(&semaphore);
         let client = state.http_client.clone();
         let ws_url = profile.server_url.clone();
+        let state = Arc::clone(state);
         let ui_tx = state.ui_tx.clone();
 
         handles.push(tokio::spawn(async move {
@@ -659,6 +665,9 @@ async fn fetch_initial_metrics(state: &Arc<AppState>) {
             let resp = crate::control_api::fetch_stream_metrics(&client, &ws_url, &stream_id)
                 .await
                 .ok()?;
+            if !should_emit_initial_metrics(&state, generation) {
+                return None;
+            }
 
             let payload = crate::ui_events::StreamMetricsPayload {
                 forwarder_id,
@@ -685,6 +694,24 @@ async fn fetch_initial_metrics(state: &Arc<AppState>) {
     for handle in handles {
         let _ = handle.await;
     }
+}
+
+async fn open_upstream_dashboard_events(
+    client: &reqwest::Client,
+    events_url: &str,
+    token: &str,
+) -> Result<reqwest::Response, String> {
+    let response = client
+        .get(events_url)
+        .bearer_auth(token)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("upstream returned {}", response.status()));
+    }
+    Ok(response)
 }
 
 async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
@@ -731,10 +758,28 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
 
         let events_url = format!("{base_url}/api/v1/events");
 
-        fetch_initial_metrics(&state).await;
+        let response =
+            match open_upstream_dashboard_events(&client, &events_url, &profile.token).await {
+                Ok(response) => response,
+                Err(e) => {
+                    if *state.connection_state.borrow() == ConnectionState::Connected {
+                        state.logger.log_at(
+                            UiLogLevel::Warn,
+                            format!("upstream dashboard SSE refresh disconnected: {e}"),
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
 
-        match consume_upstream_dashboard_events(&state, &client, &events_url, &profile.token).await
-        {
+        let generation = state.next_dashboard_metrics_generation();
+        let fetch_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            fetch_initial_metrics(&fetch_state, generation).await;
+        });
+
+        match consume_upstream_dashboard_events(&state, response).await {
             Ok(()) => {}
             Err(e) => {
                 if *state.connection_state.borrow() == ConnectionState::Connected {
@@ -751,21 +796,8 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
 
 async fn consume_upstream_dashboard_events(
     state: &Arc<AppState>,
-    client: &reqwest::Client,
-    events_url: &str,
-    token: &str,
+    response: reqwest::Response,
 ) -> Result<(), String> {
-    let response = client
-        .get(events_url)
-        .bearer_auth(token)
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("upstream returned {}", response.status()));
-    }
-
     let mut response = response;
     let mut pending_line_bytes: Vec<u8> = Vec::new();
     let mut pending_event: Option<String> = None;
@@ -802,6 +834,7 @@ async fn consume_upstream_dashboard_events(
                     state.emit_streams_snapshot().await;
                 }
                 if should_emit_receiver_resync_for_dashboard_event(&event_name) {
+                    state.invalidate_dashboard_metrics_generation();
                     state.emit_resync();
                 }
                 if should_refresh_chip_lookup_for_dashboard_event(&event_name) {
@@ -1206,10 +1239,21 @@ mod tests {
     use crate::local_proxy::LocalProxy;
     use crate::ports::stream_key;
     use crate::ui_events::ReceiverUiEvent;
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        response::sse::{Event, KeepAlive, Sse},
+        routing::get,
+    };
+    use futures_util::stream;
     use futures_util::{SinkExt, StreamExt};
     use rt_protocol::{Heartbeat, ReceiverMode, ReceiverModeApplied, ReplayTarget, WsMessage};
+    use std::collections::HashMap;
+    use std::convert::Infallible;
     use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
+    use tokio::sync::Notify;
     use tokio::task::JoinHandle;
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::protocol::Message;
@@ -1237,6 +1281,95 @@ mod tests {
             handler(ws).await;
         });
         (addr, task)
+    }
+
+    async fn run_http_server(router: Router) -> (std::net::SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        });
+        (addr, task)
+    }
+
+    async fn wait_for(description: &str, condition: impl Fn() -> bool) {
+        let timeout = std::time::Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        while !condition() {
+            assert!(
+                started.elapsed() < timeout,
+                "timed out waiting for {description}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[derive(Clone)]
+    struct OrderTestState {
+        events_opened: Arc<AtomicBool>,
+        metrics_called: Arc<AtomicBool>,
+        metrics_saw_events_opened: Arc<AtomicBool>,
+    }
+
+    async fn order_test_events(
+        State(state): State<OrderTestState>,
+    ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+        state.events_opened.store(true, Ordering::SeqCst);
+        Sse::new(stream::pending()).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(60))
+                .text("keepalive"),
+        )
+    }
+
+    async fn order_test_metrics(
+        State(state): State<OrderTestState>,
+        Path(_stream_id): Path<String>,
+    ) -> Json<serde_json::Value> {
+        state.metrics_called.store(true, Ordering::SeqCst);
+        state
+            .metrics_saw_events_opened
+            .store(state.events_opened.load(Ordering::SeqCst), Ordering::SeqCst);
+        Json(serde_json::json!({
+            "raw_count": 10,
+            "dedup_count": 8,
+            "retransmit_count": 2,
+            "lag_ms": 500,
+            "epoch_raw_count": 4,
+            "epoch_dedup_count": 3,
+            "epoch_retransmit_count": 1,
+            "epoch_lag_ms": 250,
+            "epoch_last_received_at": "2026-03-21T12:00:00Z",
+            "unique_chips": 2,
+            "last_tag_id": null,
+            "last_reader_timestamp": null
+        }))
+    }
+
+    #[derive(Clone)]
+    struct DelayedMetricsState {
+        release_metrics: Arc<Notify>,
+    }
+
+    async fn delayed_metrics(
+        State(state): State<DelayedMetricsState>,
+        Path(_stream_id): Path<String>,
+    ) -> Json<serde_json::Value> {
+        state.release_metrics.notified().await;
+        Json(serde_json::json!({
+            "raw_count": 1,
+            "dedup_count": 1,
+            "retransmit_count": 0,
+            "lag_ms": 100,
+            "epoch_raw_count": 1,
+            "epoch_dedup_count": 1,
+            "epoch_retransmit_count": 0,
+            "epoch_lag_ms": 100,
+            "epoch_last_received_at": "2026-03-21T12:00:00Z",
+            "unique_chips": 1,
+            "last_tag_id": null,
+            "last_reader_timestamp": null
+        }))
     }
 
     #[tokio::test]
@@ -1658,6 +1791,159 @@ mod tests {
             compute_reconnect_delay_secs(state.current_retry_streak()),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn dashboard_sse_connects_before_fetching_initial_metrics() {
+        let http_state = OrderTestState {
+            events_opened: Arc::new(AtomicBool::new(false)),
+            metrics_called: Arc::new(AtomicBool::new(false)),
+            metrics_saw_events_opened: Arc::new(AtomicBool::new(false)),
+        };
+        let router = Router::new()
+            .route("/api/v1/events", get(order_test_events))
+            .route(
+                "/api/v1/streams/{stream_id}/metrics",
+                get(order_test_metrics),
+            )
+            .with_state(http_state.clone());
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        *state.stream_id_map.write().await = HashMap::from([(
+            "stream-1".to_owned(),
+            ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()),
+        )]);
+        state.set_connection_state(ConnectionState::Connected).await;
+
+        let task = tokio::spawn(run_upstream_dashboard_sse_refresher(Arc::clone(&state)));
+        wait_for("initial metrics fetch", || {
+            http_state.metrics_called.load(Ordering::SeqCst)
+        })
+        .await;
+
+        assert!(
+            http_state.metrics_saw_events_opened.load(Ordering::SeqCst),
+            "expected SSE /api/v1/events to be connected before the initial metrics fetch"
+        );
+
+        task.abort();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_initial_metrics_drops_late_result_after_disconnect() {
+        let release_metrics = Arc::new(Notify::new());
+        let router = Router::new()
+            .route("/api/v1/streams/{stream_id}/metrics", get(delayed_metrics))
+            .with_state(DelayedMetricsState {
+                release_metrics: Arc::clone(&release_metrics),
+            });
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        *state.stream_id_map.write().await = HashMap::from([(
+            "stream-1".to_owned(),
+            ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()),
+        )]);
+        state.set_connection_state(ConnectionState::Connected).await;
+        let mut ui_rx = state.ui_tx.subscribe();
+        let generation = state.next_dashboard_metrics_generation();
+
+        let fetch_state = Arc::clone(&state);
+        let fetch_task = tokio::spawn(async move {
+            fetch_initial_metrics(&fetch_state, generation).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        state
+            .set_connection_state(ConnectionState::Disconnected)
+            .await;
+        release_metrics.notify_waiters();
+
+        fetch_task.await.expect("fetch task");
+
+        let events: Vec<_> = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ReceiverUiEvent::StreamMetricsUpdated(_))),
+            "expected no StreamMetricsUpdated event after disconnect, got: {events:?}"
+        );
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_initial_metrics_drops_late_result_after_generation_invalidation() {
+        let release_metrics = Arc::new(Notify::new());
+        let router = Router::new()
+            .route("/api/v1/streams/{stream_id}/metrics", get(delayed_metrics))
+            .with_state(DelayedMetricsState {
+                release_metrics: Arc::clone(&release_metrics),
+            });
+        let (addr, server_task) = run_http_server(router).await;
+
+        let db = Db::open_in_memory().expect("open db");
+        let (state, _shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+        {
+            let mut db = state.db.lock().await;
+            db.save_profile(
+                &format!("ws://{addr}"),
+                "token",
+                "check-only",
+                Some("test-receiver"),
+            )
+            .expect("save profile");
+        }
+        *state.stream_id_map.write().await = HashMap::from([(
+            "stream-1".to_owned(),
+            ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()),
+        )]);
+        state.set_connection_state(ConnectionState::Connected).await;
+        let mut ui_rx = state.ui_tx.subscribe();
+        let generation = state.next_dashboard_metrics_generation();
+
+        let fetch_state = Arc::clone(&state);
+        let fetch_task = tokio::spawn(async move {
+            fetch_initial_metrics(&fetch_state, generation).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        state.invalidate_dashboard_metrics_generation();
+        release_metrics.notify_waiters();
+
+        fetch_task.await.expect("fetch task");
+
+        let events: Vec<_> = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ReceiverUiEvent::StreamMetricsUpdated(_))),
+            "expected no StreamMetricsUpdated event after generation invalidation, got: {events:?}"
+        );
+
+        server_task.abort();
     }
 
     #[test]

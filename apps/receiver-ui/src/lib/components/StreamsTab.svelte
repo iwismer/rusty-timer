@@ -279,42 +279,36 @@
                         <p class="text-muted text-xs font-medium mb-1">
                           Lifetime
                         </p>
-                        <div class="grid grid-cols-2 gap-x-4 gap-y-1">
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Total frames received including retransmits"
+                        <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+                          <div
+                            title="Total frames received including retransmits"
+                          >
+                            <span class="text-text-muted">Raw count</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.raw_count.toLocaleString()}</span
                             >
-                              Raw count
-                            </dt>
-                            <dd>{metrics.raw_count.toLocaleString()}</dd>
                           </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Unique frames after deduplication"
+                          <div title="Unique frames after deduplication">
+                            <span class="text-text-muted">Dedup count</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.dedup_count.toLocaleString()}</span
                             >
-                              Dedup count
-                            </dt>
-                            <dd>{metrics.dedup_count.toLocaleString()}</dd>
                           </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Duplicate frames that matched existing events"
+                          <div
+                            title="Duplicate frames that matched existing events"
+                          >
+                            <span class="text-text-muted">Retransmit</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.retransmit_count.toLocaleString()}</span
                             >
-                              Retransmit
-                            </dt>
-                            <dd>{metrics.retransmit_count.toLocaleString()}</dd>
                           </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Time since the last unique frame was received"
+                          <div
+                            title="Time since the last unique frame was received"
+                          >
+                            <span class="text-text-muted">Lag</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{formatLag(metrics.lag)}</span
                             >
-                              Lag
-                            </dt>
-                            <dd>{formatLag(metrics.lag)}</dd>
                           </div>
                         </div>
                       </div>
@@ -324,74 +318,58 @@
                         <p class="text-muted text-xs font-medium mb-1">
                           Current Epoch
                         </p>
-                        <div class="grid grid-cols-2 gap-x-4 gap-y-1">
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Frames received in the current epoch"
+                        <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+                          <div title="Frames received in the current epoch">
+                            <span class="text-text-muted">Raw (epoch)</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.epoch_raw_count.toLocaleString()}</span
                             >
-                              Raw (epoch)
-                            </dt>
-                            <dd>{metrics.epoch_raw_count.toLocaleString()}</dd>
                           </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Unique frames in the current epoch"
+                          <div title="Unique frames in the current epoch">
+                            <span class="text-text-muted">Dedup (epoch)</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.epoch_dedup_count.toLocaleString()}</span
                             >
-                              Dedup (epoch)
-                            </dt>
-                            <dd>
-                              {metrics.epoch_dedup_count.toLocaleString()}
-                            </dd>
                           </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Duplicate frames in the current epoch"
+                          <div title="Duplicate frames in the current epoch">
+                            <span class="text-text-muted"
+                              >Retransmit (epoch)</span
                             >
-                              Retransmit (epoch)
-                            </dt>
-                            <dd>
-                              {metrics.epoch_retransmit_count.toLocaleString()}
-                            </dd>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.epoch_retransmit_count.toLocaleString()}</span
+                            >
                           </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Distinct chip IDs detected in the current epoch"
+                          <div
+                            title="Distinct chip IDs detected in the current epoch"
+                          >
+                            <span class="text-text-muted">Unique chips</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.unique_chips.toLocaleString()}</span
                             >
-                              Unique chips
-                            </dt>
-                            <dd>{metrics.unique_chips.toLocaleString()}</dd>
                           </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Timestamp of the last unique frame in the current epoch"
-                            >
-                              Last read
-                            </dt>
-                            <dd>
-                              {metrics.epoch_last_received_at
+                          <div
+                            title="Timestamp of the last unique frame in the current epoch"
+                          >
+                            <span class="text-text-muted">Last read</span>
+                            <span class="font-mono text-text-primary ml-1"
+                              >{metrics.epoch_last_received_at
                                 ? new Date(
                                     metrics.epoch_last_received_at,
                                   ).toLocaleString()
-                                : "N/A (no events in epoch)"}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt
-                              class="text-muted text-xs"
-                              title="Live-updating elapsed time since last unique frame"
+                                : "N/A (no events in epoch)"}</span
                             >
-                              Time since last read
-                            </dt>
-                            <dd>
-                              {timeSinceLastRead[
+                          </div>
+                          <div
+                            title="Live-updating elapsed time since last unique frame"
+                          >
+                            <span class="text-text-muted"
+                              >Time since last read</span
+                            >
+                            <span class="font-mono text-text-primary ml-1"
+                              >{timeSinceLastRead[
                                 streamKey(stream.forwarder_id, stream.reader_ip)
-                              ] ?? "—"}
-                            </dd>
+                              ] ?? "—"}</span
+                            >
                           </div>
                         </div>
                       </div>

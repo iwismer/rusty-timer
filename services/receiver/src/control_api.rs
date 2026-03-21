@@ -54,6 +54,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
     pub stream_id_map: Arc<tokio::sync::RwLock<StreamIdMap>>,
+    dashboard_metrics_generation: AtomicU64,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -93,6 +94,7 @@ impl AppState {
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
             stream_id_map: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_metrics_generation: AtomicU64::new(0),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -118,6 +120,21 @@ impl AppState {
 
     pub fn current_retry_streak(&self) -> u64 {
         self.retry_streak.load(Ordering::SeqCst)
+    }
+
+    pub fn next_dashboard_metrics_generation(&self) -> u64 {
+        self.dashboard_metrics_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1
+    }
+
+    pub fn invalidate_dashboard_metrics_generation(&self) {
+        self.dashboard_metrics_generation
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn current_dashboard_metrics_generation(&self) -> u64 {
+        self.dashboard_metrics_generation.load(Ordering::SeqCst)
     }
 
     pub fn reset_retry_streak(&self) {
