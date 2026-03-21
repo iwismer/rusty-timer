@@ -66,6 +66,14 @@ export const store = $state({
   checkingUpdate: false,
   checkMessage: null as string | null,
 
+  // DBF config
+  dbfEnabled: false,
+  dbfPath: "C:\\winrace\\Files\\IPICO.DBF",
+  editDbfEnabled: false,
+  editDbfPath: "C:\\winrace\\Files\\IPICO.DBF",
+  dbfSaving: false,
+  dbfClearing: false,
+
   // Update
   updateModalOpen: false,
   updateState: null as UpdateState | null,
@@ -534,6 +542,8 @@ export async function loadAll(): Promise<void> {
         api.getRaces().catch(() => null),
       ]);
 
+    await loadDbfConfig();
+
     store.status = nextStatus;
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
       store.streams = nextStreams;
@@ -754,6 +764,45 @@ export async function saveProfile(): Promise<void> {
     store.error = String(e);
   } finally {
     store.saving = false;
+  }
+}
+
+export async function loadDbfConfig() {
+  try {
+    const config = await api.getDbfConfig();
+    store.dbfEnabled = config.enabled;
+    store.dbfPath = config.path;
+    store.editDbfEnabled = config.enabled;
+    store.editDbfPath = config.path;
+  } catch (e) {
+    console.error("Failed to load DBF config:", e);
+  }
+}
+
+export async function saveDbfConfig() {
+  store.dbfSaving = true;
+  try {
+    await api.putDbfConfig({
+      enabled: store.editDbfEnabled,
+      path: store.editDbfPath,
+    });
+    store.dbfEnabled = store.editDbfEnabled;
+    store.dbfPath = store.editDbfPath;
+  } catch (e) {
+    store.error = `Failed to save DBF config: ${e}`;
+  } finally {
+    store.dbfSaving = false;
+  }
+}
+
+export async function clearDbfFile() {
+  store.dbfClearing = true;
+  try {
+    await api.clearDbf();
+  } catch (e) {
+    store.error = `Failed to clear DBF file: ${e}`;
+  } finally {
+    store.dbfClearing = false;
   }
 }
 
