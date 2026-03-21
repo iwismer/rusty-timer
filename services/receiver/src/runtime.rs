@@ -541,9 +541,15 @@ fn should_emit_receiver_resync_for_dashboard_event(event_name: &str) -> bool {
     matches!(event_name, "resync")
 }
 
-fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) -> Option<String> {
+fn consume_sse_line_for_event(
+    line: &str,
+    pending_event: &mut Option<String>,
+    pending_data: &mut Option<String>,
+) -> Option<(String, Option<String>)> {
     if line.is_empty() {
-        return pending_event.take();
+        let event = pending_event.take();
+        let data = pending_data.take();
+        return event.map(|e| (e, data));
     }
     if line.starts_with(':') {
         return None;
@@ -552,9 +558,12 @@ fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) ->
         let event_name = rest.trim();
         if event_name.is_empty() {
             pending_event.take();
+            pending_data.take();
         } else {
             *pending_event = Some(event_name.to_owned());
         }
+    } else if let Some(rest) = line.strip_prefix("data:") {
+        *pending_data = Some(rest.trim().to_owned());
     }
     None
 }
@@ -641,6 +650,7 @@ async fn consume_upstream_dashboard_events(
     let mut response = response;
     let mut pending_line_bytes: Vec<u8> = Vec::new();
     let mut pending_event: Option<String> = None;
+    let mut pending_data: Option<String> = None;
 
     loop {
         if *state.connection_state.borrow() != ConnectionState::Connected {
@@ -666,7 +676,9 @@ async fn consume_upstream_dashboard_events(
             }
 
             let line = String::from_utf8_lossy(&line_bytes).into_owned();
-            if let Some(event_name) = consume_sse_line_for_event(&line, &mut pending_event) {
+            if let Some((event_name, _data)) =
+                consume_sse_line_for_event(&line, &mut pending_event, &mut pending_data)
+            {
                 if should_refresh_stream_snapshot_for_dashboard_event(&event_name) {
                     state.emit_streams_snapshot().await;
                 }
@@ -1646,17 +1658,29 @@ mod tests {
     #[test]
     fn sse_event_parsing_emits_completed_event_name_on_frame_boundary() {
         let mut pending_event = None;
+        let mut pending_data = None;
         assert_eq!(
-            consume_sse_line_for_event("event: stream_updated", &mut pending_event),
+            consume_sse_line_for_event(
+                "event: stream_updated",
+                &mut pending_event,
+                &mut pending_data
+            ),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("data: {\"type\":\"stream_updated\"}", &mut pending_event),
+            consume_sse_line_for_event(
+                "data: {\"type\":\"stream_updated\"}",
+                &mut pending_event,
+                &mut pending_data
+            ),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("", &mut pending_event),
-            Some("stream_updated".to_owned())
+            consume_sse_line_for_event("", &mut pending_event, &mut pending_data),
+            Some((
+                "stream_updated".to_owned(),
+                Some("{\"type\":\"stream_updated\"}".to_owned())
+            ))
         );
         assert_eq!(pending_event, None);
     }
@@ -1664,15 +1688,66 @@ mod tests {
     #[test]
     fn sse_event_parsing_ignores_comments_and_data_only_frames() {
         let mut pending_event = None;
+        let mut pending_data = None;
         assert_eq!(
-            consume_sse_line_for_event(": keepalive", &mut pending_event),
+            consume_sse_line_for_event(": keepalive", &mut pending_event, &mut pending_data),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("data: keepalive", &mut pending_event),
+            consume_sse_line_for_event("data: keepalive", &mut pending_event, &mut pending_data),
             None
         );
-        assert_eq!(consume_sse_line_for_event("", &mut pending_event), None);
+        assert_eq!(
+            consume_sse_line_for_event("", &mut pending_event, &mut pending_data),
+            None
+        );
+    }
+
+    #[test]
+    fn sse_parser_captures_data_payload() {
+        let mut pending_event: Option<String> = None;
+        let mut pending_data: Option<String> = None;
+
+        assert_eq!(
+            consume_sse_line_for_event(
+                "event: metrics_updated",
+                &mut pending_event,
+                &mut pending_data
+            ),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event(
+                r#"data: {"stream_id":"abc","raw_count":10}"#,
+                &mut pending_event,
+                &mut pending_data
+            ),
+            None
+        );
+        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        assert_eq!(
+            result,
+            Some((
+                "metrics_updated".to_owned(),
+                Some(r#"{"stream_id":"abc","raw_count":10}"#.to_owned())
+            ))
+        );
+        assert_eq!(pending_event, None);
+        assert_eq!(pending_data, None);
+    }
+
+    #[test]
+    fn sse_parser_returns_none_data_when_no_data_line() {
+        let mut pending_event: Option<String> = None;
+        let mut pending_data: Option<String> = None;
+
+        consume_sse_line_for_event(
+            "event: stream_created",
+            &mut pending_event,
+            &mut pending_data,
+        );
+        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        assert_eq!(result, Some(("stream_created".to_owned(), None)));
     }
 
     #[tokio::test]
