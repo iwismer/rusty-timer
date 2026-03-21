@@ -48,13 +48,13 @@ export interface StreamMetrics {
   raw_count: number;
   dedup_count: number;
   retransmit_count: number;
-  lag: number | null;
+  lag_ms: number | null;
   epoch_raw_count: number;
   epoch_dedup_count: number;
   epoch_retransmit_count: number;
   unique_chips: number;
   epoch_last_received_at: string | null;
-  epoch_lag: number | null;
+  epoch_lag_ms: number | null;
 }
 
 export interface StreamsResponse {

@@ -17,7 +17,7 @@ The receiver has no access to these metrics today.
 ### Data Flow
 
 1. **SSE subscription**: The receiver's Rust backend subscribes to the server's SSE endpoint (`/api/v1/events`) when the WebSocket connection is established. It listens for `metrics_updated` events, parses them, and forwards them to the frontend via a new Tauri native event `stream_metrics_updated`.
-2. **Initial fetch**: On connection (and on resync), the backend fetches `GET /api/v1/streams/{id}/metrics` for each subscribed stream (with a concurrency limit of 4 to avoid burst-loading the server) and emits the results as `stream_metrics_updated` events to the frontend.
+2. **Initial fetch**: On connection, the backend fetches `GET /api/v1/streams/{id}/metrics` for each subscribed stream (with a concurrency limit of 4 to avoid burst-loading the server) and emits the results as `stream_metrics_updated` events to the frontend. Metrics are also re-fetched when stream-lifecycle SSE events occur (stream created/updated/deleted, epoch changed).
 3. **Frontend store**: A new reactive map in the store (`streamMetrics: Map<string, StreamMetrics>`) keyed by stream key (`forwarder_id/reader_ip`) holds the latest metrics per stream.
 4. **SSE listener**: `sse.ts` registers a handler for the `stream_metrics_updated` Tauri event that updates the store map.
 
@@ -28,13 +28,13 @@ The server's SSE `metrics_updated` events and HTTP metrics endpoint use `stream_
 ### SSE Connection Lifecycle
 
 - The SSE connection is established when the WebSocket connects and torn down when it disconnects.
-- The SSE endpoint does not require authentication (it is a read-only dashboard feed with no auth middleware).
+- The SSE endpoint requires bearer token authentication, using the same token as the WebSocket connection.
 - On SSE connection drop (while WebSocket is still up), the client reconnects after a 1-second delay (matching the existing SSE reconnection behavior in the receiver). On reconnect, a full metrics re-fetch is triggered to cover any missed events.
 - If the server's broadcast channel lags (overflow), the SSE stream errors out. The reconnect-and-refetch strategy handles this case.
 
 ### Field Name Mapping
 
-The server's SSE payload and HTTP response use `lag_ms` and `epoch_lag_ms`. The receiver's Rust backend normalizes these to `lag` and `epoch_lag` (matching the server-ui's convention) before emitting the Tauri event. This keeps the frontend type consistent with the server-ui's `StreamMetrics` interface.
+The server's SSE payload and HTTP response use `lag_ms` and `epoch_lag_ms`. The receiver carries these names through the entire stack to preserve the unit suffix and prevent future misinterpretation of the values.
 
 ### StreamMetrics Type (TypeScript)
 
@@ -43,13 +43,13 @@ interface StreamMetrics {
   raw_count: number;
   dedup_count: number;
   retransmit_count: number;
-  lag: number | null;         // milliseconds since last canonical event, null if no events
+  lag_ms: number | null;      // milliseconds since last canonical event, null if no events
   epoch_raw_count: number;
   epoch_dedup_count: number;
   epoch_retransmit_count: number;
   unique_chips: number;
   epoch_last_received_at: string | null;  // RFC 3339 timestamp
-  epoch_lag: number | null;   // milliseconds, null if no events in epoch
+  epoch_lag_ms: number | null; // milliseconds, null if no events in epoch
 }
 ```
 
@@ -59,16 +59,16 @@ Fields intentionally excluded: `last_tag_id` and `last_reader_timestamp` (availa
 
 The existing info grid (Reader IP, Forwarder, Epoch) remains at the top. Below it, two new sections are added before the controls row.
 
-**Lifetime Metrics** (2-column grid, matching existing style):
+**Lifetime Metrics** (rendered side-by-side with Current Epoch in a 2-column outer grid, each section with a single-column list):
 
 | Label | Source field | Help text (title attribute) |
 |---|---|---|
 | Raw count | `raw_count` | Total frames received including retransmits |
 | Dedup count | `dedup_count` | Unique frames after deduplication |
 | Retransmit | `retransmit_count` | Duplicate frames that matched existing events |
-| Lag | `lag` | Time since the last unique frame was received |
+| Lag | `lag_ms` | Server-reported delay since the last unique frame was received (snapshot, not live) |
 
-**Current Epoch** (2-column grid):
+**Current Epoch**:
 
 | Label | Source field | Help text (title attribute) |
 |---|---|---|

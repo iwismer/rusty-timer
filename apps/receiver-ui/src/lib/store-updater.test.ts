@@ -197,13 +197,13 @@ describe("receiver updater store", () => {
           raw_count: 10,
           dedup_count: 9,
           retransmit_count: 1,
-          lag: 1000,
+          lag_ms: 1000,
           epoch_raw_count: 4,
           epoch_dedup_count: 3,
           epoch_retransmit_count: 1,
           unique_chips: 2,
           epoch_last_received_at: "2026-03-21T12:00:00Z",
-          epoch_lag: 250,
+          epoch_lag_ms: 250,
         },
       ],
     ]);
@@ -255,13 +255,13 @@ describe("receiver updater store", () => {
       raw_count: 10,
       dedup_count: 9,
       retransmit_count: 1,
-      lag: 1000,
+      lag_ms: 1000,
       epoch_raw_count: 4,
       epoch_dedup_count: 3,
       epoch_retransmit_count: 1,
       unique_chips: 2,
       epoch_last_received_at: "2026-03-21T12:00:00Z",
-      epoch_lag: 250,
+      epoch_lag_ms: 250,
     };
     store.streamMetrics = new Map([[key, metrics]]);
     store.streams = {
@@ -312,13 +312,13 @@ describe("receiver updater store", () => {
       raw_count: 10,
       dedup_count: 9,
       retransmit_count: 1,
-      lag: 1000,
+      lag_ms: 1000,
       epoch_raw_count: 4,
       epoch_dedup_count: 3,
       epoch_retransmit_count: 1,
       unique_chips: 2,
       epoch_last_received_at: "2026-03-21T12:00:00Z",
-      epoch_lag: 250,
+      epoch_lag_ms: 250,
     };
     store.streamMetrics = new Map([[key, metrics]]);
 

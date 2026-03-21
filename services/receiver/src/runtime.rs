@@ -606,33 +606,41 @@ async fn handle_metrics_updated(state: &Arc<AppState>, data: &str) {
     let payload: UpstreamMetricsPayload = match serde_json::from_str(data) {
         Ok(p) => p,
         Err(e) => {
-            tracing::debug!("failed to parse metrics_updated payload: {e}");
+            let truncated = if data.len() > 200 { &data[..200] } else { data };
+            tracing::warn!(error = %e, payload = %truncated, "failed to parse metrics_updated SSE payload");
             return;
         }
     };
 
     let stream_id_map = state.stream_id_map.read().await;
     let Some((forwarder_id, reader_ip)) = stream_id_map.get(&payload.stream_id) else {
-        return; // Unknown stream, silently ignore
+        // Unknown stream_id — likely a stream the receiver isn't subscribed to
+        return;
     };
+
+    let metrics = crate::ui_events::StreamMetricsPayload::from_upstream(
+        forwarder_id.clone(),
+        reader_ip.clone(),
+        &crate::control_api::UpstreamMetricsResponse {
+            raw_count: payload.raw_count,
+            dedup_count: payload.dedup_count,
+            retransmit_count: payload.retransmit_count,
+            lag_ms: payload.lag_ms,
+            epoch_raw_count: payload.epoch_raw_count,
+            epoch_dedup_count: payload.epoch_dedup_count,
+            epoch_retransmit_count: payload.epoch_retransmit_count,
+            epoch_lag_ms: payload.epoch_lag_ms,
+            epoch_last_received_at: payload.epoch_last_received_at.clone(),
+            unique_chips: payload.unique_chips,
+            last_tag_id: payload.last_tag_id.clone(),
+            last_reader_timestamp: payload.last_reader_timestamp.clone(),
+        },
+    );
 
     let _ = state
         .ui_tx
         .send(crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(
-            crate::ui_events::StreamMetricsPayload {
-                forwarder_id: forwarder_id.clone(),
-                reader_ip: reader_ip.clone(),
-                raw_count: payload.raw_count,
-                dedup_count: payload.dedup_count,
-                retransmit_count: payload.retransmit_count,
-                lag: payload.lag_ms,
-                epoch_raw_count: payload.epoch_raw_count,
-                epoch_dedup_count: payload.epoch_dedup_count,
-                epoch_retransmit_count: payload.epoch_retransmit_count,
-                unique_chips: payload.unique_chips,
-                epoch_last_received_at: payload.epoch_last_received_at,
-                epoch_lag: payload.epoch_lag_ms,
-            },
+            metrics,
         ));
 }
 
@@ -647,30 +655,40 @@ async fn initial_metrics_entries(
     state: &Arc<AppState>,
     ws_url: &str,
 ) -> Vec<(String, String, String)> {
-    if let Ok(streams) = crate::control_api::fetch_server_streams(&state.http_client, ws_url).await
-    {
-        let new_map = crate::control_api::build_stream_id_map(&streams);
-        *state.stream_id_map.write().await = new_map;
+    match crate::control_api::fetch_server_streams(&state.http_client, ws_url).await {
+        Ok(streams) => {
+            let new_map = crate::control_api::build_stream_id_map(&streams);
+            *state.stream_id_map.write().await = new_map;
 
-        return streams
-            .into_iter()
-            .map(|stream| (stream.stream_id, stream.forwarder_id, stream.reader_ip))
-            .collect();
+            streams
+                .into_iter()
+                .map(|stream| (stream.stream_id, stream.forwarder_id, stream.reader_ip))
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to refresh stream list for metrics; using cached data");
+            state
+                .stream_id_map
+                .read()
+                .await
+                .iter()
+                .map(|(sid, (fwd, ip))| (sid.clone(), fwd.clone(), ip.clone()))
+                .collect()
+        }
     }
-
-    state
-        .stream_id_map
-        .read()
-        .await
-        .iter()
-        .map(|(sid, (fwd, ip))| (sid.clone(), fwd.clone(), ip.clone()))
-        .collect()
 }
 
 async fn fetch_initial_metrics(state: &Arc<AppState>, generation: u64) {
     let profile = {
         let db = state.db.lock().await;
-        db.load_profile().ok().flatten()
+        match db.load_profile() {
+            Ok(Some(p)) => Some(p),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load profile for initial metrics fetch");
+                None
+            }
+        }
     };
     let Some(profile) = profile else { return };
 
@@ -679,7 +697,7 @@ async fn fetch_initial_metrics(state: &Arc<AppState>, generation: u64) {
         return;
     }
 
-    // Fetch metrics with concurrency limit of 4
+    // Fetch metrics with concurrency limit of 4 to avoid burst-loading the server
     let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
     let mut handles = Vec::new();
 
@@ -691,28 +709,31 @@ async fn fetch_initial_metrics(state: &Arc<AppState>, generation: u64) {
         let ui_tx = state.ui_tx.clone();
 
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok()?;
-            let resp = crate::control_api::fetch_stream_metrics(&client, &ws_url, &stream_id)
-                .await
-                .ok()?;
+            let _permit = match sem.acquire().await {
+                Ok(permit) => permit,
+                Err(e) => {
+                    tracing::error!("metrics semaphore closed unexpectedly: {e}");
+                    return None;
+                }
+            };
+            let resp = match crate::control_api::fetch_stream_metrics(
+                &client, &ws_url, &stream_id,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(stream_id = %stream_id, error = %e, "failed to fetch initial metrics");
+                    return None;
+                }
+            };
             if !should_emit_initial_metrics(&state, generation) {
                 return None;
             }
 
-            let payload = crate::ui_events::StreamMetricsPayload {
-                forwarder_id,
-                reader_ip,
-                raw_count: resp.raw_count,
-                dedup_count: resp.dedup_count,
-                retransmit_count: resp.retransmit_count,
-                lag: resp.lag_ms,
-                epoch_raw_count: resp.epoch_raw_count,
-                epoch_dedup_count: resp.epoch_dedup_count,
-                epoch_retransmit_count: resp.epoch_retransmit_count,
-                unique_chips: resp.unique_chips,
-                epoch_last_received_at: resp.epoch_last_received_at,
-                epoch_lag: resp.epoch_lag_ms,
-            };
+            let payload = crate::ui_events::StreamMetricsPayload::from_upstream(
+                forwarder_id, reader_ip, &resp,
+            );
 
             let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(
                 payload,
@@ -722,7 +743,9 @@ async fn fetch_initial_metrics(state: &Arc<AppState>, generation: u64) {
     }
 
     for handle in handles {
-        let _ = handle.await;
+        if let Err(e) = handle.await {
+            tracing::warn!("metrics fetch task failed: {e}");
+        }
     }
 }
 
@@ -767,7 +790,14 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
 
         let profile = {
             let db = state.db.lock().await;
-            db.load_profile().ok().flatten()
+            match db.load_profile() {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load profile for dashboard SSE");
+                    None
+                }
+            }
         };
         let Some(profile) = profile else {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;

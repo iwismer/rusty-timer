@@ -26,13 +26,36 @@ pub struct StreamMetricsPayload {
     pub raw_count: i64,
     pub dedup_count: i64,
     pub retransmit_count: i64,
-    pub lag: Option<u64>,
+    pub lag_ms: Option<u64>,
     pub epoch_raw_count: i64,
     pub epoch_dedup_count: i64,
     pub epoch_retransmit_count: i64,
     pub unique_chips: i64,
     pub epoch_last_received_at: Option<String>,
-    pub epoch_lag: Option<u64>,
+    pub epoch_lag_ms: Option<u64>,
+}
+
+impl StreamMetricsPayload {
+    pub fn from_upstream(
+        forwarder_id: String,
+        reader_ip: String,
+        resp: &crate::control_api::UpstreamMetricsResponse,
+    ) -> Self {
+        Self {
+            forwarder_id,
+            reader_ip,
+            raw_count: resp.raw_count,
+            dedup_count: resp.dedup_count,
+            retransmit_count: resp.retransmit_count,
+            lag_ms: resp.lag_ms,
+            epoch_raw_count: resp.epoch_raw_count,
+            epoch_dedup_count: resp.epoch_dedup_count,
+            epoch_retransmit_count: resp.epoch_retransmit_count,
+            unique_chips: resp.unique_chips,
+            epoch_last_received_at: resp.epoch_last_received_at.clone(),
+            epoch_lag_ms: resp.epoch_lag_ms,
+        }
+    }
 }
 
 /// Extract chip ID from IPICO raw frame bytes.
@@ -185,19 +208,19 @@ mod tests {
             raw_count: 100,
             dedup_count: 80,
             retransmit_count: 20,
-            lag: Some(1500),
+            lag_ms: Some(1500),
             epoch_raw_count: 50,
             epoch_dedup_count: 40,
             epoch_retransmit_count: 10,
             unique_chips: 30,
             epoch_last_received_at: Some("2026-03-21T12:00:00Z".to_owned()),
-            epoch_lag: Some(500),
+            epoch_lag_ms: Some(500),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "stream_metrics_updated");
         assert_eq!(json["forwarder_id"], "fwd-1");
         assert_eq!(json["raw_count"], 100);
-        assert_eq!(json["lag"], 1500);
+        assert_eq!(json["lag_ms"], 1500);
         assert_eq!(json["unique_chips"], 30);
     }
 
@@ -209,18 +232,18 @@ mod tests {
             raw_count: 0,
             dedup_count: 0,
             retransmit_count: 0,
-            lag: None,
+            lag_ms: None,
             epoch_raw_count: 0,
             epoch_dedup_count: 0,
             epoch_retransmit_count: 0,
             unique_chips: 0,
             epoch_last_received_at: None,
-            epoch_lag: None,
+            epoch_lag_ms: None,
         });
         let json = serde_json::to_value(&event).unwrap();
-        assert!(json["lag"].is_null());
+        assert!(json["lag_ms"].is_null());
         assert!(json["epoch_last_received_at"].is_null());
-        assert!(json["epoch_lag"].is_null());
+        assert!(json["epoch_lag_ms"].is_null());
     }
 
     #[test]

@@ -61,10 +61,10 @@
     return match?.[1] ?? timestamp;
   }
 
-  function formatLag(lag: number | null): string {
-    if (lag === null) return "N/A (no events yet)";
-    if (lag < 1000) return `${lag} ms`;
-    return `${(lag / 1000).toFixed(1)} s`;
+  function formatLag(lagMs: number | null): string {
+    if (lagMs === null) return "N/A (no events yet)";
+    if (lagMs < 1000) return `${lagMs} ms`;
+    return `${(lagMs / 1000).toFixed(1)} s`;
   }
 
   function formatDuration(ms: number): string {
@@ -304,11 +304,11 @@
                               >
                             </div>
                             <div
-                              title="Time since the last unique frame was received"
+                              title="Server-reported delay since the last unique frame was received (snapshot, not live)"
                             >
                               <span class="text-text-muted">Lag:</span>
                               <span class="font-mono text-text-primary ml-1"
-                                >{formatLag(metrics.lag)}</span
+                                >{formatLag(metrics.lag_ms)}</span
                               >
                             </div>
                           </div>
