@@ -16,7 +16,7 @@ The receiver has no access to these metrics today.
 
 ### Data Flow
 
-1. **SSE subscription**: The receiver's Rust backend subscribes to the server's SSE endpoint (`/api/v1/sse`) when the WebSocket connection is established. It listens for `metrics_updated` events, parses them, and forwards them to the frontend via a new Tauri native event `stream_metrics_updated`.
+1. **SSE subscription**: The receiver's Rust backend subscribes to the server's SSE endpoint (`/api/v1/events`) when the WebSocket connection is established. It listens for `metrics_updated` events, parses them, and forwards them to the frontend via a new Tauri native event `stream_metrics_updated`.
 2. **Initial fetch**: On connection (and on resync), the backend fetches `GET /api/v1/streams/{id}/metrics` for each subscribed stream (with a concurrency limit of 4 to avoid burst-loading the server) and emits the results as `stream_metrics_updated` events to the frontend.
 3. **Frontend store**: A new reactive map in the store (`streamMetrics: Map<string, StreamMetrics>`) keyed by stream key (`forwarder_id/reader_ip`) holds the latest metrics per stream.
 4. **SSE listener**: `sse.ts` registers a handler for the `stream_metrics_updated` Tauri event that updates the store map.
@@ -29,7 +29,7 @@ The server's SSE `metrics_updated` events and HTTP metrics endpoint use `stream_
 
 - The SSE connection is established when the WebSocket connects and torn down when it disconnects.
 - The SSE endpoint does not require authentication (it is a read-only dashboard feed with no auth middleware).
-- On SSE connection drop (while WebSocket is still up), the client reconnects with exponential backoff (1s, 2s, 4s, capped at 30s). On reconnect, a full metrics re-fetch is triggered to cover any missed events.
+- On SSE connection drop (while WebSocket is still up), the client reconnects after a 1-second delay (matching the existing SSE reconnection behavior in the receiver). On reconnect, a full metrics re-fetch is triggered to cover any missed events.
 - If the server's broadcast channel lags (overflow), the SSE stream errors out. The reconnect-and-refetch strategy handles this case.
 
 ### Field Name Mapping
@@ -99,7 +99,7 @@ When metrics haven't been fetched yet (e.g., server unreachable), the metrics se
 ### What Changes Where
 
 **Rust backend (`services/receiver/src/`)**:
-- New SSE client module that connects to the server's `/api/v1/sse` endpoint
+- New SSE client module that connects to the server's `/api/v1/events` endpoint
 - Metrics fetch function that calls `GET /api/v1/streams/{id}/metrics` for subscribed streams
 - New `ReceiverUiEvent` variant for `StreamMetricsUpdated`
 - SSE connection lifecycle tied to the WebSocket connection state
