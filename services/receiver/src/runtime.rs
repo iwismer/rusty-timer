@@ -807,10 +807,10 @@ async fn consume_upstream_dashboard_events(
                 if should_refresh_chip_lookup_for_dashboard_event(&event_name) {
                     refresh_chip_lookup(state).await;
                 }
-                if event_name == "metrics_updated" {
-                    if let Some(data) = data {
-                        handle_metrics_updated(state, &data).await;
-                    }
+                if event_name == "metrics_updated"
+                    && let Some(data) = data
+                {
+                    handle_metrics_updated(state, &data).await;
                 }
             }
         }

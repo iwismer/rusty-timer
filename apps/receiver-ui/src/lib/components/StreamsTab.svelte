@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { AlertBanner } from "@rusty-timer/shared-ui";
   import { resizeWidth } from "$lib/actions/resizeWidth";
   import {
@@ -87,7 +88,7 @@
 
     if (!metrics?.epoch_last_received_at) {
       timeSinceLastRead = {
-        ...timeSinceLastRead,
+        ...untrack(() => timeSinceLastRead),
         [key]: "N/A (no events in epoch)",
       };
       return;
@@ -97,7 +98,7 @@
       const now = Date.now();
       const lastAt = new Date(metrics.epoch_last_received_at!).getTime();
       timeSinceLastRead = {
-        ...timeSinceLastRead,
+        ...untrack(() => timeSinceLastRead),
         [key]: formatDuration(now - lastAt),
       };
     };
