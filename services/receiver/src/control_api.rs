@@ -35,6 +35,9 @@ pub enum ShutdownSignal {
     Terminate,
 }
 
+/// Maps server-side stream_id (UUID string) to (forwarder_id, reader_ip) pairs.
+pub type StreamIdMap = HashMap<String, (String, String)>;
+
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
     pub connection_state: watch::Sender<ConnectionState>,
@@ -50,6 +53,7 @@ pub struct AppState {
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
     pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
+    pub stream_id_map: Arc<tokio::sync::RwLock<StreamIdMap>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -88,6 +92,7 @@ impl AppState {
             db_integrity_ok,
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
+            stream_id_map: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -236,6 +241,11 @@ impl AppState {
         let mut seen: HashSet<(String, String)> = HashSet::new();
 
         if let Some(ref server_streams) = server_streams {
+            // Update stream_id → key map for SSE metrics resolution
+            {
+                let new_map = build_stream_id_map(server_streams);
+                *self.stream_id_map.write().await = new_map;
+            }
             for si in server_streams {
                 let key = (si.forwarder_id.clone(), si.reader_ip.clone());
                 let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
@@ -565,6 +575,19 @@ pub async fn fetch_server_streams(
         .map_err(|e| format!("invalid JSON: {e}"))?;
 
     Ok(body.streams)
+}
+
+/// Build a stream_id → (forwarder_id, reader_ip) mapping from the upstream stream list.
+pub fn build_stream_id_map(streams: &[UpstreamStreamInfo]) -> StreamIdMap {
+    streams
+        .iter()
+        .map(|s| {
+            (
+                s.stream_id.clone(),
+                (s.forwarder_id.clone(), s.reader_ip.clone()),
+            )
+        })
+        .collect()
 }
 
 /// Flat chip_id -> (bib, name) map for a single race.

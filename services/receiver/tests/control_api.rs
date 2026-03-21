@@ -1,7 +1,7 @@
 use receiver::Db;
 use receiver::control_api::{
     self, AppState, ConnectionState, CursorResetRequest, EarliestEpochRequest, ProfileRequest,
-    UpdatePortRequest,
+    UpdatePortRequest, UpstreamStreamInfo, build_stream_id_map,
 };
 use std::sync::Arc;
 
@@ -521,4 +521,23 @@ async fn streams_response_includes_cursor_data() {
         .unwrap();
     assert_eq!(f2.cursor_epoch, None);
     assert_eq!(f2.cursor_seq, None);
+}
+
+#[test]
+fn build_stream_id_map_creates_correct_mapping() {
+    let streams = vec![UpstreamStreamInfo {
+        stream_id: "aaaa".to_owned(),
+        forwarder_id: "fwd-1".to_owned(),
+        reader_ip: "10.0.0.1:10000".to_owned(),
+        display_alias: None,
+        stream_epoch: 1,
+        online: true,
+        current_epoch_name: None,
+    }];
+    let map = build_stream_id_map(&streams);
+    assert_eq!(
+        map.get("aaaa"),
+        Some(&("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()))
+    );
+    assert_eq!(map.get("unknown"), None);
 }
