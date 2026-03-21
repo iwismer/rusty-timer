@@ -577,6 +577,49 @@ pub async fn fetch_server_streams(
     Ok(body.streams)
 }
 
+/// Fetch metrics for a single stream from the server's HTTP API.
+pub async fn fetch_stream_metrics(
+    client: &reqwest::Client,
+    ws_url: &str,
+    stream_id: &str,
+) -> Result<UpstreamMetricsResponse, String> {
+    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
+    let url = format!("{base}/api/v1/streams/{stream_id}/metrics");
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("metrics request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("metrics returned {}", response.status()));
+    }
+    response
+        .json::<UpstreamMetricsResponse>()
+        .await
+        .map_err(|e| format!("failed to parse metrics response: {e}"))
+}
+
+/// Typed response from GET /api/v1/streams/{id}/metrics.
+/// Field names match the server's JSON keys exactly.
+#[derive(Debug, Deserialize)]
+pub struct UpstreamMetricsResponse {
+    pub raw_count: i64,
+    pub dedup_count: i64,
+    pub retransmit_count: i64,
+    pub lag_ms: Option<u64>,
+    pub epoch_raw_count: i64,
+    pub epoch_dedup_count: i64,
+    pub epoch_retransmit_count: i64,
+    pub epoch_lag_ms: Option<u64>,
+    pub epoch_last_received_at: Option<String>,
+    pub unique_chips: i64,
+    // Present in response but not forwarded to UI:
+    #[allow(dead_code)]
+    pub last_tag_id: Option<String>,
+    #[allow(dead_code)]
+    pub last_reader_timestamp: Option<String>,
+}
+
 /// Build a stream_id → (forwarder_id, reader_ip) mapping from the upstream stream list.
 pub fn build_stream_id_map(streams: &[UpstreamStreamInfo]) -> StreamIdMap {
     streams

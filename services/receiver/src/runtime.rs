@@ -625,6 +625,68 @@ async fn handle_metrics_updated(state: &Arc<AppState>, data: &str) {
 
 use crate::control_api::http_base_url;
 
+async fn fetch_initial_metrics(state: &Arc<AppState>) {
+    let profile = {
+        let db = state.db.lock().await;
+        db.load_profile().ok().flatten()
+    };
+    let Some(profile) = profile else { return };
+
+    let stream_id_map = state.stream_id_map.read().await;
+    if stream_id_map.is_empty() {
+        return;
+    }
+
+    // Collect entries to avoid holding the read lock during HTTP calls
+    let entries: Vec<(String, String, String)> = stream_id_map
+        .iter()
+        .map(|(sid, (fwd, ip))| (sid.clone(), fwd.clone(), ip.clone()))
+        .collect();
+    drop(stream_id_map);
+
+    // Fetch metrics with concurrency limit of 4
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut handles = Vec::new();
+
+    for (stream_id, forwarder_id, reader_ip) in entries {
+        let sem = Arc::clone(&semaphore);
+        let client = state.http_client.clone();
+        let ws_url = profile.server_url.clone();
+        let ui_tx = state.ui_tx.clone();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.ok()?;
+            let resp = crate::control_api::fetch_stream_metrics(&client, &ws_url, &stream_id)
+                .await
+                .ok()?;
+
+            let payload = crate::ui_events::StreamMetricsPayload {
+                forwarder_id,
+                reader_ip,
+                raw_count: resp.raw_count,
+                dedup_count: resp.dedup_count,
+                retransmit_count: resp.retransmit_count,
+                lag: resp.lag_ms,
+                epoch_raw_count: resp.epoch_raw_count,
+                epoch_dedup_count: resp.epoch_dedup_count,
+                epoch_retransmit_count: resp.epoch_retransmit_count,
+                unique_chips: resp.unique_chips,
+                epoch_last_received_at: resp.epoch_last_received_at,
+                epoch_lag: resp.epoch_lag_ms,
+            };
+
+            let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(
+                payload,
+            ));
+            Some(())
+        }));
+    }
+
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
 async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
     let client = match reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(3))
@@ -668,6 +730,8 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
         };
 
         let events_url = format!("{base_url}/api/v1/events");
+
+        fetch_initial_metrics(&state).await;
 
         match consume_upstream_dashboard_events(&state, &client, &events_url, &profile.token).await
         {
