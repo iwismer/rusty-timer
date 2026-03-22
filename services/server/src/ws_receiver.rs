@@ -398,7 +398,6 @@ async fn proxy_announcer_reset_reply(
     })
 }
 
-
 async fn proxy_races_list_reply(
     state: AppState,
     req: rt_protocol::ReceiverProxyRacesListRequest,
