@@ -1020,6 +1020,28 @@ pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, Recei
 // Announcer proxy (WS → server)
 // ---------------------------------------------------------------------------
 
+pub async fn get_server_streams(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyStreamsListRequest(
+        rt_protocol::ReceiverProxyStreamsListRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyStreamsListResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(r.streams)
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
 pub async fn get_announcer_config(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
     let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerGetConfigRequest(
         rt_protocol::ReceiverProxyAnnouncerGetConfigRequest {

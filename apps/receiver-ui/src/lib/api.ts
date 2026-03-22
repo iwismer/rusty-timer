@@ -393,6 +393,19 @@ export interface AnnouncerConfigUpdate {
   max_list_size: number;
 }
 
+export interface ServerStreamsResponse {
+  streams: Array<{
+    stream_id: string;
+    forwarder_id: string;
+    reader_ip: string;
+    display_alias: string | null;
+  }>;
+}
+
+export async function getServerStreams(): Promise<ServerStreamsResponse> {
+  return invoke<ServerStreamsResponse>("get_server_streams");
+}
+
 export async function getAnnouncerConfig(): Promise<AnnouncerConfig> {
   return invoke<AnnouncerConfig>("get_announcer_config");
 }

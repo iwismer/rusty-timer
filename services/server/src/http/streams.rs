@@ -10,7 +10,8 @@ use axum::{
 use sqlx::Row;
 use uuid::Uuid;
 
-pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
+/// Get the stream list as a JSON value. Callable from WS proxy handlers.
+pub async fn get_streams_value(state: &AppState) -> Result<serde_json::Value, String> {
     let rows = sqlx::query(
         r#"SELECT s.stream_id,
                   s.forwarder_id,
@@ -28,44 +29,43 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
            ORDER BY s.created_at ASC"#,
     )
     .fetch_all(&state.pool)
-    .await;
+    .await
+    .map_err(|e| format!("database error: {e}"))?;
 
-    match rows {
-        Ok(rows) => {
-            let streams: Vec<serde_json::Value> = rows
-                .into_iter()
-                .map(|r| {
-                    let stream_id: uuid::Uuid = r.get("stream_id");
-                    let forwarder_id: String = r.get("forwarder_id");
-                    let reader_ip: String = r.get("reader_ip");
-                    let display_alias: Option<String> = r.get("display_alias");
-                    let forwarder_display_name: Option<String> = r.get("forwarder_display_name");
-                    let stream_epoch: i64 = r.get("stream_epoch");
-                    let online: bool = r.get("online");
-                    let reader_connected: bool = r.get("reader_connected");
-                    let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
-                    let current_epoch_name: Option<String> = r.get("current_epoch_name");
-                    serde_json::json!({
-                        "stream_id": stream_id.to_string(),
-                        "forwarder_id": forwarder_id,
-                        "reader_ip": reader_ip,
-                        "display_alias": display_alias,
-                        "forwarder_display_name": forwarder_display_name,
-                        "stream_epoch": stream_epoch,
-                        "current_epoch_name": current_epoch_name,
-                        "online": online,
-                        "reader_connected": reader_connected,
-                        "created_at": created_at.to_rfc3339(),
-                    })
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "streams": streams })),
-            )
-                .into_response()
-        }
-        Err(e) => internal_error(e),
+    let streams: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            let stream_id: uuid::Uuid = r.get("stream_id");
+            let forwarder_id: String = r.get("forwarder_id");
+            let reader_ip: String = r.get("reader_ip");
+            let display_alias: Option<String> = r.get("display_alias");
+            let forwarder_display_name: Option<String> = r.get("forwarder_display_name");
+            let stream_epoch: i64 = r.get("stream_epoch");
+            let online: bool = r.get("online");
+            let reader_connected: bool = r.get("reader_connected");
+            let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
+            let current_epoch_name: Option<String> = r.get("current_epoch_name");
+            serde_json::json!({
+                "stream_id": stream_id.to_string(),
+                "forwarder_id": forwarder_id,
+                "reader_ip": reader_ip,
+                "display_alias": display_alias,
+                "forwarder_display_name": forwarder_display_name,
+                "stream_epoch": stream_epoch,
+                "current_epoch_name": current_epoch_name,
+                "online": online,
+                "reader_connected": reader_connected,
+                "created_at": created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "streams": streams }))
+}
+
+pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
+    match get_streams_value(&state).await {
+        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Err(e) => internal_error(std::io::Error::other(e)),
     }
 }
 

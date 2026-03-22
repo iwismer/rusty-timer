@@ -280,6 +280,30 @@ async fn proxy_device_control_reply(
     WsMessage::ReceiverProxyControlResponse(resp)
 }
 
+async fn proxy_streams_list_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyStreamsListRequest,
+) -> WsMessage {
+    match crate::http::streams::get_streams_value(&state).await {
+        Ok(streams) => WsMessage::ReceiverProxyStreamsListResponse(
+            rt_protocol::ReceiverProxyStreamsListResponse {
+                request_id: req.request_id,
+                ok: true,
+                error: None,
+                streams,
+            },
+        ),
+        Err(e) => WsMessage::ReceiverProxyStreamsListResponse(
+            rt_protocol::ReceiverProxyStreamsListResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e),
+                streams: serde_json::Value::Null,
+            },
+        ),
+    }
+}
+
 async fn proxy_announcer_get_config_reply(
     state: AppState,
     req: rt_protocol::ReceiverProxyAnnouncerGetConfigRequest,
@@ -650,6 +674,12 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     pending_proxy_replies.spawn(proxy_device_control_reply(
                                         state.clone(),
                                         device_id.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyStreamsListRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_streams_list_reply(
+                                        state.clone(),
                                         req,
                                     ));
                                 }

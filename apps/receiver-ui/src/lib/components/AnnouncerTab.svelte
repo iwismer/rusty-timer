@@ -7,15 +7,13 @@
 
   const announcerApi: AnnouncerConfigApi = {
     async getStreams() {
-      const resp = await api.getStreams();
-      return resp.streams
-        .filter((s) => s.stream_id != null)
-        .map((s) => ({
-          stream_id: s.stream_id!,
-          forwarder_id: s.forwarder_id,
-          reader_ip: s.reader_ip,
-          display_alias: s.display_alias,
-        }));
+      const resp = await api.getServerStreams();
+      return resp.streams.map((s) => ({
+        stream_id: s.stream_id,
+        forwarder_id: s.forwarder_id,
+        reader_ip: s.reader_ip,
+        display_alias: s.display_alias,
+      }));
     },
     getConfig: () => api.getAnnouncerConfig(),
     saveConfig: (update) => api.putAnnouncerConfig(update),

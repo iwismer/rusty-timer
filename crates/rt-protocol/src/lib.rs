@@ -582,6 +582,23 @@ pub struct ReceiverProxyControlResponse {
 // Receiver proxy messages: announcer config (receiver <-> server)
 // ---------------------------------------------------------------------------
 
+/// Receiver-to-server: get the server's stream list (for announcer stream selection).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyStreamsListRequest {
+    pub request_id: String,
+}
+
+/// Server-to-receiver: stream list response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyStreamsListResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub streams: serde_json::Value,
+}
+
 /// Receiver-to-server: get the current announcer configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverProxyAnnouncerGetConfigRequest {
@@ -668,6 +685,8 @@ pub enum WsMessage {
     ReceiverProxyRestartRequest(ReceiverProxyRestartRequest),
     ReceiverProxyDeviceControlRequest(ReceiverProxyDeviceControlRequest),
     ReceiverProxyControlResponse(ReceiverProxyControlResponse),
+    ReceiverProxyStreamsListRequest(ReceiverProxyStreamsListRequest),
+    ReceiverProxyStreamsListResponse(ReceiverProxyStreamsListResponse),
     ReceiverProxyAnnouncerGetConfigRequest(ReceiverProxyAnnouncerGetConfigRequest),
     ReceiverProxyAnnouncerPutConfigRequest(ReceiverProxyAnnouncerPutConfigRequest),
     ReceiverProxyAnnouncerResetRequest(ReceiverProxyAnnouncerResetRequest),
@@ -962,6 +981,30 @@ mod tests {
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"kind\":\"receiver_proxy_control_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_streams_list_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyStreamsListRequest(ReceiverProxyStreamsListRequest {
+            request_id: "req-s1".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_streams_list_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_streams_list_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyStreamsListResponse(ReceiverProxyStreamsListResponse {
+            request_id: "req-s1".into(),
+            ok: true,
+            error: None,
+            streams: serde_json::json!([{"stream_id": "abc", "forwarder_id": "fwd-1"}]),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);
     }

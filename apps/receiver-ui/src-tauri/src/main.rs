@@ -389,6 +389,13 @@ async fn update_subscription_event_type(
 }
 
 #[tauri::command]
+async fn get_server_streams(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
+    control_api::get_server_streams(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_announcer_config(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
     control_api::get_announcer_config(&state)
         .await
@@ -552,6 +559,7 @@ fn main() {
             put_dbf_config,
             clear_dbf,
             update_subscription_event_type,
+            get_server_streams,
             get_announcer_config,
             put_announcer_config,
             reset_announcer,
