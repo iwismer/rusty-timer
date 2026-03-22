@@ -352,6 +352,27 @@ export async function getForwarders(): Promise<ForwardersResponse> {
   return invoke<ForwardersResponse>("get_forwarders");
 }
 
+export interface ForwarderRaceResponse {
+  forwarder_id: string;
+  race_id: string | null;
+}
+
+export async function getForwarderRace(
+  forwarderId: string,
+): Promise<ForwarderRaceResponse> {
+  return invoke<ForwarderRaceResponse>("get_forwarder_race", { forwarderId });
+}
+
+export async function setForwarderRace(
+  forwarderId: string,
+  raceId: string | null,
+): Promise<ForwarderRaceResponse> {
+  return invoke<ForwarderRaceResponse>("set_forwarder_race", {
+    forwarderId,
+    raceId,
+  });
+}
+
 export async function getForwarderConfig(
   forwarderId: string,
 ): Promise<ForwarderConfigResponse> {

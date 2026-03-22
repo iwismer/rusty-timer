@@ -69,6 +69,8 @@ impl WsCommand {
             WsMessage::ReceiverProxyRaceDeleteRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyParticipantsGetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyFileUploadRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyForwarderRaceGetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyForwarderRaceSetRequest(r) => r.request_id.clone(),
             _ => return Err((message, reply)),
         };
         Ok(Self {
@@ -158,6 +160,8 @@ fn proxy_response_request_id(msg: &WsMessage) -> Option<&str> {
         WsMessage::ReceiverProxyRaceDeleteResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyParticipantsGetResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyFileUploadResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => Some(&r.request_id),
         _ => None,
     }
 }

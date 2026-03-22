@@ -1223,6 +1223,66 @@ pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
     }
 }
 
+pub async fn get_forwarder_race(
+    state: &AppState,
+    forwarder_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyForwarderRaceGetRequest(
+        rt_protocol::ReceiverProxyForwarderRaceGetRequest {
+            request_id: generate_request_id(),
+            forwarder_id: forwarder_id.clone(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({
+                "forwarder_id": r.forwarder_id,
+                "race_id": r.race_id,
+            }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn set_forwarder_race(
+    state: &AppState,
+    forwarder_id: String,
+    race_id: Option<String>,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyForwarderRaceSetRequest(
+        rt_protocol::ReceiverProxyForwarderRaceSetRequest {
+            request_id: generate_request_id(),
+            forwarder_id: forwarder_id.clone(),
+            race_id,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({
+                "forwarder_id": r.forwarder_id,
+                "race_id": r.race_id,
+            }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
 /// Send a WS command through the active session and wait for a response.
 ///
 /// Uses a 15s timeout. For forwarder proxy requests, the server applies a 10s

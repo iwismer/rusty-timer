@@ -793,6 +793,133 @@ async fn proxy_file_upload_reply(
     }
 }
 
+async fn proxy_forwarder_race_get_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyForwarderRaceGetRequest,
+) -> WsMessage {
+    match crate::repo::forwarder_races::get_forwarder_race(&state.pool, &req.forwarder_id).await {
+        Ok(race_id) => WsMessage::ReceiverProxyForwarderRaceGetResponse(
+            rt_protocol::ReceiverProxyForwarderRaceGetResponse {
+                request_id: req.request_id,
+                ok: true,
+                error: None,
+                forwarder_id: req.forwarder_id,
+                race_id: race_id.map(|id| id.to_string()),
+            },
+        ),
+        Err(e) => {
+            warn!(forwarder_id = %req.forwarder_id, error = %e, "get forwarder race failed");
+            WsMessage::ReceiverProxyForwarderRaceGetResponse(
+                rt_protocol::ReceiverProxyForwarderRaceGetResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(e.to_string()),
+                    forwarder_id: req.forwarder_id,
+                    race_id: None,
+                },
+            )
+        }
+    }
+}
+
+async fn proxy_forwarder_race_set_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyForwarderRaceSetRequest,
+) -> WsMessage {
+    let race_id: Option<Uuid> = match &req.race_id {
+        None => None,
+        Some(s) => match Uuid::parse_str(s) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                return WsMessage::ReceiverProxyForwarderRaceSetResponse(
+                    rt_protocol::ReceiverProxyForwarderRaceSetResponse {
+                        request_id: req.request_id,
+                        ok: false,
+                        error: Some(format!("invalid race_id: {e}")),
+                        forwarder_id: req.forwarder_id,
+                        race_id: None,
+                    },
+                );
+            }
+        },
+    };
+
+    // Validate race exists if assigning
+    if let Some(rid) = race_id {
+        match crate::repo::races::race_exists(&state.pool, rid).await {
+            Ok(false) => {
+                return WsMessage::ReceiverProxyForwarderRaceSetResponse(
+                    rt_protocol::ReceiverProxyForwarderRaceSetResponse {
+                        request_id: req.request_id,
+                        ok: false,
+                        error: Some("race not found".into()),
+                        forwarder_id: req.forwarder_id,
+                        race_id: None,
+                    },
+                );
+            }
+            Err(e) => {
+                return WsMessage::ReceiverProxyForwarderRaceSetResponse(
+                    rt_protocol::ReceiverProxyForwarderRaceSetResponse {
+                        request_id: req.request_id,
+                        ok: false,
+                        error: Some(e.to_string()),
+                        forwarder_id: req.forwarder_id,
+                        race_id: None,
+                    },
+                );
+            }
+            Ok(true) => {}
+        }
+    }
+
+    if let Err(e) =
+        crate::repo::forwarder_races::set_forwarder_race(&state.pool, &req.forwarder_id, race_id)
+            .await
+    {
+        warn!(forwarder_id = %req.forwarder_id, error = %e, "set forwarder race failed");
+        return WsMessage::ReceiverProxyForwarderRaceSetResponse(
+            rt_protocol::ReceiverProxyForwarderRaceSetResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e.to_string()),
+                forwarder_id: req.forwarder_id,
+                race_id: None,
+            },
+        );
+    }
+
+    match race_id {
+        Some(rid) => state.logger.log(format!(
+            "forwarder \"{}\" assigned to race {} via receiver {}",
+            req.forwarder_id, rid, device_id
+        )),
+        None => state.logger.log(format!(
+            "forwarder \"{}\" unassigned from race via receiver {}",
+            req.forwarder_id, device_id
+        )),
+    }
+
+    // Broadcast SSE event
+    let _ = state
+        .dashboard_tx
+        .send(DashboardEvent::ForwarderRaceAssigned {
+            forwarder_id: req.forwarder_id.clone(),
+            race_id,
+        });
+
+    WsMessage::ReceiverProxyForwarderRaceSetResponse(
+        rt_protocol::ReceiverProxyForwarderRaceSetResponse {
+            request_id: req.request_id,
+            ok: true,
+            error: None,
+            forwarder_id: req.forwarder_id,
+            race_id: race_id.map(|id| id.to_string()),
+        },
+    )
+}
+
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
     let token_str = match token {
         Some(t) => t,
@@ -1155,6 +1282,19 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                         req,
                                     ));
                                 }
+                                Ok(WsMessage::ReceiverProxyForwarderRaceGetRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_forwarder_race_get_reply(
+                                        state.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyForwarderRaceSetRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_forwarder_race_set_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
                                 Ok(_) => {
                                     send_ws_error(
                                         &mut socket,
@@ -1285,6 +1425,28 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                                     ok: false,
                                                     error: Some("server serialization error".into()),
                                                     imported: 0,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyForwarderRaceGetResponse(
+                                                rt_protocol::ReceiverProxyForwarderRaceGetResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    forwarder_id: r.forwarder_id.clone(),
+                                                    race_id: None,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyForwarderRaceSetResponse(
+                                                rt_protocol::ReceiverProxyForwarderRaceSetResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    forwarder_id: r.forwarder_id.clone(),
+                                                    race_id: None,
                                                 },
                                             ))
                                         }

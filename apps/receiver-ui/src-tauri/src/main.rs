@@ -282,6 +282,27 @@ async fn get_forwarders(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json
 }
 
 #[tauri::command]
+async fn get_forwarder_race(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::get_forwarder_race(&state, forwarder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_forwarder_race(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    race_id: Option<String>,
+) -> CmdResult<serde_json::Value> {
+    control_api::set_forwarder_race(&state, forwarder_id, race_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_forwarder_config(
     state: State<'_, Arc<AppState>>,
     forwarder_id: String,
@@ -756,6 +777,8 @@ fn main() {
             get_participants,
             upload_race_file,
             get_forwarders,
+            get_forwarder_race,
+            set_forwarder_race,
             get_forwarder_config,
             set_forwarder_config,
             restart_forwarder_service,

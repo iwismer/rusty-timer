@@ -64,6 +64,9 @@ export const store = $state({
   forwarders: null as api.ForwarderEntry[] | null,
   forwardersError: null as string | null,
   selectedForwarderId: null as string | null,
+  forwarderRaceId: null as string | null,
+  forwarderRaceLoading: false,
+  forwarderRaceSaving: false,
 
   // Races
   selectedRaceId: null as string | null,
@@ -664,6 +667,47 @@ export async function loadForwarders(): Promise<void> {
 
 export function selectForwarder(forwarderId: string | null): void {
   store.selectedForwarderId = forwarderId;
+  store.forwarderRaceId = null;
+  store.forwarderRaceLoading = false;
+  store.forwarderRaceSaving = false;
+  if (forwarderId) {
+    void loadForwarderRace(forwarderId);
+  }
+}
+
+export async function loadForwarderRace(forwarderId: string): Promise<void> {
+  store.forwarderRaceLoading = true;
+  try {
+    const result = await api.getForwarderRace(forwarderId);
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceId = result.race_id;
+    }
+  } catch (e) {
+    console.error("Failed to load forwarder race:", e);
+  } finally {
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceLoading = false;
+    }
+  }
+}
+
+export async function setForwarderRace(
+  forwarderId: string,
+  raceId: string | null,
+): Promise<void> {
+  store.forwarderRaceSaving = true;
+  try {
+    const result = await api.setForwarderRace(forwarderId, raceId);
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceId = result.race_id;
+    }
+  } catch (e) {
+    console.error("Failed to set forwarder race:", e);
+  } finally {
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceSaving = false;
+    }
+  }
 }
 
 export function selectRace(raceId: string | null): void {

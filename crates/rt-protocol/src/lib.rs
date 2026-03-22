@@ -708,6 +708,46 @@ pub struct ReceiverProxyRaceDeleteResponse {
     pub error: Option<String>,
 }
 
+/// Receiver-to-server: get the race assigned to a forwarder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceGetRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+}
+
+/// Server-to-receiver: forwarder race assignment response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceGetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub forwarder_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub race_id: Option<String>,
+}
+
+/// Receiver-to-server: set/unset the race assigned to a forwarder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceSetRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+    /// `None` to unassign.
+    pub race_id: Option<String>,
+}
+
+/// Server-to-receiver: forwarder race set response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceSetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub forwarder_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub race_id: Option<String>,
+}
+
 /// Receiver-to-server: get participants for a race.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverProxyParticipantsGetRequest {
@@ -845,6 +885,10 @@ pub enum WsMessage {
     ReceiverProxyParticipantsGetResponse(ReceiverProxyParticipantsGetResponse),
     ReceiverProxyFileUploadRequest(ReceiverProxyFileUploadRequest),
     ReceiverProxyFileUploadResponse(ReceiverProxyFileUploadResponse),
+    ReceiverProxyForwarderRaceGetRequest(ReceiverProxyForwarderRaceGetRequest),
+    ReceiverProxyForwarderRaceGetResponse(ReceiverProxyForwarderRaceGetResponse),
+    ReceiverProxyForwarderRaceSetRequest(ReceiverProxyForwarderRaceSetRequest),
+    ReceiverProxyForwarderRaceSetResponse(ReceiverProxyForwarderRaceSetResponse),
 }
 
 // ---------------------------------------------------------------------------

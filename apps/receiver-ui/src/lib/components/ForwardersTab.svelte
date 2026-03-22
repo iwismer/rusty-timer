@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { store, loadForwarders, selectForwarder } from "$lib/store.svelte";
+  import {
+    store,
+    loadForwarders,
+    selectForwarder,
+    setForwarderRace,
+  } from "$lib/store.svelte";
   import { ForwarderConfig } from "@rusty-timer/shared-ui";
   import type { ConfigApi } from "@rusty-timer/shared-ui";
   import { createForwarderConfigApi } from "$lib/forwarder-config-api";
@@ -132,6 +137,40 @@
             >
               {formatLastRead(fwd.last_read_at)}
             </div>
+          </div>
+        </div>
+
+        <!-- Race assignment -->
+        <div
+          class="bg-surface-0 border border-border rounded-lg mb-6 overflow-hidden"
+        >
+          <div
+            class="px-4 py-3 border-b border-border font-semibold text-text-primary text-sm"
+          >
+            Race Assignment
+          </div>
+          <div class="px-4 py-3 flex items-center gap-3">
+            {#if store.forwarderRaceLoading}
+              <span class="text-sm text-text-muted">Loading...</span>
+            {:else}
+              <select
+                class="flex-1 bg-surface-1 border border-border rounded px-3 py-1.5 text-sm text-text-primary"
+                value={store.forwarderRaceId ?? ""}
+                disabled={store.forwarderRaceSaving}
+                onchange={(e) => {
+                  const val = e.currentTarget.value;
+                  void setForwarderRace(fwd.forwarder_id, val || null);
+                }}
+              >
+                <option value="">No race assigned</option>
+                {#each store.races as race (race.race_id)}
+                  <option value={race.race_id}>{race.name}</option>
+                {/each}
+              </select>
+              {#if store.forwarderRaceSaving}
+                <span class="text-xs text-text-muted">Saving...</span>
+              {/if}
+            {/if}
           </div>
         </div>
 
