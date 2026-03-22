@@ -567,7 +567,13 @@ fn consume_sse_line_for_event(
             *pending_event = Some(event_name.to_owned());
         }
     } else if let Some(rest) = line.strip_prefix("data:") {
-        *pending_data = Some(rest.trim().to_owned());
+        match pending_data {
+            Some(existing) => {
+                existing.push('\n');
+                existing.push_str(rest.trim());
+            }
+            None => *pending_data = Some(rest.trim().to_owned()),
+        }
     }
     None
 }
@@ -1715,6 +1721,7 @@ mod tests {
             ))
         );
         assert_eq!(pending_event, None);
+        assert_eq!(pending_data, None);
     }
 
     #[test]
@@ -1780,6 +1787,29 @@ mod tests {
         );
         let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
         assert_eq!(result, Some(("stream_created".to_owned(), None)));
+    }
+
+    #[test]
+    fn sse_parser_concatenates_multiline_data() {
+        let mut pending_event = None;
+        let mut pending_data = None;
+        assert!(
+            consume_sse_line_for_event("event:test", &mut pending_event, &mut pending_data)
+                .is_none()
+        );
+        assert!(
+            consume_sse_line_for_event("data:line1", &mut pending_event, &mut pending_data)
+                .is_none()
+        );
+        assert!(
+            consume_sse_line_for_event("data:line2", &mut pending_event, &mut pending_data)
+                .is_none()
+        );
+        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        assert_eq!(
+            result,
+            Some(("test".to_owned(), Some("line1\nline2".to_owned())))
+        );
     }
 
     #[tokio::test]
