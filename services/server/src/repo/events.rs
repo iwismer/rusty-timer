@@ -242,6 +242,7 @@ pub async fn set_reader_connected(
     Ok(result.rows_affected() > 0)
 }
 
+#[derive(Default)]
 pub struct StreamMetricsRow {
     pub raw_count: i64,
     pub dedup_count: i64,

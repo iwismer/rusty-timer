@@ -345,7 +345,12 @@ where
                         }
                     }
                     Some(Ok(Message::Close(_))) => break,
-                    Some(Ok(Message::Ping(d))) => { let _ = ws.send(Message::Pong(d)).await; }
+                    Some(Ok(Message::Ping(d))) => {
+                        if ws.send(Message::Pong(d)).await.is_err() {
+                            warn!(session_id = %session_id, "failed to send Pong, connection likely dead");
+                            break;
+                        }
+                    }
                     Some(Ok(_)) => {}
                 }
             }
