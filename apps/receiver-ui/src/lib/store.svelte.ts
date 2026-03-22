@@ -893,7 +893,10 @@ export function initStore(): void {
       }
       for (const stream of s.streams) {
         const key = streamKey(stream.forwarder_id, stream.reader_ip);
-        if (previousEpochByKey.get(key) !== stream.stream_epoch) {
+        if (
+          !previousEpochByKey.has(key) ||
+          previousEpochByKey.get(key) !== stream.stream_epoch
+        ) {
           prunedMetrics.delete(key);
         }
       }

@@ -295,6 +295,55 @@ describe("receiver updater store", () => {
     expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 
+  it("onStreamsSnapshot clears metrics for newly appearing streams", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    // Pre-populate metrics for a stream
+    const key = streamKey("fwd-new", "10.0.0.1:10000");
+    store.streamMetrics = new Map([
+      [
+        key,
+        {
+          forwarder_id: "fwd-new",
+          reader_ip: "10.0.0.1:10000",
+          raw_count: 100,
+          dedup_count: 90,
+          retransmit_count: 10,
+          lag_ms: null,
+          epoch_raw_count: 50,
+          epoch_dedup_count: 45,
+          epoch_retransmit_count: 5,
+          epoch_lag_ms: null,
+          epoch_last_received_at: null,
+          unique_chips: 20,
+        },
+      ],
+    ]);
+    // No previous streams (simulates first snapshot or stream re-appearing)
+    store.streams = null;
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-new",
+          reader_ip: "10.0.0.1:10000",
+          stream_epoch: undefined,
+        } as any,
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    expect(store.streamMetrics.has(key)).toBe(false);
+  });
+
   it("keeps cached metrics across resync until replacement data arrives", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");
