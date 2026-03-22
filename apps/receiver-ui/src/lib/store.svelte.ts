@@ -26,6 +26,7 @@ export type TabId =
   | "streams"
   | "forwarders"
   | "announcer"
+  | "races"
   | "mode"
   | "config"
   | "logs"
@@ -63,6 +64,13 @@ export const store = $state({
   forwarders: null as api.ForwarderEntry[] | null,
   forwardersError: null as string | null,
   selectedForwarderId: null as string | null,
+
+  // Races
+  selectedRaceId: null as string | null,
+  raceParticipants: null as api.ParticipantEntry[] | null,
+  raceUnmatchedChips: null as api.UnmatchedChip[] | null,
+  raceDetailLoading: false,
+  raceDetailError: null as string | null,
 
   // Logs
   logEntries: [] as string[],
@@ -656,6 +664,36 @@ export async function loadForwarders(): Promise<void> {
 
 export function selectForwarder(forwarderId: string | null): void {
   store.selectedForwarderId = forwarderId;
+}
+
+export function selectRace(raceId: string | null): void {
+  store.selectedRaceId = raceId;
+  store.raceParticipants = null;
+  store.raceUnmatchedChips = null;
+  store.raceDetailError = null;
+  if (raceId) {
+    void loadRaceDetail(raceId);
+  }
+}
+
+export async function loadRaceDetail(raceId: string): Promise<void> {
+  store.raceDetailLoading = true;
+  store.raceDetailError = null;
+  try {
+    const resp = await api.getParticipants(raceId);
+    if (store.selectedRaceId === raceId) {
+      store.raceParticipants = resp.participants;
+      store.raceUnmatchedChips = resp.chips_without_participant;
+    }
+  } catch (e) {
+    if (store.selectedRaceId === raceId) {
+      store.raceDetailError = String(e);
+    }
+  } finally {
+    if (store.selectedRaceId === raceId) {
+      store.raceDetailLoading = false;
+    }
+  }
 }
 
 export async function applyMode(): Promise<void> {
