@@ -606,7 +606,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
         Ok(client) => client,
         Err(e) => {
             state.logger.log_at(
-                UiLogLevel::Warn,
+                UiLogLevel::Error,
                 format!("failed to create upstream SSE client: {e}"),
             );
             return;

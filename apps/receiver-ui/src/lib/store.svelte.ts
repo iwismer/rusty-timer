@@ -928,7 +928,10 @@ export function initStore(): void {
       next.set(key, metrics);
       store.streamMetrics = next;
     },
-  })?.catch((e: unknown) => console.error("initSSE failed:", e));
+  })?.catch((e: unknown) => {
+    console.error("initSSE failed:", e);
+    store.error = `Event listener initialization failed: ${String(e)}`;
+  });
 }
 
 export function destroyStore(): void {
