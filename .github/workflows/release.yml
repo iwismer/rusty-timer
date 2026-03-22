@@ -453,11 +453,10 @@ jobs:
       - name: Build receiver UI (SvelteKit)
         run: npm run build --workspace "apps/receiver-ui"
 
+      - uses: cargo-bins/cargo-binstall@main
+
       - name: Install Tauri CLI
-        shell: bash
-        run: |
-          cargo install cargo-binstall --locked
-          cargo binstall tauri-cli --version "^2" --no-confirm
+        run: cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Build Tauri app
         run: cargo tauri build --target x86_64-pc-windows-msvc
