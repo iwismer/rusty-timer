@@ -3,13 +3,14 @@ export interface AnnouncerStreamEntry {
   stream_id: string;
   forwarder_id: string;
   reader_ip: string;
-  display_alias?: string | null;
+  display_alias: string | null;
 }
 
 export interface AnnouncerConfig {
   enabled: boolean;
   enabled_until: string | null;
   selected_stream_ids: string[];
+  /** Server-side list size cap. Valid range: 1..500. */
   max_list_size: number;
   updated_at: string;
   public_enabled: boolean;

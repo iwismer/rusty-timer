@@ -39,15 +39,19 @@
     }
   }
 
+  let openError = $state<string | null>(null);
+
   async function openAnnouncerPage() {
     const url = announcerPageUrl();
     if (!url) return;
+    openError = null;
     try {
       const { openUrl } = await import("@tauri-apps/plugin-opener");
       await openUrl(url);
     } catch (err) {
       if ((window as any).__TAURI_INTERNALS__) {
         console.error("Failed to open announcer page:", err);
+        openError = `Failed to open browser: ${err}`;
       } else {
         // Fallback for non-Tauri (e.g. dev server in browser)
         window.open(url, "_blank");
@@ -60,12 +64,17 @@
   <div class="flex items-center justify-between gap-3 mb-6">
     <h1 class="text-xl font-bold text-text-primary m-0">Announcer</h1>
     {#if announcerPageUrl()}
-      <button
-        onclick={() => void openAnnouncerPage()}
-        class="text-sm font-medium text-action-600 hover:text-action-700 underline cursor-pointer bg-transparent border-none p-0"
-      >
-        Open announcer page
-      </button>
+      <div class="flex items-center gap-2">
+        {#if openError}
+          <span class="text-sm text-red-600">{openError}</span>
+        {/if}
+        <button
+          onclick={() => void openAnnouncerPage()}
+          class="text-sm font-medium text-action-600 hover:text-action-700 underline cursor-pointer bg-transparent border-none p-0"
+        >
+          Open announcer page
+        </button>
+      </div>
     {/if}
   </div>
 

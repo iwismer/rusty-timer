@@ -10,8 +10,8 @@ use axum::{
 use sqlx::Row;
 use uuid::Uuid;
 
-/// Get the stream list as a JSON array. Used by both the HTTP endpoint and
-/// WS proxy handlers.
+/// Fetch all streams from the database as a vector of JSON values.
+/// Used by both the HTTP endpoint and WS proxy handlers.
 pub async fn get_streams_value(state: &AppState) -> Result<Vec<serde_json::Value>, String> {
     let rows = sqlx::query(
         r#"SELECT s.stream_id,

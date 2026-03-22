@@ -1118,10 +1118,11 @@ pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
 
 /// Send a WS command through the active session and wait for a response.
 ///
-/// Uses a 15s timeout. Note: the server applies a 10s `PROXY_TIMEOUT` to both
-/// send and reply phases independently, so the server's total timeout can reach
-/// ~20s in degenerate cases. This means local timeout may fire first under
-/// backpressure.
+/// Uses a 15s timeout. For forwarder proxy requests, the server applies a 10s
+/// `PROXY_TIMEOUT` to both send and reply phases independently, so the server's
+/// total timeout can reach ~20s in degenerate cases and the local timeout may
+/// fire first under backpressure. Announcer and stream-list proxy requests are
+/// handled server-side with no explicit timeout beyond the database query time.
 async fn send_ws_command(
     state: &AppState,
     message: rt_protocol::WsMessage,

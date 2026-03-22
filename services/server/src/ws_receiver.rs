@@ -286,10 +286,23 @@ async fn proxy_streams_list_reply(
 ) -> WsMessage {
     match crate::http::streams::get_streams_value(&state).await {
         Ok(stream_values) => {
-            let streams: Vec<rt_protocol::StreamInfo> = stream_values
-                .into_iter()
-                .filter_map(|v| serde_json::from_value(v).ok())
-                .collect();
+            let mut streams = Vec::with_capacity(stream_values.len());
+            for v in stream_values {
+                match serde_json::from_value::<rt_protocol::StreamInfo>(v) {
+                    Ok(s) => streams.push(s),
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize stream into StreamInfo");
+                        return WsMessage::ReceiverProxyStreamsListResponse(
+                            rt_protocol::ReceiverProxyStreamsListResponse {
+                                request_id: req.request_id,
+                                ok: false,
+                                error: Some(format!("stream deserialization failed: {e}")),
+                                streams: vec![],
+                            },
+                        );
+                    }
+                }
+            }
             WsMessage::ReceiverProxyStreamsListResponse(
                 rt_protocol::ReceiverProxyStreamsListResponse {
                     request_id: req.request_id,
@@ -331,7 +344,7 @@ async fn proxy_announcer_get_config_reply(
             WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
                 request_id: req.request_id,
                 ok: false,
-                error: Some(e),
+                error: Some(e.to_string()),
                 config: serde_json::Value::Null,
             })
         }
@@ -360,7 +373,7 @@ async fn proxy_announcer_put_config_reply(
             WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
                 request_id: req.request_id,
                 ok: false,
-                error: Some(e),
+                error: Some(e.to_string()),
                 config: serde_json::Value::Null,
             })
         }
@@ -372,6 +385,8 @@ async fn proxy_announcer_reset_reply(
     device_id: String,
     req: rt_protocol::ReceiverProxyAnnouncerResetRequest,
 ) -> WsMessage {
+    // NOTE: reset_announcer_runtime is currently infallible.
+    // If it becomes fallible, this handler must propagate errors.
     state.reset_announcer_runtime().await;
     state
         .logger
