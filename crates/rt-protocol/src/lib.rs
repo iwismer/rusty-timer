@@ -1,14 +1,25 @@
 // rt-protocol: Remote forwarding protocol types and serialization.
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
-// deserialization. The enum covers the frozen v1/v1.2 message kinds plus
-// reader-status tracking and reader-control extensions.
+// deserialization. The enum covers the v1/v1.2 message kinds, reader-status
+// tracking, reader-control extensions, receiver proxy commands, and race
+// management.
 
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 fn deserialize_non_negative_i64<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
     let v = i64::deserialize(d)?;
+    if v < 0 {
+        return Err(serde::de::Error::custom(format!(
+            "expected non-negative value, got {v}"
+        )));
+    }
+    Ok(v)
+}
+
+fn deserialize_non_negative_i32<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    let v = i32::deserialize(d)?;
     if v < 0 {
         return Err(serde::de::Error::custom(format!(
             "expected non-negative value, got {v}"
@@ -640,12 +651,200 @@ pub struct ReceiverProxyAnnouncerResetResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Receiver proxy messages for race management
+// ---------------------------------------------------------------------------
+
+/// Receiver-to-server: list all races.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyRacesListRequest {
+    pub request_id: String,
+}
+
+/// Server-to-receiver: races list response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyRacesListResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub races: Vec<RaceInfo>,
+}
+
+/// A race entry returned from the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaceInfo {
+    pub race_id: String,
+    pub name: String,
+    /// RFC 3339 timestamp.
+    pub created_at: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
+    pub participant_count: i64,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
+    pub chip_count: i64,
+}
+
+/// Receiver-to-server: create a new race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyRaceCreateRequest {
+    pub request_id: String,
+    pub name: String,
+}
+
+/// Server-to-receiver: race creation response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyRaceCreateResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub race: Option<RaceInfo>,
+}
+
+/// Receiver-to-server: delete a race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyRaceDeleteRequest {
+    pub request_id: String,
+    pub race_id: String,
+}
+
+/// Server-to-receiver: race deletion response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyRaceDeleteResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Receiver-to-server: get the race assigned to a forwarder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceGetRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+}
+
+/// Server-to-receiver: forwarder race assignment response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceGetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub forwarder_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub race_id: Option<String>,
+}
+
+/// Receiver-to-server: set/unset the race assigned to a forwarder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceSetRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+    /// `None` to unassign.
+    pub race_id: Option<String>,
+}
+
+/// Server-to-receiver: forwarder race set response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyForwarderRaceSetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub forwarder_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub race_id: Option<String>,
+}
+
+/// Receiver-to-server: get participants for a race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyParticipantsGetRequest {
+    pub request_id: String,
+    pub race_id: String,
+}
+
+/// Server-to-receiver: participants response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyParticipantsGetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub participants: Vec<ParticipantInfo>,
+    #[serde(default)]
+    pub chips_without_participant: Vec<UnmatchedChipInfo>,
+}
+
+/// A participant with their associated chip IDs, returned as part of
+/// `ReceiverProxyParticipantsGetResponse`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticipantInfo {
+    #[serde(deserialize_with = "deserialize_non_negative_i32")]
+    pub bib: i32,
+    pub first_name: String,
+    pub last_name: String,
+    /// Gender code from the PPL file (e.g. "M", "F", or "" if unspecified).
+    pub gender: String,
+    pub affiliation: Option<String>,
+    pub chip_ids: Vec<String>,
+}
+
+/// A chip-to-bib mapping where the bib does not correspond to any uploaded
+/// participant for the race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnmatchedChipInfo {
+    pub chip_id: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i32")]
+    pub bib: i32,
+}
+
+/// The kind of file being uploaded for a race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadType {
+    /// A .ppl participant file.
+    Participants,
+    /// A bib-chip mapping file.
+    Chips,
+}
+
+/// Receiver-to-server: upload a file (ppl or bibchip) for a race.
+///
+/// The `file_data` field carries the entire file as a Base64-encoded string.
+/// The client enforces a 10 MB limit; the server enforces ~15 MB encoded
+/// (which corresponds to ~10 MB decoded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyFileUploadRequest {
+    pub request_id: String,
+    pub race_id: String,
+    pub upload_type: UploadType,
+    /// Base64-encoded file content.
+    pub file_data: String,
+    pub file_name: String,
+}
+
+/// Server-to-receiver: file upload response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyFileUploadResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_non_negative_i64")]
+    pub imported: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
 /// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
-/// status tracking, reader control extensions, and receiver-to-server
-/// proxy messages for remote forwarder management and announcer configuration.
+/// status tracking, reader control extensions, receiver-to-server
+/// proxy messages for remote forwarder management, announcer configuration,
+/// and race management.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -693,6 +892,20 @@ pub enum WsMessage {
     ReceiverProxyAnnouncerResetRequest(ReceiverProxyAnnouncerResetRequest),
     ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse),
     ReceiverProxyAnnouncerResetResponse(ReceiverProxyAnnouncerResetResponse),
+    ReceiverProxyRacesListRequest(ReceiverProxyRacesListRequest),
+    ReceiverProxyRacesListResponse(ReceiverProxyRacesListResponse),
+    ReceiverProxyRaceCreateRequest(ReceiverProxyRaceCreateRequest),
+    ReceiverProxyRaceCreateResponse(ReceiverProxyRaceCreateResponse),
+    ReceiverProxyRaceDeleteRequest(ReceiverProxyRaceDeleteRequest),
+    ReceiverProxyRaceDeleteResponse(ReceiverProxyRaceDeleteResponse),
+    ReceiverProxyParticipantsGetRequest(ReceiverProxyParticipantsGetRequest),
+    ReceiverProxyParticipantsGetResponse(ReceiverProxyParticipantsGetResponse),
+    ReceiverProxyFileUploadRequest(ReceiverProxyFileUploadRequest),
+    ReceiverProxyFileUploadResponse(ReceiverProxyFileUploadResponse),
+    ReceiverProxyForwarderRaceGetRequest(ReceiverProxyForwarderRaceGetRequest),
+    ReceiverProxyForwarderRaceGetResponse(ReceiverProxyForwarderRaceGetResponse),
+    ReceiverProxyForwarderRaceSetRequest(ReceiverProxyForwarderRaceSetRequest),
+    ReceiverProxyForwarderRaceSetResponse(ReceiverProxyForwarderRaceSetResponse),
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,6 +1323,224 @@ mod tests {
     }
 
     #[test]
+    fn receiver_proxy_races_list_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyRacesListRequest(ReceiverProxyRacesListRequest {
+            request_id: "req-10".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_races_list_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_races_list_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyRacesListResponse(ReceiverProxyRacesListResponse {
+            request_id: "req-10".into(),
+            ok: true,
+            error: None,
+            races: vec![RaceInfo {
+                race_id: "race-1".into(),
+                name: "5K Fun Run".into(),
+                created_at: "2026-03-21T10:00:00Z".into(),
+                participant_count: 42,
+                chip_count: 50,
+            }],
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_races_list_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_race_create_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyRaceCreateRequest(ReceiverProxyRaceCreateRequest {
+            request_id: "req-11".into(),
+            name: "10K Championship".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_race_create_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_race_create_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyRaceCreateResponse(ReceiverProxyRaceCreateResponse {
+            request_id: "req-11".into(),
+            ok: true,
+            error: None,
+            race: Some(RaceInfo {
+                race_id: "race-2".into(),
+                name: "10K Championship".into(),
+                created_at: "2026-03-21T11:00:00Z".into(),
+                participant_count: 0,
+                chip_count: 0,
+            }),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_race_create_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_race_delete_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyRaceDeleteRequest(ReceiverProxyRaceDeleteRequest {
+            request_id: "req-12".into(),
+            race_id: "race-1".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_race_delete_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_race_delete_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyRaceDeleteResponse(ReceiverProxyRaceDeleteResponse {
+            request_id: "req-12".into(),
+            ok: true,
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_race_delete_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_participants_get_request_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyParticipantsGetRequest(ReceiverProxyParticipantsGetRequest {
+                request_id: "req-13".into(),
+                race_id: "race-1".into(),
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_participants_get_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_participants_get_response_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyParticipantsGetResponse(ReceiverProxyParticipantsGetResponse {
+                request_id: "req-13".into(),
+                ok: true,
+                error: None,
+                participants: vec![ParticipantInfo {
+                    bib: 101,
+                    first_name: "Alice".into(),
+                    last_name: "Smith".into(),
+                    gender: "F".into(),
+                    affiliation: Some("Fast Runners Club".into()),
+                    chip_ids: vec!["CHIP001".into(), "CHIP002".into()],
+                }],
+                chips_without_participant: vec![UnmatchedChipInfo {
+                    chip_id: "CHIP999".into(),
+                    bib: 999,
+                }],
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_participants_get_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_file_upload_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyFileUploadRequest(ReceiverProxyFileUploadRequest {
+            request_id: "req-14".into(),
+            race_id: "race-1".into(),
+            upload_type: UploadType::Participants,
+            file_data: "SGVsbG8gV29ybGQ=".into(),
+            file_name: "participants.csv".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_file_upload_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_file_upload_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyFileUploadResponse(ReceiverProxyFileUploadResponse {
+            request_id: "req-14".into(),
+            ok: true,
+            error: None,
+            imported: 25,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_file_upload_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_race_create_error_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyRaceCreateResponse(ReceiverProxyRaceCreateResponse {
+            request_id: "req-err".into(),
+            ok: false,
+            error: Some("race name must not be empty".into()),
+            race: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_races_list_error_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyRacesListResponse(ReceiverProxyRacesListResponse {
+            request_id: "req-err2".into(),
+            ok: false,
+            error: Some("database connection failed".into()),
+            races: vec![],
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn negative_race_participant_count_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_races_list_response",
+            "request_id": "req-neg",
+            "ok": true,
+            "races": [{
+                "race_id": "race-1",
+                "name": "5K",
+                "created_at": "2026-03-21T10:00:00Z",
+                "participant_count": -1,
+                "chip_count": 0
+            }]
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn negative_file_upload_imported_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_file_upload_response",
+            "request_id": "req-neg2",
+            "ok": true,
+            "imported": -5
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
+    }
+
+    #[test]
     fn reader_download_progress_round_trip() {
         let msg = WsMessage::ReaderDownloadProgress(ReaderDownloadProgress {
             reader_ip: "192.168.0.1:10000".into(),
@@ -1122,5 +1553,168 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_get_request_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyForwarderRaceGetRequest(ReceiverProxyForwarderRaceGetRequest {
+                request_id: "req-fg1".into(),
+                forwarder_id: "fwd-abc".into(),
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_get_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_get_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceGetResponse(
+            ReceiverProxyForwarderRaceGetResponse {
+                request_id: "req-fg1".into(),
+                ok: true,
+                error: None,
+                forwarder_id: "fwd-abc".into(),
+                race_id: Some("race-1".into()),
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_get_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_get_response_unassigned_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceGetResponse(
+            ReceiverProxyForwarderRaceGetResponse {
+                request_id: "req-fg2".into(),
+                ok: true,
+                error: None,
+                forwarder_id: "fwd-abc".into(),
+                race_id: None,
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_request_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyForwarderRaceSetRequest(ReceiverProxyForwarderRaceSetRequest {
+                request_id: "req-fs1".into(),
+                forwarder_id: "fwd-abc".into(),
+                race_id: Some("race-1".into()),
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_set_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_request_unassign_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyForwarderRaceSetRequest(ReceiverProxyForwarderRaceSetRequest {
+                request_id: "req-fs2".into(),
+                forwarder_id: "fwd-abc".into(),
+                race_id: None,
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceSetResponse(
+            ReceiverProxyForwarderRaceSetResponse {
+                request_id: "req-fs1".into(),
+                ok: true,
+                error: None,
+                forwarder_id: "fwd-abc".into(),
+                race_id: Some("race-1".into()),
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_set_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_response_error_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceSetResponse(
+            ReceiverProxyForwarderRaceSetResponse {
+                request_id: "req-fs3".into(),
+                ok: false,
+                error: Some("race not found".into()),
+                forwarder_id: "fwd-abc".into(),
+                race_id: None,
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn upload_type_chips_round_trip() {
+        let msg = WsMessage::ReceiverProxyFileUploadRequest(ReceiverProxyFileUploadRequest {
+            request_id: "req-chips".into(),
+            race_id: "race-1".into(),
+            upload_type: UploadType::Chips,
+            file_data: "YmlkLGNoaXAK".into(),
+            file_name: "chips.bibchip".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"upload_type\":\"chips\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn negative_participant_bib_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_participants_get_response",
+            "request_id": "req-neg-bib",
+            "ok": true,
+            "participants": [{
+                "bib": -1,
+                "first_name": "Alice",
+                "last_name": "Smith",
+                "gender": "F",
+                "affiliation": null,
+                "chip_ids": []
+            }],
+            "chips_without_participant": []
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn negative_unmatched_chip_bib_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_participants_get_response",
+            "request_id": "req-neg-chip-bib",
+            "ok": true,
+            "participants": [],
+            "chips_without_participant": [{
+                "chip_id": "CHIP001",
+                "bib": -5
+            }]
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
     }
 }

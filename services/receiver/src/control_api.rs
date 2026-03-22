@@ -912,52 +912,159 @@ pub async fn get_streams(state: &AppState) -> StreamsResponse {
     state.build_streams_response().await
 }
 
+// ---------------------------------------------------------------------------
+// Race management (via WS proxy session)
+// ---------------------------------------------------------------------------
+
 pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let profile = {
-        let db = state.db.lock().await;
-        match db.load_profile() {
-            Ok(Some(p)) => p,
-            Ok(None) => return Err(ReceiverError::NotFound("no profile".to_owned())),
-            Err(e) => return Err(ReceiverError::Internal(e.to_string())),
+    let msg = rt_protocol::WsMessage::ReceiverProxyRacesListRequest(
+        rt_protocol::ReceiverProxyRacesListRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyRacesListResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({ "races": r.races }))
         }
-    };
-
-    let Some(base) = http_base_url(&profile.server_url) else {
-        return Err(ReceiverError::BadRequest("invalid upstream URL".to_owned()));
-    };
-    let url = format!("{base}/api/v1/races");
-
-    let response = match state
-        .http_client
-        .get(&url)
-        .bearer_auth(profile.token)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
-        }
-    };
-
-    if !response.status().is_success() {
-        return Err(ReceiverError::UpstreamError(format!(
-            "server returned {}",
-            response.status()
-        )));
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
     }
+}
 
-    match response.json::<serde_json::Value>().await {
-        Ok(body) => Ok(body),
-        Err(e) => Err(ReceiverError::UpstreamError(format!(
-            "invalid JSON from upstream: {e}"
-        ))),
+pub async fn create_race(
+    state: &AppState,
+    name: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyRaceCreateRequest(
+        rt_protocol::ReceiverProxyRaceCreateRequest {
+            request_id: generate_request_id(),
+            name,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyRaceCreateResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            match r.race {
+                Some(race) => Ok(serde_json::json!(race)),
+                None => Err(ReceiverError::UpstreamError(
+                    "server returned success but no race data".to_owned(),
+                )),
+            }
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn delete_race(state: &AppState, race_id: String) -> Result<(), ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyRaceDeleteRequest(
+        rt_protocol::ReceiverProxyRaceDeleteRequest {
+            request_id: generate_request_id(),
+            race_id,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyRaceDeleteResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn get_participants(
+    state: &AppState,
+    race_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyParticipantsGetRequest(
+        rt_protocol::ReceiverProxyParticipantsGetRequest {
+            request_id: generate_request_id(),
+            race_id,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyParticipantsGetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({
+                "participants": r.participants,
+                "chips_without_participant": r.chips_without_participant,
+            }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn upload_race_file(
+    state: &AppState,
+    race_id: String,
+    upload_type: String,
+    file_data: String,
+    file_name: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let upload_type_enum = match upload_type.as_str() {
+        "participants" => rt_protocol::UploadType::Participants,
+        "chips" => rt_protocol::UploadType::Chips,
+        other => {
+            return Err(ReceiverError::BadRequest(format!(
+                "invalid upload_type: {other}, expected 'participants' or 'chips'"
+            )));
+        }
+    };
+    let msg = rt_protocol::WsMessage::ReceiverProxyFileUploadRequest(
+        rt_protocol::ReceiverProxyFileUploadRequest {
+            request_id: generate_request_id(),
+            race_id,
+            upload_type: upload_type_enum,
+            file_data,
+            file_name,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyFileUploadResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({ "imported": r.imported }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
     }
 }
 
 // ---------------------------------------------------------------------------
 // Forwarder list (via HTTP to server) + proxy commands (via WS session:
-// config, restart, device control)
+// config, restart, device control, race assignment) + shared proxy helpers
 // ---------------------------------------------------------------------------
 
 /// Generate a process-unique request ID for WS proxy commands.
@@ -1116,13 +1223,74 @@ pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
     }
 }
 
+pub async fn get_forwarder_race(
+    state: &AppState,
+    forwarder_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyForwarderRaceGetRequest(
+        rt_protocol::ReceiverProxyForwarderRaceGetRequest {
+            request_id: generate_request_id(),
+            forwarder_id: forwarder_id.clone(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({
+                "forwarder_id": r.forwarder_id,
+                "race_id": r.race_id,
+            }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn set_forwarder_race(
+    state: &AppState,
+    forwarder_id: String,
+    race_id: Option<String>,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyForwarderRaceSetRequest(
+        rt_protocol::ReceiverProxyForwarderRaceSetRequest {
+            request_id: generate_request_id(),
+            forwarder_id: forwarder_id.clone(),
+            race_id,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({
+                "forwarder_id": r.forwarder_id,
+                "race_id": r.race_id,
+            }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
 /// Send a WS command through the active session and wait for a response.
 ///
 /// Uses a 15s timeout. For forwarder proxy requests, the server applies a 10s
 /// `PROXY_TIMEOUT` to both send and reply phases independently, so the server's
 /// total timeout can reach ~20s in degenerate cases and the local timeout may
-/// fire first under backpressure. Announcer and stream-list proxy requests are
-/// handled server-side with no explicit timeout beyond the database query time.
+/// fire first under backpressure. Non-forwarder proxy requests (announcer,
+/// stream-list, race management) are handled server-side with no explicit
+/// timeout beyond the database query time.
 async fn send_ws_command(
     state: &AppState,
     message: rt_protocol::WsMessage,
@@ -1145,7 +1313,7 @@ async fn send_ws_command(
 
     let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
         .await
-        .map_err(|_| ReceiverError::UpstreamError("server response timeout".to_owned()))?
+        .map_err(|_| ReceiverError::UpstreamError("upstream response timeout (15s)".to_owned()))?
         .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
 
     // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,

@@ -64,6 +64,13 @@ impl WsCommand {
             WsMessage::ReceiverProxyAnnouncerConfigGetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyAnnouncerConfigSetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyAnnouncerResetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyRacesListRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyRaceCreateRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyRaceDeleteRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyParticipantsGetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyFileUploadRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyForwarderRaceGetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyForwarderRaceSetRequest(r) => r.request_id.clone(),
             _ => return Err((message, reply)),
         };
         Ok(Self {
@@ -148,6 +155,13 @@ fn proxy_response_request_id(msg: &WsMessage) -> Option<&str> {
         WsMessage::ReceiverProxyStreamsListResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyAnnouncerResetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyRacesListResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyRaceCreateResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyRaceDeleteResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyParticipantsGetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyFileUploadResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => Some(&r.request_id),
         _ => None,
     }
 }

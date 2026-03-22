@@ -121,14 +121,40 @@ export type ReceiverMode =
       targets: ReplayTarget[];
     };
 
+/** Corresponds to RaceInfo in rt-protocol. */
 export interface RaceEntry {
   race_id: string;
   name: string;
   created_at: string;
+  participant_count: number;
+  chip_count: number;
 }
 
 export interface RacesResponse {
   races: RaceEntry[];
+}
+
+export interface ParticipantEntry {
+  bib: number;
+  first_name: string;
+  last_name: string;
+  gender: string;
+  affiliation: string | null;
+  chip_ids: string[];
+}
+
+export interface UnmatchedChip {
+  chip_id: string;
+  bib: number;
+}
+
+export interface ParticipantsResponse {
+  participants: ParticipantEntry[];
+  chips_without_participant: UnmatchedChip[];
+}
+
+export interface UploadResult {
+  imported: number;
 }
 
 export interface ReplayTargetEpochOption {
@@ -234,6 +260,34 @@ export async function getRaces(): Promise<RacesResponse> {
   return invoke<RacesResponse>("get_races");
 }
 
+export async function createRace(name: string): Promise<RaceEntry> {
+  return invoke<RaceEntry>("create_race", { name });
+}
+
+export async function deleteRace(raceId: string): Promise<void> {
+  await invoke("delete_race", { raceId });
+}
+
+export async function getParticipants(
+  raceId: string,
+): Promise<ParticipantsResponse> {
+  return invoke<ParticipantsResponse>("get_participants", { raceId });
+}
+
+export async function uploadRaceFile(
+  raceId: string,
+  uploadType: "participants" | "chips",
+  fileData: string,
+  fileName: string,
+): Promise<UploadResult> {
+  return invoke<UploadResult>("upload_race_file", {
+    raceId,
+    uploadType,
+    fileData,
+    fileName,
+  });
+}
+
 export async function getReplayTargetEpochs(
   stream: StreamRef,
 ): Promise<ReplayTargetEpochsResponse> {
@@ -296,6 +350,27 @@ export async function updateLocalPort(
 
 export async function getForwarders(): Promise<ForwardersResponse> {
   return invoke<ForwardersResponse>("get_forwarders");
+}
+
+export interface ForwarderRaceResponse {
+  forwarder_id: string;
+  race_id: string | null;
+}
+
+export async function getForwarderRace(
+  forwarderId: string,
+): Promise<ForwarderRaceResponse> {
+  return invoke<ForwarderRaceResponse>("get_forwarder_race", { forwarderId });
+}
+
+export async function setForwarderRace(
+  forwarderId: string,
+  raceId: string | null,
+): Promise<ForwarderRaceResponse> {
+  return invoke<ForwarderRaceResponse>("set_forwarder_race", {
+    forwarderId,
+    raceId,
+  });
 }
 
 export async function getForwarderConfig(

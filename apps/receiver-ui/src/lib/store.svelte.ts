@@ -26,6 +26,7 @@ export type TabId =
   | "streams"
   | "forwarders"
   | "announcer"
+  | "races"
   | "mode"
   | "config"
   | "logs"
@@ -63,6 +64,17 @@ export const store = $state({
   forwarders: null as api.ForwarderEntry[] | null,
   forwardersError: null as string | null,
   selectedForwarderId: null as string | null,
+  forwarderRaceId: null as string | null,
+  forwarderRaceLoading: false,
+  forwarderRaceSaving: false,
+  forwarderRaceError: null as string | null,
+
+  // Races
+  selectedRaceId: null as string | null,
+  raceParticipants: null as api.ParticipantEntry[] | null,
+  raceUnmatchedChips: null as api.UnmatchedChip[] | null,
+  raceDetailLoading: false,
+  raceDetailError: null as string | null,
 
   // Logs
   logEntries: [] as string[],
@@ -656,6 +668,85 @@ export async function loadForwarders(): Promise<void> {
 
 export function selectForwarder(forwarderId: string | null): void {
   store.selectedForwarderId = forwarderId;
+  store.forwarderRaceId = null;
+  store.forwarderRaceLoading = false;
+  store.forwarderRaceSaving = false;
+  store.forwarderRaceError = null;
+  if (forwarderId) {
+    void loadForwarderRace(forwarderId);
+  }
+}
+
+export async function loadForwarderRace(forwarderId: string): Promise<void> {
+  store.forwarderRaceLoading = true;
+  store.forwarderRaceError = null;
+  try {
+    const result = await api.getForwarderRace(forwarderId);
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceId = result.race_id;
+    }
+  } catch (e) {
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceError = `Failed to load race assignment: ${String(e)}`;
+    }
+  } finally {
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceLoading = false;
+    }
+  }
+}
+
+export async function setForwarderRace(
+  forwarderId: string,
+  raceId: string | null,
+): Promise<void> {
+  store.forwarderRaceSaving = true;
+  store.forwarderRaceError = null;
+  try {
+    const result = await api.setForwarderRace(forwarderId, raceId);
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceId = result.race_id;
+    }
+  } catch (e) {
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceError = `Failed to save race assignment: ${String(e)}`;
+      void loadForwarderRace(forwarderId);
+    }
+  } finally {
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceSaving = false;
+    }
+  }
+}
+
+export function selectRace(raceId: string | null): void {
+  store.selectedRaceId = raceId;
+  store.raceParticipants = null;
+  store.raceUnmatchedChips = null;
+  store.raceDetailError = null;
+  if (raceId) {
+    void loadRaceDetail(raceId);
+  }
+}
+
+export async function loadRaceDetail(raceId: string): Promise<void> {
+  store.raceDetailLoading = true;
+  store.raceDetailError = null;
+  try {
+    const resp = await api.getParticipants(raceId);
+    if (store.selectedRaceId === raceId) {
+      store.raceParticipants = resp.participants;
+      store.raceUnmatchedChips = resp.chips_without_participant;
+    }
+  } catch (e) {
+    if (store.selectedRaceId === raceId) {
+      store.raceDetailError = String(e);
+    }
+  } finally {
+    if (store.selectedRaceId === raceId) {
+      store.raceDetailLoading = false;
+    }
+  }
 }
 
 export async function applyMode(): Promise<void> {
