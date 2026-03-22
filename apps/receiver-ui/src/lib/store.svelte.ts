@@ -588,9 +588,6 @@ export async function loadAll(): Promise<void> {
     if (nextForwarders.ok) {
       store.forwarders = nextForwarders.forwarders.forwarders;
       store.forwardersError = null;
-      // Reset live-tracking caches so they don't carry stale data across refreshes.
-      seenChipsByForwarder.clear();
-      streamReadTotals.clear();
       syncSelectedForwarder();
     } else {
       store.forwarders = null;
@@ -636,8 +633,6 @@ export async function loadForwarders(): Promise<void> {
   try {
     const result = await api.getForwarders();
     store.forwarders = result.forwarders;
-    seenChipsByForwarder.clear();
-    streamReadTotals.clear();
     syncSelectedForwarder();
   } catch (error) {
     console.error("Failed to load forwarders:", error);
@@ -892,81 +887,16 @@ export async function confirmUpdateInstall(): Promise<void> {
 
 // --------------- SSE + Init ---------------
 
-// Track chips seen per forwarder during this SSE session so unique_chips
-// can be bumped live for genuinely new chips.  Starts empty — chips already
-// counted by the server are not pre-populated, so duplicate arrivals of
-// already-known chips may over-count unique_chips until the next full reload.
-const seenChipsByForwarder = new Map<string, Set<string>>();
-
-function applyForwarderLastRead(
-  forwarderId: string,
-  lastReadAt: string,
-  chipId: string,
-): void {
+function applyForwarderLastRead(forwarderId: string, lastReadAt: string): void {
   if (!store.forwarders) return;
   const idx = store.forwarders.findIndex((f) => f.forwarder_id === forwarderId);
   if (idx === -1) return;
 
-  let seen = seenChipsByForwarder.get(forwarderId);
-  if (!seen) {
-    seen = new Set<string>();
-    seenChipsByForwarder.set(forwarderId, seen);
-  }
-  const isNewChip = !seen.has(chipId);
-  seen.add(chipId);
-
   const fwd = { ...store.forwarders[idx] };
   fwd.last_read_at = lastReadAt;
-  if (isNewChip) {
-    fwd.unique_chips = fwd.unique_chips + 1;
-  }
   const next = [...store.forwarders];
   next[idx] = fwd;
   store.forwarders = next;
-}
-
-// Track per-stream read totals so stream_counts_updated events can be
-// aggregated into forwarder-level total_reads for live display.
-const streamReadTotals = new Map<
-  string,
-  { forwarderId: string; total: number }
->();
-
-function applyForwarderStreamCounts(updates: StreamCountUpdate[]): void {
-  if (!store.forwarders) return;
-
-  const affectedForwarders = new Set<string>();
-  for (const u of updates) {
-    const key = streamKey(u.forwarder_id, u.reader_ip);
-    streamReadTotals.set(key, {
-      forwarderId: u.forwarder_id,
-      total: u.reads_total,
-    });
-    affectedForwarders.add(u.forwarder_id);
-  }
-
-  if (affectedForwarders.size === 0) return;
-
-  let changed = false;
-  const next = store.forwarders.map((fwd) => {
-    if (!affectedForwarders.has(fwd.forwarder_id)) return fwd;
-
-    let sum = 0;
-    for (const [, entry] of streamReadTotals) {
-      if (entry.forwarderId === fwd.forwarder_id) {
-        sum += entry.total;
-      }
-    }
-    if (sum > fwd.total_reads) {
-      changed = true;
-      return { ...fwd, total_reads: sum };
-    }
-    return fwd;
-  });
-
-  if (changed) {
-    store.forwarders = next;
-  }
 }
 
 export function initStore(): void {
@@ -1055,7 +985,6 @@ export function initStore(): void {
     onStreamCountsUpdated: (updates) => {
       const needsResync = applyStreamCountUpdates(updates);
       if (needsResync) void loadAll();
-      applyForwarderStreamCounts(updates);
     },
     onModeChanged: (mode) => {
       applyHydratedMode(mode);
@@ -1065,11 +994,7 @@ export function initStore(): void {
       const next = new Map(store.lastReads);
       next.set(key, read);
       store.lastReads = next;
-      applyForwarderLastRead(
-        read.forwarder_id,
-        new Date().toISOString(),
-        read.chip_id,
-      );
+      applyForwarderLastRead(read.forwarder_id, new Date().toISOString());
     },
     onStreamMetricsUpdated: (metrics) => {
       const key = streamKey(metrics.forwarder_id, metrics.reader_ip);
