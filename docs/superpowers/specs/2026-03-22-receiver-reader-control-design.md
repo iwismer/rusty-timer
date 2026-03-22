@@ -109,9 +109,10 @@ proxy_reader_control_reply(state, req) -> WsMessage::ReceiverProxyReaderControlR
 ```
 
 The async function:
-1. Looks up `state.forwarder_command_senders` for `req.forwarder_id`
-2. For request/response actions (`GetInfo`, `SyncClock`, `SetReadMode`, `SetTto`, `SetRecording`, `StopDownload`, `Refresh`, `Reconnect`): creates a oneshot, sends `ForwarderCommand::ReaderControl`, awaits reply with timeout
-3. For fire-and-forget actions (`ClearRecords`, `StartDownload`): sends `ForwarderCommand::ReaderControlFireAndForget`, returns `ok: true` immediately
+1. Validates `req.reader_ip` format using `validate_reader_ip()` (must be valid `SocketAddrV4`), returning `ok: false, error: "invalid reader_ip format"` on failure — consistent with the HTTP endpoints
+2. Looks up `state.forwarder_command_senders` for `req.forwarder_id`
+3. For request/response actions (`GetInfo`, `SyncClock`, `SetReadMode`, `SetTto`, `SetRecording`, `StopDownload`, `Refresh`, `Reconnect`): creates a oneshot, sends `ForwarderCommand::ReaderControl`, awaits reply with timeout
+4. For fire-and-forget actions (`ClearRecords`, `StartDownload`): sends `ForwarderCommand::ReaderControlFireAndForget`, returns `ok: true` immediately. These are fire-and-forget because they trigger long-running operations — `ClearRecords` runs a 10s erase sequence and `StartDownload` streams data with progress reported via `ReaderDownloadProgress`
 4. Maps `ForwarderProxyReply::Response(resp)` to the response struct, handling `Timeout` and `InternalError` as `ok: false`
 
 ### `ws_receiver.rs` - Sentinel intercepts
@@ -125,13 +126,13 @@ Same pattern as `__reader_status_changed`.
 ### `ws_forwarder.rs` - Sentinel broadcasts
 
 After the existing `ReaderInfoUpdate` handler (which writes to `state.reader_states` and sends `DashboardEvent::ReaderInfoUpdated`), add:
-1. Look up stream(s) for this forwarder + reader_ip
-2. Build `ReceiverReaderInfoUpdate` with `stream_id`, serialize to JSON
+1. Look up `stream_id` via `stream_map.get(&update.reader_ip)` (the in-scope local `HashMap<String, Uuid>`)
+2. Build `ReceiverReaderInfoUpdate` with `stream_id`, wrap as `WsMessage::ReceiverReaderInfoUpdate(update)`, serialize to JSON (must be the full `WsMessage` envelope with `kind` tag, matching the `ReaderStatusChanged` sentinel pattern)
 3. Send as sentinel `ReadEvent` with `read_type = "__reader_info_updated"` into the stream's broadcast channel
 
 After the existing `ReaderDownloadProgress` handler (which sends `DashboardEvent::ReaderDownloadProgress`), add:
-1. Look up stream(s) for this forwarder + reader_ip
-2. Build `ReceiverReaderDownloadProgress` with `stream_id`, serialize to JSON
+1. Look up `stream_id` via `stream_map.get(&progress.reader_ip)` (same in-scope local map)
+2. Build `ReceiverReaderDownloadProgress` with `stream_id`, wrap as `WsMessage::ReceiverReaderDownloadProgress(progress)`, serialize to JSON (full `WsMessage` envelope)
 3. Send as sentinel `ReadEvent` with `read_type = "__reader_download_progress"` into the stream's broadcast channel
 
 ---
