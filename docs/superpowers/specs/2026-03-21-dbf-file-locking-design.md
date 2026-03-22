@@ -22,18 +22,20 @@ Add `use fs2::FileExt;` to imports.
 
 Current sequence:
 ```
-open → read header → sanity check → seek → write record → update count → flush → drop
+exists check → (create if missing) → open → read header → sanity check → seek → write record → update count → flush → drop
 ```
 
 New sequence:
 ```
-open → lock_exclusive → read header → sanity check → seek → write record → update count → flush → unlock → drop
+create-or-open → lock_exclusive → (init header if empty) → read header → sanity check → seek → write record → update count → flush → unlock → drop
 ```
 
 Specifically:
-1. After `OpenOptions::new().read(true).write(true).open(path)?`, call `file.lock_exclusive()?`.
-2. After `file.flush()?`, call `file.unlock()?`.
-3. Error paths don't need explicit unlock — dropping the file handle releases the lock on both Windows (`LockFileEx`) and Unix (`flock`).
+1. Replace the `path.exists()` / `create_empty_dbf` check and separate `open()` with a single `OpenOptions::new().read(true).write(true).create(true).open(path)?`. This atomically creates the file if it doesn't exist without truncating an existing one.
+2. Call `file.lock_exclusive()?` immediately after opening.
+3. Check the file length (e.g., `file.metadata()?.len() == 0`). If zero, write the empty DBF header (from the embedded template) while holding the lock. This eliminates the TOCTOU race where two concurrent writers could both try to create/initialize the file.
+4. After `file.flush()?`, call `file.unlock()?`. The explicit unlock is for clarity — dropping the file handle also releases the lock on both Windows (`LockFileEx`) and Unix (`flock`).
+5. `lock_exclusive()` errors propagate via `?`, surfacing as write failures in `run_dbf_writer`'s existing `consecutive_failures` counter.
 
 ### `services/receiver/Cargo.toml`
 
@@ -43,10 +45,10 @@ Add `fs2 = "0.4"` to `[dependencies]`.
 
 1. **Existing tests pass unchanged.** Adding locking to `append_record` doesn't change its behavior for single-threaded callers.
 
-2. **New test: `append_record_concurrent_writers_produce_valid_file`.** Spawn two threads that each call `append_record` 50 times on the same file. After both complete, verify the file contains exactly 100 records and is readable by the `dbase` crate without corruption. Confirms the lock serializes concurrent writers.
+2. **New test: `append_record_concurrent_writers_produce_valid_file`.** Spawn two threads that each call `append_record` 50 times on the same file, using different reader indices per thread so records are distinguishable. After both complete, verify the file contains exactly 100 records, is readable by the `dbase` crate without corruption, and each thread's records are individually correct. Confirms the lock serializes concurrent writers.
 
 ## Non-goals
 
-- Locking in `create_empty_dbf` or `clear_dbf` — these are user-initiated one-shot operations, not concurrent with record writes.
+- Locking in `create_empty_dbf` or `clear_dbf` — these are user-initiated one-shot operations, not concurrent with record writes. Note: on Unix, `clear_dbf` creates a new file (new inode), so an existing `flock` lock on the old inode provides no protection. On Windows, the exclusive lock blocks the overwrite, which is the safe behavior on the production platform.
 - Holding the lock across the writer task's lifetime — this would block Race Director from reading during an active race.
 - Batching records under a single lock — IPICO Direct writes one at a time, and the throughput doesn't warrant batching.
