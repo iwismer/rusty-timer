@@ -56,10 +56,13 @@
   }
 
   function formatLastReadTimestamp(timestamp: string): string {
-    const match = timestamp.match(
-      /(?:^|[T\s])(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:$|Z|[+-]\d{2}:?\d{2}|\s)/,
-    );
-    return match?.[1] ?? timestamp;
+    const d = new Date(timestamp);
+    if (isNaN(d.getTime())) return timestamp;
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    const ms = String(d.getMilliseconds()).padStart(3, "0");
+    return `${hh}:${mm}:${ss}.${ms}`;
   }
 
   function formatLag(lagMs: number | null): string {

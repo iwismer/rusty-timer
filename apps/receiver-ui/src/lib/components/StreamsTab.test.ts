@@ -127,7 +127,11 @@ describe("StreamsTab", () => {
   it("renders last read with time only and left-aligned text", () => {
     render(StreamsTab);
 
-    const lastRead = screen.getByText(/14:23:05\.123/);
+    const timestamp = new Date("2026-03-20T14:23:05.123Z");
+    const expectedTime = `${String(timestamp.getHours()).padStart(2, "0")}:${String(timestamp.getMinutes()).padStart(2, "0")}:${String(timestamp.getSeconds()).padStart(2, "0")}.${String(timestamp.getMilliseconds()).padStart(3, "0")}`;
+    const lastRead = screen.getByText(
+      new RegExp(expectedTime.replace(".", "\\.")),
+    );
     expect(lastRead).toBeInTheDocument();
     expect(lastRead).not.toHaveTextContent("2026-03-20");
     expect(lastRead.closest("td")).toHaveClass("text-left");
