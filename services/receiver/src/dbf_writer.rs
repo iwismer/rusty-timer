@@ -318,9 +318,21 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
 
 /// Rewrite the DBF file at `path` as empty (header only, zero records).
 ///
-/// If the file does not exist it is created.
+/// If the file does not exist it is created. An exclusive lock is acquired so
+/// clears serialize with concurrent appends.
 pub fn clear_dbf(path: &Path) -> std::io::Result<()> {
-    create_empty_dbf(path)
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+
+    file.lock_exclusive()?;
+    file.set_len(0)?;
+    write_empty_header(&mut file)?;
+    file.unlock()?;
+    Ok(())
 }
 
 /// Maximum consecutive I/O failures before the writer gives up and stops.
@@ -854,6 +866,48 @@ mod tests {
         }
         assert_eq!(start_count, 50);
         assert_eq!(finish_count, 50);
+    }
+
+    #[test]
+    fn clear_dbf_waits_for_existing_exclusive_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("locked-clear.dbf");
+
+        let raw = sample_raw_frame();
+        let rec = map_to_dbf_fields(&raw, EventType::Finish, 0).unwrap();
+        append_record(&path, &rec).unwrap();
+
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        lock_file.lock_exclusive().unwrap();
+
+        let path_for_thread = path.clone();
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let result = clear_dbf(&path_for_thread);
+            tx.send(result).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "clear_dbf should wait for the active file lock instead of rewriting immediately"
+        );
+
+        lock_file.unlock().unwrap();
+
+        let result = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        result.unwrap();
+        handle.join().unwrap();
+
+        let mut reader = dbase::Reader::from_path(&path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert_eq!(records.len(), 0);
     }
 
     #[tokio::test]

@@ -95,6 +95,7 @@ export const store = $state({
 
   // Stream action state
   streamActionBusy: false,
+  streamEventTypeBusy: {} as Record<string, boolean>,
 
   // Version info
   appVersion: "",
@@ -686,6 +687,41 @@ export async function toggleSubscription(
     store.error = String(e);
   } finally {
     store.streamActionBusy = false;
+  }
+}
+
+export async function updateStreamEventType(
+  stream: api.StreamEntry,
+  eventType: "start" | "finish",
+): Promise<void> {
+  if (!store.streams || !stream.subscribed) return;
+
+  const key = streamKey(stream.forwarder_id, stream.reader_ip);
+  if (store.streamEventTypeBusy[key]) return;
+
+  store.streamEventTypeBusy = { ...store.streamEventTypeBusy, [key]: true };
+  try {
+    store.error = null;
+    await api.updateSubscriptionEventType(
+      {
+        forwarder_id: stream.forwarder_id,
+        reader_ip: stream.reader_ip,
+      },
+      eventType,
+    );
+    store.streams = {
+      ...store.streams,
+      streams: store.streams.streams.map((candidate) =>
+        candidate.forwarder_id === stream.forwarder_id &&
+        candidate.reader_ip === stream.reader_ip
+          ? { ...candidate, event_type: eventType }
+          : candidate,
+      ),
+    };
+  } catch (e) {
+    store.error = String(e);
+  } finally {
+    store.streamEventTypeBusy = { ...store.streamEventTypeBusy, [key]: false };
   }
 }
 

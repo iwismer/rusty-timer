@@ -28,6 +28,7 @@ const apiMocks = vi.hoisted(() => ({
   getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
   putDbfConfig: vi.fn().mockResolvedValue(undefined),
   clearDbf: vi.fn().mockResolvedValue(undefined),
+  updateSubscriptionEventType: vi.fn().mockResolvedValue(undefined),
 }));
 
 const desktopUpdaterMocks = vi.hoisted(() => ({
@@ -378,5 +379,33 @@ describe("receiver updater store", () => {
     await flushAsyncWork();
 
     expect(store.streamMetrics.get(key)).toEqual(metrics);
+  });
+
+  it("updates the stream DBF event type through the API and local store", async () => {
+    const { store, updateStreamEventType } = await import("./store.svelte");
+
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 10100,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    await updateStreamEventType(store.streams.streams[0], "start");
+
+    expect(apiMocks.updateSubscriptionEventType).toHaveBeenCalledWith(
+      {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+      },
+      "start",
+    );
+    expect(store.streams.streams[0]?.event_type).toBe("start");
   });
 });
