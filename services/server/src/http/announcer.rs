@@ -231,6 +231,80 @@ pub async fn public_announcer_sse(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Standalone helpers callable from WS proxy handlers
+// ---------------------------------------------------------------------------
+
+/// Get the current announcer config as a JSON value.
+/// Returns `Err(String)` on database errors.
+pub async fn get_config_value(state: &AppState) -> Result<serde_json::Value, String> {
+    let config = announcer_config::get_config(&state.pool)
+        .await
+        .map_err(|e| format!("database error: {e}"))?;
+    Ok(config_response(config))
+}
+
+/// Update the announcer config from a JSON payload.
+/// Returns the updated config as JSON, or `Err(String)` on validation/db errors.
+pub async fn put_config_value(
+    state: &AppState,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body: PutAnnouncerConfigRequest =
+        serde_json::from_value(payload).map_err(|e| format!("invalid payload: {e}"))?;
+
+    if body.enabled && body.selected_stream_ids.is_empty() {
+        return Err("enabled announcer requires at least one selected stream".to_owned());
+    }
+
+    let selected_stream_ids = dedupe_stream_ids(body.selected_stream_ids);
+    if body.enabled && !selected_stream_ids.is_empty() {
+        let known_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM streams WHERE stream_id = ANY($1)")
+                .bind(&selected_stream_ids)
+                .fetch_one(&state.pool)
+                .await
+                .map_err(|e| format!("database error: {e}"))?;
+        if usize::try_from(known_count).unwrap_or(0) != selected_stream_ids.len() {
+            return Err("selected_stream_ids contains unknown stream id".to_owned());
+        }
+    }
+
+    let previous = announcer_config::get_config(&state.pool)
+        .await
+        .map_err(|e| format!("database error: {e}"))?;
+
+    let now = Utc::now();
+    let enabled_until = if body.enabled {
+        if !previous.enabled {
+            Some(now + Duration::hours(ENABLED_TTL_HOURS))
+        } else {
+            previous.enabled_until
+        }
+    } else {
+        None
+    };
+
+    let max_list_size = body.max_list_size.clamp(MIN_LIST_SIZE, MAX_LIST_SIZE);
+    let update = AnnouncerConfigUpdate {
+        enabled: body.enabled,
+        enabled_until,
+        selected_stream_ids: selected_stream_ids.clone(),
+        max_list_size,
+    };
+    let updated = announcer_config::set_config(&state.pool, &update)
+        .await
+        .map_err(|e| format!("database error: {e}"))?;
+
+    if should_reset_runtime(&previous, &updated, &selected_stream_ids) {
+        state.reset_announcer_runtime().await;
+    } else if previous.max_list_size != updated.max_list_size {
+        state.notify_announcer_resync();
+    }
+
+    Ok(config_response(updated))
+}
+
 fn dedupe_stream_ids(stream_ids: Vec<Uuid>) -> Vec<Uuid> {
     let mut seen = HashSet::new();
     stream_ids

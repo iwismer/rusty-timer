@@ -388,6 +388,30 @@ async fn update_subscription_event_type(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_announcer_config(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
+    control_api::get_announcer_config(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn put_announcer_config(
+    state: State<'_, Arc<AppState>>,
+    body: serde_json::Value,
+) -> CmdResult<serde_json::Value> {
+    control_api::put_announcer_config(&state, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reset_announcer(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    control_api::reset_announcer(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Event bridge: forward ReceiverUiEvent -> Tauri frontend events
 // ---------------------------------------------------------------------------
@@ -528,6 +552,9 @@ fn main() {
             put_dbf_config,
             clear_dbf,
             update_subscription_event_type,
+            get_announcer_config,
+            put_announcer_config,
+            reset_announcer,
         ])
         .build(tauri::generate_context!());
 

@@ -25,6 +25,7 @@ import {
 export type TabId =
   | "streams"
   | "forwarders"
+  | "announcer"
   | "mode"
   | "config"
   | "logs"

@@ -11,6 +11,7 @@
   import UpdateModal from "$lib/components/UpdateModal.svelte";
   import StreamsTab from "$lib/components/StreamsTab.svelte";
   import ForwardersTab from "$lib/components/ForwardersTab.svelte";
+  import AnnouncerTab from "$lib/components/AnnouncerTab.svelte";
   import ConfigTab from "$lib/components/ConfigTab.svelte";
   import ModeTab from "$lib/components/ModeTab.svelte";
   import LogsTab from "$lib/components/LogsTab.svelte";
@@ -60,6 +61,8 @@
       <StreamsTab />
     {:else if store.activeTab === "forwarders"}
       <ForwardersTab />
+    {:else if store.activeTab === "announcer"}
+      <AnnouncerTab />
     {:else if store.activeTab === "config"}
       <ConfigTab />
     {:else if store.activeTab === "mode"}

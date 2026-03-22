@@ -375,3 +375,34 @@ export async function updateSubscriptionEventType(
     body: { event_type: eventType },
   });
 }
+
+// --------------- Announcer commands ---------------
+
+export interface AnnouncerConfig {
+  enabled: boolean;
+  enabled_until: string | null;
+  selected_stream_ids: string[];
+  max_list_size: number;
+  updated_at: string;
+  public_enabled: boolean;
+}
+
+export interface AnnouncerConfigUpdate {
+  enabled: boolean;
+  selected_stream_ids: string[];
+  max_list_size: number;
+}
+
+export async function getAnnouncerConfig(): Promise<AnnouncerConfig> {
+  return invoke<AnnouncerConfig>("get_announcer_config");
+}
+
+export async function putAnnouncerConfig(
+  body: AnnouncerConfigUpdate,
+): Promise<AnnouncerConfig> {
+  return invoke<AnnouncerConfig>("put_announcer_config", { body });
+}
+
+export async function resetAnnouncer(): Promise<void> {
+  await invoke("reset_announcer");
+}

@@ -1016,6 +1016,80 @@ pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, Recei
     }
 }
 
+// ---------------------------------------------------------------------------
+// Announcer proxy (WS → server)
+// ---------------------------------------------------------------------------
+
+pub async fn get_announcer_config(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerGetConfigRequest(
+        rt_protocol::ReceiverProxyAnnouncerGetConfigRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(r.config)
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn put_announcer_config(
+    state: &AppState,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerPutConfigRequest(
+        rt_protocol::ReceiverProxyAnnouncerPutConfigRequest {
+            request_id: generate_request_id(),
+            payload: body,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(r.config)
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerResetRequest(
+        rt_protocol::ReceiverProxyAnnouncerResetRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyAnnouncerResetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
 /// Send a WS command through the active session and wait for a response.
 ///
 /// Uses a 15s timeout. Note: the server applies a 10s `PROXY_TIMEOUT` to both

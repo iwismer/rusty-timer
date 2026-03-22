@@ -60,6 +60,9 @@ impl WsCommand {
             WsMessage::ReceiverProxyConfigSetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyRestartRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyDeviceControlRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyAnnouncerGetConfigRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyAnnouncerPutConfigRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyAnnouncerResetRequest(r) => r.request_id.clone(),
             _ => return Err((message, reply)),
         };
         Ok(Self {
@@ -141,6 +144,8 @@ fn proxy_response_request_id(msg: &WsMessage) -> Option<&str> {
         WsMessage::ReceiverProxyConfigGetResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyConfigSetResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyControlResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyAnnouncerResetResponse(r) => Some(&r.request_id),
         _ => None,
     }
 }
