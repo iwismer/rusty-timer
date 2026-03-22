@@ -12,6 +12,11 @@
 
 ---
 
+> **Note (2026-03-21):** The implementation uses `lag_ms` and `epoch_lag_ms` field names
+> throughout the entire stack (Rust and TypeScript), preserving the unit suffix end-to-end.
+> This differs from the original plan text which used `lag` and `epoch_lag`. See the design
+> spec for the rationale.
+
 ## File Structure
 
 | Action | File | Responsibility |
