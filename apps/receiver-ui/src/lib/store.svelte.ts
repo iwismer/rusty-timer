@@ -22,7 +22,13 @@ import {
 
 // --------------- Tab enum ---------------
 
-export type TabId = "streams" | "config" | "mode" | "logs" | "admin";
+export type TabId =
+  | "streams"
+  | "forwarders"
+  | "mode"
+  | "config"
+  | "logs"
+  | "admin";
 
 export type UpdateState = {
   status: "available" | "downloaded";
@@ -51,6 +57,11 @@ export const store = $state({
   streams: null as StreamsResponse | null,
   lastReads: new Map<string, LastRead>(),
   streamMetrics: new Map<string, api.StreamMetrics>(),
+
+  // Forwarders
+  forwarders: null as api.ForwarderEntry[] | null,
+  forwardersError: null as string | null,
+  selectedForwarderId: null as string | null,
 
   // Logs
   logEntries: [] as string[],
@@ -483,6 +494,16 @@ export function applyHydratedMode(mode: ReceiverMode): void {
   modeHydrationVersion += 1;
 }
 
+function syncSelectedForwarder(): void {
+  if (!store.selectedForwarderId || !store.forwarders) return;
+  const stillExists = store.forwarders.some(
+    (fwd) => fwd.forwarder_id === store.selectedForwarderId,
+  );
+  if (!stillExists) {
+    store.selectedForwarderId = null;
+  }
+}
+
 export function markModeEdited(): void {
   store.modeEditedSinceHydration = true;
   modeEditVersion += 1;
@@ -525,14 +546,27 @@ export async function loadAll(): Promise<void> {
     const modeEditVersionAtStart = modeEditVersion;
     const modeMutationVersionAtStart = modeMutationVersion;
     const streamRefreshVersionAtStart = streamRefreshVersion;
-    const [nextStatus, nextStreams, nextLogs, nextMode, nextRaces] =
-      await Promise.all([
-        api.getStatus(),
-        api.getStreams(),
-        api.getLogs(),
-        api.getMode().catch(() => null),
-        api.getRaces().catch(() => null),
-      ]);
+    const [
+      nextStatus,
+      nextStreams,
+      nextLogs,
+      nextMode,
+      nextRaces,
+      nextForwarders,
+    ] = await Promise.all([
+      api.getStatus(),
+      api.getStreams(),
+      api.getLogs(),
+      api.getMode().catch(() => null),
+      api.getRaces().catch(() => null),
+      api
+        .getForwarders()
+        .then((forwarders) => ({ ok: true as const, forwarders }))
+        .catch((error: unknown) => ({
+          ok: false as const,
+          error: String(error),
+        })),
+    ]);
 
     store.status = nextStatus;
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
@@ -550,6 +584,15 @@ export async function loadAll(): Promise<void> {
       ) {
         store.raceIdDraft = prevRaceId;
       }
+    }
+    if (nextForwarders.ok) {
+      store.forwarders = nextForwarders.forwarders.forwarders;
+      store.forwardersError = null;
+      syncSelectedForwarder();
+    } else {
+      store.forwarders = null;
+      store.forwardersError = nextForwarders.error;
+      store.selectedForwarderId = null;
     }
     if (
       nextMode &&
@@ -583,6 +626,24 @@ export async function loadAll(): Promise<void> {
       void loadAll();
     }
   }
+}
+
+export async function loadForwarders(): Promise<void> {
+  store.forwardersError = null;
+  try {
+    const result = await api.getForwarders();
+    store.forwarders = result.forwarders;
+    syncSelectedForwarder();
+  } catch (error) {
+    console.error("Failed to load forwarders:", error);
+    store.forwarders = null;
+    store.forwardersError = String(error);
+    store.selectedForwarderId = null;
+  }
+}
+
+export function selectForwarder(forwarderId: string | null): void {
+  store.selectedForwarderId = forwarderId;
 }
 
 export async function applyMode(): Promise<void> {
@@ -826,6 +887,23 @@ export async function confirmUpdateInstall(): Promise<void> {
 
 // --------------- SSE + Init ---------------
 
+function applyForwarderMetricsUpdate(update: api.ForwarderMetricsUpdate): void {
+  if (!store.forwarders) return;
+  const idx = store.forwarders.findIndex(
+    (f) => f.forwarder_id === update.forwarder_id,
+  );
+  if (idx === -1) return;
+
+  const next = [...store.forwarders];
+  next[idx] = {
+    ...next[idx],
+    unique_chips: update.unique_chips,
+    total_reads: update.total_reads,
+    last_read_at: update.last_read_at,
+  };
+  store.forwarders = next;
+}
+
 export function initStore(): void {
   void loadAll();
 
@@ -912,6 +990,9 @@ export function initStore(): void {
     onStreamCountsUpdated: (updates) => {
       const needsResync = applyStreamCountUpdates(updates);
       if (needsResync) void loadAll();
+    },
+    onForwarderMetricsUpdated: (update) => {
+      applyForwarderMetricsUpdate(update);
     },
     onModeChanged: (mode) => {
       applyHydratedMode(mode);

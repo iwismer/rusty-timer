@@ -38,6 +38,7 @@ fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
         ReceiverUiEvent::LogEntry { .. } => "log_entry",
         ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
+        ReceiverUiEvent::ForwarderMetricsUpdated(_) => "forwarder_metrics_updated",
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
         ReceiverUiEvent::LastRead(_) => "last_read",
         ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
@@ -164,7 +165,66 @@ async fn get_races(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Val
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(rename_all = "snake_case")]
+#[tauri::command]
+async fn get_forwarders(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
+    control_api::get_forwarders(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_forwarder_config(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::get_forwarder_config(&state, forwarder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_forwarder_config(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    section: String,
+    data: serde_json::Value,
+) -> CmdResult<serde_json::Value> {
+    control_api::set_forwarder_config(&state, forwarder_id, section, data)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restart_forwarder_service(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::restart_forwarder_service(&state, forwarder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restart_forwarder_device(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::restart_forwarder_device(&state, forwarder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn shutdown_forwarder_device(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::shutdown_forwarder_device(&state, forwarder_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_replay_target_epochs(
     state: State<'_, Arc<AppState>>,
     forwarder_id: String,
@@ -404,6 +464,12 @@ fn main() {
             get_streams,
             put_earliest_epoch,
             get_races,
+            get_forwarders,
+            get_forwarder_config,
+            set_forwarder_config,
+            restart_forwarder_service,
+            restart_forwarder_device,
+            shutdown_forwarder_device,
             get_replay_target_epochs,
             get_subscriptions,
             put_subscriptions,

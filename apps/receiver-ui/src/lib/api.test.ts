@@ -187,8 +187,8 @@ describe("api client", () => {
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("get_replay_target_epochs", {
-      forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1:10000",
+      forwarderId: "fwd-1",
+      readerIp: "10.0.0.1:10000",
     });
     expect(result.epochs).toEqual([
       {
@@ -235,6 +235,7 @@ describe("sse client", () => {
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
+      onForwarderMetricsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
       onStreamMetricsUpdated: vi.fn(),
@@ -254,6 +255,7 @@ describe("sse client", () => {
     expect(registeredEvents).toContain("log_entry");
     expect(registeredEvents).toContain("resync");
     expect(registeredEvents).toContain("stream_counts_updated");
+    expect(registeredEvents).toContain("forwarder_metrics_updated");
     expect(registeredEvents).toContain("mode_changed");
     expect(registeredEvents).toContain("last_read");
 
@@ -292,6 +294,7 @@ describe("sse client", () => {
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
+      onForwarderMetricsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
       onStreamMetricsUpdated: vi.fn(),
@@ -310,6 +313,52 @@ describe("sse client", () => {
         reads_epoch: 3,
       },
     ]);
+
+    destroySSE();
+  });
+
+  it("forwards forwarder_metrics_updated event payload", async () => {
+    mockListen.mockImplementation(
+      async (eventName: string, callback: (event: any) => void) => {
+        if (eventName === "forwarder_metrics_updated") {
+          setTimeout(() => {
+            callback({
+              payload: {
+                forwarder_id: "f1",
+                unique_chips: 4,
+                total_reads: 15,
+                last_read_at: "2026-03-21T12:34:56.000Z",
+              },
+            });
+          }, 0);
+        }
+        return () => {};
+      },
+    );
+
+    const { initSSE, destroySSE } = await import("./sse");
+    const callbacks = {
+      onStatusChanged: vi.fn(),
+      onStreamsSnapshot: vi.fn(),
+      onLogEntry: vi.fn(),
+      onResync: vi.fn(),
+      onConnectionChange: vi.fn(),
+      onStreamCountsUpdated: vi.fn(),
+      onForwarderMetricsUpdated: vi.fn(),
+      onStreamMetricsUpdated: vi.fn(),
+      onModeChanged: vi.fn(),
+      onLastRead: vi.fn(),
+    };
+
+    await initSSE(callbacks);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(callbacks.onForwarderMetricsUpdated).toHaveBeenCalledWith({
+      forwarder_id: "f1",
+      unique_chips: 4,
+      total_reads: 15,
+      last_read_at: "2026-03-21T12:34:56.000Z",
+    });
 
     destroySSE();
   });
@@ -338,6 +387,7 @@ describe("sse client", () => {
       onResync: vi.fn(),
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
+      onForwarderMetricsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
       onStreamMetricsUpdated: vi.fn(),

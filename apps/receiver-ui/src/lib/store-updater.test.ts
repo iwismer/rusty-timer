@@ -22,6 +22,7 @@ const apiMocks = vi.hoisted(() => ({
   }),
   getRaces: vi.fn().mockResolvedValue({ races: [] }),
   getReplayTargetEpochs: vi.fn().mockResolvedValue({ epochs: [] }),
+  getForwarders: vi.fn().mockResolvedValue({ forwarders: [] }),
   checkForUpdate: vi.fn().mockResolvedValue({ status: "up_to_date" }),
   downloadUpdate: vi.fn().mockResolvedValue({ status: "downloaded" }),
   applyUpdate: vi.fn().mockResolvedValue(undefined),

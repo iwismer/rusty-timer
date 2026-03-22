@@ -23,11 +23,14 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use rt_protocol::{
     EarliestEpochOverride, ReadEvent, ReceiverAck, ReceiverEventBatch, ReceiverHelloV12,
-    ReceiverMode, ReceiverModeApplied, ReplayTarget, StreamRef, WsMessage, error_codes,
+    ReceiverMode, ReceiverModeApplied, ReceiverProxyConfigGetResponse,
+    ReceiverProxyConfigSetResponse, ReceiverProxyControlResponse, ReplayTarget, StreamRef,
+    WsMessage, error_codes,
 };
 use sqlx::{Row, types::Uuid as SqlUuid};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -143,6 +146,137 @@ impl RaceBaseline {
 
 fn cursor_gt(left_epoch: i64, left_seq: i64, right_epoch: i64, right_seq: i64) -> bool {
     (left_epoch, left_seq) > (right_epoch, right_seq)
+}
+
+async fn proxy_config_get_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyConfigGetRequest,
+) -> WsMessage {
+    let proxy_result = crate::forwarder_proxy::proxy_config_get(&state, &req.forwarder_id).await;
+    let resp = match proxy_result {
+        Ok(r) => ReceiverProxyConfigGetResponse {
+            request_id: req.request_id,
+            ok: r.ok,
+            error: r.error,
+            config: r.config,
+            restart_needed: r.restart_needed,
+        },
+        Err(e) => ReceiverProxyConfigGetResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(e.to_string()),
+            config: serde_json::Value::Null,
+            restart_needed: false,
+        },
+    };
+    WsMessage::ReceiverProxyConfigGetResponse(resp)
+}
+
+async fn proxy_config_set_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyConfigSetRequest,
+) -> WsMessage {
+    let log_section = req.section.clone();
+    let proxy_result = crate::forwarder_proxy::proxy_config_set(
+        &state,
+        &req.forwarder_id,
+        req.section,
+        req.payload,
+    )
+    .await;
+    let resp = match proxy_result {
+        Ok(r) => {
+            if r.ok {
+                state.logger.log(format!(
+                    "forwarder \"{}\" config/{} updated via receiver {}",
+                    req.forwarder_id, log_section, device_id
+                ));
+            }
+            ReceiverProxyConfigSetResponse {
+                request_id: req.request_id,
+                ok: r.ok,
+                error: r.error,
+                restart_needed: r.restart_needed,
+            }
+        }
+        Err(e) => ReceiverProxyConfigSetResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(e.to_string()),
+            restart_needed: false,
+        },
+    };
+    WsMessage::ReceiverProxyConfigSetResponse(resp)
+}
+
+async fn proxy_restart_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyRestartRequest,
+) -> WsMessage {
+    let proxy_result = crate::forwarder_proxy::proxy_restart(&state, &req.forwarder_id).await;
+    let resp = match proxy_result {
+        Ok(r) => {
+            if r.ok {
+                state.logger.log(format!(
+                    "forwarder \"{}\" restart requested via receiver {}",
+                    req.forwarder_id, device_id
+                ));
+            }
+            ReceiverProxyControlResponse {
+                request_id: req.request_id,
+                ok: r.ok,
+                error: r.error,
+            }
+        }
+        Err(e) => ReceiverProxyControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(e.to_string()),
+        },
+    };
+    WsMessage::ReceiverProxyControlResponse(resp)
+}
+
+async fn proxy_device_control_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyDeviceControlRequest,
+) -> WsMessage {
+    let action_str = match req.action {
+        rt_protocol::DeviceControlAction::RestartDevice => "restart_device",
+        rt_protocol::DeviceControlAction::ShutdownDevice => "shutdown_device",
+    };
+    let payload = serde_json::json!({ "action": action_str });
+    let proxy_result = crate::forwarder_proxy::proxy_config_set(
+        &state,
+        &req.forwarder_id,
+        "control".to_owned(),
+        payload,
+    )
+    .await;
+    let resp = match proxy_result {
+        Ok(r) => {
+            if r.ok {
+                state.logger.log(format!(
+                    "forwarder \"{}\" {} requested via receiver {}",
+                    req.forwarder_id, action_str, device_id
+                ));
+            }
+            ReceiverProxyControlResponse {
+                request_id: req.request_id,
+                ok: r.ok,
+                error: r.error,
+            }
+        }
+        Err(e) => ReceiverProxyControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some(e.to_string()),
+        },
+    };
+    WsMessage::ReceiverProxyControlResponse(resp)
 }
 
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
@@ -310,6 +444,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
         heartbeat_interval.tick().await;
         let mut race_refresh_interval = tokio::time::interval(RACE_REFRESH_INTERVAL);
         race_refresh_interval.tick().await;
+        let mut pending_proxy_replies = JoinSet::new();
 
         loop {
             let mut events_to_send: Vec<ReadEvent> = Vec::new();
@@ -424,6 +559,31 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     .await;
                                     break;
                                 }
+                                Ok(WsMessage::ReceiverProxyConfigGetRequest(req)) => {
+                                    pending_proxy_replies
+                                        .spawn(proxy_config_get_reply(state.clone(), req));
+                                }
+                                Ok(WsMessage::ReceiverProxyConfigSetRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_config_set_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyRestartRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_restart_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyDeviceControlRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_device_control_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
                                 Ok(_) => {
                                     send_ws_error(
                                         &mut socket,
@@ -465,6 +625,67 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                 _ = heartbeat_interval.tick() => {
                     if !send_heartbeat(&mut socket, &session_id, &device_id).await {
                         break;
+                    }
+                }
+                joined = pending_proxy_replies.join_next(), if !pending_proxy_replies.is_empty() => {
+                    match joined {
+                        Some(Ok(msg)) => {
+                            let text = match serde_json::to_string(&msg) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    error!(device_id = %device_id, error = %e, "failed to serialize proxy reply");
+                                    // Send a typed fallback error so the receiver doesn't hang.
+                                    // Match on the response to return the correct kind.
+                                    let fallback = match &msg {
+                                        WsMessage::ReceiverProxyConfigGetResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyConfigGetResponse(
+                                                ReceiverProxyConfigGetResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    config: serde_json::Value::Null,
+                                                    restart_needed: false,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyConfigSetResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyConfigSetResponse(
+                                                ReceiverProxyConfigSetResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    restart_needed: false,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyControlResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyControlResponse(
+                                                ReceiverProxyControlResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                },
+                                            ))
+                                        }
+                                        _ => { continue; }
+                                    };
+                                    if let Ok(fallback_text) = fallback {
+                                        let _ = socket.send(Message::Text(fallback_text.into())).await;
+                                    }
+                                    continue;
+                                }
+                            };
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Err(err)) => {
+                            error!(device_id = %device_id, error = %err, "proxy reply task panicked; keeping session alive");
+                            // The panicked task's request_id is lost, so the
+                            // receiver will time out after 15s for that request.
+                            continue;
+                        }
+                        None => {}
                     }
                 }
                 _ = race_refresh_interval.tick() => {

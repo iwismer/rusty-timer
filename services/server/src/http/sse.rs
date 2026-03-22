@@ -19,6 +19,9 @@ pub async fn dashboard_sse(
                 crate::dashboard_events::DashboardEvent::StreamCreated { .. } => "stream_created",
                 crate::dashboard_events::DashboardEvent::StreamUpdated { .. } => "stream_updated",
                 crate::dashboard_events::DashboardEvent::MetricsUpdated { .. } => "metrics_updated",
+                crate::dashboard_events::DashboardEvent::ForwarderMetricsUpdated { .. } => {
+                    "forwarder_metrics_updated"
+                }
                 crate::dashboard_events::DashboardEvent::ForwarderRaceAssigned { .. } => {
                     "forwarder_race_assigned"
                 }

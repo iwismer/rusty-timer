@@ -4,8 +4,9 @@
 
   const tabs: { id: TabId; label: string }[] = [
     { id: "streams", label: "Streams" },
-    { id: "config", label: "Config" },
+    { id: "forwarders", label: "Forwarders" },
     { id: "mode", label: "Mode" },
+    { id: "config", label: "Config" },
     { id: "logs", label: "Logs" },
     { id: "admin", label: "Admin" },
   ];

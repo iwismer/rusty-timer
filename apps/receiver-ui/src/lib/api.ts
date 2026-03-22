@@ -140,6 +140,54 @@ export interface ReplayTargetEpochsResponse {
   epochs: ReplayTargetEpochOption[];
 }
 
+// --------------- Forwarder types ---------------
+
+export interface ForwarderReaderInfo {
+  reader_ip: string;
+  connected: boolean;
+}
+
+export interface ForwarderEntry {
+  forwarder_id: string;
+  display_name: string | null;
+  online: boolean;
+  readers: ForwarderReaderInfo[];
+  unique_chips: number;
+  total_reads: number;
+  last_read_at: string | null;
+}
+
+export interface ForwardersResponse {
+  forwarders: ForwarderEntry[];
+}
+
+export interface ForwarderMetricsUpdate {
+  forwarder_id: string;
+  unique_chips: number;
+  total_reads: number;
+  last_read_at: string | null;
+}
+
+export interface ForwarderConfigResponse {
+  ok: boolean;
+  config: Record<string, unknown>;
+  restart_needed: boolean;
+  error?: string;
+}
+
+export interface ForwarderConfigSaveResponse {
+  ok: boolean;
+  restart_needed: boolean;
+  error?: string;
+}
+
+export interface ForwarderControlResponse {
+  ok: boolean;
+  error?: string;
+}
+
+// --------------- API functions ---------------
+
 export async function getProfile(): Promise<Profile> {
   return invoke<Profile>("get_profile");
 }
@@ -188,8 +236,8 @@ export async function getReplayTargetEpochs(
   stream: StreamRef,
 ): Promise<ReplayTargetEpochsResponse> {
   return invoke<ReplayTargetEpochsResponse>("get_replay_target_epochs", {
-    forwarder_id: stream.forwarder_id,
-    reader_ip: stream.reader_ip,
+    forwarderId: stream.forwarder_id,
+    readerIp: stream.reader_ip,
   });
 }
 
@@ -239,6 +287,56 @@ export async function updateLocalPort(
       reader_ip: stream.reader_ip,
       local_port_override: localPortOverride,
     },
+  });
+}
+
+// --------------- Forwarder commands ---------------
+
+export async function getForwarders(): Promise<ForwardersResponse> {
+  return invoke<ForwardersResponse>("get_forwarders");
+}
+
+export async function getForwarderConfig(
+  forwarderId: string,
+): Promise<ForwarderConfigResponse> {
+  return invoke<ForwarderConfigResponse>("get_forwarder_config", {
+    forwarderId,
+  });
+}
+
+export async function setForwarderConfig(
+  forwarderId: string,
+  section: string,
+  data: Record<string, unknown>,
+): Promise<ForwarderConfigSaveResponse> {
+  return invoke<ForwarderConfigSaveResponse>("set_forwarder_config", {
+    forwarderId,
+    section,
+    data,
+  });
+}
+
+export async function restartForwarderService(
+  forwarderId: string,
+): Promise<ForwarderControlResponse> {
+  return invoke<ForwarderControlResponse>("restart_forwarder_service", {
+    forwarderId,
+  });
+}
+
+export async function restartForwarderDevice(
+  forwarderId: string,
+): Promise<ForwarderControlResponse> {
+  return invoke<ForwarderControlResponse>("restart_forwarder_device", {
+    forwarderId,
+  });
+}
+
+export async function shutdownForwarderDevice(
+  forwarderId: string,
+): Promise<ForwarderControlResponse> {
+  return invoke<ForwarderControlResponse>("shutdown_forwarder_device", {
+    forwarderId,
   });
 }
 

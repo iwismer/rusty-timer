@@ -5,6 +5,7 @@ pub mod announcer;
 pub mod export;
 pub mod forwarder_config;
 pub mod forwarder_races;
+pub mod forwarders_list;
 pub mod logs;
 pub mod metrics;
 pub mod races;

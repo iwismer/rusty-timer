@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use rt_protocol::{AckEntry, ReadEvent, ReceiverAck, WsMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, error, info, warn};
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +33,43 @@ pub struct Session {
 /// have entries; reads from other forwarders are not enriched.
 pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
+/// A request sent from a Tauri command handler to the WS session loop.
+/// The session loop sends `message` over the WebSocket and routes the
+/// server's response back via the oneshot `reply` channel. Responses are
+/// matched to pending requests by `request_id`.
+///
+/// Use [`WsCommand::new`] to construct — it extracts the `request_id` from
+/// the message automatically, preventing mismatches between the two copies.
+pub struct WsCommand {
+    pub message: WsMessage,
+    pub request_id: String,
+    pub reply: oneshot::Sender<WsMessage>,
+}
+
+impl WsCommand {
+    /// Create a new `WsCommand`, extracting `request_id` from the message.
+    ///
+    /// Returns `Err` if `message` is not a `ReceiverProxy*Request` variant.
+    #[allow(clippy::result_large_err)]
+    pub fn new(
+        message: WsMessage,
+        reply: oneshot::Sender<WsMessage>,
+    ) -> Result<Self, (WsMessage, oneshot::Sender<WsMessage>)> {
+        let request_id = match &message {
+            WsMessage::ReceiverProxyConfigGetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyConfigSetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyRestartRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyDeviceControlRequest(r) => r.request_id.clone(),
+            _ => return Err((message, reply)),
+        };
+        Ok(Self {
+            message,
+            request_id,
+            reply,
+        })
+    }
+}
+
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
@@ -41,6 +78,7 @@ pub struct SessionLoopDeps {
     pub shutdown: watch::Receiver<bool>,
     pub connection_state: watch::Receiver<ConnectionState>,
     pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
+    pub ws_cmd_rx: mpsc::Receiver<WsCommand>,
 }
 
 fn apply_batch_counts(
@@ -93,6 +131,16 @@ fn apply_batch_counts(
     updates
 }
 
+/// Extract the request_id from a proxy response message, if applicable.
+fn proxy_response_request_id(msg: &WsMessage) -> Option<&str> {
+    match msg {
+        WsMessage::ReceiverProxyConfigGetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyConfigSetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyControlResponse(r) => Some(&r.request_id),
+        _ => None,
+    }
+}
+
 pub async fn run_session_loop<S>(
     mut ws: S,
     session_id: String,
@@ -103,16 +151,55 @@ where
         + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
         + Unpin,
 {
+    let mut pending_requests: HashMap<String, oneshot::Sender<WsMessage>> = HashMap::new();
+
     loop {
         tokio::select! {
             biased;
             _ = deps.shutdown.changed() => { if *deps.shutdown.borrow() { break; } }
+            Some(cmd) = deps.ws_cmd_rx.recv() => {
+                let text = match serde_json::to_string(&cmd.message) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(error = %e, request_id = %cmd.request_id, "failed to serialize WS command");
+                        if cmd.reply.send(WsMessage::Error(rt_protocol::ErrorMessage {
+                            code: "SERIALIZE_ERROR".into(),
+                            message: e.to_string(),
+                            retryable: false,
+                        })).is_err() {
+                            warn!(request_id = %cmd.request_id, "proxy error reply dropped (caller already gone)");
+                        }
+                        continue;
+                    }
+                };
+                if ws.send(Message::Text(text.into())).await.is_err() {
+                    warn!(request_id = %cmd.request_id, pending_count = pending_requests.len(),
+                          "WS send failed for proxy command; ending session");
+                    let _ = cmd.reply.send(WsMessage::Error(rt_protocol::ErrorMessage {
+                        code: "WS_SEND_FAILED".into(),
+                        message: "WebSocket send failed".into(),
+                        retryable: true,
+                    }));
+                    break;
+                }
+                pending_requests.insert(cmd.request_id, cmd.reply);
+            }
             msg = ws.next() => {
                 match msg {
                     None => break,
                     Some(Err(e)) => return Err(SessionError::Ws(e)),
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<WsMessage>(&t) {
+                            Ok(ref parsed) if proxy_response_request_id(parsed).is_some() => {
+                                let request_id = proxy_response_request_id(parsed).unwrap().to_owned();
+                                if let Some(reply_tx) = pending_requests.remove(&request_id) {
+                                    if reply_tx.send(parsed.clone()).is_err() {
+                                        warn!(request_id = %request_id, "proxy response arrived but caller already gone (likely timeout)");
+                                    }
+                                } else {
+                                    warn!(request_id = %request_id, "received proxy response with no pending request");
+                                }
+                            }
                             Ok(WsMessage::ReceiverEventBatch(b)) => {
                                 debug!(n=b.events.len(),"batch");
                                 let reconnect_pending =
@@ -224,6 +311,19 @@ where
                     Some(Ok(_)) => {}
                 }
             }
+        }
+    }
+    if !pending_requests.is_empty() {
+        warn!(
+            count = pending_requests.len(),
+            "session ended with pending proxy requests; notifying callers"
+        );
+        for (_request_id, reply_tx) in pending_requests.drain() {
+            let _ = reply_tx.send(WsMessage::Error(rt_protocol::ErrorMessage {
+                code: "SESSION_CLOSED".into(),
+                message: "WS session ended while request was pending".into(),
+                retryable: true,
+            }));
         }
     }
     Ok(())

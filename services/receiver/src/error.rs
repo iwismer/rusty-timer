@@ -6,6 +6,8 @@ pub enum ReceiverError {
     BadRequest(String),
     #[error("upstream error: {0}")]
     UpstreamError(String),
+    #[error("not connected: {0}")]
+    NotConnected(String),
     #[error("internal error: {0}")]
     Internal(String),
 }

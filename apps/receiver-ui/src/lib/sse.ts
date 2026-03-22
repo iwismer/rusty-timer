@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  ForwarderMetricsUpdate,
   LastRead,
   ReceiverMode,
   StatusResponse,
@@ -23,6 +24,7 @@ type StreamsSnapshotPayload = {
 };
 type LogEntryPayload = { entry: string };
 type StreamCountsUpdatedPayload = { updates?: StreamCountUpdate[] };
+type ForwarderMetricsUpdatedPayload = ForwarderMetricsUpdate;
 type ModeChangedPayload = { mode: ReceiverMode };
 type LastReadPayload = {
   forwarder_id: string;
@@ -40,6 +42,7 @@ export type SseCallbacks = {
   onResync: () => void;
   onConnectionChange: (connected: boolean) => void;
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
+  onForwarderMetricsUpdated: (update: ForwarderMetricsUpdate) => void;
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;
   onStreamMetricsUpdated: (metrics: StreamMetrics) => void;
@@ -78,6 +81,12 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
     listen<StreamCountsUpdatedPayload>("stream_counts_updated", (event) => {
       callbacks.onStreamCountsUpdated(event.payload.updates ?? []);
     }),
+    listen<ForwarderMetricsUpdatedPayload>(
+      "forwarder_metrics_updated",
+      (event) => {
+        callbacks.onForwarderMetricsUpdated(event.payload);
+      },
+    ),
     listen<ModeChangedPayload>("mode_changed", (event) => {
       callbacks.onModeChanged(event.payload.mode);
     }),

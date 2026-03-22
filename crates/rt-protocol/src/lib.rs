@@ -503,11 +503,88 @@ pub struct ReaderDownloadProgress {
 }
 
 // ---------------------------------------------------------------------------
+// Receiver proxy messages (receiver <-> server, for proxied forwarder config and control)
+// ---------------------------------------------------------------------------
+
+/// Actions that can be requested on a forwarder device via the proxy channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceControlAction {
+    RestartDevice,
+    ShutdownDevice,
+}
+
+/// Receiver-to-server: request a forwarder's current config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyConfigGetRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+}
+
+/// Server-to-receiver: forwarder config response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyConfigGetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub config: serde_json::Value,
+    #[serde(default)]
+    pub restart_needed: bool,
+}
+
+/// Receiver-to-server: update a forwarder config section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyConfigSetRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+    pub section: String,
+    pub payload: serde_json::Value,
+}
+
+/// Server-to-receiver: config update result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyConfigSetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub restart_needed: bool,
+}
+
+/// Receiver-to-server: request a forwarder service restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyRestartRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+}
+
+/// Receiver-to-server: request a forwarder device control action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyDeviceControlRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+    pub action: DeviceControlAction,
+}
+
+/// Server-to-receiver: result of a service restart or device control action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyControlResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
 /// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
-/// status tracking and reader control extensions.
+/// status tracking, reader control extensions, and receiver-to-server
+/// proxy messages for remote forwarder config and control.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -541,6 +618,13 @@ pub enum WsMessage {
     ReaderControlResponse(ReaderControlResponse),
     ReaderInfoUpdate(ReaderInfoUpdate),
     ReaderDownloadProgress(ReaderDownloadProgress),
+    ReceiverProxyConfigGetRequest(ReceiverProxyConfigGetRequest),
+    ReceiverProxyConfigGetResponse(ReceiverProxyConfigGetResponse),
+    ReceiverProxyConfigSetRequest(ReceiverProxyConfigSetRequest),
+    ReceiverProxyConfigSetResponse(ReceiverProxyConfigSetResponse),
+    ReceiverProxyRestartRequest(ReceiverProxyRestartRequest),
+    ReceiverProxyDeviceControlRequest(ReceiverProxyDeviceControlRequest),
+    ReceiverProxyControlResponse(ReceiverProxyControlResponse),
 }
 
 // ---------------------------------------------------------------------------
@@ -743,6 +827,95 @@ mod tests {
             err.to_string().contains("non-negative"),
             "expected non-negative error, got: {err}"
         );
+    }
+
+    #[test]
+    fn receiver_proxy_config_get_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyConfigGetRequest(ReceiverProxyConfigGetRequest {
+            request_id: "req-1".into(),
+            forwarder_id: "fwd-abc".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_config_get_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_config_get_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyConfigGetResponse(ReceiverProxyConfigGetResponse {
+            request_id: "req-1".into(),
+            ok: true,
+            error: None,
+            config: serde_json::json!({"general": {"display_name": "Start"}}),
+            restart_needed: false,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_config_get_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_config_set_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyConfigSetRequest(ReceiverProxyConfigSetRequest {
+            request_id: "req-2".into(),
+            forwarder_id: "fwd-abc".into(),
+            section: "general".into(),
+            payload: serde_json::json!({"display_name": "Finish"}),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_config_set_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyConfigSetResponse(ReceiverProxyConfigSetResponse {
+            request_id: "req-2".into(),
+            ok: true,
+            error: None,
+            restart_needed: true,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_restart_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyRestartRequest(ReceiverProxyRestartRequest {
+            request_id: "req-3".into(),
+            forwarder_id: "fwd-abc".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_device_control_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyDeviceControlRequest(ReceiverProxyDeviceControlRequest {
+            request_id: "req-4".into(),
+            forwarder_id: "fwd-abc".into(),
+            action: DeviceControlAction::RestartDevice,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_control_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyControlResponse(ReceiverProxyControlResponse {
+            request_id: "req-3".into(),
+            ok: true,
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_control_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
     }
 
     #[test]
