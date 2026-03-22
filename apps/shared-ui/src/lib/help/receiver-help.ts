@@ -104,4 +104,88 @@ export const RECEIVER_HELP = {
     ],
     seeAlso: [{ sectionKey: "receiver_mode", label: "Receiver Mode" }],
   },
+  races: {
+    title: "Races",
+    overview:
+      "Races organize participant and chip data for an event. Create a race, upload participants and chip mappings, then assign forwarders to it so chip reads resolve to bib numbers and names.",
+    fields: {
+      create_race: {
+        label: "Create Race",
+        summary:
+          "Creates a new race to hold participant and chip-mapping data.",
+        detailHtml:
+          "Enter a name and click <strong>Create Race</strong> to add a new race. " +
+          "Once created, open the race to upload participant and chip-mapping files." +
+          "<br><br>" +
+          "Each race has its own independent set of participants and chip mappings, so you can run multiple races on the same day without data overlap.",
+      },
+      delete_race: {
+        label: "Delete Race",
+        summary:
+          "Permanently deletes the race and all its participants, chip mappings, and forwarder associations.",
+        detailHtml:
+          "<strong>This action is irreversible.</strong> Deleting a race removes all of its participant data, chip mappings, and any forwarder-race associations. " +
+          "Timing data (reads/events) is not affected — only the race metadata is deleted." +
+          "<br><br>" +
+          "You will be asked to confirm before the delete proceeds.",
+      },
+    },
+    tips: [
+      "Create one race per start. For multi-wave events, you can use a single race if all waves share the same participant list, or separate races per wave.",
+      "Upload participants and chip mappings before race day if possible — you can always update them later.",
+      "Deleting a race does not delete any timing data. Reads are preserved regardless of race assignments.",
+    ],
+    seeAlso: [
+      { sectionKey: "race_detail", label: "Race Detail" },
+      { sectionKey: "receiver_mode", label: "Receiver Mode" },
+    ],
+  },
+  race_detail: {
+    title: "Race Detail",
+    overview:
+      "Manage participant and chip-mapping data for a specific race. Upload files to populate participants and map chips to bib numbers.",
+    fields: {
+      upload_participants: {
+        label: "Upload Participants (.ppl)",
+        summary:
+          "Upload a .ppl file containing participant data: bib number, name, gender, and team.",
+        detailHtml:
+          "Upload a <code>.ppl</code> file to import participant data for this race. The file should contain bib numbers, first and last names, gender, and optionally a team/affiliation." +
+          "<br><br>" +
+          "Uploading replaces all existing participants for this race. If you need to update the list, upload the corrected file again." +
+          "<br><br>" +
+          "Participants are used together with chip mappings to resolve raw chip reads into names and bib numbers.",
+      },
+      upload_chips: {
+        label: "Upload Chip Mappings (.bibchip)",
+        summary:
+          "Upload a file mapping chip IDs to bib numbers, enabling chip-read resolution.",
+        detailHtml:
+          "Upload a <code>.bibchip</code>, <code>.csv</code>, or <code>.txt</code> file that maps chip IDs to bib numbers. Each line should contain a bib number and the corresponding chip ID." +
+          "<br><br>" +
+          "This mapping is what allows the system to show participant names instead of raw chip IDs when a read comes in. Without chip mappings, reads display as hex chip IDs only." +
+          "<br><br>" +
+          "Uploading replaces all existing chip mappings for this race.",
+      },
+      unmatched_chips: {
+        label: "Unmatched Chips",
+        summary:
+          "Chip mappings that reference bib numbers not found in the participant list.",
+        detailHtml:
+          "Shows chip-to-bib mappings where the bib number does not match any uploaded participant. This usually means:" +
+          "<ul>" +
+          "<li>The participant list is outdated or incomplete — re-upload it</li>" +
+          "<li>The chip mapping file has stale bib numbers — re-upload it</li>" +
+          "<li>A participant was added to the chip file but not the participant file</li>" +
+          "</ul>" +
+          "Unmatched chips will still record reads, but those reads won't resolve to a participant name.",
+      },
+    },
+    tips: [
+      "Upload chip mappings after participants so you can immediately see any unmatched bibs.",
+      "If you see unmatched chips, check that the participant and chip files use the same bib numbering.",
+      "You can re-upload files at any time to update the data — the new upload fully replaces the old data.",
+    ],
+    seeAlso: [{ sectionKey: "races", label: "Races" }],
+  },
 } as const satisfies HelpContext;
