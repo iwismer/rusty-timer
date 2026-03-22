@@ -49,6 +49,7 @@ enum BridgeAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Undo, Redo, Separator only constructed on macOS
 enum EditMenuItem {
     Undo,
     Redo,
@@ -561,6 +562,8 @@ fn main() {
                 .accelerator("CmdOrCtrl+0")
                 .build(app)?;
 
+            #[allow(unused_mut)]
+            // mutated only under cfg(target_os = "macos") and cfg(debug_assertions)
             let mut view_builder = SubmenuBuilder::new(app, "View")
                 .item(&refresh)
                 .item(&toggle_theme)
