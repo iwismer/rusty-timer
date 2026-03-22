@@ -607,11 +607,19 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             }
                             Ok(WsMessage::ReaderInfoUpdate(update)) => {
                                 let key = crate::state::reader_cache_key(&device_id, &update.reader_ip);
+                                // Merge: carry forward existing reader_info when the update is state-only
+                                let merged_info = if update.reader_info.is_some() {
+                                    update.reader_info.clone()
+                                } else {
+                                    state.reader_states.read().await
+                                        .get(&key)
+                                        .and_then(|c| c.reader_info.clone())
+                                };
                                 let cached = CachedReaderState {
                                     forwarder_id: device_id.clone(),
                                     reader_ip: update.reader_ip.clone(),
                                     state: update.state,
-                                    reader_info: update.reader_info.clone(),
+                                    reader_info: merged_info.clone(),
                                 };
                                 state.reader_states.write().await.insert(key, cached);
 
@@ -621,7 +629,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                         stream_id: *stream_id,
                                         reader_ip: update.reader_ip.clone(),
                                         state: update.state,
-                                        reader_info: update.reader_info.clone(),
+                                        reader_info: merged_info.clone(),
                                     };
                                     match serde_json::to_string(
                                         &rt_protocol::WsMessage::ReceiverReaderInfoUpdate(receiver_update),
@@ -653,7 +661,7 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     forwarder_id: device_id.clone(),
                                     reader_ip: update.reader_ip,
                                     state: update.state,
-                                    reader_info: update.reader_info,
+                                    reader_info: merged_info,
                                 });
                             }
                             Ok(WsMessage::ReaderDownloadProgress(progress)) => {
