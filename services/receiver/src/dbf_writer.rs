@@ -12,6 +12,8 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+use fs2::FileExt;
+
 use dbase::{FieldIOError, TableWriterBuilder, WritableRecord};
 use ipico_core::read::ChipRead;
 use rt_protocol::ReadEvent;
@@ -232,20 +234,42 @@ pub fn create_empty_dbf(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Write an empty Visual FoxPro DBF header to an already-open file.
+///
+/// Used to initialize a newly-created file while holding an exclusive lock,
+/// avoiding the TOCTOU race of check-then-create. Seeks back to file start
+/// after writing so the caller can immediately read the header.
+fn write_empty_header(file: &mut std::fs::File) -> std::io::Result<()> {
+    let header_size = u16::from_le_bytes([DBF_TEMPLATE_BYTES[8], DBF_TEMPLATE_BYTES[9]]) as usize;
+    let mut header = DBF_TEMPLATE_BYTES[..header_size].to_vec();
+    // Zero the record count (bytes 4-7)
+    header[4..8].copy_from_slice(&0u32.to_le_bytes());
+    file.write_all(&header)?;
+    file.write_all(&[DBF_EOF_MARKER])?;
+    file.flush()?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(())
+}
+
 /// Append a [`DbfRecord`] to the DBF file at `path` using in-place append.
 ///
-/// If the file does not exist it is created first. The record is written
-/// directly to the end of the file and the header record count is updated,
-/// avoiding a full file rewrite.
+/// If the file does not exist it is created first. An exclusive file lock
+/// is held for the duration of the write to prevent concurrent readers
+/// (e.g. Race Director) from seeing a partially-written record.
 pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
-    if !path.exists() {
-        create_empty_dbf(path)?;
-    }
-
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .create(true)
+        .truncate(false)
         .open(path)?;
+
+    file.lock_exclusive()?;
+
+    // If the file was just created (empty), write the DBF header under the lock
+    if file.metadata()?.len() == 0 {
+        write_empty_header(&mut file)?;
+    }
 
     // Read header fields: record_count (bytes 4-7), header_size (bytes 8-9),
     // record_size (bytes 10-11), all little-endian.
@@ -282,6 +306,7 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
     file.write_all(&new_count.to_le_bytes())?;
 
     file.flush()?;
+    file.unlock()?;
     Ok(())
 }
 
@@ -766,6 +791,63 @@ mod tests {
             }),
             Some("000000012345".to_owned())
         );
+    }
+
+    #[test]
+    fn append_record_concurrent_writers_produce_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.dbf");
+
+        // Do NOT pre-create the file — both threads race to create it
+        let path1 = path.clone();
+        let path2 = path.clone();
+
+        let raw = sample_raw_frame();
+        let rec_a = map_to_dbf_fields(&raw, EventType::Start, 1).unwrap();
+        let rec_b = map_to_dbf_fields(&raw, EventType::Finish, 2).unwrap();
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..50 {
+                    append_record(&path1, &rec_a).unwrap();
+                }
+            });
+            s.spawn(|| {
+                for _ in 0..50 {
+                    append_record(&path2, &rec_b).unwrap();
+                }
+            });
+        });
+
+        let mut reader = dbase::Reader::from_path(&path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert_eq!(records.len(), 100, "should have exactly 100 records");
+
+        // Verify each record is intact (not interleaved)
+        let mut start_count = 0;
+        let mut finish_count = 0;
+        for r in &records {
+            match r.get("EVENT") {
+                Some(dbase::FieldValue::Character(Some(s))) => match s.trim() {
+                    "S" => {
+                        start_count += 1;
+                        if let Some(dbase::FieldValue::Character(Some(rd))) = r.get("READER") {
+                            assert_eq!(rd.trim(), "1");
+                        }
+                    }
+                    "F" => {
+                        finish_count += 1;
+                        if let Some(dbase::FieldValue::Character(Some(rd))) = r.get("READER") {
+                            assert_eq!(rd.trim(), "2");
+                        }
+                    }
+                    other => panic!("unexpected EVENT value: {other}"),
+                },
+                other => panic!("unexpected EVENT field: {other:?}"),
+            }
+        }
+        assert_eq!(start_count, 50);
+        assert_eq!(finish_count, 50);
     }
 
     #[tokio::test]
