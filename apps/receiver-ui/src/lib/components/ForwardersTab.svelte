@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import {
     store,
     loadForwarders,
@@ -11,8 +11,18 @@
   import { createForwarderConfigApi } from "$lib/forwarder-config-api";
   import type { ForwarderEntry } from "$lib/api";
 
+  let now = $state(Date.now());
+  let tickInterval: ReturnType<typeof setInterval>;
+
   onMount(() => {
     void loadForwarders();
+    tickInterval = setInterval(() => {
+      now = Date.now();
+    }, 1000);
+  });
+
+  onDestroy(() => {
+    clearInterval(tickInterval);
   });
 
   function selectedForwarder(): ForwarderEntry | undefined {
@@ -32,9 +42,9 @@
     return "bg-status-ok";
   }
 
-  function formatLastRead(lastReadAt: string | null): string {
+  function formatLastRead(lastReadAt: string | null, _now: number): string {
     if (!lastReadAt) return "\u2014";
-    const diff = Date.now() - new Date(lastReadAt).getTime();
+    const diff = _now - new Date(lastReadAt).getTime();
     if (diff < 0) return "just now";
     const secs = Math.floor(diff / 1000);
     if (secs < 60) return `${secs}s ago`;
@@ -44,9 +54,9 @@
     return `${hours}h ago`;
   }
 
-  function lastReadColor(lastReadAt: string | null): string {
+  function lastReadColor(lastReadAt: string | null, _now: number): string {
     if (!lastReadAt) return "text-text-muted";
-    const diff = Date.now() - new Date(lastReadAt).getTime();
+    const diff = _now - new Date(lastReadAt).getTime();
     if (diff < 10_000) return "text-status-ok";
     if (diff < 60_000) return "text-text-primary";
     return "text-text-muted";
@@ -133,9 +143,10 @@
             <div
               class="text-2xl font-bold font-mono mt-1 {lastReadColor(
                 fwd.last_read_at,
+                now,
               )}"
             >
-              {formatLastRead(fwd.last_read_at)}
+              {formatLastRead(fwd.last_read_at, now)}
             </div>
           </div>
         </div>
@@ -323,9 +334,10 @@
                 <td
                   class="px-3 py-2.5 text-right font-mono {lastReadColor(
                     fwd.last_read_at,
+                    now,
                   )}"
                 >
-                  {formatLastRead(fwd.last_read_at)}
+                  {formatLastRead(fwd.last_read_at, now)}
                 </td>
               </tr>
             {/each}
