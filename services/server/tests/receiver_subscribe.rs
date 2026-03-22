@@ -1159,3 +1159,219 @@ async fn receiver_v12_targeted_replay_is_snapshot_bounded_when_new_events_arrive
         "targeted replay snapshot must be bounded and exclude events after mode apply"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Announcer proxy tests (WS -> server, no forwarder involved)
+// ---------------------------------------------------------------------------
+
+/// Helper to drain control messages (heartbeats, mode-applied, metrics) and
+/// return the first message matching the predicate.
+async fn recv_matching<F>(client: &mut MockWsClient, timeout: Duration, mut pred: F) -> WsMessage
+where
+    F: FnMut(&WsMessage) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "timeout waiting for matching message");
+        match tokio::time::timeout(remaining, client.recv_message()).await {
+            Ok(Ok(msg)) if pred(&msg) => return msg,
+            Ok(Ok(WsMessage::Heartbeat(_)))
+            | Ok(Ok(WsMessage::ReceiverModeApplied(_)))
+            | Ok(Ok(WsMessage::ReceiverStreamMetrics(_))) => continue,
+            Ok(Ok(other)) => panic!("unexpected message while waiting: {other:?}"),
+            Ok(Err(err)) => panic!("recv error: {err}"),
+            Err(_) => panic!("timeout waiting for matching message"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn receiver_v12_announcer_get_config_via_ws_proxy() {
+    let (pool, addr) = start_server().await;
+    insert_token(&pool, "rcv-ann-get", "receiver", b"rcv-ann-get-token").await;
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-ann-get".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![],
+            earliest_epochs: vec![],
+        },
+        resume: vec![],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-ann-get-token", hello).await;
+
+    // Send announcer config get request
+    rcv.send_message(&WsMessage::ReceiverProxyAnnouncerConfigGetRequest(
+        ReceiverProxyAnnouncerConfigGetRequest {
+            request_id: "ann-get-1".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let response = recv_matching(&mut rcv, Duration::from_secs(5), |msg| {
+        matches!(msg, WsMessage::ReceiverProxyAnnouncerConfigResponse(_))
+    })
+    .await;
+
+    match response {
+        WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
+            assert_eq!(r.request_id, "ann-get-1");
+            assert!(r.ok, "expected ok=true, got error: {:?}", r.error);
+            // Default config should have enabled=false
+            assert_eq!(r.config["enabled"], false);
+        }
+        other => panic!("expected ReceiverProxyAnnouncerConfigResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn receiver_v12_announcer_put_config_validation_error_via_ws_proxy() {
+    let (pool, addr) = start_server().await;
+    insert_token(&pool, "rcv-ann-put", "receiver", b"rcv-ann-put-token").await;
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-ann-put".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![],
+            earliest_epochs: vec![],
+        },
+        resume: vec![],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-ann-put-token", hello).await;
+
+    // Try to enable announcer with no streams -- should fail validation
+    rcv.send_message(&WsMessage::ReceiverProxyAnnouncerConfigSetRequest(
+        ReceiverProxyAnnouncerConfigSetRequest {
+            request_id: "ann-put-1".to_owned(),
+            payload: serde_json::json!({
+                "enabled": true,
+                "selected_stream_ids": [],
+                "max_list_size": 50,
+            }),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let response = recv_matching(&mut rcv, Duration::from_secs(5), |msg| {
+        matches!(msg, WsMessage::ReceiverProxyAnnouncerConfigResponse(_))
+    })
+    .await;
+
+    match response {
+        WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
+            assert_eq!(r.request_id, "ann-put-1");
+            assert!(!r.ok, "expected validation error");
+            assert!(
+                r.error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("at least one selected stream"),
+                "unexpected error: {:?}",
+                r.error
+            );
+        }
+        other => panic!("expected ReceiverProxyAnnouncerConfigResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn receiver_v12_announcer_reset_via_ws_proxy() {
+    let (pool, addr) = start_server().await;
+    insert_token(&pool, "rcv-ann-rst", "receiver", b"rcv-ann-rst-token").await;
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-ann-rst".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![],
+            earliest_epochs: vec![],
+        },
+        resume: vec![],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-ann-rst-token", hello).await;
+
+    rcv.send_message(&WsMessage::ReceiverProxyAnnouncerResetRequest(
+        ReceiverProxyAnnouncerResetRequest {
+            request_id: "ann-rst-1".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let response = recv_matching(&mut rcv, Duration::from_secs(5), |msg| {
+        matches!(msg, WsMessage::ReceiverProxyAnnouncerResetResponse(_))
+    })
+    .await;
+
+    match response {
+        WsMessage::ReceiverProxyAnnouncerResetResponse(r) => {
+            assert_eq!(r.request_id, "ann-rst-1");
+            assert!(r.ok, "expected ok=true, got error: {:?}", r.error);
+        }
+        other => panic!("expected ReceiverProxyAnnouncerResetResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn receiver_v12_streams_list_via_ws_proxy() {
+    let (pool, addr) = start_server().await;
+    insert_token(&pool, "fwd-sl", "forwarder", b"fwd-sl-token").await;
+    insert_token(&pool, "rcv-sl", "receiver", b"rcv-sl-token").await;
+
+    // Connect a forwarder and send an event to create a stream
+    let mut fwd = connect_forwarder(addr, "fwd-sl-token", "fwd-sl", "10.20.0.1:10000").await;
+    let fwd_session = match fwd.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {other:?}"),
+    };
+    send_forwarder_event(
+        &mut fwd,
+        &fwd_session,
+        "fwd-sl",
+        "10.20.0.1:10000",
+        1,
+        1,
+        "SL_EVENT",
+    )
+    .await;
+
+    // Wait for the stream to appear in the DB
+    let _stream_id = wait_for_stream_id(&pool, "fwd-sl", "10.20.0.1:10000").await;
+
+    // Now connect a receiver and query streams via WS proxy
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-sl".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![],
+            earliest_epochs: vec![],
+        },
+        resume: vec![],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-sl-token", hello).await;
+
+    rcv.send_message(&WsMessage::ReceiverProxyStreamsListRequest(
+        ReceiverProxyStreamsListRequest {
+            request_id: "sl-1".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let response = recv_matching(&mut rcv, Duration::from_secs(5), |msg| {
+        matches!(msg, WsMessage::ReceiverProxyStreamsListResponse(_))
+    })
+    .await;
+
+    match response {
+        WsMessage::ReceiverProxyStreamsListResponse(r) => {
+            assert_eq!(r.request_id, "sl-1");
+            assert!(r.ok, "expected ok=true, got error: {:?}", r.error);
+            assert_eq!(r.streams.len(), 1, "expected exactly one stream");
+            assert_eq!(r.streams[0].forwarder_id, "fwd-sl");
+            assert_eq!(r.streams[0].reader_ip, "10.20.0.1:10000");
+        }
+        other => panic!("expected ReceiverProxyStreamsListResponse, got {other:?}"),
+    }
+}

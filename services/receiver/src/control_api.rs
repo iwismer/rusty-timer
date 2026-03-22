@@ -1016,12 +1016,113 @@ pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, Recei
     }
 }
 
+// ---------------------------------------------------------------------------
+// Announcer proxy (WS → server)
+// ---------------------------------------------------------------------------
+
+pub async fn get_server_streams(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyStreamsListRequest(
+        rt_protocol::ReceiverProxyStreamsListRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyStreamsListResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            // Wrap in {"streams": [...]} to match the HTTP API shape expected by the frontend
+            let streams_json = serde_json::to_value(&r.streams).map_err(|e| {
+                ReceiverError::UpstreamError(format!("failed to serialize streams: {e}"))
+            })?;
+            Ok(serde_json::json!({ "streams": streams_json }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn get_announcer_config(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigGetRequest(
+        rt_protocol::ReceiverProxyAnnouncerConfigGetRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(r.config)
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn put_announcer_config(
+    state: &AppState,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigSetRequest(
+        rt_protocol::ReceiverProxyAnnouncerConfigSetRequest {
+            request_id: generate_request_id(),
+            payload: body,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(r.config)
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn reset_announcer(state: &AppState) -> Result<(), ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerResetRequest(
+        rt_protocol::ReceiverProxyAnnouncerResetRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyAnnouncerResetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
 /// Send a WS command through the active session and wait for a response.
 ///
-/// Uses a 15s timeout. Note: the server applies a 10s `PROXY_TIMEOUT` to both
-/// send and reply phases independently, so the server's total timeout can reach
-/// ~20s in degenerate cases. This means local timeout may fire first under
-/// backpressure.
+/// Uses a 15s timeout. For forwarder proxy requests, the server applies a 10s
+/// `PROXY_TIMEOUT` to both send and reply phases independently, so the server's
+/// total timeout can reach ~20s in degenerate cases and the local timeout may
+/// fire first under backpressure. Announcer and stream-list proxy requests are
+/// handled server-side with no explicit timeout beyond the database query time.
 async fn send_ws_command(
     state: &AppState,
     message: rt_protocol::WsMessage,
@@ -1044,7 +1145,7 @@ async fn send_ws_command(
 
     let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
         .await
-        .map_err(|_| ReceiverError::UpstreamError("forwarder response timeout".to_owned()))?
+        .map_err(|_| ReceiverError::UpstreamError("server response timeout".to_owned()))?
         .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
 
     // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,

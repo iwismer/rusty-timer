@@ -6,6 +6,7 @@
     { id: "streams", label: "Streams" },
     { id: "forwarders", label: "Forwarders" },
     { id: "mode", label: "Mode" },
+    { id: "announcer", label: "Announcer" },
     { id: "config", label: "Config" },
     { id: "logs", label: "Logs" },
     { id: "admin", label: "Admin" },

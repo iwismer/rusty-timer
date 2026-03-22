@@ -503,7 +503,7 @@ pub struct ReaderDownloadProgress {
 }
 
 // ---------------------------------------------------------------------------
-// Receiver proxy messages (receiver <-> server, for proxied forwarder config and control)
+// Receiver proxy messages (receiver <-> server, for proxied forwarder config, control, and announcer)
 // ---------------------------------------------------------------------------
 
 /// Actions that can be requested on a forwarder device via the proxy channel.
@@ -579,12 +579,73 @@ pub struct ReceiverProxyControlResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Receiver proxy messages: announcer config and streams (receiver <-> server)
+// ---------------------------------------------------------------------------
+
+/// Receiver-to-server: get the server's stream list (for announcer stream selection).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyStreamsListRequest {
+    pub request_id: String,
+}
+
+/// Server-to-receiver: stream list response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyStreamsListResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub streams: Vec<StreamInfo>,
+}
+
+/// Receiver-to-server: get the current announcer configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyAnnouncerConfigGetRequest {
+    pub request_id: String,
+}
+
+/// Receiver-to-server: update the announcer configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyAnnouncerConfigSetRequest {
+    pub request_id: String,
+    pub payload: serde_json::Value,
+}
+
+/// Receiver-to-server: reset the announcer runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyAnnouncerResetRequest {
+    pub request_id: String,
+}
+
+/// Server-to-receiver: announcer config response, used for both get-config
+/// and set-config requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyAnnouncerConfigResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// Server-to-receiver: announcer reset result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyAnnouncerResetResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
 
 /// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
 /// status tracking, reader control extensions, and receiver-to-server
-/// proxy messages for remote forwarder config and control.
+/// proxy messages for remote forwarder management and announcer configuration.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -625,6 +686,13 @@ pub enum WsMessage {
     ReceiverProxyRestartRequest(ReceiverProxyRestartRequest),
     ReceiverProxyDeviceControlRequest(ReceiverProxyDeviceControlRequest),
     ReceiverProxyControlResponse(ReceiverProxyControlResponse),
+    ReceiverProxyStreamsListRequest(ReceiverProxyStreamsListRequest),
+    ReceiverProxyStreamsListResponse(ReceiverProxyStreamsListResponse),
+    ReceiverProxyAnnouncerConfigGetRequest(ReceiverProxyAnnouncerConfigGetRequest),
+    ReceiverProxyAnnouncerConfigSetRequest(ReceiverProxyAnnouncerConfigSetRequest),
+    ReceiverProxyAnnouncerResetRequest(ReceiverProxyAnnouncerResetRequest),
+    ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse),
+    ReceiverProxyAnnouncerResetResponse(ReceiverProxyAnnouncerResetResponse),
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +982,129 @@ mod tests {
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"kind\":\"receiver_proxy_control_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_streams_list_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyStreamsListRequest(ReceiverProxyStreamsListRequest {
+            request_id: "req-s1".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_streams_list_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_streams_list_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyStreamsListResponse(ReceiverProxyStreamsListResponse {
+            request_id: "req-s1".into(),
+            ok: true,
+            error: None,
+            streams: vec![StreamInfo {
+                stream_id: "abc".into(),
+                forwarder_id: "fwd-1".into(),
+                reader_ip: "10.0.0.1".into(),
+                display_alias: None,
+                stream_epoch: 1,
+                online: true,
+                reader_connected: true,
+            }],
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_streams_list_response_error_round_trip() {
+        let msg = WsMessage::ReceiverProxyStreamsListResponse(ReceiverProxyStreamsListResponse {
+            request_id: "req-s2".into(),
+            ok: false,
+            error: Some("database error: connection refused".into()),
+            streams: vec![],
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_announcer_config_get_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyAnnouncerConfigGetRequest(
+            ReceiverProxyAnnouncerConfigGetRequest {
+                request_id: "req-a1".into(),
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_announcer_config_get_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_announcer_config_set_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyAnnouncerConfigSetRequest(
+            ReceiverProxyAnnouncerConfigSetRequest {
+                request_id: "req-a2".into(),
+                payload: serde_json::json!({"enabled": true, "selected_stream_ids": [], "max_list_size": 25}),
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_announcer_reset_request_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyAnnouncerResetRequest(ReceiverProxyAnnouncerResetRequest {
+                request_id: "req-a3".into(),
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_announcer_config_response_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
+                request_id: "req-a1".into(),
+                ok: true,
+                error: None,
+                config: serde_json::json!({"enabled": false, "max_list_size": 25}),
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_announcer_config_response_error_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
+                request_id: "req-a1".into(),
+                ok: false,
+                error: Some("database error: connection refused".into()),
+                config: serde_json::Value::Null,
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_announcer_reset_response_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyAnnouncerResetResponse(ReceiverProxyAnnouncerResetResponse {
+                request_id: "req-a3".into(),
+                ok: true,
+                error: None,
+            });
+        let json = serde_json::to_string(&msg).unwrap();
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);
     }

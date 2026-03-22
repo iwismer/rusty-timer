@@ -23,7 +23,8 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use rt_protocol::{
     EarliestEpochOverride, ReadEvent, ReceiverAck, ReceiverEventBatch, ReceiverHelloV12,
-    ReceiverMode, ReceiverModeApplied, ReceiverProxyConfigGetResponse,
+    ReceiverMode, ReceiverModeApplied, ReceiverProxyAnnouncerConfigResponse,
+    ReceiverProxyAnnouncerResetResponse, ReceiverProxyConfigGetResponse,
     ReceiverProxyConfigSetResponse, ReceiverProxyControlResponse, ReplayTarget, StreamRef,
     WsMessage, error_codes,
 };
@@ -277,6 +278,124 @@ async fn proxy_device_control_reply(
         },
     };
     WsMessage::ReceiverProxyControlResponse(resp)
+}
+
+async fn proxy_streams_list_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyStreamsListRequest,
+) -> WsMessage {
+    match crate::http::streams::get_streams_value(&state).await {
+        Ok(stream_values) => {
+            let mut streams = Vec::with_capacity(stream_values.len());
+            for v in stream_values {
+                match serde_json::from_value::<rt_protocol::StreamInfo>(v) {
+                    Ok(s) => streams.push(s),
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize stream into StreamInfo");
+                        return WsMessage::ReceiverProxyStreamsListResponse(
+                            rt_protocol::ReceiverProxyStreamsListResponse {
+                                request_id: req.request_id,
+                                ok: false,
+                                error: Some(format!("stream deserialization failed: {e}")),
+                                streams: vec![],
+                            },
+                        );
+                    }
+                }
+            }
+            WsMessage::ReceiverProxyStreamsListResponse(
+                rt_protocol::ReceiverProxyStreamsListResponse {
+                    request_id: req.request_id,
+                    ok: true,
+                    error: None,
+                    streams,
+                },
+            )
+        }
+        Err(e) => {
+            warn!(error = %e, "streams list proxy failed");
+            WsMessage::ReceiverProxyStreamsListResponse(
+                rt_protocol::ReceiverProxyStreamsListResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(e),
+                    streams: vec![],
+                },
+            )
+        }
+    }
+}
+
+async fn proxy_announcer_get_config_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyAnnouncerConfigGetRequest,
+) -> WsMessage {
+    match crate::http::announcer::get_config_value(&state).await {
+        Ok(config) => {
+            WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
+                request_id: req.request_id,
+                ok: true,
+                error: None,
+                config,
+            })
+        }
+        Err(e) => {
+            warn!(error = %e, "announcer get-config proxy failed");
+            WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e.to_string()),
+                config: serde_json::Value::Null,
+            })
+        }
+    }
+}
+
+async fn proxy_announcer_put_config_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyAnnouncerConfigSetRequest,
+) -> WsMessage {
+    match crate::http::announcer::put_config_value(&state, req.payload).await {
+        Ok(config) => {
+            state
+                .logger
+                .log(format!("announcer config updated via receiver {device_id}"));
+            WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
+                request_id: req.request_id,
+                ok: true,
+                error: None,
+                config,
+            })
+        }
+        Err(e) => {
+            warn!(error = %e, "announcer put-config proxy failed");
+            WsMessage::ReceiverProxyAnnouncerConfigResponse(ReceiverProxyAnnouncerConfigResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e.to_string()),
+                config: serde_json::Value::Null,
+            })
+        }
+    }
+}
+
+async fn proxy_announcer_reset_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyAnnouncerResetRequest,
+) -> WsMessage {
+    // NOTE: reset_announcer_runtime is currently infallible.
+    // If it becomes fallible, this handler must propagate errors.
+    state.reset_announcer_runtime().await;
+    state
+        .logger
+        .log(format!("announcer reset via receiver {device_id}"));
+    WsMessage::ReceiverProxyAnnouncerResetResponse(ReceiverProxyAnnouncerResetResponse {
+        request_id: req.request_id,
+        ok: true,
+        error: None,
+    })
 }
 
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
@@ -579,6 +698,32 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                 }
                                 Ok(WsMessage::ReceiverProxyDeviceControlRequest(req)) => {
                                     pending_proxy_replies.spawn(proxy_device_control_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyStreamsListRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_streams_list_reply(
+                                        state.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyAnnouncerConfigGetRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_announcer_get_config_reply(
+                                        state.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyAnnouncerConfigSetRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_announcer_put_config_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyAnnouncerResetRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_announcer_reset_reply(
                                         state.clone(),
                                         device_id.clone(),
                                         req,

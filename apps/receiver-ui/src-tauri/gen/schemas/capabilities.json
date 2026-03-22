@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for the receiver Tauri app","local":true,"windows":["*"],"permissions":["core:default","updater:default","core:event:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for the receiver Tauri app","local":true,"windows":["*"],"permissions":["core:default","opener:default","updater:default","core:event:default"]}}

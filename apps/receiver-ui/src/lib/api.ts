@@ -375,3 +375,34 @@ export async function updateSubscriptionEventType(
     body: { event_type: eventType },
   });
 }
+
+// --------------- Announcer commands ---------------
+
+import type {
+  AnnouncerConfig,
+  AnnouncerConfigUpdate,
+  AnnouncerStreamEntry,
+} from "@rusty-timer/shared-ui";
+export type { AnnouncerConfig, AnnouncerConfigUpdate };
+
+export interface ServerStreamsResponse {
+  streams: AnnouncerStreamEntry[];
+}
+
+export async function getServerStreams(): Promise<ServerStreamsResponse> {
+  return invoke<ServerStreamsResponse>("get_server_streams");
+}
+
+export async function getAnnouncerConfig(): Promise<AnnouncerConfig> {
+  return invoke<AnnouncerConfig>("get_announcer_config");
+}
+
+export async function putAnnouncerConfig(
+  body: AnnouncerConfigUpdate,
+): Promise<AnnouncerConfig> {
+  return invoke<AnnouncerConfig>("put_announcer_config", { body });
+}
+
+export async function resetAnnouncer(): Promise<void> {
+  await invoke("reset_announcer");
+}
