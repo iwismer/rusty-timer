@@ -8,7 +8,7 @@
     let offline = 0;
     let totalReads = 0;
     for (const s of list) {
-      if (s.online === true) online++;
+      if (s.online === true && s.reader_connected === true) online++;
       else if (s.online === false) offline++;
       else degraded++;
       if (s.subscribed && s.reads_total !== undefined) {
