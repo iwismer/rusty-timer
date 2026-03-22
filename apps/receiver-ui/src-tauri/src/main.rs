@@ -436,6 +436,16 @@ fn main() {
                 .item(&quit)
                 .build()?;
 
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .item(&PredefinedMenuItem::undo(app, None)?)
+                .item(&PredefinedMenuItem::redo(app, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::cut(app, None)?)
+                .item(&PredefinedMenuItem::copy(app, None)?)
+                .item(&PredefinedMenuItem::paste(app, None)?)
+                .item(&PredefinedMenuItem::select_all(app, None)?)
+                .build()?;
+
             let toggle_theme =
                 MenuItemBuilder::with_id("toggle-theme", "Toggle Theme").build(app)?;
             let view_menu = SubmenuBuilder::new(app, "View")
@@ -447,6 +457,7 @@ fn main() {
 
             let menu = MenuBuilder::new(app)
                 .item(&file_menu)
+                .item(&edit_menu)
                 .item(&view_menu)
                 .item(&help_menu)
                 .build()?;
