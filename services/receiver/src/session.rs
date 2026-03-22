@@ -50,6 +50,7 @@ impl WsCommand {
     /// Create a new `WsCommand`, extracting `request_id` from the message.
     ///
     /// Returns `Err` if `message` is not a `ReceiverProxy*Request` variant.
+    #[allow(clippy::result_large_err)]
     pub fn new(
         message: WsMessage,
         reply: oneshot::Sender<WsMessage>,
