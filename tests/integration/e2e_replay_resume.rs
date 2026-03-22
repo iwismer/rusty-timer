@@ -144,7 +144,11 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -190,7 +194,11 @@ async fn e2e_replay_on_reconnect_cursor_respected() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -278,7 +286,11 @@ async fn e2e_replay_fresh_receiver_gets_all_events() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -415,7 +427,11 @@ async fn e2e_epoch_reset_old_epoch_remains_replayable() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => continue,
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => break,
         }
@@ -507,7 +523,11 @@ async fn e2e_receiver_ack_advances_cursor() {
                 .await
                 .unwrap();
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {}
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => {}
             Ok(Ok(other)) => panic!("unexpected: {:?}", other),
             Ok(Err(_)) | Err(_) => {}
         }
@@ -565,7 +585,11 @@ async fn e2e_receiver_ack_advances_cursor() {
                 );
             }
         }
-        Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {}
+        Ok(Ok(
+            WsMessage::Heartbeat(_)
+            | WsMessage::ReceiverModeApplied(_)
+            | WsMessage::ReceiverStreamMetrics(_),
+        )) => {}
         Ok(Ok(other)) => panic!("unexpected: {:?}", other),
         // Timeout or connection close are acceptable — no events to deliver.
         Ok(Err(_)) | Err(_) => {}

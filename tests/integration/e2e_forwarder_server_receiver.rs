@@ -255,7 +255,11 @@ async fn e2e_two_stream_forwarder_to_mock_receiver() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => continue,
             Ok(Ok(other)) => panic!("unexpected message: {:?}", other),
             Ok(Err(e)) => panic!("recv error: {}", e),
             Err(_) => break,

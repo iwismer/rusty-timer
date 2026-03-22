@@ -141,7 +141,11 @@ async fn server_restart_events_survive_in_postgres() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => continue,
             _ => break,
         }
     }
