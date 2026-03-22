@@ -4,6 +4,7 @@
   "windows": ["*"],
   "permissions": [
     "core:default",
+    "opener:default",
     "updater:default",
     "core:event:default"
   ]

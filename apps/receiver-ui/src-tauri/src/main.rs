@@ -453,6 +453,7 @@ fn main() {
     tracing_subscriber::fmt::init();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();

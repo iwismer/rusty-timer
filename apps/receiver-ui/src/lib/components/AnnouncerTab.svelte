@@ -33,20 +33,30 @@
       return null;
     }
   }
+
+  async function openAnnouncerPage() {
+    const url = announcerPageUrl();
+    if (!url) return;
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+    } catch {
+      // Fallback for non-Tauri (e.g. dev server in browser)
+      window.open(url, "_blank");
+    }
+  }
 </script>
 
 <main class="max-w-[900px] mx-auto px-6 py-6">
   <div class="flex items-center justify-between gap-3 mb-6">
     <h1 class="text-xl font-bold text-text-primary m-0">Announcer</h1>
     {#if announcerPageUrl()}
-      <a
-        href={announcerPageUrl()}
-        target="_blank"
-        rel="noopener noreferrer"
-        class="text-sm font-medium text-action-600 hover:text-action-700 underline"
+      <button
+        onclick={() => void openAnnouncerPage()}
+        class="text-sm font-medium text-action-600 hover:text-action-700 underline cursor-pointer bg-transparent border-none p-0"
       >
         Open announcer page
-      </a>
+      </button>
     {/if}
   </div>
 
