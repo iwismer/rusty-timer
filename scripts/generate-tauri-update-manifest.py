@@ -44,6 +44,8 @@ def main() -> None:
         sys.exit(1)
 
     exe_name = exe_files[0].name
+    # GitHub replaces spaces with dots in release asset filenames
+    asset_name = exe_name.replace(" ", ".")
 
     manifest = {
         "version": f"v{version}",
@@ -51,7 +53,7 @@ def main() -> None:
         "notes": f"Receiver v{version}",
         "platforms": {
             "windows-x86_64": {
-                "url": f"https://github.com/{REPO}/releases/download/receiver-v{version}/{exe_name}",
+                "url": f"https://github.com/{REPO}/releases/download/receiver-v{version}/{asset_name}",
                 "signature": signature,
             }
         },
