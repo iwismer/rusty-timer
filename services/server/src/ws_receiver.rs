@@ -1,9 +1,11 @@
 use crate::{
     auth::validate_token,
+    dashboard_events::DashboardEvent,
     repo::{
         events::{
-            fetch_events_after_cursor_through_cursor_limited,
+            count_unique_chips, fetch_events_after_cursor_through_cursor_limited,
             fetch_events_for_stream_epoch_from_seq_through_cursor_limited, fetch_max_event_cursor,
+            fetch_stream_metrics,
         },
         receiver_cursors::{fetch_cursor, upsert_cursor},
         stream_epoch_races::list_race_selection_streams,
@@ -48,6 +50,38 @@ struct StreamSub {
     last_epoch: i64,
     last_seq: i64,
     rx: tokio::sync::broadcast::Receiver<ReadEvent>,
+}
+
+async fn send_stream_metrics(
+    socket: &mut WebSocket,
+    state: &AppState,
+    target: &ResolvedStreamTarget,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let metrics = match fetch_stream_metrics(&state.pool, target.stream_id).await? {
+        Some(m) => m,
+        None => return Ok(()), // No metrics row yet
+    };
+
+    let unique_chips =
+        count_unique_chips(&state.pool, target.stream_id, target.current_stream_epoch).await?;
+
+    let msg = WsMessage::ReceiverStreamMetrics(rt_protocol::ReceiverStreamMetrics {
+        forwarder_id: target.forwarder_id.clone(),
+        reader_ip: target.reader_ip.clone(),
+        raw_count: metrics.raw_count,
+        dedup_count: metrics.dedup_count,
+        retransmit_count: metrics.retransmit_count,
+        lag_ms: metrics.lag_ms,
+        epoch_raw_count: metrics.epoch_raw_count,
+        epoch_dedup_count: metrics.epoch_dedup_count,
+        epoch_retransmit_count: metrics.epoch_retransmit_count,
+        epoch_lag_ms: metrics.epoch_lag_ms,
+        epoch_last_received_at: metrics.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
+        unique_chips,
+    });
+    let json = serde_json::to_string(&msg)?;
+    socket.send(Message::Text(json.into())).await?;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -235,7 +269,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
         }
 
         let mut subscriptions: Vec<StreamSub> = Vec::new();
-        let mut active_mode = match apply_mode(
+        let (mut active_mode, resolved_targets) = match apply_mode(
             &mut socket,
             &state,
             &device_id,
@@ -245,12 +279,32 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
         )
         .await
         {
-            Ok(mode) => mode,
+            Ok(result) => result,
             Err(e) => {
                 error!(device_id = %device_id, error = %e, "error applying receiver mode");
                 return;
             }
         };
+
+        // Push initial stream metrics for each resolved target.
+        for target in &resolved_targets {
+            if let Err(e) = send_stream_metrics(&mut socket, &state, target).await {
+                warn!(
+                    stream_id = %target.stream_id,
+                    error = %e,
+                    "failed to send initial stream metrics"
+                );
+            }
+        }
+
+        // Build a lookup map so we can filter live metrics events to only
+        // the streams this receiver is subscribed to.
+        let mut subscribed_stream_info: HashMap<Uuid, (String, String)> = resolved_targets
+            .iter()
+            .map(|t| (t.stream_id, (t.forwarder_id.clone(), t.reader_ip.clone())))
+            .collect();
+
+        let mut dashboard_rx = state.dashboard_tx.subscribe();
 
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         heartbeat_interval.tick().await;
@@ -426,6 +480,7 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                         race_id,
                         baseline,
                         &mut subscriptions,
+                        &mut subscribed_stream_info,
                     )
                     .await {
                         Ok(_changed) => {}
@@ -433,6 +488,49 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                             error!(device_id = %device_id, error = %e, "error refreshing race mode");
                             break;
                         }
+                    }
+                }
+                event = dashboard_rx.recv() => {
+                    match event {
+                        Ok(DashboardEvent::MetricsUpdated {
+                            stream_id,
+                            raw_count,
+                            dedup_count,
+                            retransmit_count,
+                            lag_ms,
+                            epoch_raw_count,
+                            epoch_dedup_count,
+                            epoch_retransmit_count,
+                            epoch_lag_ms,
+                            epoch_last_received_at,
+                            unique_chips,
+                            ..
+                        }) => {
+                            if let Some((forwarder_id, reader_ip)) = subscribed_stream_info.get(&stream_id) {
+                                let msg = WsMessage::ReceiverStreamMetrics(rt_protocol::ReceiverStreamMetrics {
+                                    forwarder_id: forwarder_id.clone(),
+                                    reader_ip: reader_ip.clone(),
+                                    raw_count,
+                                    dedup_count,
+                                    retransmit_count,
+                                    lag_ms,
+                                    epoch_raw_count,
+                                    epoch_dedup_count,
+                                    epoch_retransmit_count,
+                                    epoch_lag_ms,
+                                    epoch_last_received_at,
+                                    unique_chips,
+                                });
+                                if let Ok(json) = serde_json::to_string(&msg) {
+                                    if socket.send(Message::Text(json.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
@@ -481,7 +579,7 @@ async fn apply_mode(
     session_id: &str,
     hello: &ReceiverHelloV12,
     subscriptions: &mut Vec<StreamSub>,
-) -> Result<ActiveMode, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(ActiveMode, Vec<ResolvedStreamTarget>), Box<dyn std::error::Error + Send + Sync>> {
     match &hello.mode {
         ReceiverMode::Live {
             streams,
@@ -526,10 +624,10 @@ async fn apply_mode(
             let _ = state
                 .update_receiver_session_selection(session_id, mode_snapshot(&hello.mode))
                 .await;
-            Ok(ActiveMode::Live)
+            Ok((ActiveMode::Live, targets))
         }
         ReceiverMode::Race { race_id } => {
-            let (mut next_subscriptions, baseline) =
+            let (mut next_subscriptions, baseline, race_targets) =
                 apply_race_mode_forward_only(state, device_id, race_id).await?;
             for sub in &mut next_subscriptions {
                 replay_backlog(socket, state, session_id, sub).await?;
@@ -548,10 +646,13 @@ async fn apply_mode(
             let _ = state
                 .update_receiver_session_selection(session_id, mode_snapshot(&hello.mode))
                 .await;
-            Ok(ActiveMode::Race {
-                race_id: race_id.clone(),
-                baseline,
-            })
+            Ok((
+                ActiveMode::Race {
+                    race_id: race_id.clone(),
+                    baseline,
+                },
+                race_targets,
+            ))
         }
         ReceiverMode::TargetedReplay { targets } => {
             let (resolved_targets, warnings) =
@@ -583,7 +684,7 @@ async fn apply_mode(
             let _ = state
                 .update_receiver_session_selection(session_id, mode_snapshot(&hello.mode))
                 .await;
-            Ok(ActiveMode::TargetedReplay)
+            Ok((ActiveMode::TargetedReplay, Vec::new()))
         }
     }
 }
@@ -592,16 +693,19 @@ async fn apply_race_mode_forward_only(
     state: &AppState,
     device_id: &str,
     race_id: &str,
-) -> Result<(Vec<StreamSub>, RaceBaseline), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (Vec<StreamSub>, RaceBaseline, Vec<ResolvedStreamTarget>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let (targets, baseline) = resolve_race_targets(state, race_id).await?;
     let mut subscriptions = Vec::with_capacity(targets.len());
-    for target in targets {
+    for target in &targets {
         let start_cursor = fetch_cursor(&state.pool, device_id, target.stream_id)
             .await?
             .unwrap_or((1, 0));
         subscriptions.push(subscribe_by_stream_id(state, target.stream_id, start_cursor).await);
     }
-    Ok((subscriptions, baseline))
+    Ok((subscriptions, baseline, targets))
 }
 
 async fn apply_race_refresh_forward_only(
@@ -612,10 +716,20 @@ async fn apply_race_refresh_forward_only(
     race_id: &str,
     baseline: &mut RaceBaseline,
     subscriptions: &mut Vec<StreamSub>,
+    subscribed_stream_info: &mut HashMap<Uuid, (String, String)>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let (targets, _) = resolve_race_targets(state, race_id).await?;
     if !race_refresh_needed(&targets, subscriptions, baseline) {
         return Ok(false);
+    }
+
+    // Update stream info map with current target set before plan consumes targets.
+    subscribed_stream_info.clear();
+    for target in &targets {
+        subscribed_stream_info.insert(
+            target.stream_id,
+            (target.forwarder_id.clone(), target.reader_ip.clone()),
+        );
     }
 
     let (mut next_subscriptions, new_targets) =
