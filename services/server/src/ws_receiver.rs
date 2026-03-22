@@ -521,10 +521,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     epoch_last_received_at,
                                     unique_chips,
                                 });
-                                if let Ok(json) = serde_json::to_string(&msg) {
-                                    if socket.send(Message::Text(json.into())).await.is_err() {
-                                        break;
-                                    }
+                                if let Ok(json) = serde_json::to_string(&msg)
+                                    && socket.send(Message::Text(json.into())).await.is_err()
+                                {
+                                    break;
                                 }
                             }
                         }
@@ -708,6 +708,7 @@ async fn apply_race_mode_forward_only(
     Ok((subscriptions, baseline, targets))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_race_refresh_forward_only(
     socket: &mut WebSocket,
     state: &AppState,
