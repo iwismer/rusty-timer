@@ -6,12 +6,29 @@ use std::sync::{Arc, Mutex};
 use receiver::control_api::{self, AppState, ShutdownSignal};
 use receiver::ui_events::ReceiverUiEvent;
 use tauri::async_runtime::JoinHandle;
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder};
 use tauri::{Emitter, Manager, RunEvent, State};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracing::warn;
+
+struct ZoomLevel(Mutex<f64>);
+
+fn open_in_file_manager(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer").arg(path).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Result alias for Tauri commands
@@ -30,6 +47,36 @@ enum BridgeAction {
     },
     EmitResync,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditMenuItem {
+    Undo,
+    Redo,
+    Separator,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
+#[cfg(target_os = "macos")]
+const EDIT_MENU_ITEMS: &[EditMenuItem] = &[
+    EditMenuItem::Undo,
+    EditMenuItem::Redo,
+    EditMenuItem::Separator,
+    EditMenuItem::Cut,
+    EditMenuItem::Copy,
+    EditMenuItem::Paste,
+    EditMenuItem::SelectAll,
+];
+
+#[cfg(not(target_os = "macos"))]
+const EDIT_MENU_ITEMS: &[EditMenuItem] = &[
+    EditMenuItem::Cut,
+    EditMenuItem::Copy,
+    EditMenuItem::Paste,
+    EditMenuItem::SelectAll,
+];
 
 fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
     match event {
@@ -103,6 +150,28 @@ fn record_app_failure(app: &tauri::AppHandle, message: &str) {
     eprintln!("{message}");
     let log_dir = app.path().app_local_data_dir().ok();
     write_crash_log_best_effort(log_dir.as_deref(), message);
+}
+
+fn edit_menu_items() -> &'static [EditMenuItem] {
+    EDIT_MENU_ITEMS
+}
+
+fn build_edit_menu<R: tauri::Runtime, M: Manager<R>>(app: &M) -> tauri::Result<Submenu<R>> {
+    let mut builder = SubmenuBuilder::new(app, "Edit");
+
+    for item in edit_menu_items() {
+        builder = match item {
+            EditMenuItem::Undo => builder.item(&PredefinedMenuItem::undo(app, None)?),
+            EditMenuItem::Redo => builder.item(&PredefinedMenuItem::redo(app, None)?),
+            EditMenuItem::Separator => builder.separator(),
+            EditMenuItem::Cut => builder.item(&PredefinedMenuItem::cut(app, None)?),
+            EditMenuItem::Copy => builder.item(&PredefinedMenuItem::copy(app, None)?),
+            EditMenuItem::Paste => builder.item(&PredefinedMenuItem::paste(app, None)?),
+            EditMenuItem::SelectAll => builder.item(&PredefinedMenuItem::select_all(app, None)?),
+        };
+    }
+
+    builder.build()
 }
 
 // ---------------------------------------------------------------------------
@@ -427,39 +496,147 @@ fn main() {
             let handle = app.handle().clone();
 
             // Build native menu bar
+
+            // --- File menu ---
             let check_update =
                 MenuItemBuilder::with_id("check-update", "Check for Updates...").build(app)?;
+            let open_data_dir =
+                MenuItemBuilder::with_id("open-data-dir", "Open Data Directory").build(app)?;
             let quit = PredefinedMenuItem::quit(app, Some("Quit"))?;
             let file_menu = SubmenuBuilder::new(app, "File")
                 .item(&check_update)
+                .item(&open_data_dir)
                 .separator()
                 .item(&quit)
                 .build()?;
 
+            // --- Edit menu ---
+            let edit_menu = build_edit_menu(app)?;
+
+            // --- View menu ---
+            let refresh = MenuItemBuilder::with_id("refresh", "Refresh")
+                .accelerator("CmdOrCtrl+R")
+                .build(app)?;
             let toggle_theme =
                 MenuItemBuilder::with_id("toggle-theme", "Toggle Theme").build(app)?;
-            let view_menu = SubmenuBuilder::new(app, "View")
-                .item(&toggle_theme)
-                .build()?;
+            let zoom_in = MenuItemBuilder::with_id("zoom-in", "Zoom In")
+                .accelerator("CmdOrCtrl+=")
+                .build(app)?;
+            let zoom_out = MenuItemBuilder::with_id("zoom-out", "Zoom Out")
+                .accelerator("CmdOrCtrl+-")
+                .build(app)?;
+            let zoom_reset = MenuItemBuilder::with_id("zoom-reset", "Reset Zoom")
+                .accelerator("CmdOrCtrl+0")
+                .build(app)?;
 
+            let mut view_builder = SubmenuBuilder::new(app, "View")
+                .item(&refresh)
+                .item(&toggle_theme)
+                .separator()
+                .item(&zoom_in)
+                .item(&zoom_out)
+                .item(&zoom_reset);
+
+            #[cfg(target_os = "macos")]
+            {
+                view_builder = view_builder
+                    .separator()
+                    .item(&PredefinedMenuItem::fullscreen(app, None)?);
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let toggle_devtools =
+                    MenuItemBuilder::with_id("toggle-devtools", "Toggle Developer Tools")
+                        .accelerator("CmdOrCtrl+Shift+I")
+                        .build(app)?;
+                view_builder = view_builder.separator().item(&toggle_devtools);
+            }
+
+            let view_menu = view_builder.build()?;
+
+            // --- Help menu ---
+            let about = PredefinedMenuItem::about(app, Some("About Rusty Timer Receiver"), None)?;
             let open_help = MenuItemBuilder::with_id("open-help", "Help...").build(app)?;
-            let help_menu = SubmenuBuilder::new(app, "Help").item(&open_help).build()?;
+            let open_logs_dir =
+                MenuItemBuilder::with_id("open-logs-dir", "Open Logs Directory").build(app)?;
+            let help_menu = SubmenuBuilder::new(app, "Help")
+                .item(&about)
+                .item(&open_help)
+                .item(&open_logs_dir)
+                .build()?;
 
             let menu = MenuBuilder::new(app)
                 .item(&file_menu)
+                .item(&edit_menu)
                 .item(&view_menu)
                 .item(&help_menu)
                 .build()?;
 
             app.set_menu(menu)?;
 
+            // Zoom level state for View > Zoom In/Out/Reset
+            app.manage(ZoomLevel(Mutex::new(1.0)));
+
             // Handle menu events
             app.on_menu_event(|app_handle, event| match event.id().as_ref() {
                 "check-update" => {
                     let _ = app_handle.emit("menu-check-update", ());
                 }
+                "refresh" => {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.reload();
+                    }
+                }
                 "toggle-theme" => {
                     let _ = app_handle.emit("menu-toggle-theme", ());
+                }
+                "zoom-in" => {
+                    if let Some(level) = app_handle.try_state::<ZoomLevel>() {
+                        let mut zoom = level.0.lock().unwrap();
+                        *zoom = (*zoom + 0.1).min(3.0);
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.set_zoom(*zoom);
+                        }
+                    }
+                }
+                "zoom-out" => {
+                    if let Some(level) = app_handle.try_state::<ZoomLevel>() {
+                        let mut zoom = level.0.lock().unwrap();
+                        *zoom = (*zoom - 0.1).max(0.5);
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.set_zoom(*zoom);
+                        }
+                    }
+                }
+                "zoom-reset" => {
+                    if let Some(level) = app_handle.try_state::<ZoomLevel>() {
+                        let mut zoom = level.0.lock().unwrap();
+                        *zoom = 1.0;
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.set_zoom(1.0);
+                        }
+                    }
+                }
+                #[cfg(debug_assertions)]
+                "toggle-devtools" => {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        if window.is_devtools_open() {
+                            window.close_devtools();
+                        } else {
+                            window.open_devtools();
+                        }
+                    }
+                }
+                "open-data-dir" => {
+                    if let Ok(dir) = app_handle.path().app_local_data_dir() {
+                        open_in_file_manager(&dir);
+                    }
+                }
+                "open-logs-dir" => {
+                    if let Ok(dir) = app_handle.path().app_log_dir() {
+                        open_in_file_manager(&dir);
+                    }
                 }
                 "open-help" => {
                     let _ = app_handle.emit("menu-open-help", ());
@@ -618,5 +795,35 @@ mod tests {
 
         fs::remove_file(&path).expect("remove crash log");
         fs::remove_dir(&dir).expect("remove crash dir");
+    }
+
+    #[test]
+    fn edit_menu_items_match_platform_support() {
+        let items = edit_menu_items();
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            items,
+            &[
+                EditMenuItem::Undo,
+                EditMenuItem::Redo,
+                EditMenuItem::Separator,
+                EditMenuItem::Cut,
+                EditMenuItem::Copy,
+                EditMenuItem::Paste,
+                EditMenuItem::SelectAll
+            ]
+        );
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            items,
+            &[
+                EditMenuItem::Cut,
+                EditMenuItem::Copy,
+                EditMenuItem::Paste,
+                EditMenuItem::SelectAll
+            ]
+        );
     }
 }
