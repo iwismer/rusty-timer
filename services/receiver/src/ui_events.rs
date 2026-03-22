@@ -36,27 +36,6 @@ pub struct StreamMetricsPayload {
 }
 
 impl StreamMetricsPayload {
-    pub fn from_upstream(
-        forwarder_id: String,
-        reader_ip: String,
-        resp: &crate::control_api::UpstreamMetricsResponse,
-    ) -> Self {
-        Self {
-            forwarder_id,
-            reader_ip,
-            raw_count: resp.raw_count,
-            dedup_count: resp.dedup_count,
-            retransmit_count: resp.retransmit_count,
-            lag_ms: resp.lag_ms,
-            epoch_raw_count: resp.epoch_raw_count,
-            epoch_dedup_count: resp.epoch_dedup_count,
-            epoch_retransmit_count: resp.epoch_retransmit_count,
-            unique_chips: resp.unique_chips,
-            epoch_last_received_at: resp.epoch_last_received_at.clone(),
-            epoch_lag_ms: resp.epoch_lag_ms,
-        }
-    }
-
     pub fn from_ws(msg: &rt_protocol::ReceiverStreamMetrics) -> Self {
         Self {
             forwarder_id: msg.forwarder_id.clone(),

@@ -35,9 +35,6 @@ pub enum ShutdownSignal {
     Terminate,
 }
 
-/// Maps server-side stream_id (UUID string) to (forwarder_id, reader_ip) pairs.
-pub type StreamIdMap = HashMap<String, (String, String)>;
-
 pub struct AppState {
     pub db: Arc<Mutex<Db>>,
     pub connection_state: watch::Sender<ConnectionState>,
@@ -53,8 +50,6 @@ pub struct AppState {
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
     pub chip_lookup: Arc<tokio::sync::RwLock<crate::session::ChipLookup>>,
-    pub stream_id_map: Arc<tokio::sync::RwLock<StreamIdMap>>,
-    dashboard_metrics_generation: AtomicU64,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
 }
@@ -93,8 +88,6 @@ impl AppState {
             db_integrity_ok,
             http_client,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(crate::session::ChipLookup::new())),
-            stream_id_map: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_metrics_generation: AtomicU64::new(0),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
         });
@@ -120,21 +113,6 @@ impl AppState {
 
     pub fn current_retry_streak(&self) -> u64 {
         self.retry_streak.load(Ordering::SeqCst)
-    }
-
-    pub fn next_dashboard_metrics_generation(&self) -> u64 {
-        self.dashboard_metrics_generation
-            .fetch_add(1, Ordering::SeqCst)
-            + 1
-    }
-
-    pub fn invalidate_dashboard_metrics_generation(&self) {
-        self.dashboard_metrics_generation
-            .fetch_add(1, Ordering::SeqCst);
-    }
-
-    pub fn current_dashboard_metrics_generation(&self) -> u64 {
-        self.dashboard_metrics_generation.load(Ordering::SeqCst)
     }
 
     pub fn reset_retry_streak(&self) {
@@ -173,9 +151,6 @@ impl AppState {
     }
 
     async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
-        if new_state != ConnectionState::Connected {
-            self.invalidate_dashboard_metrics_generation();
-        }
         let streams_count = {
             let db = self.db.lock().await;
             match db.load_subscriptions() {
@@ -261,11 +236,6 @@ impl AppState {
         let mut seen: HashSet<(String, String)> = HashSet::new();
 
         if let Some(ref server_streams) = server_streams {
-            // Update stream_id → key map for SSE metrics resolution
-            {
-                let new_map = build_stream_id_map(server_streams);
-                *self.stream_id_map.write().await = new_map;
-            }
             for si in server_streams {
                 let key = (si.forwarder_id.clone(), si.reader_ip.clone());
                 let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
@@ -595,62 +565,6 @@ pub async fn fetch_server_streams(
         .map_err(|e| format!("invalid JSON: {e}"))?;
 
     Ok(body.streams)
-}
-
-/// Fetch metrics for a single stream from the server's HTTP API.
-pub async fn fetch_stream_metrics(
-    client: &reqwest::Client,
-    ws_url: &str,
-    stream_id: &str,
-) -> Result<UpstreamMetricsResponse, String> {
-    let base = http_base_url(ws_url).ok_or_else(|| "cannot parse upstream URL".to_owned())?;
-    let url = format!("{base}/api/v1/streams/{stream_id}/metrics");
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("metrics request failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("metrics returned {}", response.status()));
-    }
-    response
-        .json::<UpstreamMetricsResponse>()
-        .await
-        .map_err(|e| format!("failed to parse metrics response: {e}"))
-}
-
-/// Typed response from GET /api/v1/streams/{id}/metrics.
-/// Field names match the server's JSON keys exactly.
-#[derive(Debug, Deserialize)]
-pub struct UpstreamMetricsResponse {
-    pub raw_count: i64,
-    pub dedup_count: i64,
-    pub retransmit_count: i64,
-    pub lag_ms: Option<u64>,
-    pub epoch_raw_count: i64,
-    pub epoch_dedup_count: i64,
-    pub epoch_retransmit_count: i64,
-    pub epoch_lag_ms: Option<u64>,
-    pub epoch_last_received_at: Option<String>,
-    pub unique_chips: i64,
-    // Present in response but not forwarded to UI:
-    #[allow(dead_code)]
-    pub last_tag_id: Option<String>,
-    #[allow(dead_code)]
-    pub last_reader_timestamp: Option<String>,
-}
-
-/// Build a stream_id → (forwarder_id, reader_ip) mapping from the upstream stream list.
-pub fn build_stream_id_map(streams: &[UpstreamStreamInfo]) -> StreamIdMap {
-    streams
-        .iter()
-        .map(|s| {
-            (
-                s.stream_id.clone(),
-                (s.forwarder_id.clone(), s.reader_ip.clone()),
-            )
-        })
-        .collect()
 }
 
 /// Flat chip_id -> (bib, name) map for a single race.
