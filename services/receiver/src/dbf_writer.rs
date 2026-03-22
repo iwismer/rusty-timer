@@ -241,6 +241,12 @@ pub fn create_empty_dbf(path: &Path) -> std::io::Result<()> {
 /// after writing so the caller can immediately read the header.
 fn write_empty_header(file: &mut std::fs::File) -> std::io::Result<()> {
     let header_size = u16::from_le_bytes([DBF_TEMPLATE_BYTES[8], DBF_TEMPLATE_BYTES[9]]) as usize;
+    if header_size > DBF_TEMPLATE_BYTES.len() {
+        return Err(std::io::Error::other(format!(
+            "DBF template header_size {header_size} exceeds template length {}",
+            DBF_TEMPLATE_BYTES.len()
+        )));
+    }
     let mut header = DBF_TEMPLATE_BYTES[..header_size].to_vec();
     // Zero the record count (bytes 4-7)
     header[4..8].copy_from_slice(&0u32.to_le_bytes());
