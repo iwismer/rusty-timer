@@ -121,6 +121,7 @@ export type ReceiverMode =
       targets: ReplayTarget[];
     };
 
+/** Corresponds to RaceInfo in rt-protocol. */
 export interface RaceEntry {
   race_id: string;
   name: string;

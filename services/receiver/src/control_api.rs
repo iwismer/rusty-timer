@@ -912,6 +912,10 @@ pub async fn get_streams(state: &AppState) -> StreamsResponse {
     state.build_streams_response().await
 }
 
+// ---------------------------------------------------------------------------
+// Race management (via WS proxy session)
+// ---------------------------------------------------------------------------
+
 pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
     let msg = rt_protocol::WsMessage::ReceiverProxyRacesListRequest(
         rt_protocol::ReceiverProxyRacesListRequest {
@@ -1060,7 +1064,7 @@ pub async fn upload_race_file(
 
 // ---------------------------------------------------------------------------
 // Forwarder list (via HTTP to server) + proxy commands (via WS session:
-// config, restart, device control)
+// config, restart, device control) + shared proxy helpers
 // ---------------------------------------------------------------------------
 
 /// Generate a process-unique request ID for WS proxy commands.

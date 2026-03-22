@@ -423,6 +423,7 @@ async fn proxy_races_list_reply(
             })
         }
         Err(e) => {
+            warn!(error = %e, "race list failed");
             WsMessage::ReceiverProxyRacesListResponse(rt_protocol::ReceiverProxyRacesListResponse {
                 request_id: req.request_id,
                 ok: false,
@@ -471,14 +472,17 @@ async fn proxy_race_create_reply(
                 },
             )
         }
-        Err(e) => WsMessage::ReceiverProxyRaceCreateResponse(
-            rt_protocol::ReceiverProxyRaceCreateResponse {
-                request_id: req.request_id,
-                ok: false,
-                error: Some(e.to_string()),
-                race: None,
-            },
-        ),
+        Err(e) => {
+            warn!(error = %e, "race create failed");
+            WsMessage::ReceiverProxyRaceCreateResponse(
+                rt_protocol::ReceiverProxyRaceCreateResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(e.to_string()),
+                    race: None,
+                },
+            )
+        }
     }
 }
 
@@ -523,20 +527,26 @@ async fn proxy_race_delete_reply(
                 },
             )
         }
-        Ok(false) => WsMessage::ReceiverProxyRaceDeleteResponse(
-            rt_protocol::ReceiverProxyRaceDeleteResponse {
-                request_id: req.request_id,
-                ok: false,
-                error: Some("race not found".into()),
-            },
-        ),
-        Err(e) => WsMessage::ReceiverProxyRaceDeleteResponse(
-            rt_protocol::ReceiverProxyRaceDeleteResponse {
-                request_id: req.request_id,
-                ok: false,
-                error: Some(e.to_string()),
-            },
-        ),
+        Ok(false) => {
+            warn!(race_id = %race_id, "race delete failed: not found");
+            WsMessage::ReceiverProxyRaceDeleteResponse(
+                rt_protocol::ReceiverProxyRaceDeleteResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("race not found".into()),
+                },
+            )
+        }
+        Err(e) => {
+            warn!(race_id = %race_id, error = %e, "race delete failed");
+            WsMessage::ReceiverProxyRaceDeleteResponse(
+                rt_protocol::ReceiverProxyRaceDeleteResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(e.to_string()),
+                },
+            )
+        }
     }
 }
 
@@ -590,15 +600,30 @@ async fn proxy_participants_get_reply(
                 },
             )
         }
-        (Err(e), _) | (_, Err(e)) => WsMessage::ReceiverProxyParticipantsGetResponse(
-            rt_protocol::ReceiverProxyParticipantsGetResponse {
-                request_id: req.request_id,
-                ok: false,
-                error: Some(e.to_string()),
-                participants: vec![],
-                chips_without_participant: vec![],
-            },
-        ),
+        (Err(e1), Err(e2)) => {
+            warn!(race_id = %req.race_id, participants_error = %e1, chips_error = %e2, "participants get failed (both queries)");
+            WsMessage::ReceiverProxyParticipantsGetResponse(
+                rt_protocol::ReceiverProxyParticipantsGetResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(format!("participants: {e1}; chips: {e2}")),
+                    participants: vec![],
+                    chips_without_participant: vec![],
+                },
+            )
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            warn!(race_id = %req.race_id, error = %e, "participants get failed");
+            WsMessage::ReceiverProxyParticipantsGetResponse(
+                rt_protocol::ReceiverProxyParticipantsGetResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(e.to_string()),
+                    participants: vec![],
+                    chips_without_participant: vec![],
+                },
+            )
+        }
     }
 }
 
@@ -624,6 +649,7 @@ async fn proxy_file_upload_reply(
     };
     match crate::repo::races::race_exists(&state.pool, race_id).await {
         Ok(false) => {
+            warn!(race_id = %race_id, "file upload failed: race not found");
             return WsMessage::ReceiverProxyFileUploadResponse(
                 rt_protocol::ReceiverProxyFileUploadResponse {
                     request_id: req.request_id,
@@ -634,6 +660,7 @@ async fn proxy_file_upload_reply(
             );
         }
         Err(e) => {
+            warn!(race_id = %race_id, error = %e, "file upload failed: race existence check");
             return WsMessage::ReceiverProxyFileUploadResponse(
                 rt_protocol::ReceiverProxyFileUploadResponse {
                     request_id: req.request_id,
@@ -648,6 +675,7 @@ async fn proxy_file_upload_reply(
     let bytes = match base64::engine::general_purpose::STANDARD.decode(&req.file_data) {
         Ok(b) => b,
         Err(e) => {
+            warn!(race_id = %race_id, error = %e, "file upload failed: base64 decode");
             return WsMessage::ReceiverProxyFileUploadResponse(
                 rt_protocol::ReceiverProxyFileUploadResponse {
                     request_id: req.request_id,
@@ -663,6 +691,7 @@ async fn proxy_file_upload_reply(
             let parsed = match timer_core::util::io::parse_participant_bytes(&bytes) {
                 Ok(p) => p,
                 Err(e) => {
+                    warn!(race_id = %race_id, error = %e, "file upload failed: participant parse");
                     return WsMessage::ReceiverProxyFileUploadResponse(
                         rt_protocol::ReceiverProxyFileUploadResponse {
                             request_id: req.request_id,
@@ -703,20 +732,24 @@ async fn proxy_file_upload_reply(
                         },
                     )
                 }
-                Err(e) => WsMessage::ReceiverProxyFileUploadResponse(
-                    rt_protocol::ReceiverProxyFileUploadResponse {
-                        request_id: req.request_id,
-                        ok: false,
-                        error: Some(e.to_string()),
-                        imported: 0,
-                    },
-                ),
+                Err(e) => {
+                    warn!(race_id = %race_id, error = %e, "file upload failed: replace participants");
+                    WsMessage::ReceiverProxyFileUploadResponse(
+                        rt_protocol::ReceiverProxyFileUploadResponse {
+                            request_id: req.request_id,
+                            ok: false,
+                            error: Some(e.to_string()),
+                            imported: 0,
+                        },
+                    )
+                }
             }
         }
         rt_protocol::UploadType::Chips => {
             let parsed = match timer_core::util::io::parse_bibchip_bytes(&bytes) {
                 Ok(c) => c,
                 Err(e) => {
+                    warn!(race_id = %race_id, error = %e, "file upload failed: bibchip parse");
                     return WsMessage::ReceiverProxyFileUploadResponse(
                         rt_protocol::ReceiverProxyFileUploadResponse {
                             request_id: req.request_id,
@@ -744,14 +777,17 @@ async fn proxy_file_upload_reply(
                         },
                     )
                 }
-                Err(e) => WsMessage::ReceiverProxyFileUploadResponse(
-                    rt_protocol::ReceiverProxyFileUploadResponse {
-                        request_id: req.request_id,
-                        ok: false,
-                        error: Some(e.to_string()),
-                        imported: 0,
-                    },
-                ),
+                Err(e) => {
+                    warn!(race_id = %race_id, error = %e, "file upload failed: replace chips");
+                    WsMessage::ReceiverProxyFileUploadResponse(
+                        rt_protocol::ReceiverProxyFileUploadResponse {
+                            request_id: req.request_id,
+                            ok: false,
+                            error: Some(e.to_string()),
+                            imported: 0,
+                        },
+                    )
+                }
             }
         }
     }

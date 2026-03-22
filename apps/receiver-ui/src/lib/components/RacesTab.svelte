@@ -23,11 +23,11 @@
   let uploadingBibchip = $state(false);
   let uploadResult: string | null = $state(null);
 
-  // Sort state
+  // --- Sort state ---
   let sortField: keyof ParticipantEntry = $state("bib");
   let sortAsc = $state(true);
 
-  // Filter state
+  // --- Filter state ---
   let filterText = $state("");
 
   // Derived: filtered + sorted participants
@@ -133,7 +133,14 @@
     }
   }
 
+  const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10 MB
+
   async function fileToBase64(file: File): Promise<string> {
+    if (file.size > MAX_UPLOAD_SIZE) {
+      throw new Error(
+        `File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 10MB.`,
+      );
+    }
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     let binary = "";
@@ -208,7 +215,9 @@
   }
 
   function formatDate(iso: string): string {
-    return new Date(iso).toLocaleString();
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "(unknown date)";
+    return d.toLocaleString();
   }
 </script>
 

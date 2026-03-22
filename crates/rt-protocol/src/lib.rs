@@ -759,7 +759,6 @@ pub enum UploadType {
 }
 
 /// Receiver-to-server: upload a file (ppl or bibchip) for a race.
-/// File content is base64-encoded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverProxyFileUploadRequest {
     pub request_id: String,
@@ -777,7 +776,7 @@ pub struct ReceiverProxyFileUploadResponse {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_non_negative_i64")]
     pub imported: i64,
 }
 
@@ -1416,6 +1415,68 @@ mod tests {
         assert!(json.contains("\"kind\":\"receiver_proxy_file_upload_response\""));
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_race_create_error_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyRaceCreateResponse(ReceiverProxyRaceCreateResponse {
+            request_id: "req-err".into(),
+            ok: false,
+            error: Some("race name must not be empty".into()),
+            race: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_races_list_error_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyRacesListResponse(ReceiverProxyRacesListResponse {
+            request_id: "req-err2".into(),
+            ok: false,
+            error: Some("database connection failed".into()),
+            races: vec![],
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn negative_race_participant_count_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_races_list_response",
+            "request_id": "req-neg",
+            "ok": true,
+            "races": [{
+                "race_id": "race-1",
+                "name": "5K",
+                "created_at": "2026-03-21T10:00:00Z",
+                "participant_count": -1,
+                "chip_count": 0
+            }]
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn negative_file_upload_imported_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_file_upload_response",
+            "request_id": "req-neg2",
+            "ok": true,
+            "imported": -5
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
     }
 
     #[test]

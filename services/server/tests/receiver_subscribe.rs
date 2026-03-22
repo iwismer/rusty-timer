@@ -1375,3 +1375,243 @@ async fn receiver_v12_streams_list_via_ws_proxy() {
         other => panic!("expected ReceiverProxyStreamsListResponse, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Race proxy integration tests
+// ---------------------------------------------------------------------------
+
+/// Helper: connect a receiver in live mode (no streams needed for race proxy).
+async fn connect_receiver_for_race_proxy(
+    pool: &sqlx::PgPool,
+    addr: std::net::SocketAddr,
+) -> MockWsClient {
+    insert_token(pool, "rcv-race", "receiver", b"rcv-race-token").await;
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-race".to_owned(),
+        mode: ReceiverMode::Live {
+            streams: vec![],
+            earliest_epochs: vec![],
+        },
+        resume: vec![],
+    };
+    let (rcv, _session_id) = connect_receiver_v12(addr, "rcv-race-token", hello).await;
+    rcv
+}
+
+/// Helper: receive the next race-proxy response, skipping heartbeats/metrics/mode-applied.
+async fn recv_race_proxy_message(rcv: &mut MockWsClient) -> WsMessage {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), rcv.recv_message())
+            .await
+            .expect("timed out waiting for race proxy response")
+            .unwrap()
+        {
+            WsMessage::ReceiverModeApplied(_)
+            | WsMessage::Heartbeat(_)
+            | WsMessage::ReceiverStreamMetrics(_) => continue,
+            msg => return msg,
+        }
+    }
+}
+
+#[tokio::test]
+async fn race_proxy_list_create_delete_round_trip() {
+    let (pool, addr) = start_server().await;
+    let mut rcv = connect_receiver_for_race_proxy(&pool, addr).await;
+
+    // List races — should be empty initially.
+    rcv.send_message(&WsMessage::ReceiverProxyRacesListRequest(
+        ReceiverProxyRacesListRequest {
+            request_id: "list-1".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let resp = recv_race_proxy_message(&mut rcv).await;
+    match resp {
+        WsMessage::ReceiverProxyRacesListResponse(r) => {
+            assert!(r.ok, "list should succeed: {:?}", r.error);
+            assert_eq!(r.request_id, "list-1");
+            assert!(r.races.is_empty(), "no races should exist yet");
+        }
+        other => panic!("expected RacesListResponse, got {other:?}"),
+    }
+
+    // Create a race.
+    rcv.send_message(&WsMessage::ReceiverProxyRaceCreateRequest(
+        ReceiverProxyRaceCreateRequest {
+            request_id: "create-1".to_owned(),
+            name: "Integration Test 5K".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let created_race_id = match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRaceCreateResponse(r) => {
+            assert!(r.ok, "create should succeed: {:?}", r.error);
+            assert_eq!(r.request_id, "create-1");
+            let race = r.race.expect("create response should include race");
+            assert_eq!(race.name, "Integration Test 5K");
+            assert_eq!(race.participant_count, 0);
+            assert_eq!(race.chip_count, 0);
+            race.race_id
+        }
+        other => panic!("expected RaceCreateResponse, got {other:?}"),
+    };
+
+    // List again — should contain the new race.
+    rcv.send_message(&WsMessage::ReceiverProxyRacesListRequest(
+        ReceiverProxyRacesListRequest {
+            request_id: "list-2".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRacesListResponse(r) => {
+            assert!(r.ok);
+            assert_eq!(r.races.len(), 1);
+            assert_eq!(r.races[0].race_id, created_race_id);
+        }
+        other => panic!("expected RacesListResponse, got {other:?}"),
+    }
+
+    // Delete the race.
+    rcv.send_message(&WsMessage::ReceiverProxyRaceDeleteRequest(
+        ReceiverProxyRaceDeleteRequest {
+            request_id: "delete-1".to_owned(),
+            race_id: created_race_id.clone(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRaceDeleteResponse(r) => {
+            assert!(r.ok, "delete should succeed: {:?}", r.error);
+            assert_eq!(r.request_id, "delete-1");
+        }
+        other => panic!("expected RaceDeleteResponse, got {other:?}"),
+    }
+
+    // Verify deletion — list should be empty again.
+    rcv.send_message(&WsMessage::ReceiverProxyRacesListRequest(
+        ReceiverProxyRacesListRequest {
+            request_id: "list-3".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRacesListResponse(r) => {
+            assert!(r.ok);
+            assert!(r.races.is_empty(), "race should have been deleted");
+        }
+        other => panic!("expected RacesListResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn race_proxy_delete_nonexistent_returns_error() {
+    let (pool, addr) = start_server().await;
+    let mut rcv = connect_receiver_for_race_proxy(&pool, addr).await;
+
+    rcv.send_message(&WsMessage::ReceiverProxyRaceDeleteRequest(
+        ReceiverProxyRaceDeleteRequest {
+            request_id: "del-missing".to_owned(),
+            race_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRaceDeleteResponse(r) => {
+            assert!(!r.ok, "deleting nonexistent race should fail");
+            assert_eq!(r.request_id, "del-missing");
+            assert!(
+                r.error.as_deref().unwrap_or("").contains("not found"),
+                "error should mention not found, got: {:?}",
+                r.error
+            );
+        }
+        other => panic!("expected RaceDeleteResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn race_proxy_participants_get_empty() {
+    let (pool, addr) = start_server().await;
+    let mut rcv = connect_receiver_for_race_proxy(&pool, addr).await;
+
+    // Create a race first.
+    rcv.send_message(&WsMessage::ReceiverProxyRaceCreateRequest(
+        ReceiverProxyRaceCreateRequest {
+            request_id: "c1".to_owned(),
+            name: "Participants Test Race".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let race_id = match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRaceCreateResponse(r) => {
+            assert!(r.ok);
+            r.race.unwrap().race_id
+        }
+        other => panic!("expected RaceCreateResponse, got {other:?}"),
+    };
+
+    // Get participants — should be empty.
+    rcv.send_message(&WsMessage::ReceiverProxyParticipantsGetRequest(
+        ReceiverProxyParticipantsGetRequest {
+            request_id: "part-1".to_owned(),
+            race_id,
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyParticipantsGetResponse(r) => {
+            assert!(r.ok, "participants get should succeed: {:?}", r.error);
+            assert_eq!(r.request_id, "part-1");
+            assert!(r.participants.is_empty());
+            assert!(r.chips_without_participant.is_empty());
+        }
+        other => panic!("expected ParticipantsGetResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn race_proxy_create_empty_name_returns_error() {
+    let (pool, addr) = start_server().await;
+    let mut rcv = connect_receiver_for_race_proxy(&pool, addr).await;
+
+    rcv.send_message(&WsMessage::ReceiverProxyRaceCreateRequest(
+        ReceiverProxyRaceCreateRequest {
+            request_id: "empty-name".to_owned(),
+            name: "   ".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRaceCreateResponse(r) => {
+            assert!(!r.ok, "creating race with empty name should fail");
+            assert_eq!(r.request_id, "empty-name");
+            assert!(r.race.is_none());
+            assert!(
+                r.error.as_deref().unwrap_or("").contains("empty"),
+                "error should mention empty, got: {:?}",
+                r.error
+            );
+        }
+        other => panic!("expected RaceCreateResponse, got {other:?}"),
+    }
+}
