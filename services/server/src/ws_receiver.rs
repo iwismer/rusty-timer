@@ -1090,12 +1090,6 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
         };
 
         // Push initial stream metrics for each resolved target.
-        info!(
-            device_id = %device_id,
-            target_count = resolved_targets.len(),
-            subscriptions = subscriptions.len(),
-            "sending initial stream metrics"
-        );
         for target in &resolved_targets {
             if let Err(e) = send_stream_metrics(&mut socket, &state, target).await {
                 warn!(

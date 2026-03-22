@@ -177,17 +177,11 @@ where
         + Unpin,
 {
     let mut pending_requests: HashMap<String, oneshot::Sender<WsMessage>> = HashMap::new();
-    info!(session_id = %session_id, "session loop started");
 
     loop {
         tokio::select! {
             biased;
-            _ = deps.shutdown.changed() => {
-                if *deps.shutdown.borrow() {
-                    info!(session_id = %session_id, "session loop ending: shutdown signal");
-                    break;
-                }
-            }
+            _ = deps.shutdown.changed() => { if *deps.shutdown.borrow() { break; } }
             Some(cmd) = deps.ws_cmd_rx.recv() => {
                 let text = match serde_json::to_string(&cmd.message) {
                     Ok(t) => t,
@@ -217,12 +211,9 @@ where
             }
             msg = ws.next() => {
                 match msg {
-                    None => {
-                        info!(session_id = %session_id, "session loop ending: WS stream closed");
-                        break;
-                    }
+                    None => break,
                     Some(Err(e)) => {
-                        warn!(session_id = %session_id, error = %e, "session loop ending: WS error");
+                        warn!(session_id = %session_id, error = %e, "WS error in session loop");
                         return Err(SessionError::Ws(e));
                     }
                     Some(Ok(Message::Text(t))) => {
