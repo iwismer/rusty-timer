@@ -378,28 +378,15 @@ export async function updateSubscriptionEventType(
 
 // --------------- Announcer commands ---------------
 
-export interface AnnouncerConfig {
-  enabled: boolean;
-  enabled_until: string | null;
-  selected_stream_ids: string[];
-  max_list_size: number;
-  updated_at: string;
-  public_enabled: boolean;
-}
-
-export interface AnnouncerConfigUpdate {
-  enabled: boolean;
-  selected_stream_ids: string[];
-  max_list_size: number;
-}
+import type {
+  AnnouncerConfig,
+  AnnouncerConfigUpdate,
+  AnnouncerStreamEntry,
+} from "@rusty-timer/shared-ui";
+export type { AnnouncerConfig, AnnouncerConfigUpdate };
 
 export interface ServerStreamsResponse {
-  streams: Array<{
-    stream_id: string;
-    forwarder_id: string;
-    reader_ip: string;
-    display_alias: string | null;
-  }>;
+  streams: AnnouncerStreamEntry[];
 }
 
 export async function getServerStreams(): Promise<ServerStreamsResponse> {

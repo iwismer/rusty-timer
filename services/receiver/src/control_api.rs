@@ -1034,7 +1034,11 @@ pub async fn get_server_streams(state: &AppState) -> Result<serde_json::Value, R
                     r.error.unwrap_or_else(|| "unknown error".to_owned()),
                 ));
             }
-            Ok(r.streams)
+            // Wrap in {"streams": [...]} to match the HTTP API shape expected by the frontend
+            let streams_json = serde_json::to_value(&r.streams).map_err(|e| {
+                ReceiverError::UpstreamError(format!("failed to serialize streams: {e}"))
+            })?;
+            Ok(serde_json::json!({ "streams": streams_json }))
         }
         _ => Err(ReceiverError::UpstreamError(
             "unexpected response type".to_owned(),
@@ -1043,8 +1047,8 @@ pub async fn get_server_streams(state: &AppState) -> Result<serde_json::Value, R
 }
 
 pub async fn get_announcer_config(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerGetConfigRequest(
-        rt_protocol::ReceiverProxyAnnouncerGetConfigRequest {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigGetRequest(
+        rt_protocol::ReceiverProxyAnnouncerConfigGetRequest {
             request_id: generate_request_id(),
         },
     );
@@ -1068,8 +1072,8 @@ pub async fn put_announcer_config(
     state: &AppState,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, ReceiverError> {
-    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerPutConfigRequest(
-        rt_protocol::ReceiverProxyAnnouncerPutConfigRequest {
+    let msg = rt_protocol::WsMessage::ReceiverProxyAnnouncerConfigSetRequest(
+        rt_protocol::ReceiverProxyAnnouncerConfigSetRequest {
             request_id: generate_request_id(),
             payload: body,
         },
@@ -1140,7 +1144,7 @@ async fn send_ws_command(
 
     let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
         .await
-        .map_err(|_| ReceiverError::UpstreamError("forwarder response timeout".to_owned()))?
+        .map_err(|_| ReceiverError::UpstreamError("server response timeout".to_owned()))?
         .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
 
     // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,

@@ -10,8 +10,9 @@ use axum::{
 use sqlx::Row;
 use uuid::Uuid;
 
-/// Get the stream list as a JSON value. Callable from WS proxy handlers.
-pub async fn get_streams_value(state: &AppState) -> Result<serde_json::Value, String> {
+/// Get the stream list as a JSON array. Used by both the HTTP endpoint and
+/// WS proxy handlers.
+pub async fn get_streams_value(state: &AppState) -> Result<Vec<serde_json::Value>, String> {
     let rows = sqlx::query(
         r#"SELECT s.stream_id,
                   s.forwarder_id,
@@ -59,12 +60,16 @@ pub async fn get_streams_value(state: &AppState) -> Result<serde_json::Value, St
             })
         })
         .collect();
-    Ok(serde_json::json!({ "streams": streams }))
+    Ok(streams)
 }
 
 pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
     match get_streams_value(&state).await {
-        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Ok(streams) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "streams": streams })),
+        )
+            .into_response(),
         Err(e) => internal_error(std::io::Error::other(e)),
     }
 }

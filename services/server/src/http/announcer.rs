@@ -18,6 +18,7 @@ use futures_util::stream::Stream;
 use serde::Deserialize;
 use std::{collections::HashSet, convert::Infallible, time::Duration as StdDuration};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tracing::error;
 use uuid::Uuid;
 
 const MIN_LIST_SIZE: i32 = 1;
@@ -55,64 +56,13 @@ pub async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
 
 pub async fn put_config(
     State(state): State<AppState>,
-    Json(body): Json<PutAnnouncerConfigRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if body.enabled && body.selected_stream_ids.is_empty() {
-        return bad_request("enabled announcer requires at least one selected stream");
+    match put_config_value(&state, body).await {
+        Ok(config) => Json(config).into_response(),
+        Err(e) if e.starts_with("database error:") => internal_error(std::io::Error::other(e)),
+        Err(e) => bad_request(&e),
     }
-
-    let selected_stream_ids = dedupe_stream_ids(body.selected_stream_ids);
-    if body.enabled && !selected_stream_ids.is_empty() {
-        let known_count = match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM streams WHERE stream_id = ANY($1)",
-        )
-        .bind(&selected_stream_ids)
-        .fetch_one(&state.pool)
-        .await
-        {
-            Ok(count) => count,
-            Err(err) => return internal_error(err),
-        };
-        if usize::try_from(known_count).unwrap_or(0) != selected_stream_ids.len() {
-            return bad_request("selected_stream_ids contains unknown stream id");
-        }
-    }
-
-    let previous = match announcer_config::get_config(&state.pool).await {
-        Ok(config) => config,
-        Err(err) => return internal_error(err),
-    };
-
-    let now = Utc::now();
-    let enabled_until = if body.enabled {
-        if !previous.enabled {
-            Some(now + Duration::hours(ENABLED_TTL_HOURS))
-        } else {
-            previous.enabled_until
-        }
-    } else {
-        None
-    };
-
-    let max_list_size = body.max_list_size.clamp(MIN_LIST_SIZE, MAX_LIST_SIZE);
-    let update = AnnouncerConfigUpdate {
-        enabled: body.enabled,
-        enabled_until,
-        selected_stream_ids: selected_stream_ids.clone(),
-        max_list_size,
-    };
-    let updated = match announcer_config::set_config(&state.pool, &update).await {
-        Ok(config) => config,
-        Err(err) => return internal_error(err),
-    };
-
-    if should_reset_runtime(&previous, &updated, &selected_stream_ids) {
-        state.reset_announcer_runtime().await;
-    } else if previous.max_list_size != updated.max_list_size {
-        state.notify_announcer_resync();
-    }
-
-    Json(config_response(updated)).into_response()
 }
 
 pub async fn post_reset(State(state): State<AppState>) -> impl IntoResponse {
@@ -192,7 +142,10 @@ pub async fn announcer_sse(
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(AnnouncerEvent::Update(delta)) => match serde_json::to_string(&delta) {
             Ok(json) => Some(Ok(Event::default().event("announcer_update").data(json))),
-            Err(_) => None,
+            Err(e) => {
+                error!("failed to serialize announcer SSE delta: {e}");
+                Some(Ok(Event::default().event("resync").data("{}")))
+            }
         },
         Ok(AnnouncerEvent::Resync) => Some(Ok(Event::default().event("resync").data("{}"))),
         Err(_) => Some(Ok(Event::default().event("resync").data("{}"))),
@@ -217,7 +170,10 @@ pub async fn public_announcer_sse(
             };
             match serde_json::to_string(&payload) {
                 Ok(json) => Some(Ok(Event::default().event("announcer_update").data(json))),
-                Err(_) => None,
+                Err(e) => {
+                    error!("failed to serialize public announcer SSE delta: {e}");
+                    Some(Ok(Event::default().event("resync").data("{}")))
+                }
             }
         }
         Ok(AnnouncerEvent::Resync) => Some(Ok(Event::default().event("resync").data("{}"))),
@@ -246,6 +202,9 @@ pub async fn get_config_value(state: &AppState) -> Result<serde_json::Value, Str
 
 /// Update the announcer config from a JSON payload.
 /// Returns the updated config as JSON, or `Err(String)` on validation/db errors.
+///
+/// Side effects: may reset the announcer runtime (if enabled state or selected
+/// streams changed) or trigger a resync notification (if max_list_size changed).
 pub async fn put_config_value(
     state: &AppState,
     payload: serde_json::Value,

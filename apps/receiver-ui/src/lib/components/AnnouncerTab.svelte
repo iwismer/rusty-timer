@@ -29,7 +29,12 @@
       url.protocol = url.protocol === "wss:" ? "https:" : "http:";
       url.pathname = "/announcer";
       return url.href;
-    } catch {
+    } catch (err) {
+      console.warn(
+        "Cannot derive announcer page URL from server URL:",
+        wsUrl,
+        err,
+      );
       return null;
     }
   }
@@ -40,9 +45,13 @@
     try {
       const { openUrl } = await import("@tauri-apps/plugin-opener");
       await openUrl(url);
-    } catch {
-      // Fallback for non-Tauri (e.g. dev server in browser)
-      window.open(url, "_blank");
+    } catch (err) {
+      if ((window as any).__TAURI_INTERNALS__) {
+        console.error("Failed to open announcer page:", err);
+      } else {
+        // Fallback for non-Tauri (e.g. dev server in browser)
+        window.open(url, "_blank");
+      }
     }
   }
 </script>

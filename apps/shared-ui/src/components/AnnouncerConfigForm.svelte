@@ -17,6 +17,7 @@
   let saveSuccess: string | null = $state(null);
   let resetting = $state(false);
   let resetStatus: string | null = $state(null);
+  let resetError = $state(false);
 
   let streams: AnnouncerStreamEntry[] = $state([]);
   let enabled = $state(false);
@@ -94,11 +95,13 @@
   async function handleReset() {
     resetting = true;
     resetStatus = null;
+    resetError = false;
     try {
       await api.reset();
       resetStatus = "Announcer runtime reset.";
     } catch (err) {
       resetStatus = String(err);
+      resetError = true;
     } finally {
       resetting = false;
     }
@@ -241,7 +244,7 @@
         <p class="text-xs text-status-err m-0">{saveError}</p>
       {/if}
       {#if resetStatus}
-        <p class="text-xs text-text-muted m-0">{resetStatus}</p>
+        <p class="text-xs m-0" class:text-status-err={resetError} class:text-text-muted={!resetError}>{resetStatus}</p>
       {/if}
     </div>
   </Card>
