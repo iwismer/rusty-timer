@@ -235,6 +235,46 @@ async fn get_races(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Val
 }
 
 #[tauri::command]
+async fn create_race(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::create_race(&state, name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_race(state: State<'_, Arc<AppState>>, race_id: String) -> CmdResult<()> {
+    control_api::delete_race(&state, race_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_participants(
+    state: State<'_, Arc<AppState>>,
+    race_id: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::get_participants(&state, race_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn upload_race_file(
+    state: State<'_, Arc<AppState>>,
+    race_id: String,
+    upload_type: String,
+    file_data: String,
+    file_name: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::upload_race_file(&state, race_id, upload_type, file_data, file_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_forwarders(state: State<'_, Arc<AppState>>) -> CmdResult<serde_json::Value> {
     control_api::get_forwarders(&state)
         .await
@@ -711,6 +751,10 @@ fn main() {
             get_streams,
             put_earliest_epoch,
             get_races,
+            create_race,
+            delete_race,
+            get_participants,
+            upload_race_file,
             get_forwarders,
             get_forwarder_config,
             set_forwarder_config,
