@@ -125,10 +125,35 @@ export interface RaceEntry {
   race_id: string;
   name: string;
   created_at: string;
+  participant_count: number;
+  chip_count: number;
 }
 
 export interface RacesResponse {
   races: RaceEntry[];
+}
+
+export interface ParticipantEntry {
+  bib: number;
+  first_name: string;
+  last_name: string;
+  gender: string;
+  affiliation: string | null;
+  chip_ids: string[];
+}
+
+export interface UnmatchedChip {
+  chip_id: string;
+  bib: number;
+}
+
+export interface ParticipantsResponse {
+  participants: ParticipantEntry[];
+  chips_without_participant: UnmatchedChip[];
+}
+
+export interface UploadResult {
+  imported: number;
 }
 
 export interface ReplayTargetEpochOption {
@@ -232,6 +257,34 @@ export async function putEarliestEpoch(
 
 export async function getRaces(): Promise<RacesResponse> {
   return invoke<RacesResponse>("get_races");
+}
+
+export async function createRace(name: string): Promise<RaceEntry> {
+  return invoke<RaceEntry>("create_race", { name });
+}
+
+export async function deleteRace(raceId: string): Promise<void> {
+  await invoke("delete_race", { raceId });
+}
+
+export async function getParticipants(
+  raceId: string,
+): Promise<ParticipantsResponse> {
+  return invoke<ParticipantsResponse>("get_participants", { raceId });
+}
+
+export async function uploadRaceFile(
+  raceId: string,
+  uploadType: string,
+  fileData: string,
+  fileName: string,
+): Promise<UploadResult> {
+  return invoke<UploadResult>("upload_race_file", {
+    raceId,
+    uploadType,
+    fileData,
+    fileName,
+  });
 }
 
 export async function getReplayTargetEpochs(
