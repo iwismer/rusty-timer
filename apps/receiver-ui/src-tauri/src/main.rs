@@ -17,16 +17,14 @@ struct ZoomLevel(Mutex<f64>);
 
 fn open_in_file_manager(path: &Path) {
     #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(path).spawn();
-    }
+    let result = std::process::Command::new("open").arg(path).spawn();
     #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
-    }
+    let result = std::process::Command::new("explorer").arg(path).spawn();
     #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+
+    if let Err(e) = result {
+        warn!(path = %path.display(), error = %e, "failed to open file manager");
     }
 }
 
@@ -562,10 +560,14 @@ fn spawn_event_bridge(app_handle: tauri::AppHandle, state: &Arc<AppState>) {
         while let Some(item) = stream.next().await {
             match bridge_action_from_item(item) {
                 BridgeAction::EmitEvent { name, event } => {
-                    let _ = handle.emit(name, &event);
+                    if let Err(e) = handle.emit(name, &event) {
+                        warn!(event_name = name, error = %e, "failed to emit UI event to webview");
+                    }
                 }
                 BridgeAction::EmitResync => {
-                    let _ = handle.emit("resync", ());
+                    if let Err(e) = handle.emit("resync", ()) {
+                        warn!(error = %e, "failed to emit resync event to webview");
+                    }
                 }
             }
         }
@@ -677,22 +679,30 @@ fn main() {
             // Handle menu events
             app.on_menu_event(|app_handle, event| match event.id().as_ref() {
                 "check-update" => {
-                    let _ = app_handle.emit("menu-check-update", ());
+                    if let Err(e) = app_handle.emit("menu-check-update", ()) {
+                        warn!(error = %e, "failed to emit menu-check-update event");
+                    }
                 }
                 "refresh" => {
                     if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.reload();
+                        if let Err(e) = window.reload() {
+                            warn!(error = %e, "failed to reload webview");
+                        }
                     }
                 }
                 "toggle-theme" => {
-                    let _ = app_handle.emit("menu-toggle-theme", ());
+                    if let Err(e) = app_handle.emit("menu-toggle-theme", ()) {
+                        warn!(error = %e, "failed to emit menu-toggle-theme event");
+                    }
                 }
                 "zoom-in" => {
                     if let Some(level) = app_handle.try_state::<ZoomLevel>() {
                         let mut zoom = level.0.lock().unwrap();
                         *zoom = (*zoom + 0.1).min(3.0);
                         if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.set_zoom(*zoom);
+                            if let Err(e) = window.set_zoom(*zoom) {
+                                warn!(error = %e, "failed to set zoom level");
+                            }
                         }
                     }
                 }
@@ -701,7 +711,9 @@ fn main() {
                         let mut zoom = level.0.lock().unwrap();
                         *zoom = (*zoom - 0.1).max(0.5);
                         if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.set_zoom(*zoom);
+                            if let Err(e) = window.set_zoom(*zoom) {
+                                warn!(error = %e, "failed to set zoom level");
+                            }
                         }
                     }
                 }
@@ -710,7 +722,9 @@ fn main() {
                         let mut zoom = level.0.lock().unwrap();
                         *zoom = 1.0;
                         if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.set_zoom(1.0);
+                            if let Err(e) = window.set_zoom(1.0) {
+                                warn!(error = %e, "failed to reset zoom level");
+                            }
                         }
                     }
                 }
@@ -735,7 +749,9 @@ fn main() {
                     }
                 }
                 "open-help" => {
-                    let _ = app_handle.emit("menu-open-help", ());
+                    if let Err(e) = app_handle.emit("menu-open-help", ()) {
+                        warn!(error = %e, "failed to emit menu-open-help event");
+                    }
                 }
                 _ => {}
             });

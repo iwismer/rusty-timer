@@ -300,7 +300,7 @@ describe("receiver updater store", () => {
     expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 
-  it("onStreamsSnapshot clears metrics for newly appearing streams", async () => {
+  it("onStreamsSnapshot keeps metrics for newly appearing streams", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");
 
@@ -310,27 +310,23 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    // Pre-populate metrics for a stream
+    // Pre-populate metrics for a stream (simulates metrics arriving before snapshot)
     const key = streamKey("fwd-new", "10.0.0.1:10000");
-    store.streamMetrics = new Map([
-      [
-        key,
-        {
-          forwarder_id: "fwd-new",
-          reader_ip: "10.0.0.1:10000",
-          raw_count: 100,
-          dedup_count: 90,
-          retransmit_count: 10,
-          lag_ms: null,
-          epoch_raw_count: 50,
-          epoch_dedup_count: 45,
-          epoch_retransmit_count: 5,
-          epoch_lag_ms: null,
-          epoch_last_received_at: null,
-          unique_chips: 20,
-        },
-      ],
-    ]);
+    const metrics = {
+      forwarder_id: "fwd-new",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 100,
+      dedup_count: 90,
+      retransmit_count: 10,
+      lag_ms: null,
+      epoch_raw_count: 50,
+      epoch_dedup_count: 45,
+      epoch_retransmit_count: 5,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 20,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
     // No previous streams (simulates first snapshot or stream re-appearing)
     store.streams = null;
 
@@ -346,7 +342,412 @@ describe("receiver updater store", () => {
       upstream_error: null,
     });
 
+    // Metrics should be preserved — only prune on known epoch changes
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+  });
+
+  it("onStreamsSnapshot keeps metrics when previous epoch was undefined", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 0,
+      dedup_count: 0,
+      retransmit_count: 0,
+      lag_ms: null,
+      epoch_raw_count: 0,
+      epoch_dedup_count: 0,
+      epoch_retransmit_count: 0,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 0,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    // Previous streams had undefined epoch (local-only data during reconnect)
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: undefined,
+        } as any,
+      ],
+      degraded: true,
+      upstream_error: "connection state: Connecting",
+    };
+
+    // New snapshot arrives with real epoch after reconnect
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    // Metrics should survive — undefined→real is not a real epoch change
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+  });
+
+  it("onStreamsSnapshot clears metrics after reconnect when the concrete epoch changed", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 12,
+      dedup_count: 11,
+      retransmit_count: 1,
+      lag_ms: 500,
+      epoch_raw_count: 7,
+      epoch_dedup_count: 6,
+      epoch_retransmit_count: 1,
+      epoch_lag_ms: 200,
+      epoch_last_received_at: "2026-03-21T12:00:00Z",
+      unique_chips: 4,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: undefined,
+        } as any,
+      ],
+      degraded: true,
+      upstream_error: "connection state: Connecting",
+    });
+
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 2,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
     expect(store.streamMetrics.has(key)).toBe(false);
+  });
+
+  it("onStreamsSnapshot keeps metrics through multiple consecutive undefined-epoch snapshots", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 5,
+      dedup_count: 5,
+      retransmit_count: 0,
+      lag_ms: null,
+      epoch_raw_count: 5,
+      epoch_dedup_count: 5,
+      epoch_retransmit_count: 0,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 3,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    // First undefined snapshot (disconnect)
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          stream_epoch: undefined,
+        } as any,
+      ],
+      degraded: true,
+      upstream_error: "connection state: Connecting",
+    });
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+
+    // Second consecutive undefined snapshot (still disconnected)
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          stream_epoch: undefined,
+        } as any,
+      ],
+      degraded: true,
+      upstream_error: "connection state: Connecting",
+    });
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+
+    // Reconnect with new epoch — should clear
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 2,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+    expect(store.streamMetrics.has(key)).toBe(false);
+  });
+
+  it("onStreamsSnapshot clears metrics for stream that disappears and reappears with new epoch", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 10,
+      dedup_count: 9,
+      retransmit_count: 1,
+      lag_ms: null,
+      epoch_raw_count: 10,
+      epoch_dedup_count: 9,
+      epoch_retransmit_count: 1,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 5,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    // Stream disappears entirely
+    callbacks?.onStreamsSnapshot({
+      streams: [],
+      degraded: false,
+      upstream_error: null,
+    });
+    // Metrics pruned because stream is no longer in snapshot
+    expect(store.streamMetrics.has(key)).toBe(false);
+  });
+
+  it("onStreamsSnapshot handles null epoch same as undefined", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 0,
+      dedup_count: 0,
+      retransmit_count: 0,
+      lag_ms: null,
+      epoch_raw_count: 0,
+      epoch_dedup_count: 0,
+      epoch_retransmit_count: 0,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 0,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    store.streams = null;
+
+    // null epoch should behave identically to undefined — metrics preserved
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          stream_epoch: null,
+        } as any,
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+  });
+
+  it("onStreamsSnapshot prunes only the stream whose epoch changed in a multi-stream snapshot", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const keyA = streamKey("fwd-1", "10.0.0.1:10000");
+    const keyB = streamKey("fwd-2", "10.0.0.2:10000");
+    const metricsA = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 5,
+      dedup_count: 5,
+      retransmit_count: 0,
+      lag_ms: null,
+      epoch_raw_count: 5,
+      epoch_dedup_count: 5,
+      epoch_retransmit_count: 0,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 3,
+    };
+    const metricsB = {
+      forwarder_id: "fwd-2",
+      reader_ip: "10.0.0.2:10000",
+      raw_count: 20,
+      dedup_count: 18,
+      retransmit_count: 2,
+      lag_ms: null,
+      epoch_raw_count: 20,
+      epoch_dedup_count: 18,
+      epoch_retransmit_count: 2,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 10,
+    };
+    store.streamMetrics = new Map([
+      [keyA, metricsA],
+      [keyB, metricsB],
+    ]);
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+        {
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: true,
+          local_port: 7002,
+          stream_epoch: 3,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    // Stream A epoch changes, Stream B stays the same
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 2,
+        },
+        {
+          forwarder_id: "fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: true,
+          local_port: 7002,
+          stream_epoch: 3,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    // Stream A metrics pruned (epoch changed), Stream B preserved
+    expect(store.streamMetrics.has(keyA)).toBe(false);
+    expect(store.streamMetrics.get(keyB)).toEqual(metricsB);
   });
 
   it("keeps cached metrics across resync until replacement data arrives", async () => {

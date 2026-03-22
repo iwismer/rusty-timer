@@ -32,7 +32,7 @@ use sqlx::{Row, types::Uuid as SqlUuid};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -61,26 +61,25 @@ async fn send_stream_metrics(
     state: &AppState,
     target: &ResolvedStreamTarget,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let metrics = match fetch_stream_metrics(&state.pool, target.stream_id).await? {
-        Some(m) => m,
-        None => return Ok(()), // No metrics row yet
+    let metrics = fetch_stream_metrics(&state.pool, target.stream_id).await?;
+    let unique_chips = if metrics.is_some() {
+        count_unique_chips(&state.pool, target.stream_id, target.current_stream_epoch).await?
+    } else {
+        0
     };
-
-    let unique_chips =
-        count_unique_chips(&state.pool, target.stream_id, target.current_stream_epoch).await?;
-
+    let m = metrics.unwrap_or_default();
     let msg = WsMessage::ReceiverStreamMetrics(rt_protocol::ReceiverStreamMetrics {
         forwarder_id: target.forwarder_id.clone(),
         reader_ip: target.reader_ip.clone(),
-        raw_count: metrics.raw_count,
-        dedup_count: metrics.dedup_count,
-        retransmit_count: metrics.retransmit_count,
-        lag_ms: metrics.lag_ms,
-        epoch_raw_count: metrics.epoch_raw_count,
-        epoch_dedup_count: metrics.epoch_dedup_count,
-        epoch_retransmit_count: metrics.epoch_retransmit_count,
-        epoch_lag_ms: metrics.epoch_lag_ms,
-        epoch_last_received_at: metrics.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
+        raw_count: m.raw_count,
+        dedup_count: m.dedup_count,
+        retransmit_count: m.retransmit_count,
+        lag_ms: m.lag_ms,
+        epoch_raw_count: m.epoch_raw_count,
+        epoch_dedup_count: m.epoch_dedup_count,
+        epoch_retransmit_count: m.epoch_retransmit_count,
+        epoch_lag_ms: m.epoch_lag_ms,
+        epoch_last_received_at: m.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
         unique_chips,
     });
     let json = serde_json::to_string(&msg)?;
@@ -1082,7 +1081,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
         for target in &resolved_targets {
             if let Err(e) = send_stream_metrics(&mut socket, &state, target).await {
                 warn!(
+                    device_id = %device_id,
                     stream_id = %target.stream_id,
+                    forwarder_id = %target.forwarder_id,
+                    reader_ip = %target.reader_ip,
                     error = %e,
                     "failed to send initial stream metrics"
                 );
@@ -1181,10 +1183,15 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                     session_id: session_id.clone(),
                     events: events_to_send,
                 });
-                if let Ok(json) = serde_json::to_string(&batch)
-                    && socket.send(Message::Text(json.into())).await.is_err()
-                {
-                    break;
+                match serde_json::to_string(&batch) {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!(device_id = %device_id, error = %e, "failed to serialize event batch for receiver");
+                    }
                 }
                 sent_live_batch = true;
             }
@@ -1336,13 +1343,18 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                             }
                         }
                         Ok(Some(Ok(Message::Ping(data)))) => {
-                            let _ = socket.send(Message::Pong(data)).await;
+                            if socket.send(Message::Pong(data)).await.is_err() {
+                                warn!(device_id = %device_id, "failed to send Pong, connection likely dead");
+                                break;
+                            }
                         }
                         Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
                             state.logger.log(format!("receiver {device_id} disconnected"));
                             break;
                         }
-                        Err(_) => {}
+                        Err(_) => {
+                            debug!(device_id = %device_id, "WS read timed out (expected during idle)");
+                        }
                         Ok(Some(Err(e))) => {
                             warn!(device_id = %device_id, error = %e, "WS error");
                             break;
@@ -1469,8 +1481,11 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                         }
                                         _ => { continue; }
                                     };
-                                    if let Ok(fallback_text) = fallback {
-                                        let _ = socket.send(Message::Text(fallback_text.into())).await;
+                                    if let Ok(fallback_text) = fallback
+                                        && socket.send(Message::Text(fallback_text.into())).await.is_err()
+                                    {
+                                        warn!(device_id = %device_id, "failed to send fallback error to receiver");
+                                        break;
                                     }
                                     continue;
                                 }
@@ -1542,15 +1557,22 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     epoch_last_received_at,
                                     unique_chips,
                                 });
-                                if let Ok(json) = serde_json::to_string(&msg)
-                                    && socket.send(Message::Text(json.into())).await.is_err()
-                                {
-                                    break;
+                                match serde_json::to_string(&msg) {
+                                    Ok(json) => {
+                                        if socket.send(Message::Text(json.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(device_id = %device_id, error = %e, "failed to serialize live stream metrics for receiver");
+                                    }
                                 }
                             }
                         }
                         Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(device_id = %device_id, skipped = n, "receiver dashboard event channel lagged, metrics updates may have been dropped");
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }

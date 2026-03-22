@@ -210,11 +210,12 @@ impl AppState {
         let db = self.db.lock().await;
         let subs = match db.load_subscriptions() {
             Ok(s) => s,
-            Err(_) => {
+            Err(e) => {
+                warn!(error = %e, "failed to load subscriptions for streams response");
                 return StreamsResponse {
                     streams: vec![],
                     degraded: true,
-                    upstream_error: Some("failed to load subscriptions".to_owned()),
+                    upstream_error: Some(format!("failed to load subscriptions: {e}")),
                 };
             }
         };

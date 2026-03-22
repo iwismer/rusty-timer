@@ -212,7 +212,10 @@ where
             msg = ws.next() => {
                 match msg {
                     None => break,
-                    Some(Err(e)) => return Err(SessionError::Ws(e)),
+                    Some(Err(e)) => {
+                        warn!(session_id = %session_id, error = %e, "WS error in session loop");
+                        return Err(SessionError::Ws(e));
+                    }
                     Some(Ok(Message::Text(t))) => {
                         match serde_json::from_str::<WsMessage>(&t) {
                             Ok(ref parsed) if proxy_response_request_id(parsed).is_some() => {
@@ -342,7 +345,12 @@ where
                         }
                     }
                     Some(Ok(Message::Close(_))) => break,
-                    Some(Ok(Message::Ping(d))) => { let _ = ws.send(Message::Pong(d)).await; }
+                    Some(Ok(Message::Ping(d))) => {
+                        if ws.send(Message::Pong(d)).await.is_err() {
+                            warn!(session_id = %session_id, "failed to send Pong, connection likely dead");
+                            break;
+                        }
+                    }
                     Some(Ok(_)) => {}
                 }
             }
