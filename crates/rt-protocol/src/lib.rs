@@ -126,6 +126,12 @@ pub const SENTINEL_READ_TYPE_PREFIX: &str = "__";
 /// JSON-serialized `WsMessage::ReaderStatusChanged` payload.
 pub const READER_STATUS_CHANGED_READ_TYPE: &str = "__reader_status_changed";
 
+/// Sentinel `read_type` for reader-info-updated control messages.
+pub const READER_INFO_UPDATED_READ_TYPE: &str = "__reader_info_updated";
+
+/// Sentinel `read_type` for reader-download-progress control messages.
+pub const READER_DOWNLOAD_PROGRESS_READ_TYPE: &str = "__reader_download_progress";
+
 /// A batch of read events from a forwarder.
 ///
 /// `batch_id` is an opaque correlation ID for logging/debugging.  The server
@@ -837,6 +843,49 @@ pub struct ReceiverProxyFileUploadResponse {
     pub imported: i64,
 }
 
+/// Receiver-to-server: request a reader control action proxied to a forwarder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyReaderControlRequest {
+    pub request_id: String,
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub action: ReaderControlAction,
+}
+
+/// Server-to-receiver: result of a proxied reader control action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverProxyReaderControlResponse {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_info: Option<ReaderInfo>,
+}
+
+/// Server-to-receiver: broadcast reader info update (tunneled via sentinel).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverReaderInfoUpdate {
+    pub stream_id: Uuid,
+    pub reader_ip: String,
+    pub state: ReaderConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_info: Option<ReaderInfo>,
+}
+
+/// Server-to-receiver: broadcast download progress (tunneled via sentinel).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiverReaderDownloadProgress {
+    pub stream_id: Uuid,
+    pub reader_ip: String,
+    pub state: DownloadState,
+    pub reads_received: u32,
+    pub progress: u64,
+    pub total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
@@ -906,6 +955,10 @@ pub enum WsMessage {
     ReceiverProxyForwarderRaceGetResponse(ReceiverProxyForwarderRaceGetResponse),
     ReceiverProxyForwarderRaceSetRequest(ReceiverProxyForwarderRaceSetRequest),
     ReceiverProxyForwarderRaceSetResponse(ReceiverProxyForwarderRaceSetResponse),
+    ReceiverProxyReaderControlRequest(ReceiverProxyReaderControlRequest),
+    ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse),
+    ReceiverReaderInfoUpdate(ReceiverReaderInfoUpdate),
+    ReceiverReaderDownloadProgress(ReceiverReaderDownloadProgress),
 }
 
 // ---------------------------------------------------------------------------
@@ -1716,5 +1769,65 @@ mod tests {
             err.to_string().contains("non-negative"),
             "expected non-negative error, got: {err}"
         );
+    }
+
+    #[test]
+    fn receiver_proxy_reader_control_request_round_trip() {
+        let msg = WsMessage::ReceiverProxyReaderControlRequest(ReceiverProxyReaderControlRequest {
+            request_id: "req-1".to_owned(),
+            forwarder_id: "fwd-1".to_owned(),
+            reader_ip: "192.168.1.100:10000".to_owned(),
+            action: ReaderControlAction::SyncClock,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert!(json.contains("\"kind\":\"receiver_proxy_reader_control_request\""));
+    }
+
+    #[test]
+    fn receiver_proxy_reader_control_response_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: "req-1".to_owned(),
+                ok: true,
+                error: None,
+                reader_info: None,
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert!(json.contains("\"kind\":\"receiver_proxy_reader_control_response\""));
+    }
+
+    #[test]
+    fn receiver_reader_info_update_round_trip() {
+        let msg = WsMessage::ReceiverReaderInfoUpdate(ReceiverReaderInfoUpdate {
+            stream_id: Uuid::nil(),
+            reader_ip: "192.168.1.100:10000".to_owned(),
+            state: ReaderConnectionState::Connected,
+            reader_info: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert!(json.contains("\"kind\":\"receiver_reader_info_update\""));
+    }
+
+    #[test]
+    fn receiver_reader_download_progress_round_trip() {
+        let msg = WsMessage::ReceiverReaderDownloadProgress(ReceiverReaderDownloadProgress {
+            stream_id: Uuid::nil(),
+            reader_ip: "192.168.1.100:10000".to_owned(),
+            state: DownloadState::Downloading,
+            reads_received: 42,
+            progress: 100,
+            total: 1000,
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert!(json.contains("\"kind\":\"receiver_reader_download_progress\""));
     }
 }
