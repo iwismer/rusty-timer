@@ -346,6 +346,66 @@ describe("receiver updater store", () => {
     expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 
+  it("onStreamsSnapshot keeps metrics when previous epoch was undefined", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 0,
+      dedup_count: 0,
+      retransmit_count: 0,
+      lag_ms: null,
+      epoch_raw_count: 0,
+      epoch_dedup_count: 0,
+      epoch_retransmit_count: 0,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 0,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    // Previous streams had undefined epoch (local-only data during reconnect)
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: undefined,
+        } as any,
+      ],
+      degraded: true,
+      upstream_error: "connection state: Connecting",
+    };
+
+    // New snapshot arrives with real epoch after reconnect
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    // Metrics should survive — undefined→real is not a real epoch change
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+  });
+
   it("keeps cached metrics across resync until replacement data arrives", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");
