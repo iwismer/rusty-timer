@@ -1481,11 +1481,11 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                         }
                                         _ => { continue; }
                                     };
-                                    if let Ok(fallback_text) = fallback {
-                                        if socket.send(Message::Text(fallback_text.into())).await.is_err() {
-                                            warn!(device_id = %device_id, "failed to send fallback error to receiver");
-                                            break;
-                                        }
+                                    if let Ok(fallback_text) = fallback
+                                        && socket.send(Message::Text(fallback_text.into())).await.is_err()
+                                    {
+                                        warn!(device_id = %device_id, "failed to send fallback error to receiver");
+                                        break;
                                     }
                                     continue;
                                 }
