@@ -1264,7 +1264,8 @@ pub async fn put_dbf_config(
             "DBF path should have a .dbf extension for Race Director compatibility".to_owned(),
         ));
     }
-    if let Some(parent) = p.parent()
+    if body.enabled
+        && let Some(parent) = p.parent()
         && !parent.as_os_str().is_empty()
         && !parent.exists()
     {

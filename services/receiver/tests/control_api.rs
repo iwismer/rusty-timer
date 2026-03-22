@@ -523,3 +523,30 @@ async fn streams_response_includes_cursor_data() {
     assert_eq!(f2.cursor_epoch, None);
     assert_eq!(f2.cursor_seq, None);
 }
+
+#[tokio::test]
+async fn put_dbf_config_allows_disabling_when_parent_directory_is_missing() {
+    let state = setup();
+    {
+        let mut db = state.db.lock().await;
+        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+    }
+
+    let base_dir = tempfile::tempdir().unwrap();
+    let missing_path = base_dir.path().join("missing").join("output.dbf");
+
+    control_api::put_dbf_config(
+        &state,
+        receiver::db::DbfConfig {
+            enabled: false,
+            path: missing_path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let config = control_api::get_dbf_config(&state).await.unwrap();
+    assert!(!config.enabled);
+    assert_eq!(config.path, missing_path.display().to_string());
+}

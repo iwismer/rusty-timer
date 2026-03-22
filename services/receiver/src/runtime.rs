@@ -107,13 +107,15 @@ async fn stop_dbf_writer(
         let _ = cancel_tx.send(true);
     }
     if let Some(handle) = task {
-        match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+        tokio::pin!(handle);
+        match tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle).await {
             Ok(Ok(())) => {}
             Ok(Err(join_err)) => {
                 tracing::error!(error = %join_err, "DBF writer task panicked");
             }
             Err(_elapsed) => {
                 tracing::error!("DBF writer task did not shut down within 2 seconds");
+                handle.abort();
             }
         }
     }
@@ -1615,6 +1617,39 @@ mod tests {
 
         let completed = wait_handle.await.expect("wait task should not panic");
         assert!(completed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_dbf_writer_aborts_stuck_task_after_timeout() {
+        struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_for_task = std::sync::Arc::clone(&dropped);
+
+        let stuck_task = tokio::spawn(async move {
+            let _guard = DropFlag(dropped_for_task);
+            std::future::pending::<()>().await;
+        });
+
+        let stop_task = tokio::spawn(async move {
+            stop_dbf_writer(Some(cancel_tx), Some(stuck_task)).await;
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+
+        stop_task.await.expect("stop task should not panic");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "timed out DBF writer task should be aborted so its future is dropped"
+        );
     }
 
     #[tokio::test]
