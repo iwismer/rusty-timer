@@ -150,6 +150,7 @@ async fn recv_first_event_batch(
         match tokio::time::timeout(remaining, client.recv_message()).await {
             Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => return batch,
             Ok(Ok(WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(WsMessage::ReceiverStreamMetrics(_))) => continue,
             Ok(Ok(WsMessage::Heartbeat(_))) => continue,
             Ok(Ok(other)) => panic!("expected receiver event batch, got {other:?}"),
             Ok(Err(err)) => panic!("recv error: {err}"),
