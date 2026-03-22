@@ -30,6 +30,21 @@
   // --- Filter state ---
   let filterText = $state("");
 
+  // Reset detail-view state when selected race changes
+  let prevRaceId: string | null = null;
+  $effect(() => {
+    const currentId = store.selectedRaceId;
+    if (currentId !== prevRaceId) {
+      prevRaceId = currentId;
+      pplFile = null;
+      bibchipFile = null;
+      uploadResult = null;
+      filterText = "";
+      sortField = "bib";
+      sortAsc = true;
+    }
+  });
+
   // Derived: filtered + sorted participants
   let displayParticipants = $derived.by(() => {
     let result = store.raceParticipants ?? [];

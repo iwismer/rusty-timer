@@ -18,6 +18,16 @@ fn deserialize_non_negative_i64<'de, D: Deserializer<'de>>(d: D) -> Result<i64, 
     Ok(v)
 }
 
+fn deserialize_non_negative_i32<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    let v = i32::deserialize(d)?;
+    if v < 0 {
+        return Err(serde::de::Error::custom(format!(
+            "expected non-negative value, got {v}"
+        )));
+    }
+    Ok(v)
+}
+
 // ---------------------------------------------------------------------------
 // Shared sub-types
 // ---------------------------------------------------------------------------
@@ -772,9 +782,11 @@ pub struct ReceiverProxyParticipantsGetResponse {
 /// `ReceiverProxyParticipantsGetResponse`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParticipantInfo {
+    #[serde(deserialize_with = "deserialize_non_negative_i32")]
     pub bib: i32,
     pub first_name: String,
     pub last_name: String,
+    /// Gender code from the PPL file (e.g. "M", "F", or "" if unspecified).
     pub gender: String,
     pub affiliation: Option<String>,
     pub chip_ids: Vec<String>,
@@ -785,6 +797,7 @@ pub struct ParticipantInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnmatchedChipInfo {
     pub chip_id: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i32")]
     pub bib: i32,
 }
 
@@ -799,6 +812,10 @@ pub enum UploadType {
 }
 
 /// Receiver-to-server: upload a file (ppl or bibchip) for a race.
+///
+/// The `file_data` field carries the entire file as a Base64-encoded string.
+/// The client enforces a 10 MB limit; the server enforces ~15 MB encoded
+/// (which corresponds to ~10 MB decoded).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiverProxyFileUploadRequest {
     pub request_id: String,
@@ -1536,5 +1553,168 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_get_request_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyForwarderRaceGetRequest(ReceiverProxyForwarderRaceGetRequest {
+                request_id: "req-fg1".into(),
+                forwarder_id: "fwd-abc".into(),
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_get_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_get_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceGetResponse(
+            ReceiverProxyForwarderRaceGetResponse {
+                request_id: "req-fg1".into(),
+                ok: true,
+                error: None,
+                forwarder_id: "fwd-abc".into(),
+                race_id: Some("race-1".into()),
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_get_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_get_response_unassigned_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceGetResponse(
+            ReceiverProxyForwarderRaceGetResponse {
+                request_id: "req-fg2".into(),
+                ok: true,
+                error: None,
+                forwarder_id: "fwd-abc".into(),
+                race_id: None,
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_request_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyForwarderRaceSetRequest(ReceiverProxyForwarderRaceSetRequest {
+                request_id: "req-fs1".into(),
+                forwarder_id: "fwd-abc".into(),
+                race_id: Some("race-1".into()),
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_set_request\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_request_unassign_round_trip() {
+        let msg =
+            WsMessage::ReceiverProxyForwarderRaceSetRequest(ReceiverProxyForwarderRaceSetRequest {
+                request_id: "req-fs2".into(),
+                forwarder_id: "fwd-abc".into(),
+                race_id: None,
+            });
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_response_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceSetResponse(
+            ReceiverProxyForwarderRaceSetResponse {
+                request_id: "req-fs1".into(),
+                ok: true,
+                error: None,
+                forwarder_id: "fwd-abc".into(),
+                race_id: Some("race-1".into()),
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"receiver_proxy_forwarder_race_set_response\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn receiver_proxy_forwarder_race_set_response_error_round_trip() {
+        let msg = WsMessage::ReceiverProxyForwarderRaceSetResponse(
+            ReceiverProxyForwarderRaceSetResponse {
+                request_id: "req-fs3".into(),
+                ok: false,
+                error: Some("race not found".into()),
+                forwarder_id: "fwd-abc".into(),
+                race_id: None,
+            },
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn upload_type_chips_round_trip() {
+        let msg = WsMessage::ReceiverProxyFileUploadRequest(ReceiverProxyFileUploadRequest {
+            request_id: "req-chips".into(),
+            race_id: "race-1".into(),
+            upload_type: UploadType::Chips,
+            file_data: "YmlkLGNoaXAK".into(),
+            file_name: "chips.bibchip".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"upload_type\":\"chips\""));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn negative_participant_bib_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_participants_get_response",
+            "request_id": "req-neg-bib",
+            "ok": true,
+            "participants": [{
+                "bib": -1,
+                "first_name": "Alice",
+                "last_name": "Smith",
+                "gender": "F",
+                "affiliation": null,
+                "chip_ids": []
+            }],
+            "chips_without_participant": []
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn negative_unmatched_chip_bib_rejected() {
+        let json = r#"{
+            "kind": "receiver_proxy_participants_get_response",
+            "request_id": "req-neg-chip-bib",
+            "ok": true,
+            "participants": [],
+            "chips_without_participant": [{
+                "chip_id": "CHIP001",
+                "bib": -5
+            }]
+        }"#;
+        let err = serde_json::from_str::<WsMessage>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("non-negative"),
+            "expected non-negative error, got: {err}"
+        );
     }
 }

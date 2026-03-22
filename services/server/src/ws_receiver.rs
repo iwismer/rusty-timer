@@ -626,12 +626,30 @@ async fn proxy_participants_get_reply(
     }
 }
 
+/// Maximum base64-encoded file data size accepted server-side (~10 MB decoded).
+const MAX_FILE_DATA_BYTES: usize = 15 * 1024 * 1024;
+
 async fn proxy_file_upload_reply(
     state: AppState,
     device_id: String,
     req: rt_protocol::ReceiverProxyFileUploadRequest,
 ) -> WsMessage {
     use base64::Engine;
+
+    if req.file_data.len() > MAX_FILE_DATA_BYTES {
+        return WsMessage::ReceiverProxyFileUploadResponse(
+            rt_protocol::ReceiverProxyFileUploadResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(format!(
+                    "file too large ({} bytes encoded, max {})",
+                    req.file_data.len(),
+                    MAX_FILE_DATA_BYTES
+                )),
+                imported: 0,
+            },
+        );
+    }
 
     let race_id = match Uuid::parse_str(&req.race_id) {
         Ok(id) => id,

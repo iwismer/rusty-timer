@@ -1064,7 +1064,7 @@ pub async fn upload_race_file(
 
 // ---------------------------------------------------------------------------
 // Forwarder list (via HTTP to server) + proxy commands (via WS session:
-// config, restart, device control) + shared proxy helpers
+// config, restart, device control, race assignment) + shared proxy helpers
 // ---------------------------------------------------------------------------
 
 /// Generate a process-unique request ID for WS proxy commands.
@@ -1288,8 +1288,9 @@ pub async fn set_forwarder_race(
 /// Uses a 15s timeout. For forwarder proxy requests, the server applies a 10s
 /// `PROXY_TIMEOUT` to both send and reply phases independently, so the server's
 /// total timeout can reach ~20s in degenerate cases and the local timeout may
-/// fire first under backpressure. Announcer and stream-list proxy requests are
-/// handled server-side with no explicit timeout beyond the database query time.
+/// fire first under backpressure. Non-forwarder proxy requests (announcer,
+/// stream-list, race management) are handled server-side with no explicit
+/// timeout beyond the database query time.
 async fn send_ws_command(
     state: &AppState,
     message: rt_protocol::WsMessage,

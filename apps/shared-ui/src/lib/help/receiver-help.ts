@@ -122,9 +122,9 @@ export const RECEIVER_HELP = {
       delete_race: {
         label: "Delete Race",
         summary:
-          "Permanently deletes the race and all its participants, chip mappings, and forwarder associations.",
+          "Permanently deletes the race and all its participants and chip mappings. Any forwarder assigned to this race will be unassigned.",
         detailHtml:
-          "<strong>This action is irreversible.</strong> Deleting a race removes all of its participant data, chip mappings, and any forwarder-race associations. " +
+          "<strong>This action is irreversible.</strong> Deleting a race removes all of its participant data and chip mappings. Forwarders assigned to this race will be unassigned. " +
           "Timing data (reads/events) is not affected — only the race metadata is deleted." +
           "<br><br>" +
           "A race cannot be deleted while a receiver session is actively using it." +

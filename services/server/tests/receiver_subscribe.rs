@@ -1615,3 +1615,146 @@ async fn race_proxy_create_empty_name_returns_error() {
         other => panic!("expected RaceCreateResponse, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn race_proxy_forwarder_race_get_set_round_trip() {
+    let (pool, addr) = start_server().await;
+
+    // Connect a forwarder so the server knows about it.
+    let fwd_token = b"fwd-race-tok";
+    insert_token(&pool, "fwd-race-1", "forwarder", fwd_token).await;
+    let _fwd = connect_forwarder(addr, "fwd-race-tok", "fwd-race-1", "10.0.0.1:10000").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut rcv = connect_receiver_for_race_proxy(&pool, addr).await;
+
+    // Get forwarder race — should be unassigned initially.
+    rcv.send_message(&WsMessage::ReceiverProxyForwarderRaceGetRequest(
+        ReceiverProxyForwarderRaceGetRequest {
+            request_id: "fget-1".to_owned(),
+            forwarder_id: "fwd-race-1".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => {
+            assert!(r.ok, "get should succeed: {:?}", r.error);
+            assert_eq!(r.request_id, "fget-1");
+            assert_eq!(r.forwarder_id, "fwd-race-1");
+            assert!(r.race_id.is_none(), "should be unassigned initially");
+        }
+        other => panic!("expected ForwarderRaceGetResponse, got {other:?}"),
+    }
+
+    // Create a race to assign.
+    rcv.send_message(&WsMessage::ReceiverProxyRaceCreateRequest(
+        ReceiverProxyRaceCreateRequest {
+            request_id: "c-fr".to_owned(),
+            name: "Forwarder Race Test".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let race_id = match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyRaceCreateResponse(r) => {
+            assert!(r.ok);
+            r.race.unwrap().race_id
+        }
+        other => panic!("expected RaceCreateResponse, got {other:?}"),
+    };
+
+    // Assign the forwarder to the race.
+    rcv.send_message(&WsMessage::ReceiverProxyForwarderRaceSetRequest(
+        ReceiverProxyForwarderRaceSetRequest {
+            request_id: "fset-1".to_owned(),
+            forwarder_id: "fwd-race-1".to_owned(),
+            race_id: Some(race_id.clone()),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => {
+            assert!(r.ok, "set should succeed: {:?}", r.error);
+            assert_eq!(r.request_id, "fset-1");
+            assert_eq!(r.forwarder_id, "fwd-race-1");
+            assert_eq!(r.race_id.as_deref(), Some(race_id.as_str()));
+        }
+        other => panic!("expected ForwarderRaceSetResponse, got {other:?}"),
+    }
+
+    // Verify the assignment via get.
+    rcv.send_message(&WsMessage::ReceiverProxyForwarderRaceGetRequest(
+        ReceiverProxyForwarderRaceGetRequest {
+            request_id: "fget-2".to_owned(),
+            forwarder_id: "fwd-race-1".to_owned(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => {
+            assert!(r.ok);
+            assert_eq!(r.race_id.as_deref(), Some(race_id.as_str()));
+        }
+        other => panic!("expected ForwarderRaceGetResponse, got {other:?}"),
+    }
+
+    // Unassign the forwarder.
+    rcv.send_message(&WsMessage::ReceiverProxyForwarderRaceSetRequest(
+        ReceiverProxyForwarderRaceSetRequest {
+            request_id: "fset-2".to_owned(),
+            forwarder_id: "fwd-race-1".to_owned(),
+            race_id: None,
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => {
+            assert!(r.ok, "unassign should succeed: {:?}", r.error);
+            assert!(r.race_id.is_none(), "should be unassigned after clear");
+        }
+        other => panic!("expected ForwarderRaceSetResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn race_proxy_forwarder_race_set_nonexistent_race_returns_error() {
+    let (pool, addr) = start_server().await;
+
+    let fwd_token = b"fwd-norace-tok";
+    insert_token(&pool, "fwd-norace-1", "forwarder", fwd_token).await;
+    let _fwd = connect_forwarder(addr, "fwd-norace-tok", "fwd-norace-1", "10.0.0.2:10000").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut rcv = connect_receiver_for_race_proxy(&pool, addr).await;
+
+    rcv.send_message(&WsMessage::ReceiverProxyForwarderRaceSetRequest(
+        ReceiverProxyForwarderRaceSetRequest {
+            request_id: "fset-bad".to_owned(),
+            forwarder_id: "fwd-norace-1".to_owned(),
+            race_id: Some("00000000-0000-0000-0000-000000000000".to_owned()),
+        },
+    ))
+    .await
+    .unwrap();
+
+    match recv_race_proxy_message(&mut rcv).await {
+        WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => {
+            assert!(!r.ok, "assigning nonexistent race should fail");
+            assert!(
+                r.error.as_deref().unwrap_or("").contains("not found"),
+                "error should mention not found, got: {:?}",
+                r.error
+            );
+        }
+        other => panic!("expected ForwarderRaceSetResponse, got {other:?}"),
+    }
+}

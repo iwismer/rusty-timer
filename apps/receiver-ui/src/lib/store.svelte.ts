@@ -67,6 +67,7 @@ export const store = $state({
   forwarderRaceId: null as string | null,
   forwarderRaceLoading: false,
   forwarderRaceSaving: false,
+  forwarderRaceError: null as string | null,
 
   // Races
   selectedRaceId: null as string | null,
@@ -670,6 +671,7 @@ export function selectForwarder(forwarderId: string | null): void {
   store.forwarderRaceId = null;
   store.forwarderRaceLoading = false;
   store.forwarderRaceSaving = false;
+  store.forwarderRaceError = null;
   if (forwarderId) {
     void loadForwarderRace(forwarderId);
   }
@@ -677,13 +679,16 @@ export function selectForwarder(forwarderId: string | null): void {
 
 export async function loadForwarderRace(forwarderId: string): Promise<void> {
   store.forwarderRaceLoading = true;
+  store.forwarderRaceError = null;
   try {
     const result = await api.getForwarderRace(forwarderId);
     if (store.selectedForwarderId === forwarderId) {
       store.forwarderRaceId = result.race_id;
     }
   } catch (e) {
-    console.error("Failed to load forwarder race:", e);
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceError = `Failed to load race assignment: ${String(e)}`;
+    }
   } finally {
     if (store.selectedForwarderId === forwarderId) {
       store.forwarderRaceLoading = false;
@@ -696,13 +701,17 @@ export async function setForwarderRace(
   raceId: string | null,
 ): Promise<void> {
   store.forwarderRaceSaving = true;
+  store.forwarderRaceError = null;
   try {
     const result = await api.setForwarderRace(forwarderId, raceId);
     if (store.selectedForwarderId === forwarderId) {
       store.forwarderRaceId = result.race_id;
     }
   } catch (e) {
-    console.error("Failed to set forwarder race:", e);
+    if (store.selectedForwarderId === forwarderId) {
+      store.forwarderRaceError = `Failed to save race assignment: ${String(e)}`;
+      void loadForwarderRace(forwarderId);
+    }
   } finally {
     if (store.selectedForwarderId === forwarderId) {
       store.forwarderRaceSaving = false;
