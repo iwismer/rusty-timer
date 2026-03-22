@@ -56,6 +56,23 @@ impl StreamMetricsPayload {
             epoch_lag_ms: resp.epoch_lag_ms,
         }
     }
+
+    pub fn from_ws(msg: &rt_protocol::ReceiverStreamMetrics) -> Self {
+        Self {
+            forwarder_id: msg.forwarder_id.clone(),
+            reader_ip: msg.reader_ip.clone(),
+            raw_count: msg.raw_count,
+            dedup_count: msg.dedup_count,
+            retransmit_count: msg.retransmit_count,
+            lag_ms: msg.lag_ms,
+            epoch_raw_count: msg.epoch_raw_count,
+            epoch_dedup_count: msg.epoch_dedup_count,
+            epoch_retransmit_count: msg.epoch_retransmit_count,
+            unique_chips: msg.unique_chips,
+            epoch_last_received_at: msg.epoch_last_received_at.clone(),
+            epoch_lag_ms: msg.epoch_lag_ms,
+        }
+    }
 }
 
 /// Extract chip ID from IPICO raw frame bytes.
