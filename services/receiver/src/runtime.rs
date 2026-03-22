@@ -7,6 +7,7 @@ use crate::ports::{PortAssignment, resolve_ports, stream_key};
 use rt_ui_log::UiLogLevel;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
 use tracing::{error, info, warn};
@@ -98,6 +99,33 @@ pub async fn init(
     Ok((state, shutdown_rx))
 }
 
+/// Stop a running DBF writer task, waiting up to 2 seconds before aborting.
+async fn stop_dbf_writer(
+    cancel_tx: Option<watch::Sender<bool>>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(cancel_flag) = cancel_flag {
+        cancel_flag.store(true, Ordering::SeqCst);
+    }
+    if let Some(cancel_tx) = cancel_tx {
+        let _ = cancel_tx.send(true);
+    }
+    if let Some(handle) = task {
+        tokio::pin!(handle);
+        match tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(join_err)) => {
+                tracing::error!(error = %join_err, "DBF writer task panicked");
+            }
+            Err(_elapsed) => {
+                tracing::error!("DBF writer task did not shut down within 2 seconds");
+                handle.abort();
+            }
+        }
+    }
+}
+
 /// Run the receiver event loop. Blocks until shutdown signal.
 /// This should be spawned as a tokio task, not run on the main thread.
 pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<ShutdownSignal>) {
@@ -114,6 +142,8 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     }
 
     let event_bus = EventBus::new();
+    let (global_event_tx, _global_event_rx) =
+        tokio::sync::broadcast::channel::<rt_protocol::ReadEvent>(256);
 
     // Start local proxies for any saved subscriptions on startup.
     let initial_subs = {
@@ -135,6 +165,44 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
         state.request_connect().await;
     }
 
+    let mut dbf_writer_cancel_tx: Option<watch::Sender<bool>> = None;
+    let mut dbf_writer_cancel_flag: Option<Arc<AtomicBool>> = None;
+    let mut dbf_writer_task: Option<tokio::task::JoinHandle<()>> = None;
+    {
+        let db = state.db.lock().await;
+        match db.load_dbf_config() {
+            Ok(dbf_config) if dbf_config.enabled => {
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                let rx = global_event_tx.subscribe();
+                let db_arc = Arc::clone(&state.db);
+                let path = dbf_config.path.clone();
+                let ui = state.ui_tx.clone();
+                let cancel_flag_for_task = Arc::clone(&cancel_flag);
+                let handle = tokio::spawn(async move {
+                    crate::dbf_writer::run_dbf_writer(
+                        rx,
+                        db_arc,
+                        cancel_rx,
+                        cancel_flag_for_task,
+                        path,
+                        ui,
+                    )
+                    .await;
+                });
+                dbf_writer_cancel_tx = Some(cancel_tx);
+                dbf_writer_cancel_flag = Some(cancel_flag);
+                dbf_writer_task = Some(handle);
+                state.logger.log("DBF writer started");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load DBF config at startup, DBF writer will not start");
+                state.logger.log(format!("DBF writer failed to start: {e}"));
+            }
+        }
+    }
+
     // Spawn upstream dashboard SSE refresher.
     // Uses tokio::spawn (not tauri::async_runtime::spawn) because this is a
     // library crate with no Tauri dependency — the caller spawns `run()` onto
@@ -153,6 +221,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     let mut session_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut conn_state_rx = state.conn_rx();
+    let mut dbf_config_rx = state.dbf_config_rx();
 
     let mut reconcile_interval = tokio::time::interval(std::time::Duration::from_millis(500));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -289,11 +358,13 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                                                     *guard = Some(ws_cmd_tx);
                                                 }
                                                 let st = Arc::clone(&state);
+                                                let gtx = global_event_tx.clone();
                                                 let handle = tokio::spawn(async move {
                                                     let event_tx = make_broadcast_sender(&bus);
                                                     let deps = crate::session::SessionLoopDeps {
                                                         db: db_arc,
                                                         event_tx,
+                                                        dbf_event_tx: Some(gtx),
                                                         stream_counts: counts,
                                                         ui_tx,
                                                         shutdown: cancel_rx,
@@ -366,12 +437,66 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                     }
                 }
             }
+
+            _ = dbf_config_rx.changed() => {
+                let db = state.db.lock().await;
+                let dbf_config = match db.load_dbf_config() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to reload DBF config, keeping current state");
+                        continue;
+                    }
+                };
+                drop(db);
+
+                // Stop existing writer if running
+                stop_dbf_writer(
+                    dbf_writer_cancel_tx.take(),
+                    dbf_writer_cancel_flag.take(),
+                    dbf_writer_task.take(),
+                )
+                .await;
+
+                // Start new writer if enabled
+                if dbf_config.enabled {
+                    let (cancel_tx, cancel_rx) = watch::channel(false);
+                    let cancel_flag = Arc::new(AtomicBool::new(false));
+                    let rx = global_event_tx.subscribe();
+                    let db_arc = Arc::clone(&state.db);
+                    let path = dbf_config.path.clone();
+                    let ui = state.ui_tx.clone();
+                    let cancel_flag_for_task = Arc::clone(&cancel_flag);
+                    let handle = tokio::spawn(async move {
+                        crate::dbf_writer::run_dbf_writer(
+                            rx,
+                            db_arc,
+                            cancel_rx,
+                            cancel_flag_for_task,
+                            path,
+                            ui,
+                        )
+                        .await;
+                    });
+                    dbf_writer_cancel_tx = Some(cancel_tx);
+                    dbf_writer_cancel_flag = Some(cancel_flag);
+                    dbf_writer_task = Some(handle);
+                    state.logger.log("DBF writer started");
+                } else {
+                    state.logger.log("DBF writer stopped");
+                }
+            }
         }
     }
 
     // Graceful shutdown
     state.logger.log("shutdown signal received");
     cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
+    stop_dbf_writer(
+        dbf_writer_cancel_tx.take(),
+        dbf_writer_cancel_flag.take(),
+        dbf_writer_task.take(),
+    )
+    .await;
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");
         proxy.shutdown();
@@ -1196,6 +1321,7 @@ mod tests {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: Some(first_port),
+            event_type: crate::db::EventType::Finish,
         }];
         reconcile_proxies(&initial, &mut proxies, &event_bus, &state.logger).await;
 
@@ -1206,6 +1332,7 @@ mod tests {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: Some(second_port),
+            event_type: crate::db::EventType::Finish,
         }];
         reconcile_proxies(&updated, &mut proxies, &event_bus, &state.logger).await;
 
@@ -1441,6 +1568,7 @@ mod tests {
             forwarder_id: "sub-fwd".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
+            event_type: crate::db::EventType::Finish,
         }];
         let mode = ReceiverMode::Live {
             streams: vec![
@@ -1471,6 +1599,7 @@ mod tests {
             forwarder_id: "sub-fwd".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
+            event_type: crate::db::EventType::Finish,
         }];
         let mode = ReceiverMode::TargetedReplay {
             targets: vec![
@@ -1555,6 +1684,113 @@ mod tests {
 
         let completed = wait_handle.await.expect("wait task should not panic");
         assert!(completed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_dbf_writer_aborts_stuck_task_after_timeout() {
+        struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_for_task = std::sync::Arc::clone(&dropped);
+
+        let stuck_task = tokio::spawn(async move {
+            let _guard = DropFlag(dropped_for_task);
+            std::future::pending::<()>().await;
+        });
+
+        let stop_task = tokio::spawn(async move {
+            stop_dbf_writer(Some(cancel_tx), None, Some(stuck_task)).await;
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+
+        stop_task.await.expect("stop task should not panic");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "timed out DBF writer task should be aborted so its future is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_dbf_writer_does_not_allow_blocked_write_to_complete_after_return() {
+        use fs2::FileExt;
+        use tokio::sync::broadcast;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let dbf_path = dir.path().join("test.dbf");
+        let db = Db::open(&db_path).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        crate::dbf_writer::create_empty_dbf(&dbf_path).unwrap();
+
+        let db = Arc::new(tokio::sync::Mutex::new(db));
+        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let rx = tx.subscribe();
+        let (ui_tx, _) = broadcast::channel(16);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&dbf_path)
+            .unwrap();
+        lock_file.lock_exclusive().unwrap();
+
+        let dbf_path_string = dbf_path.to_str().unwrap().to_owned();
+        let writer_task = tokio::spawn({
+            let db = Arc::clone(&db);
+            let cancel_flag = Arc::clone(&cancel_flag);
+            async move {
+                crate::dbf_writer::run_dbf_writer(
+                    rx,
+                    db,
+                    cancel_rx,
+                    cancel_flag,
+                    dbf_path_string,
+                    ui_tx,
+                )
+                .await;
+            }
+        });
+
+        tx.send(rt_protocol::ReadEvent {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "T".to_owned(),
+            raw_frame: b"aa400000000123450a2a01123018455927a7".to_vec(),
+            read_type: "RAW".to_owned(),
+        })
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            stop_dbf_writer(Some(cancel_tx), Some(cancel_flag), Some(writer_task)),
+        )
+        .await
+        .expect("DBF writer stop should return after timing out");
+
+        lock_file.unlock().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        let mut reader = dbase::Reader::from_path(&dbf_path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert_eq!(
+            records.len(),
+            0,
+            "no stale DBF write should land after stop_dbf_writer returns"
+        );
     }
 
     #[tokio::test]

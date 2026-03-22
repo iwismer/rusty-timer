@@ -8,6 +8,7 @@ export interface SubscriptionBuildStream {
   reader_ip: string;
   subscribed: boolean;
   local_port: number | null;
+  event_type?: "start" | "finish";
 }
 
 export interface BuildUpdatedSubscriptionsParams {
@@ -25,6 +26,7 @@ export interface BuildUpdatedSubscriptionsResult {
     forwarder_id: string;
     reader_ip: string;
     local_port_override: number | null;
+    event_type: "start" | "finish";
   }> | null;
   error: string | null;
 }
@@ -62,6 +64,7 @@ export function buildUpdatedSubscriptions(
       forwarder_id: s.forwarder_id,
       reader_ip: s.reader_ip,
       local_port_override: s.local_port ?? null,
+      event_type: s.event_type ?? "finish",
     }));
 
   if (target.currentlySubscribed) {
@@ -89,6 +92,7 @@ export function buildUpdatedSubscriptions(
         forwarder_id: target.forwarder_id,
         reader_ip: target.reader_ip,
         local_port_override: parsed.value,
+        event_type: "finish",
       },
     ],
     error: null,

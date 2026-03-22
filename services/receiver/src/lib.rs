@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod control_api;
 pub mod db;
+pub mod dbf_writer;
 pub mod error;
 pub mod local_proxy;
 pub mod ports;
@@ -8,7 +9,7 @@ pub mod runtime;
 pub mod session;
 pub mod ui_events;
 pub use cache::{EventBus, StreamCounts, StreamKey};
-pub use db::{Db, DbError, DbResult, Profile, Subscription};
+pub use db::{DEFAULT_DBF_PATH, Db, DbError, DbResult, EventType, Profile, Subscription};
 pub use error::ReceiverError;
 pub use ui_events::ReceiverUiEvent;
 

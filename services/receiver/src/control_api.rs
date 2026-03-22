@@ -55,6 +55,13 @@ pub struct AppState {
     pub ws_cmd_tx: RwLock<Option<tokio::sync::mpsc::Sender<crate::session::WsCommand>>>,
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
+    /// Monotonic counter incremented when DBF config changes; subscribers
+    /// (runtime.rs) use this to restart the DBF writer. Use
+    /// `notify_dbf_config_changed()` and `dbf_config_rx()` to interact.
+    dbf_config_version: watch::Sender<u64>,
+    /// Keepalive receiver to prevent the watch channel from being dropped
+    /// when no external subscribers exist.
+    _dbf_config_keepalive: watch::Receiver<u64>,
 }
 
 impl AppState {
@@ -70,6 +77,7 @@ impl AppState {
         let (shutdown_tx, shutdown_rx) = watch::channel(ShutdownSignal::None);
         let (ui_tx, _) = broadcast::channel(256);
         let (conn_tx, conn_keepalive_rx) = watch::channel(ConnectionState::Disconnected);
+        let (dbf_config_version, _dbf_config_keepalive) = watch::channel(0u64);
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
             .build()
@@ -94,6 +102,8 @@ impl AppState {
             ws_cmd_tx: RwLock::new(None),
             connect_attempt: AtomicU64::new(0),
             retry_streak: AtomicU64::new(0),
+            dbf_config_version,
+            _dbf_config_keepalive,
         });
         (state, shutdown_rx)
     }
@@ -101,6 +111,14 @@ impl AppState {
     /// Subscribe to connection state changes.
     pub fn conn_rx(&self) -> watch::Receiver<ConnectionState> {
         self.connection_state.subscribe()
+    }
+
+    pub fn notify_dbf_config_changed(&self) {
+        self.dbf_config_version.send_modify(|v| *v += 1);
+    }
+
+    pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
+        self.dbf_config_version.subscribe()
     }
 
     pub fn request_disconnect_shutdown(&self) {
@@ -260,6 +278,7 @@ impl AppState {
                     reader_ip: si.reader_ip.clone(),
                     subscribed: local.is_some(),
                     local_port: port,
+                    event_type: local.map(|s| s.event_type),
                     online: Some(si.online),
                     display_alias: si.display_alias.clone(),
                     stream_epoch: Some(si.stream_epoch),
@@ -289,6 +308,7 @@ impl AppState {
                 reader_ip: sub.reader_ip.clone(),
                 subscribed: true,
                 local_port: port,
+                event_type: Some(sub.event_type),
                 online: None,
                 display_alias: None,
                 stream_epoch: None,
@@ -372,6 +392,7 @@ pub struct SubscriptionRequest {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub local_port_override: Option<u16>,
+    pub event_type: Option<crate::db::EventType>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -398,6 +419,8 @@ pub struct StreamEntry {
     pub reader_ip: String,
     pub subscribed: bool,
     pub local_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<crate::db::EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -493,6 +516,11 @@ struct UpstreamRaceStreamMappingsResponse {
 #[derive(Debug, Deserialize)]
 struct UpstreamRaceStreamMapping {
     forwarder_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventTypeRequest {
+    pub event_type: crate::db::EventType,
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,6 +1378,7 @@ pub async fn put_subscriptions(
             forwarder_id: s.forwarder_id,
             reader_ip: s.reader_ip,
             local_port_override: s.local_port_override,
+            event_type: s.event_type.unwrap_or(crate::db::EventType::Finish),
         })
         .collect();
     let mut db = state.db.lock().await;
@@ -1392,6 +1421,7 @@ pub async fn get_subscriptions(state: &AppState) -> Result<SubscriptionsBody, Re
                     forwarder_id: s.forwarder_id,
                     reader_ip: s.reader_ip,
                     local_port_override: s.local_port_override,
+                    event_type: Some(s.event_type),
                 })
                 .collect(),
         }),
@@ -1435,6 +1465,96 @@ pub async fn disconnect(state: &AppState) {
         .set_connection_state(ConnectionState::Disconnecting)
         .await;
     state.request_disconnect_shutdown();
+}
+
+pub async fn get_dbf_config(state: &AppState) -> Result<crate::db::DbfConfig, ReceiverError> {
+    let db = state.db.lock().await;
+    match db.load_dbf_config() {
+        Ok(config) => Ok(config),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
+}
+
+pub async fn put_dbf_config(
+    state: &AppState,
+    body: crate::db::DbfConfig,
+) -> Result<(), ReceiverError> {
+    let trimmed = body.path.trim();
+    if trimmed.is_empty() {
+        return Err(ReceiverError::BadRequest(
+            "DBF path must not be empty".to_owned(),
+        ));
+    }
+    let p = std::path::Path::new(trimmed);
+    if let Some(ext) = p.extension()
+        && !ext.eq_ignore_ascii_case("dbf")
+    {
+        return Err(ReceiverError::BadRequest(
+            "DBF path should have a .dbf extension for Race Director compatibility".to_owned(),
+        ));
+    }
+    if body.enabled
+        && let Some(parent) = p.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        return Err(ReceiverError::BadRequest(format!(
+            "parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    let config = crate::db::DbfConfig {
+        enabled: body.enabled,
+        path: trimmed.to_owned(),
+    };
+    let db = state.db.lock().await;
+    match db.save_dbf_config(&config) {
+        Ok(()) => {
+            drop(db);
+            state.notify_dbf_config_changed();
+            Ok(())
+        }
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
+}
+
+pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
+    let db = state.db.lock().await;
+    let config = db
+        .load_dbf_config()
+        .map_err(|e| ReceiverError::Internal(e.to_string()))?;
+    drop(db);
+    let path = config.path.clone();
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        return Err(ReceiverError::BadRequest(format!(
+            "DBF directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    tokio::task::spawn_blocking(move || crate::dbf_writer::clear_dbf(std::path::Path::new(&path)))
+        .await
+        .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))?
+        .map_err(|e| ReceiverError::Internal(format!("Failed to clear DBF: {e}")))
+}
+
+pub async fn update_subscription_event_type(
+    state: &AppState,
+    forwarder_id: &str,
+    reader_ip: &str,
+    body: EventTypeRequest,
+) -> Result<(), ReceiverError> {
+    let db = state.db.lock().await;
+    match db.update_subscription_event_type(forwarder_id, reader_ip, body.event_type) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ReceiverError::BadRequest(
+            "subscription not found".to_owned(),
+        )),
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
 }
 
 pub async fn admin_reset_cursor(

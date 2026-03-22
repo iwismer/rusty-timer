@@ -36,6 +36,7 @@ describe("StreamsTab", () => {
     const key = streamKey("fwd-1", "10.0.0.1:10000");
     store.modeDraft = "live";
     store.error = null;
+    store.dbfEnabled = false;
     store.streams = {
       streams: [
         {
@@ -45,6 +46,7 @@ describe("StreamsTab", () => {
           local_port: 10100,
           display_alias: "Finish",
           reads_total: 15,
+          event_type: undefined,
         },
       ],
       degraded: false,
@@ -138,5 +140,19 @@ describe("StreamsTab", () => {
       "w-px",
       "whitespace-nowrap",
     );
+  });
+
+  it("shows a DBF event type selector when DBF output is enabled", async () => {
+    store.dbfEnabled = true;
+
+    render(StreamsTab);
+
+    await fireEvent.click(screen.getByRole("button", { name: /finish/i }));
+
+    const selector = screen.getByTestId("dbf-event-type-fwd-1/10.0.0.1:10000");
+    expect(selector).toBeInTheDocument();
+    expect(selector).toHaveValue("finish");
+    expect(screen.getByRole("option", { name: "Finish" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Start" })).toBeInTheDocument();
   });
 });

@@ -152,6 +152,7 @@ mod tests {
             forwarder_id: fwd.to_owned(),
             reader_ip: ip.to_owned(),
             local_port_override: port,
+            event_type: crate::db::EventType::Finish,
         }
     }
 

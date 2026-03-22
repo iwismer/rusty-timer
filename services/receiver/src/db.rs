@@ -6,6 +6,46 @@ use std::path::Path;
 use thiserror::Error;
 const SCHEMA_SQL: &str = include_str!("storage/schema.sql");
 pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
+
+/// The default path for DBF output files (Race Director convention on Windows).
+/// This path is only meaningful on the target Windows deployment; tests and
+/// non-Windows environments should override it.
+pub const DEFAULT_DBF_PATH: &str = r"C:\winrace\Files\IPICO.DBF";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EventType {
+    Start,
+    Finish,
+}
+
+impl EventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventType::Start => "start",
+            EventType::Finish => "finish",
+        }
+    }
+}
+
+impl std::str::FromStr for EventType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "start" => Ok(EventType::Start),
+            "finish" => Ok(EventType::Finish),
+            other => Err(format!(
+                "invalid event type: '{other}', must be 'start' or 'finish'"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("SQLite: {0}")]
@@ -32,6 +72,27 @@ pub struct Subscription {
     pub forwarder_id: String,
     pub reader_ip: String,
     pub local_port_override: Option<u16>,
+    pub event_type: EventType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbfConfig {
+    pub enabled: bool,
+    /// Filesystem path for DBF output. Uses `String` rather than `PathBuf`
+    /// for cross-platform serde compatibility (receiver targets Windows but
+    /// tests run on macOS/Linux).
+    pub path: String,
+}
+
+impl DbfConfig {
+    /// Validate that the config is usable. Returns an error message if not.
+    pub fn validate(&self) -> Result<(), String> {
+        let trimmed = self.path.trim();
+        if trimmed.is_empty() {
+            return Err("DBF path must not be empty".to_owned());
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorRecord {
@@ -90,11 +151,12 @@ impl Db {
         receiver_id: Option<&str>,
     ) -> DbResult<()> {
         let receiver_mode_json = self.load_receiver_mode_json_raw()?;
+        let dbf_config = self.load_dbf_config()?;
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM profile")?;
         tx.execute(
-            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id],
+            "INSERT INTO profile (server_url, token, update_mode, receiver_mode_json, receiver_id, dbf_enabled, dbf_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![url, tok, update_mode, receiver_mode_json, receiver_id, dbf_config.enabled as i64, &dbf_config.path],
         )?;
         tx.commit()?;
         Ok(())
@@ -169,25 +231,51 @@ impl Db {
         Ok(())
     }
     pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
-        let mut s = self.conn.prepare("SELECT forwarder_id, reader_ip, local_port_override FROM subscriptions ORDER BY forwarder_id, reader_ip")?;
+        let mut s = self.conn.prepare("SELECT forwarder_id, reader_ip, local_port_override, event_type FROM subscriptions ORDER BY forwarder_id, reader_ip")?;
         let rows = s.query_map([], |r| {
             Ok(Subscription {
                 forwarder_id: r.get(0)?,
                 reader_ip: r.get(1)?,
                 local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
+                event_type: {
+                    let raw = r.get::<_, String>(3)?;
+                    match raw.parse::<EventType>() {
+                        Ok(et) => et,
+                        Err(e) => {
+                            tracing::error!(error = %e, value = %raw, "corrupt event_type in database");
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                            ));
+                        }
+                    }
+                },
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
-    pub fn save_subscription(&self, fwd: &str, ip: &str, port: Option<u16>) -> DbResult<()> {
-        self.conn.execute("INSERT OR IGNORE INTO subscriptions (forwarder_id, reader_ip, local_port_override) VALUES (?1, ?2, ?3)", rusqlite::params![fwd, ip, port.map(|p| p as i64)])?;
+    pub fn save_subscription(
+        &self,
+        fwd: &str,
+        ip: &str,
+        port: Option<u16>,
+        event_type: Option<EventType>,
+    ) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![fwd, ip, port.map(|p| p as i64), event_type.unwrap_or(EventType::Finish).as_str()],
+        )?;
         Ok(())
     }
     pub fn replace_subscriptions(&mut self, subs: &[Subscription]) -> DbResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM subscriptions")?;
         for s in subs {
-            tx.execute("INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override) VALUES (?1, ?2, ?3)", rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64)])?;
+            tx.execute(
+                "INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64), s.event_type.as_str()],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -243,20 +331,35 @@ impl Db {
     fn apply_schema(&self) -> DbResult<()> {
         self.conn.execute_batch(SCHEMA_SQL)?;
         // Migration: add update_mode column to existing profile tables.
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE profile ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'check-and-download';",
             "update_mode",
         )?;
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE profile ADD COLUMN receiver_mode_json TEXT;",
             "receiver_mode_json",
         )?;
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE profile ADD COLUMN receiver_id TEXT;",
             "receiver_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE profile ADD COLUMN dbf_enabled INTEGER NOT NULL DEFAULT 0;",
+            "dbf_enabled",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            r"ALTER TABLE profile ADD COLUMN dbf_path TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF';",
+            "dbf_path",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
+            "event_type",
         )?;
         Ok(())
     }
@@ -312,6 +415,92 @@ impl Db {
         Ok(())
     }
 
+    pub fn load_dbf_config(&self) -> DbResult<DbfConfig> {
+        let result: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT dbf_enabled, dbf_path FROM profile LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(match result {
+            Some((enabled, path)) => DbfConfig {
+                enabled: enabled != 0,
+                path,
+            },
+            None => DbfConfig {
+                enabled: false,
+                path: DEFAULT_DBF_PATH.to_owned(),
+            },
+        })
+    }
+
+    pub fn save_dbf_config(&self, config: &DbfConfig) -> DbResult<()> {
+        if let Err(msg) = config.validate() {
+            return Err(DbError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                msg,
+            )));
+        }
+        let changed = self.conn.execute(
+            "UPDATE profile SET dbf_enabled = ?1, dbf_path = ?2",
+            rusqlite::params![config.enabled as i64, config.path],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ProfileMissing);
+        }
+        Ok(())
+    }
+
+    pub fn update_subscription_event_type(
+        &self,
+        fwd: &str,
+        ip: &str,
+        event_type: EventType,
+    ) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "UPDATE subscriptions SET event_type = ?1 WHERE forwarder_id = ?2 AND reader_ip = ?3",
+            rusqlite::params![event_type.as_str(), fwd, ip],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn load_subscription_dbf_details(
+        &self,
+        fwd: &str,
+        ip: &str,
+    ) -> DbResult<Option<(usize, EventType)>> {
+        let result: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT s1.event_type,
+                        (
+                            SELECT COUNT(*)
+                            FROM subscriptions s2
+                            WHERE s2.forwarder_id < s1.forwarder_id
+                               OR (s2.forwarder_id = s1.forwarder_id AND s2.reader_ip < s1.reader_ip)
+                        ) AS subscription_index
+                 FROM subscriptions s1
+                 WHERE s1.forwarder_id = ?1 AND s1.reader_ip = ?2",
+                rusqlite::params![fwd, ip],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        result
+            .map(|(raw_event_type, idx)| {
+                let event_type = raw_event_type.parse::<EventType>().map_err(|e| {
+                    DbError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                let idx = usize::try_from(idx).map_err(|e| {
+                    DbError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                Ok((idx, event_type))
+            })
+            .transpose()
+    }
+
     fn load_receiver_mode_json_raw(&self) -> DbResult<Option<String>> {
         let raw: Option<Option<String>> = self
             .conn
@@ -331,7 +520,7 @@ impl Db {
     }
 }
 
-fn apply_profile_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
+fn apply_add_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
     match conn.execute_batch(sql) {
         Ok(()) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(_, Some(message)))
@@ -544,8 +733,9 @@ mod tests {
     #[test]
     fn delete_all_subscriptions_removes_every_row() {
         let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
-        db.save_subscription("f2", "10.0.0.2", Some(9000)).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        db.save_subscription("f2", "10.0.0.2", Some(9000), None)
+            .unwrap();
         let count = db.delete_all_subscriptions().unwrap();
         assert_eq!(count, 2);
         assert!(db.load_subscriptions().unwrap().is_empty());
@@ -583,7 +773,7 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.save_profile("wss://example.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
         db.factory_reset().unwrap();
@@ -599,7 +789,7 @@ mod tests {
     #[test]
     fn update_subscription_port_changes_existing() {
         let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         let updated = db
             .update_subscription_port("f1", "10.0.0.1", Some(9000))
             .unwrap();
@@ -611,7 +801,8 @@ mod tests {
     #[test]
     fn update_subscription_port_clears_override() {
         let db = Db::open_in_memory().unwrap();
-        db.save_subscription("f1", "10.0.0.1", Some(9000)).unwrap();
+        db.save_subscription("f1", "10.0.0.1", Some(9000), None)
+            .unwrap();
         let updated = db.update_subscription_port("f1", "10.0.0.1", None).unwrap();
         assert!(updated);
         let subs = db.load_subscriptions().unwrap();
@@ -702,5 +893,64 @@ mod tests {
             "cursor must advance to higher epoch"
         );
         assert_eq!(rows[0].last_seq, 1);
+    }
+
+    #[test]
+    fn dbf_config_defaults_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
+        db.save_profile("https://example.com", "tok", "check-and-download", None)
+            .unwrap();
+        let config = db.load_dbf_config().unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.path, r"C:\winrace\Files\IPICO.DBF");
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            path: r"D:\race\output.dbf".to_owned(),
+        })
+        .unwrap();
+        let config = db.load_dbf_config().unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.path, r"D:\race\output.dbf");
+        db.save_profile("https://new.com", "tok2", "check-and-download", None)
+            .unwrap();
+        let config = db.load_dbf_config().unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.path, r"D:\race\output.dbf");
+    }
+
+    #[test]
+    fn subscription_event_type_defaults_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
+        db.save_subscription("fwd1", "10.0.0.1", None, None)
+            .unwrap();
+        let subs = db.load_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].event_type, EventType::Finish);
+        db.replace_subscriptions(&[Subscription {
+            forwarder_id: "fwd1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Start,
+        }])
+        .unwrap();
+        let subs = db.load_subscriptions().unwrap();
+        assert_eq!(subs[0].event_type, EventType::Start);
+    }
+
+    #[test]
+    fn load_subscription_dbf_details_returns_latest_index_and_event_type() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_subscription("fwd2", "10.0.0.2", None, Some(EventType::Finish))
+            .unwrap();
+        db.save_subscription("fwd1", "10.0.0.1", None, Some(EventType::Start))
+            .unwrap();
+
+        let details = db
+            .load_subscription_dbf_details("fwd2", "10.0.0.2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(details, (1, EventType::Finish));
     }
 }

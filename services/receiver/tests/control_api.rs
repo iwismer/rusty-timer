@@ -360,7 +360,7 @@ async fn admin_purge_subscriptions_deletes_all() {
     let state = setup();
     {
         let db = state.db.lock().await;
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
     }
     let result = control_api::admin_purge_subscriptions(&state)
         .await
@@ -373,7 +373,7 @@ async fn admin_purge_subscriptions_requests_reconnect_when_connected() {
     let state = setup();
     {
         let db = state.db.lock().await;
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
     }
     state.set_connection_state(ConnectionState::Connected).await;
 
@@ -424,7 +424,7 @@ async fn admin_factory_reset_clears_everything() {
         let mut db = state.db.lock().await;
         db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
             .unwrap();
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 1, 10).unwrap();
         db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
     }
@@ -440,7 +440,7 @@ async fn admin_update_port_sets_override() {
     let state = setup();
     {
         let db = state.db.lock().await;
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
     }
     control_api::admin_update_port(
         &state,
@@ -477,7 +477,8 @@ async fn admin_update_port_clears_override() {
     let state = setup();
     {
         let db = state.db.lock().await;
-        db.save_subscription("f1", "10.0.0.1", Some(9000)).unwrap();
+        db.save_subscription("f1", "10.0.0.1", Some(9000), None)
+            .unwrap();
     }
     control_api::admin_update_port(
         &state,
@@ -499,8 +500,8 @@ async fn streams_response_includes_cursor_data() {
     let state = setup();
     {
         let db = state.db.lock().await;
-        db.save_subscription("f1", "10.0.0.1", None).unwrap();
-        db.save_subscription("f2", "10.0.0.2", None).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        db.save_subscription("f2", "10.0.0.2", None, None).unwrap();
         db.save_cursor("f1", "10.0.0.1", 5, 42).unwrap();
     }
     let response = control_api::get_streams(&state).await;
@@ -521,4 +522,31 @@ async fn streams_response_includes_cursor_data() {
         .unwrap();
     assert_eq!(f2.cursor_epoch, None);
     assert_eq!(f2.cursor_seq, None);
+}
+
+#[tokio::test]
+async fn put_dbf_config_allows_disabling_when_parent_directory_is_missing() {
+    let state = setup();
+    {
+        let mut db = state.db.lock().await;
+        db.save_profile("wss://s.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+    }
+
+    let base_dir = tempfile::tempdir().unwrap();
+    let missing_path = base_dir.path().join("missing").join("output.dbf");
+
+    control_api::put_dbf_config(
+        &state,
+        receiver::db::DbfConfig {
+            enabled: false,
+            path: missing_path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let config = control_api::get_dbf_config(&state).await.unwrap();
+    assert!(!config.enabled);
+    assert_eq!(config.path, missing_path.display().to_string());
 }

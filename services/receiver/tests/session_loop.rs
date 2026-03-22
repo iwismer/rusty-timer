@@ -109,6 +109,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
         SessionLoopDeps {
             db: db.clone(),
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -193,6 +194,7 @@ async fn run_session_loop_drops_events_while_reconnect_is_pending() {
         SessionLoopDeps {
             db: db.clone(),
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -238,6 +240,7 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
         SessionLoopDeps {
             db,
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -279,6 +282,7 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
         SessionLoopDeps {
             db,
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -322,6 +326,7 @@ async fn run_session_loop_replies_to_ping_with_pong() {
         SessionLoopDeps {
             db,
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -358,6 +363,7 @@ async fn run_session_loop_stops_on_shutdown_signal() {
         SessionLoopDeps {
             db,
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -406,6 +412,7 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
         SessionLoopDeps {
             db,
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -477,6 +484,7 @@ async fn run_session_loop_emits_resync_to_ui_channel_on_reader_status_changed() 
         SessionLoopDeps {
             db,
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,
@@ -588,6 +596,7 @@ async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
         SessionLoopDeps {
             db,
             event_tx,
+            dbf_event_tx: None,
             stream_counts: StreamCounts::new(),
             ui_tx,
             shutdown: shutdown_rx,

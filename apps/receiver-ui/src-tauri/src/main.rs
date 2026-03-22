@@ -350,6 +350,44 @@ async fn admin_factory_reset(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_dbf_config(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> CmdResult<receiver::db::DbfConfig> {
+    receiver::control_api::get_dbf_config(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn put_dbf_config(
+    state: tauri::State<'_, Arc<AppState>>,
+    body: receiver::db::DbfConfig,
+) -> CmdResult<()> {
+    receiver::control_api::put_dbf_config(&state, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn clear_dbf(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<()> {
+    receiver::control_api::clear_dbf(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_subscription_event_type(
+    state: tauri::State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+    body: receiver::control_api::EventTypeRequest,
+) -> CmdResult<()> {
+    receiver::control_api::update_subscription_event_type(&state, &forwarder_id, &reader_ip, body)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Event bridge: forward ReceiverUiEvent -> Tauri frontend events
 // ---------------------------------------------------------------------------
@@ -486,6 +524,10 @@ fn main() {
             admin_update_port,
             admin_reset_profile,
             admin_factory_reset,
+            get_dbf_config,
+            put_dbf_config,
+            clear_dbf,
+            update_subscription_event_type,
         ])
         .build(tauri::generate_context!());
 

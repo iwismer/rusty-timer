@@ -33,6 +33,7 @@ fn override_port_used_instead_of_default() {
         forwarder_id: "f".to_owned(),
         reader_ip: "192.168.1.100:10000".to_owned(),
         local_port_override: Some(9999),
+        event_type: receiver::EventType::Finish,
     }];
     let r = resolve_ports(&subs);
     assert_eq!(
@@ -47,11 +48,13 @@ fn two_streams_no_collision() {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.2:10000".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
     ];
     let r = resolve_ports(&subs);
@@ -71,11 +74,13 @@ fn collision_marks_both_streams_degraded() {
             forwarder_id: "f1".to_owned(),
             reader_ip: "192.168.1.100:10000".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "f2".to_owned(),
             reader_ip: "10.0.0.100:10000".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
     ];
     let r = resolve_ports(&subs);
@@ -95,16 +100,19 @@ fn non_colliding_streams_unaffected_by_collision() {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "f1".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.2:10000".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
     ];
     let r = resolve_ports(&subs);
@@ -129,11 +137,13 @@ fn same_ip_different_reader_ports_do_not_collide() {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.1:10001".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.1:10002".to_owned(),
             local_port_override: None,
+            event_type: receiver::EventType::Finish,
         },
     ];
     let r = resolve_ports(&subs);
@@ -154,11 +164,13 @@ fn collision_via_override_ports() {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.1:10000".to_owned(),
             local_port_override: Some(8000),
+            event_type: receiver::EventType::Finish,
         },
         Subscription {
             forwarder_id: "f".to_owned(),
             reader_ip: "10.0.0.2:10000".to_owned(),
             local_port_override: Some(8000),
+            event_type: receiver::EventType::Finish,
         },
     ];
     let r = resolve_ports(&subs);
@@ -174,9 +186,9 @@ fn collision_via_override_ports() {
 #[test]
 fn port_assignments_loaded_from_db() {
     let db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100:10000", None)
+    db.save_subscription("f", "192.168.1.100:10000", None, None)
         .unwrap();
-    db.save_subscription("f", "192.168.1.200:10000", None)
+    db.save_subscription("f", "192.168.1.200:10000", None, None)
         .unwrap();
     let subs = db.load_subscriptions().unwrap();
     let r = resolve_ports(&subs);
@@ -193,7 +205,7 @@ fn port_assignments_loaded_from_db() {
 #[test]
 fn port_override_from_db_subscription() {
     let db = Db::open_in_memory().unwrap();
-    db.save_subscription("f", "192.168.1.100:10000", Some(7777))
+    db.save_subscription("f", "192.168.1.100:10000", Some(7777), None)
         .unwrap();
     let subs = db.load_subscriptions().unwrap();
     let r = resolve_ports(&subs);

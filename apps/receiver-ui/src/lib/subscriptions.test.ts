@@ -93,6 +93,7 @@ describe("buildUpdatedSubscriptions", () => {
         forwarder_id: "f2",
         reader_ip: "10.0.0.2",
         local_port_override: null,
+        event_type: "finish",
       },
     ]);
   });
@@ -105,6 +106,7 @@ describe("buildUpdatedSubscriptions", () => {
           reader_ip: "10.0.0.1",
           subscribed: true,
           local_port: 10001,
+          event_type: "start",
         },
         {
           forwarder_id: "f2",
@@ -127,11 +129,49 @@ describe("buildUpdatedSubscriptions", () => {
         forwarder_id: "f1",
         reader_ip: "10.0.0.1",
         local_port_override: 10001,
+        event_type: "start",
       },
       {
         forwarder_id: "f2",
         reader_ip: "10.0.0.2",
         local_port_override: 9002,
+        event_type: "finish",
+      },
+    ]);
+  });
+
+  it("preserves existing event types when unsubscribing another stream", () => {
+    const result = buildUpdatedSubscriptions({
+      allStreams: [
+        {
+          forwarder_id: "f1",
+          reader_ip: "10.0.0.1",
+          subscribed: true,
+          local_port: 10001,
+          event_type: "start",
+        },
+        {
+          forwarder_id: "f2",
+          reader_ip: "10.0.0.2",
+          subscribed: true,
+          local_port: null,
+          event_type: "finish",
+        },
+      ],
+      target: {
+        forwarder_id: "f2",
+        reader_ip: "10.0.0.2",
+        currentlySubscribed: true,
+      },
+    });
+
+    expect(result.error).toBeNull();
+    expect(result.subscriptions).toEqual([
+      {
+        forwarder_id: "f1",
+        reader_ip: "10.0.0.1",
+        local_port_override: 10001,
+        event_type: "start",
       },
     ]);
   });

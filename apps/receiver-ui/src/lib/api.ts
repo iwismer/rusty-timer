@@ -16,6 +16,7 @@ export interface StreamEntry {
   reader_ip: string;
   subscribed: boolean;
   local_port: number | null;
+  event_type?: "start" | "finish";
   online?: boolean;
   display_alias?: string;
   stream_epoch?: number;
@@ -67,6 +68,7 @@ export interface SubscriptionItem {
   forwarder_id: string;
   reader_ip: string;
   local_port_override: number | null;
+  event_type?: "start" | "finish";
 }
 
 export type ConnectionState =
@@ -344,4 +346,32 @@ export async function getSubscriptions(): Promise<{
   subscriptions: SubscriptionItem[];
 }> {
   return invoke<{ subscriptions: SubscriptionItem[] }>("get_subscriptions");
+}
+
+export interface DbfConfig {
+  enabled: boolean;
+  path: string;
+}
+
+export async function getDbfConfig(): Promise<DbfConfig> {
+  return invoke<DbfConfig>("get_dbf_config");
+}
+
+export async function putDbfConfig(config: DbfConfig): Promise<void> {
+  await invoke("put_dbf_config", { body: config });
+}
+
+export async function clearDbf(): Promise<void> {
+  await invoke("clear_dbf");
+}
+
+export async function updateSubscriptionEventType(
+  stream: StreamRef,
+  eventType: "start" | "finish",
+): Promise<void> {
+  await invoke("update_subscription_event_type", {
+    forwarder_id: stream.forwarder_id,
+    reader_ip: stream.reader_ip,
+    body: { event_type: eventType },
+  });
 }

@@ -72,7 +72,11 @@ impl WsCommand {
 
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
+    /// Per-stream broadcast channel for local proxy forwarding.
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
+    /// Global broadcast channel for the DBF writer. Always `Some` in
+    /// production; `None` only in tests that don't exercise DBF output.
+    pub dbf_event_tx: Option<tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>>,
     pub stream_counts: crate::cache::StreamCounts,
     pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
     pub shutdown: watch::Receiver<bool>,
@@ -210,7 +214,17 @@ where
                                 }
                                 let forwarded_events = b.events;
 
-                                for e in &forwarded_events { let _ = deps.event_tx.send(e.clone()); }
+                                let mut dbf_send_warned = false;
+                                for e in &forwarded_events {
+                                    let _ = deps.event_tx.send(e.clone());
+                                    if let Some(ref gtx) = deps.dbf_event_tx
+                                        && gtx.send(e.clone()).is_err()
+                                        && !dbf_send_warned
+                                    {
+                                        warn!("DBF event broadcast has no receivers — DBF writer may have stopped");
+                                        dbf_send_warned = true;
+                                    }
+                                }
                                 let updates = apply_batch_counts(&deps.stream_counts, &forwarded_events);
                                 if !updates.is_empty() {
                                     let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamCountsUpdated {

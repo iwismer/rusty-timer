@@ -77,6 +77,14 @@ export const store = $state({
   checkingUpdate: false,
   checkMessage: null as string | null,
 
+  // DBF config
+  dbfEnabled: false,
+  dbfPath: "C:\\winrace\\Files\\IPICO.DBF",
+  editDbfEnabled: false,
+  editDbfPath: "C:\\winrace\\Files\\IPICO.DBF",
+  dbfSaving: false,
+  dbfClearing: false,
+
   // Update
   updateModalOpen: false,
   updateState: null as UpdateState | null,
@@ -98,6 +106,7 @@ export const store = $state({
 
   // Stream action state
   streamActionBusy: false,
+  streamEventTypeBusy: {} as Record<string, boolean>,
 
   // Version info
   appVersion: "",
@@ -568,6 +577,8 @@ export async function loadAll(): Promise<void> {
         })),
     ]);
 
+    await loadDbfConfig();
+
     store.status = nextStatus;
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
       store.streams = nextStreams;
@@ -740,6 +751,41 @@ export async function toggleSubscription(
   }
 }
 
+export async function updateStreamEventType(
+  stream: api.StreamEntry,
+  eventType: "start" | "finish",
+): Promise<void> {
+  if (!store.streams || !stream.subscribed) return;
+
+  const key = streamKey(stream.forwarder_id, stream.reader_ip);
+  if (store.streamEventTypeBusy[key]) return;
+
+  store.streamEventTypeBusy = { ...store.streamEventTypeBusy, [key]: true };
+  try {
+    store.error = null;
+    await api.updateSubscriptionEventType(
+      {
+        forwarder_id: stream.forwarder_id,
+        reader_ip: stream.reader_ip,
+      },
+      eventType,
+    );
+    store.streams = {
+      ...store.streams,
+      streams: store.streams.streams.map((candidate) =>
+        candidate.forwarder_id === stream.forwarder_id &&
+        candidate.reader_ip === stream.reader_ip
+          ? { ...candidate, event_type: eventType }
+          : candidate,
+      ),
+    };
+  } catch (e) {
+    store.error = String(e);
+  } finally {
+    store.streamEventTypeBusy = { ...store.streamEventTypeBusy, [key]: false };
+  }
+}
+
 export async function replayStream(stream: api.StreamEntry): Promise<void> {
   const parsed = resolveReplayTargetEpoch(stream);
   if (parsed === null) {
@@ -815,6 +861,46 @@ export async function saveProfile(): Promise<void> {
     store.error = String(e);
   } finally {
     store.saving = false;
+  }
+}
+
+export async function loadDbfConfig() {
+  try {
+    const config = await api.getDbfConfig();
+    store.dbfEnabled = config.enabled;
+    store.dbfPath = config.path;
+    store.editDbfEnabled = config.enabled;
+    store.editDbfPath = config.path;
+  } catch (e) {
+    console.error("Failed to load DBF config:", e);
+    store.error = `Failed to load DBF config: ${e}`;
+  }
+}
+
+export async function saveDbfConfig() {
+  store.dbfSaving = true;
+  try {
+    await api.putDbfConfig({
+      enabled: store.editDbfEnabled,
+      path: store.editDbfPath,
+    });
+    store.dbfEnabled = store.editDbfEnabled;
+    store.dbfPath = store.editDbfPath;
+  } catch (e) {
+    store.error = `Failed to save DBF config: ${e}`;
+  } finally {
+    store.dbfSaving = false;
+  }
+}
+
+export async function clearDbfFile() {
+  store.dbfClearing = true;
+  try {
+    await api.clearDbf();
+  } catch (e) {
+    store.error = `Failed to clear DBF file: ${e}`;
+  } finally {
+    store.dbfClearing = false;
   }
 }
 

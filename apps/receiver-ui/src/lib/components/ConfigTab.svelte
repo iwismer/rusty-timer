@@ -7,11 +7,25 @@
     handleConnect,
     handleDisconnect,
     saveProfile,
+    saveDbfConfig,
+    clearDbfFile,
     setEditServerUrl,
     setEditToken,
     setEditReceiverId,
   } from "$lib/store.svelte";
-  import { inputClass, btnPrimary, btnDisconnect } from "$lib/ui-classes";
+  import {
+    inputClass,
+    btnPrimary,
+    btnSecondary,
+    btnDisconnect,
+  } from "$lib/ui-classes";
+
+  function getDbfDirty(): boolean {
+    return (
+      store.editDbfEnabled !== store.dbfEnabled ||
+      store.editDbfPath !== store.dbfPath
+    );
+  }
 
   function connectionLabel(state: string): string {
     switch (state) {
@@ -121,6 +135,53 @@
             : "Connecting..."}
         </button>
       {/if}
+    </div>
+  </section>
+
+  <section class="mt-6 rounded-lg border border-border bg-surface-1 p-4">
+    <p class="text-xs font-medium text-text-muted mb-3">Race Director Output</p>
+
+    <label
+      class="flex items-center gap-2 text-xs text-text-primary cursor-pointer"
+    >
+      <input
+        data-testid="dbf-enabled-toggle"
+        type="checkbox"
+        checked={store.editDbfEnabled}
+        onchange={(e) => (store.editDbfEnabled = e.currentTarget.checked)}
+        class="accent-accent"
+      />
+      Write reads to Ipico Direct file for Race Director
+    </label>
+
+    <label class="block text-xs font-medium text-text-muted mt-3">
+      File path
+      <input
+        data-testid="dbf-path-input"
+        class="{inputClass} mt-1"
+        value={store.editDbfPath}
+        oninput={(e) => (store.editDbfPath = e.currentTarget.value)}
+        placeholder="C:\winrace\Files\IPICO.DBF"
+      />
+    </label>
+
+    <div class="mt-3 flex items-center gap-2">
+      <button
+        data-testid="save-dbf-btn"
+        class={btnPrimary}
+        onclick={() => saveDbfConfig()}
+        disabled={!getDbfDirty() || store.dbfSaving}
+      >
+        {store.dbfSaving ? "Saving\u2026" : "Save DBF Config"}
+      </button>
+      <button
+        data-testid="clear-dbf-btn"
+        class={btnSecondary}
+        onclick={() => clearDbfFile()}
+        disabled={store.dbfClearing}
+      >
+        {store.dbfClearing ? "Clearing\u2026" : "Clear DBF File"}
+      </button>
     </div>
   </section>
 </div>

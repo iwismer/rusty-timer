@@ -6,6 +6,7 @@
     store,
     streamKey,
     toggleSubscription,
+    updateStreamEventType,
     changeEarliestEpoch,
     replayStream,
     replayAll,
@@ -381,6 +382,26 @@
                     {/if}
 
                     <div class="flex items-center gap-2 flex-wrap">
+                      {#if store.dbfEnabled && stream.subscribed}
+                        <select
+                          data-testid="dbf-event-type-{key}"
+                          class="px-2 py-1 text-xs rounded font-mono bg-surface-0 border border-border text-text-primary w-28 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                          value={stream.event_type ?? "finish"}
+                          onchange={(e) => {
+                            e.stopPropagation();
+                            void updateStreamEventType(
+                              stream,
+                              e.currentTarget.value as "start" | "finish",
+                            );
+                          }}
+                          onclick={(e) => e.stopPropagation()}
+                          disabled={store.streamEventTypeBusy[key]}
+                        >
+                          <option value="finish">Finish</option>
+                          <option value="start">Start</option>
+                        </select>
+                      {/if}
+
                       {#if store.modeDraft === "targeted_replay"}
                         {@const options = store.earliestEpochOptions[key] ?? []}
                         {@const selectedTargeted =

@@ -58,6 +58,38 @@ impl Timestamp {
             self.hour, self.minute, self.second, self.millis
         )
     }
+
+    /// Returns the two-digit year (e.g. 26 for 2026).
+    pub fn year(&self) -> u16 {
+        self.year
+    }
+    /// Returns the month (1-12).
+    pub fn month(&self) -> u8 {
+        self.month
+    }
+    /// Returns the day of the month (1-31).
+    pub fn day(&self) -> u8 {
+        self.day
+    }
+    /// Returns the hour (0-23).
+    pub fn hour(&self) -> u8 {
+        self.hour
+    }
+    /// Returns the minute (0-59).
+    pub fn minute(&self) -> u8 {
+        self.minute
+    }
+    /// Returns the second (0-59).
+    pub fn second(&self) -> u8 {
+        self.second
+    }
+    /// Returns milliseconds (0-990, always a multiple of 10).
+    ///
+    /// IPICO encodes centiseconds (0x00..0x63); the parser stores
+    /// `millis = centiseconds * 10`.
+    pub fn millis(&self) -> u16 {
+        self.millis
+    }
 }
 
 impl fmt::Display for Timestamp {
@@ -475,5 +507,17 @@ mod tests {
     fn timestamp_display_uses_stable_iso_like_format() {
         let ts = Timestamp::new(1, 1, 2, 3, 4, 5, 6);
         assert_eq!(format!("{ts}"), "2001-01-02T03:04:05.006");
+    }
+
+    #[test]
+    fn timestamp_accessors_return_correct_values() {
+        let ts = Timestamp::new(26, 3, 21, 14, 30, 45, 120);
+        assert_eq!(ts.year(), 26);
+        assert_eq!(ts.month(), 3);
+        assert_eq!(ts.day(), 21);
+        assert_eq!(ts.hour(), 14);
+        assert_eq!(ts.minute(), 30);
+        assert_eq!(ts.second(), 45);
+        assert_eq!(ts.millis(), 120);
     }
 }

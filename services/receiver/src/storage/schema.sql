@@ -11,13 +11,16 @@ CREATE TABLE IF NOT EXISTS profile (
     server_url  TEXT NOT NULL,
     token       TEXT NOT NULL,
     update_mode TEXT NOT NULL DEFAULT 'check-and-download',
-    receiver_mode_json TEXT
+    receiver_mode_json TEXT,
+    dbf_enabled INTEGER NOT NULL DEFAULT 0,
+    dbf_path    TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF'
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     forwarder_id       TEXT NOT NULL,
     reader_ip          TEXT NOT NULL,
     local_port_override INTEGER,
+    event_type         TEXT NOT NULL DEFAULT 'finish',
     PRIMARY KEY (forwarder_id, reader_ip)
 );
 
