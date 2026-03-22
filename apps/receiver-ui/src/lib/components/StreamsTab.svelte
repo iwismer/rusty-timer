@@ -65,7 +65,12 @@
       if (parts.length >= 2) {
         const forwarderId = parts[0];
         const readerIp = parts.slice(1).join("/");
-        void api.readerGetInfo(forwarderId, readerIp).catch(() => {});
+        void api.readerGetInfo(forwarderId, readerIp).catch((err) => {
+          console.warn(
+            `Failed to fetch reader info for ${forwarderId}/${readerIp}:`,
+            err,
+          );
+        });
       }
     }
   }

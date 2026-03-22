@@ -776,12 +776,21 @@ pub async fn fetch_chip_lookup_for_forwarders(
         if !race_chips.contains_key(race_id) {
             let url = format!("{base}/api/v1/races/{race_id}/participants");
             let chips = match client.get(&url).bearer_auth(token).send().await {
-                Ok(r) if r.status().is_success() => r
-                    .json::<serde_json::Value>()
-                    .await
-                    .map(|b| parse_participants(&b))
-                    .unwrap_or_default(),
-                _ => FlatChipMap::new(),
+                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                    Ok(b) => parse_participants(&b),
+                    Err(e) => {
+                        warn!(race_id = %race_id, error = %e, "failed to parse participants JSON for chip lookup");
+                        FlatChipMap::new()
+                    }
+                },
+                Ok(r) => {
+                    warn!(race_id = %race_id, status = %r.status(), "failed to fetch participants for chip lookup");
+                    FlatChipMap::new()
+                }
+                Err(e) => {
+                    warn!(race_id = %race_id, error = %e, "HTTP request failed for participants chip lookup");
+                    FlatChipMap::new()
+                }
             };
             race_chips.insert(race_id.clone(), chips);
         }
@@ -1296,10 +1305,12 @@ pub async fn set_forwarder_race(
 
 /// Send a WS command through the active session and wait for a response.
 ///
-/// Uses a 15s timeout. For forwarder proxy requests, the server applies a 10s
+/// Uses a 25s timeout. For forwarder proxy requests, the server applies a 10s
 /// `PROXY_TIMEOUT` to both send and reply phases independently, so the server's
-/// total timeout can reach ~20s in degenerate cases and the local timeout may
-/// fire first under backpressure. Non-forwarder proxy requests (announcer,
+/// total timeout can reach ~20s in degenerate cases. Reader control requests
+/// use a dedicated proxy path in `ws_receiver.rs::proxy_reader_control_reply`
+/// with its own 10s timeout per phase, consistent with but separate from the
+/// `forwarder_proxy.rs` implementation. Non-forwarder proxy requests (announcer,
 /// stream-list, race management) are handled server-side with no explicit
 /// timeout beyond the database query time.
 async fn send_ws_command(
@@ -1322,9 +1333,9 @@ async fn send_ws_command(
         .await
         .map_err(|_| ReceiverError::NotConnected("WS session closed".to_owned()))?;
 
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(25), reply_rx)
         .await
-        .map_err(|_| ReceiverError::UpstreamError("upstream response timeout (15s)".to_owned()))?
+        .map_err(|_| ReceiverError::UpstreamError("upstream response timeout (25s)".to_owned()))?
         .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
 
     // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,
@@ -1988,11 +1999,9 @@ async fn send_reader_control(
     );
     let response = send_ws_command(state, msg).await?;
     match response {
-        rt_protocol::WsMessage::ReceiverProxyReaderControlResponse(r) => Ok(serde_json::json!({
-            "ok": r.ok,
-            "error": r.error,
-            "reader_info": r.reader_info,
-        })),
+        rt_protocol::WsMessage::ReceiverProxyReaderControlResponse(r) => {
+            serde_json::to_value(&r).map_err(|e| ReceiverError::Internal(e.to_string()))
+        }
         _ => Err(ReceiverError::UpstreamError(
             "unexpected response type".to_owned(),
         )),

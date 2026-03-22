@@ -106,7 +106,8 @@
     try {
       await fn();
     } catch (e: any) {
-      setFeedback({ kind: "err", message: e.message ?? "Action failed" });
+      const msg = typeof e === "string" ? e : e?.message ?? "Action failed";
+      setFeedback({ kind: "err", message: msg });
     } finally {
       busy = false;
     }
@@ -115,10 +116,7 @@
   async function handleSyncClock() {
     await wrap(async () => {
       await onSyncClock();
-      setFeedback({
-        kind: "ok",
-        message: `Clock synced — drift: ${formatClockDrift(readerInfo?.clock?.drift_ms)}`,
-      });
+      setFeedback({ kind: "ok", message: "Clock synced" });
     });
   }
 
@@ -177,7 +175,7 @@
   async function handleClearRecords() {
     await wrap(async () => {
       await onClearRecords();
-      setFeedback({ kind: "ok", message: "Records cleared" });
+      setFeedback({ kind: "ok", message: "Clear records requested" });
     });
   }
 

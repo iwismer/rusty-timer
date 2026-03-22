@@ -655,6 +655,12 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                             );
                                         }
                                     }
+                                } else {
+                                    warn!(
+                                        device_id = %device_id,
+                                        reader_ip = %update.reader_ip,
+                                        "reader_info_update for unknown reader_ip"
+                                    );
                                 }
 
                                 let _ = state.dashboard_tx.send(DashboardEvent::ReaderInfoUpdated {
@@ -700,6 +706,12 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                             );
                                         }
                                     }
+                                } else {
+                                    warn!(
+                                        device_id = %device_id,
+                                        reader_ip = %progress.reader_ip,
+                                        "reader_download_progress for unknown reader_ip"
+                                    );
                                 }
 
                                 let _ = state.dashboard_tx.send(DashboardEvent::ReaderDownloadProgress {
@@ -910,6 +922,7 @@ fn expire_pending_requests<T>(
 
     for request_id in expired {
         if let Some((_, reply)) = pending.remove(&request_id) {
+            warn!(request_id = %request_id, "proxy request timed out");
             let _ = reply.send(ForwarderProxyReply::Timeout);
         }
     }

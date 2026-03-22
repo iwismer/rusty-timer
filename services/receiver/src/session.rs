@@ -33,7 +33,7 @@ pub struct Session {
 /// have entries; reads from other forwarders are not enriched.
 pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
-/// A request sent from a Tauri command handler to the WS session loop.
+/// A request sent from the receiver's control API or Tauri command handler to the WS session loop.
 /// The session loop sends `message` over the WebSocket and routes the
 /// server's response back via the oneshot `reply` channel. Responses are
 /// matched to pending requests by `request_id`.
@@ -84,7 +84,7 @@ impl WsCommand {
 
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
-    /// Per-stream broadcast channel for local proxy forwarding.
+    /// Broadcast channel for local TCP proxy listeners (one per subscribed stream).
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
     /// Global broadcast channel for the DBF writer. Always `Some` in
     /// production; `None` only in tests that don't exercise DBF output.

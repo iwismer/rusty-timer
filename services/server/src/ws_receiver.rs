@@ -942,7 +942,7 @@ async fn proxy_reader_control_reply(
 ) -> WsMessage {
     use rt_protocol::{ReaderControlAction, ReceiverProxyReaderControlResponse};
 
-    // Validate reader_ip format (consistent with HTTP endpoints)
+    // Validate reader_ip format (ip:port, consistent with HTTP endpoints)
     if req.reader_ip.parse::<std::net::SocketAddrV4>().is_err() {
         return WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
             request_id: req.request_id,
@@ -966,8 +966,9 @@ async fn proxy_reader_control_reply(
         });
     };
 
-    // Fire-and-forget only for ClearRecords. StartDownload can fail
-    // synchronously (e.g. already in progress), so preserve its reply.
+    // ClearRecords is fire-and-forget because it has no meaningful failure mode
+    // the caller needs to handle. All other actions use request/response to
+    // propagate errors (e.g., StartDownload can fail if already in progress).
     let is_fire_and_forget = matches!(req.action, ReaderControlAction::ClearRecords);
 
     if is_fire_and_forget {
