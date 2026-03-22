@@ -98,6 +98,27 @@ pub async fn init(
     Ok((state, shutdown_rx))
 }
 
+/// Stop a running DBF writer task, waiting up to 2 seconds before aborting.
+async fn stop_dbf_writer(
+    cancel_tx: Option<watch::Sender<bool>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(cancel_tx) = cancel_tx {
+        let _ = cancel_tx.send(true);
+    }
+    if let Some(handle) = task {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(join_err)) => {
+                tracing::error!(error = %join_err, "DBF writer task panicked");
+            }
+            Err(_elapsed) => {
+                tracing::error!("DBF writer task did not shut down within 2 seconds");
+            }
+        }
+    }
+}
+
 /// Run the receiver event loop. Blocks until shutdown signal.
 /// This should be spawned as a tokio task, not run on the main thread.
 pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<ShutdownSignal>) {
@@ -147,8 +168,9 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                 let rx = global_event_tx.subscribe();
                 let db_arc = Arc::clone(&state.db);
                 let path = dbf_config.path.clone();
+                let ui = state.ui_tx.clone();
                 let handle = tokio::spawn(async move {
-                    crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
+                    crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path, ui).await;
                 });
                 dbf_writer_cancel_tx = Some(cancel_tx);
                 dbf_writer_task = Some(handle);
@@ -396,21 +418,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                 drop(db);
 
                 // Stop existing writer if running
-                if let Some(cancel_tx) = dbf_writer_cancel_tx.take() {
-                    // Error means receiver dropped (task already exited), which is fine.
-                    let _ = cancel_tx.send(true);
-                }
-                if let Some(handle) = dbf_writer_task.take() {
-                    match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(join_err)) => {
-                            tracing::error!(error = %join_err, "DBF writer task panicked");
-                        }
-                        Err(_elapsed) => {
-                            tracing::warn!("DBF writer task did not shut down within 2 seconds");
-                        }
-                    }
-                }
+                stop_dbf_writer(dbf_writer_cancel_tx.take(), dbf_writer_task.take()).await;
 
                 // Start new writer if enabled
                 if dbf_config.enabled {
@@ -418,8 +426,9 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                     let rx = global_event_tx.subscribe();
                     let db_arc = Arc::clone(&state.db);
                     let path = dbf_config.path.clone();
+                    let ui = state.ui_tx.clone();
                     let handle = tokio::spawn(async move {
-                        crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path).await;
+                        crate::dbf_writer::run_dbf_writer(rx, db_arc, cancel_rx, path, ui).await;
                     });
                     dbf_writer_cancel_tx = Some(cancel_tx);
                     dbf_writer_task = Some(handle);
@@ -434,21 +443,7 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     // Graceful shutdown
     state.logger.log("shutdown signal received");
     cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
-    if let Some(cancel_tx) = dbf_writer_cancel_tx.take() {
-        // Error means receiver dropped (task already exited), which is fine.
-        let _ = cancel_tx.send(true);
-    }
-    if let Some(handle) = dbf_writer_task.take() {
-        match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
-            Ok(Ok(())) => {}
-            Ok(Err(join_err)) => {
-                tracing::error!(error = %join_err, "DBF writer task panicked");
-            }
-            Err(_elapsed) => {
-                tracing::warn!("DBF writer task did not shut down within 2 seconds");
-            }
-        }
-    }
+    stop_dbf_writer(dbf_writer_cancel_tx.take(), dbf_writer_task.take()).await;
     for (key, proxy) in proxies.drain() {
         info!(key = %key, port = proxy.port, "closing local proxy");
         proxy.shutdown();

@@ -53,9 +53,11 @@ pub struct AppState {
     connect_attempt: AtomicU64,
     retry_streak: AtomicU64,
     /// Monotonic counter incremented when DBF config changes; subscribers
-    /// (runtime.rs) use this to restart the DBF writer.
-    pub dbf_config_version: watch::Sender<u64>,
-    /// Keepalive receiver so that `dbf_config_version.send_modify()` never fails.
+    /// (runtime.rs) use this to restart the DBF writer. Use
+    /// `notify_dbf_config_changed()` and `dbf_config_rx()` to interact.
+    dbf_config_version: watch::Sender<u64>,
+    /// Keepalive receiver to prevent the watch channel from being dropped
+    /// when no external subscribers exist.
     _dbf_config_keepalive: watch::Receiver<u64>,
 }
 
@@ -1255,6 +1257,13 @@ pub async fn put_dbf_config(
         ));
     }
     let p = std::path::Path::new(trimmed);
+    if let Some(ext) = p.extension()
+        && !ext.eq_ignore_ascii_case("dbf")
+    {
+        return Err(ReceiverError::BadRequest(
+            "DBF path should have a .dbf extension for Race Director compatibility".to_owned(),
+        ));
+    }
     if let Some(parent) = p.parent()
         && !parent.as_os_str().is_empty()
         && !parent.exists()
@@ -1264,8 +1273,12 @@ pub async fn put_dbf_config(
             parent.display()
         )));
     }
+    let config = crate::db::DbfConfig {
+        enabled: body.enabled,
+        path: trimmed.to_owned(),
+    };
     let db = state.db.lock().await;
-    match db.save_dbf_config(&body) {
+    match db.save_dbf_config(&config) {
         Ok(()) => {
             drop(db);
             state.notify_dbf_config_changed();

@@ -58,7 +58,7 @@ A new module `services/receiver/src/dbf_writer.rs` that subscribes to the global
 
 **Per-ReadEvent processing**:
 1. Skip sentinel read types (where `read_type` starts with `__`)
-2. Parse raw frame to extract chip ID (reuse `chip_id_from_raw_frame`)
+2. Parse raw frame via `ChipRead::try_from()` to extract chip ID and timestamp
 3. Look up the subscription's `event_type` to determine `S` or `F`
 4. Extract timestamp via `Timestamp` public accessors, format as `HHMMSSHH`
 5. Extract date via `Timestamp` public accessors, format as `YYMMDD`
@@ -80,13 +80,14 @@ A new module `services/receiver/src/dbf_writer.rs` that subscribes to the global
 | READER | 1 | Reader index 0–9 (subscription order) |
 
 **File handling**:
-- If the file does not exist, create it with the correct Visual FoxPro schema. Use an embedded template header byte array (with version byte `0x30`) since `TableWriterBuilder::new()` creates dBase III (`0x03`) by default
-- If it exists, append using `TableWriterBuilder::from_reader()` to preserve the existing header
-- File opened with exclusive access per write (matching IPICO Direct's lock-per-record pattern)
+- If the file does not exist, create it from the embedded Visual FoxPro template (`IPICO-sample.DBF`) via `TableWriterBuilder::from_reader()` to preserve version byte `0x30` (since `TableWriterBuilder::new()` creates dBase III `0x03` by default)
+- If it exists, append using raw byte-level I/O: read header fields, seek to end of records, write deletion flag + serialized record + EOF marker, update header record count
+- File opened with standard `OpenOptions` read+write access per append
 
 **Error handling**:
-- Write failures (disk full, file locked by Race Director, invalid path) are logged and the read is skipped — no retry, no buffering
-- A persistent error counter is exposed via the control API so the UI can surface write failures
+- Write failures (disk full, file locked by Race Director, invalid path) are logged and the read is skipped
+- After 10 consecutive write failures, the DBF writer stops and surfaces an error to the UI
+- First write failure sends a UI notification so the operator is alerted immediately
 
 **Clear action**:
 - Rewrites the DBF file as an empty file with just the Visual FoxPro header (no records)

@@ -63,21 +63,30 @@ impl Timestamp {
     pub fn year(&self) -> u16 {
         self.year
     }
+    /// Returns the month (1-12).
     pub fn month(&self) -> u8 {
         self.month
     }
+    /// Returns the day of the month (1-31).
     pub fn day(&self) -> u8 {
         self.day
     }
+    /// Returns the hour (0-23).
     pub fn hour(&self) -> u8 {
         self.hour
     }
+    /// Returns the minute (0-59).
     pub fn minute(&self) -> u8 {
         self.minute
     }
+    /// Returns the second (0-59).
     pub fn second(&self) -> u8 {
         self.second
     }
+    /// Returns milliseconds (0-990, always a multiple of 10).
+    ///
+    /// IPICO encodes centiseconds (0x00..0x63); the parser stores
+    /// `millis = centiseconds * 10`.
     pub fn millis(&self) -> u16 {
         self.millis
     }

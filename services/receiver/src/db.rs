@@ -78,7 +78,21 @@ pub struct Subscription {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbfConfig {
     pub enabled: bool,
+    /// Filesystem path for DBF output. Uses `String` rather than `PathBuf`
+    /// for cross-platform serde compatibility (receiver targets Windows but
+    /// tests run on macOS/Linux).
     pub path: String,
+}
+
+impl DbfConfig {
+    /// Validate that the config is usable. Returns an error message if not.
+    pub fn validate(&self) -> Result<(), String> {
+        let trimmed = self.path.trim();
+        if trimmed.is_empty() {
+            return Err("DBF path must not be empty".to_owned());
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorRecord {
@@ -225,10 +239,17 @@ impl Db {
                 local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
                 event_type: {
                     let raw = r.get::<_, String>(3)?;
-                    raw.parse::<EventType>().unwrap_or_else(|e| {
-                        tracing::warn!(error = %e, value = %raw, "invalid event_type in database, defaulting to Finish");
-                        EventType::Finish
-                    })
+                    match raw.parse::<EventType>() {
+                        Ok(et) => et,
+                        Err(e) => {
+                            tracing::error!(error = %e, value = %raw, "corrupt event_type in database");
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                            ));
+                        }
+                    }
                 },
             })
         })?;
@@ -310,32 +331,32 @@ impl Db {
     fn apply_schema(&self) -> DbResult<()> {
         self.conn.execute_batch(SCHEMA_SQL)?;
         // Migration: add update_mode column to existing profile tables.
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE profile ADD COLUMN update_mode TEXT NOT NULL DEFAULT 'check-and-download';",
             "update_mode",
         )?;
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE profile ADD COLUMN receiver_mode_json TEXT;",
             "receiver_mode_json",
         )?;
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE profile ADD COLUMN receiver_id TEXT;",
             "receiver_id",
         )?;
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE profile ADD COLUMN dbf_enabled INTEGER NOT NULL DEFAULT 0;",
             "dbf_enabled",
         )?;
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             r"ALTER TABLE profile ADD COLUMN dbf_path TEXT NOT NULL DEFAULT 'C:\winrace\Files\IPICO.DBF';",
             "dbf_path",
         )?;
-        apply_profile_column_migration(
+        apply_add_column_migration(
             &self.conn,
             "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
             "event_type",
@@ -416,6 +437,12 @@ impl Db {
     }
 
     pub fn save_dbf_config(&self, config: &DbfConfig) -> DbResult<()> {
+        if let Err(msg) = config.validate() {
+            return Err(DbError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                msg,
+            )));
+        }
         let changed = self.conn.execute(
             "UPDATE profile SET dbf_enabled = ?1, dbf_path = ?2",
             rusqlite::params![config.enabled as i64, config.path],
@@ -458,7 +485,7 @@ impl Db {
     }
 }
 
-fn apply_profile_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
+fn apply_add_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
     match conn.execute_batch(sql) {
         Ok(()) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(_, Some(message)))

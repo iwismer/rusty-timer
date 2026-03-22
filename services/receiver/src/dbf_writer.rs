@@ -2,6 +2,8 @@
 //! manages low-level DBF file I/O (create, append, clear), and provides an
 //! async writer task that bridges the broadcast channel to disk.
 //!
+//! New files are created from an embedded Visual FoxPro template
+//! (`IPICO-sample.DBF`) to preserve the correct version byte and schema.
 //! Each append writes directly to the end of the DBF file and updates the
 //! header record count, avoiding a full file rewrite.
 
@@ -15,7 +17,38 @@ use ipico_core::read::ChipRead;
 use rt_protocol::ReadEvent;
 use tokio::sync::{Mutex, broadcast, watch};
 
-use crate::db::{Db, EventType};
+use crate::db::{Db, EventType, Subscription};
+
+/// Reasons why a raw frame cannot be mapped to a [`DbfRecord`].
+#[derive(Debug)]
+pub enum DbfMappingError {
+    /// The subscription index exceeds the single-digit READER field limit (0-9).
+    ReaderIndexTooLarge(u8),
+    /// The raw frame bytes are not valid UTF-8.
+    InvalidUtf8(std::str::Utf8Error),
+    /// The frame is not a valid IPICO chip read.
+    InvalidChipRead(String),
+    /// The parsed chip ID exceeds the 12-character CHIP field width.
+    ChipIdTooLong(usize),
+}
+
+impl std::fmt::Display for DbfMappingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReaderIndexTooLarge(idx) => {
+                write!(
+                    f,
+                    "subscription index {idx} exceeds DBF READER field limit (max 9)"
+                )
+            }
+            Self::InvalidUtf8(e) => write!(f, "raw frame is not valid UTF-8: {e}"),
+            Self::InvalidChipRead(e) => write!(f, "raw frame is not a valid IPICO chip read: {e}"),
+            Self::ChipIdTooLong(len) => {
+                write!(f, "chip ID length {len} exceeds CHIP field width (12)")
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 const VISUAL_FOXPRO_VERSION: u8 = 0x30;
@@ -78,9 +111,11 @@ impl WritableRecord for DbfRecord {
 
 /// Parse a raw IPICO frame and map it to a [`DbfRecord`].
 ///
-/// Returns `None` if:
-/// - the frame cannot be parsed as a valid IPICO chip read
+/// Returns an error if:
 /// - `reader_index` > 9 (READER field is 1 character wide)
+/// - the frame cannot be parsed as valid UTF-8
+/// - the frame is not a valid IPICO chip read
+/// - the parsed chip ID exceeds the 12-character CHIP field width
 ///
 /// # Arguments
 ///
@@ -92,29 +127,14 @@ pub fn map_to_dbf_fields(
     raw_frame: &[u8],
     event_type: EventType,
     reader_index: u8,
-) -> Option<DbfRecord> {
+) -> Result<DbfRecord, DbfMappingError> {
     if reader_index > 9 {
-        tracing::debug!(
-            reader_index,
-            "reader_index exceeds single-digit limit for DBF READER field"
-        );
-        return None;
+        return Err(DbfMappingError::ReaderIndexTooLarge(reader_index));
     }
 
-    let frame_str = match std::str::from_utf8(raw_frame) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(error = %e, "raw frame is not valid UTF-8");
-            return None;
-        }
-    };
-    let chip_read = match ChipRead::try_from(frame_str) {
-        Ok(cr) => cr,
-        Err(e) => {
-            tracing::debug!(error = %e, "raw frame is not a valid IPICO chip read");
-            return None;
-        }
-    };
+    let frame_str = std::str::from_utf8(raw_frame).map_err(DbfMappingError::InvalidUtf8)?;
+    let chip_read = ChipRead::try_from(frame_str)
+        .map_err(|e| DbfMappingError::InvalidChipRead(e.to_string()))?;
 
     let event = match event_type {
         EventType::Start => "S",
@@ -122,8 +142,9 @@ pub fn map_to_dbf_fields(
     };
 
     let ts = &chip_read.timestamp;
-    // millis is always a multiple of 10 (see `ipico_core::read` parsing at
-    // `(millis * 10) as u16`), so this division is lossless.
+    // IPICO encodes centiseconds (0x00..0x63); the parser stores
+    // millis = centiseconds * 10, so dividing by 10 here recovers the
+    // original centisecond value losslessly.
     let centisec = ts.millis() / 10;
     // TIME: HHMMSSHH (last two digits are centiseconds)
     let time = format!(
@@ -139,14 +160,10 @@ pub fn map_to_dbf_fields(
     let tpoint = format!("{} ", event);
 
     if chip_read.tag_id.len() > 12 {
-        tracing::debug!(
-            chip_len = chip_read.tag_id.len(),
-            "chip ID exceeds CHIP field width (12)"
-        );
-        return None;
+        return Err(DbfMappingError::ChipIdTooLong(chip_read.tag_id.len()));
     }
 
-    Some(DbfRecord {
+    Ok(DbfRecord {
         event: event.to_owned(),
         division: "  ".to_owned(),
         chip: chip_read.tag_id.clone(),
@@ -180,6 +197,13 @@ fn serialize_record(record: &DbfRecord) -> [u8; RECORD_DATA_LEN] {
     let mut offset = 0;
     for (field, &width) in fields.iter().zip(FIELD_WIDTHS.iter()) {
         let bytes = field.as_bytes();
+        debug_assert!(
+            bytes.len() <= width,
+            "field value '{}' ({} bytes) exceeds DBF column width ({})",
+            field,
+            bytes.len(),
+            width
+        );
         let copy_len = bytes.len().min(width);
         buf[offset..offset + copy_len].copy_from_slice(&bytes[..copy_len]);
         offset += width;
@@ -268,17 +292,34 @@ pub fn clear_dbf(path: &Path) -> std::io::Result<()> {
     create_empty_dbf(path)
 }
 
+/// Maximum consecutive I/O failures before the writer gives up and stops.
+const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 10;
+
 /// Receives ReadEvents from the global broadcast channel, filters out sentinel
 /// types and unsubscribed/overflow readers, maps each event to a DBF record
 /// using the subscription's event type, and appends the record to the DBF file.
+///
+/// Subscriptions are cached locally and refreshed every 2 seconds to avoid
+/// acquiring the DB lock on every event.
 pub async fn run_dbf_writer(
     mut event_rx: broadcast::Receiver<ReadEvent>,
     db: Arc<Mutex<Db>>,
     mut shutdown_rx: watch::Receiver<bool>,
     dbf_path: String,
+    ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
 ) {
     let path = std::path::PathBuf::from(&dbf_path);
     tracing::debug!(path = %path.display(), "DBF writer started");
+
+    // Cache subscriptions — reload periodically rather than per-event
+    let mut cached_subs: Vec<Subscription> = {
+        let db = db.lock().await;
+        db.load_subscriptions().unwrap_or_default()
+    };
+    let mut sub_refresh = tokio::time::interval(std::time::Duration::from_secs(2));
+    sub_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut consecutive_failures: u32 = 0;
 
     loop {
         tokio::select! {
@@ -289,6 +330,12 @@ pub async fn run_dbf_writer(
                     break;
                 }
             }
+            _ = sub_refresh.tick() => {
+                let db = db.lock().await;
+                if let Ok(subs) = db.load_subscriptions() {
+                    cached_subs = subs;
+                }
+            }
             result = event_rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -297,19 +344,7 @@ pub async fn run_dbf_writer(
                             continue;
                         }
 
-                        // Look up subscription for this event to get event_type and reader index
-                        let subs = {
-                            let db = db.lock().await;
-                            match db.load_subscriptions() {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to load subscriptions for DBF writer, skipping event");
-                                    continue;
-                                }
-                            }
-                        };
-
-                        let sub_index = subs.iter().position(|s| {
+                        let sub_index = cached_subs.iter().position(|s| {
                             s.forwarder_id == event.forwarder_id && s.reader_ip == event.reader_ip
                         });
 
@@ -318,29 +353,71 @@ pub async fn run_dbf_writer(
                             continue;
                         };
 
-                        let event_type = subs[idx].event_type;
+                        // Guard against subscription index exceeding the
+                        // single-character READER field limit (0-9).
+                        if idx > 9 {
+                            tracing::warn!(
+                                forwarder_id = %event.forwarder_id,
+                                reader_ip = %event.reader_ip,
+                                subscription_index = idx,
+                                "subscription index exceeds DBF READER field limit (max 9), skipping DBF write for this stream"
+                            );
+                            continue;
+                        }
+
+                        let event_type = cached_subs[idx].event_type;
                         let reader_index = idx as u8;
 
                         match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
-                            Some(record) => {
+                            Ok(record) => {
                                 let p = path.clone();
                                 match tokio::task::spawn_blocking(move || append_record(&p, &record)).await {
-                                    Ok(Ok(())) => {}
+                                    Ok(Ok(())) => {
+                                        consecutive_failures = 0;
+                                    }
                                     Ok(Err(e)) => {
-                                        tracing::error!(error = %e, path = %path.display(), "DBF write failed, skipping record");
+                                        consecutive_failures += 1;
+                                        tracing::error!(
+                                            error = %e,
+                                            path = %path.display(),
+                                            consecutive_failures,
+                                            "DBF write failed, skipping record"
+                                        );
+                                        if consecutive_failures >= MAX_CONSECUTIVE_WRITE_FAILURES {
+                                            let msg = format!(
+                                                "DBF writer stopped: {consecutive_failures} consecutive write failures (last: {e})"
+                                            );
+                                            tracing::error!("{msg}");
+                                            let _ = ui_tx.send(
+                                                crate::ui_events::ReceiverUiEvent::LogEntry { entry: msg },
+                                            );
+                                            break;
+                                        }
+                                        if consecutive_failures == 1 {
+                                            let _ = ui_tx.send(
+                                                crate::ui_events::ReceiverUiEvent::LogEntry {
+                                                    entry: format!("DBF write error: {e}"),
+                                                },
+                                            );
+                                        }
                                     }
                                     Err(join_err) => {
                                         tracing::error!(error = %join_err, path = %path.display(), "DBF write task panicked or was cancelled");
+                                        let _ = ui_tx.send(
+                                            crate::ui_events::ReceiverUiEvent::LogEntry {
+                                                entry: format!("DBF writer crashed: {join_err}"),
+                                            },
+                                        );
                                         break;
                                     }
                                 }
                             }
-                            None => {
+                            Err(e) => {
                                 tracing::warn!(
                                     forwarder_id = %event.forwarder_id,
                                     reader_ip = %event.reader_ip,
-                                    raw_frame_len = event.raw_frame.len(),
-                                    "failed to parse raw frame for DBF record, skipping"
+                                    error = %e,
+                                    "failed to map raw frame to DBF record, skipping"
                                 );
                             }
                         }
@@ -370,7 +447,7 @@ mod tests {
     #[test]
     fn map_to_dbf_fields_finish_event() {
         let raw = sample_raw_frame();
-        let record = map_to_dbf_fields(&raw, EventType::Finish, 4).unwrap();
+        let record = map_to_dbf_fields(&raw, EventType::Finish, 4).expect("should map");
         assert_eq!(record.event, "F");
         assert_eq!(record.chip, "000000012345");
         assert_eq!(record.time, "18455939");
@@ -385,29 +462,41 @@ mod tests {
     #[test]
     fn map_to_dbf_fields_start_event() {
         let raw = sample_raw_frame();
-        let record = map_to_dbf_fields(&raw, EventType::Start, 0).unwrap();
+        let record = map_to_dbf_fields(&raw, EventType::Start, 0).expect("should map");
         assert_eq!(record.event, "S");
         assert_eq!(record.tpoint, "S ");
         assert_eq!(record.reader, "0");
     }
 
     #[test]
-    fn map_to_dbf_fields_invalid_frame_returns_none() {
-        assert!(map_to_dbf_fields(b"not a valid frame", EventType::Finish, 0).is_none());
+    fn map_to_dbf_fields_invalid_frame_returns_err() {
+        assert!(matches!(
+            map_to_dbf_fields(b"not a valid frame", EventType::Finish, 0),
+            Err(DbfMappingError::InvalidChipRead(_))
+        ));
     }
 
     #[test]
-    fn map_to_dbf_fields_non_ipico_prefix_returns_none() {
+    fn map_to_dbf_fields_non_ipico_prefix_returns_err() {
         let mut raw = sample_raw_frame();
         raw[0] = b'b';
-        assert!(map_to_dbf_fields(&raw, EventType::Finish, 0).is_none());
+        assert!(matches!(
+            map_to_dbf_fields(&raw, EventType::Finish, 0),
+            Err(DbfMappingError::InvalidChipRead(_))
+        ));
     }
 
     #[test]
-    fn map_to_dbf_fields_reader_index_over_9_returns_none() {
+    fn map_to_dbf_fields_reader_index_over_9_returns_err() {
         let raw = sample_raw_frame();
-        assert!(map_to_dbf_fields(&raw, EventType::Finish, 10).is_none());
-        assert!(map_to_dbf_fields(&raw, EventType::Finish, 255).is_none());
+        assert!(matches!(
+            map_to_dbf_fields(&raw, EventType::Finish, 10),
+            Err(DbfMappingError::ReaderIndexTooLarge(10))
+        ));
+        assert!(matches!(
+            map_to_dbf_fields(&raw, EventType::Finish, 255),
+            Err(DbfMappingError::ReaderIndexTooLarge(255))
+        ));
     }
 
     #[test]
@@ -517,6 +606,10 @@ mod tests {
         let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/race-director/IPICO-sample.DBF");
         if !sample_path.exists() {
+            eprintln!(
+                "SKIPPED: sample DBF file not found at {}",
+                sample_path.display()
+            );
             return;
         }
         let mut reader = dbase::Reader::from_path(&sample_path).unwrap();
@@ -535,6 +628,10 @@ mod tests {
         let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/race-director/IPICO-sample.DBF");
         if !sample_path.exists() {
+            eprintln!(
+                "SKIPPED: sample DBF file not found at {}",
+                sample_path.display()
+            );
             return;
         }
         let mut sample_reader = dbase::Reader::from_path(&sample_path).unwrap();
@@ -587,11 +684,12 @@ mod tests {
         let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
+        let (ui_tx, _) = broadcast::channel(16);
 
         let path = dbf_path.to_str().unwrap().to_owned();
         let db_clone = Arc::clone(&db);
         let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, path).await;
+            run_dbf_writer(rx, db_clone, shutdown_rx, path, ui_tx).await;
         });
 
         tx.send(rt_protocol::ReadEvent {
@@ -630,11 +728,12 @@ mod tests {
         let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
+        let (ui_tx, _) = broadcast::channel(16);
 
         let path = dbf_path.to_str().unwrap().to_owned();
         let db_clone = Arc::clone(&db);
         let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, path).await;
+            run_dbf_writer(rx, db_clone, shutdown_rx, path, ui_tx).await;
         });
 
         tx.send(rt_protocol::ReadEvent {
@@ -684,11 +783,12 @@ mod tests {
         let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
+        let (ui_tx, _) = broadcast::channel(16);
 
         let path = dbf_path.to_str().unwrap().to_owned();
         let db_clone = Arc::clone(&db);
         let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, path).await;
+            run_dbf_writer(rx, db_clone, shutdown_rx, path, ui_tx).await;
         });
 
         // Send event for a forwarder/reader that is NOT subscribed

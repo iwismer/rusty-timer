@@ -37,8 +37,8 @@ pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
     /// Per-stream broadcast channel for local proxy forwarding.
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
-    /// Global broadcast channel for the DBF writer (`None` if DBF output is
-    /// disabled or unavailable).
+    /// Global broadcast channel for the DBF writer. Always `Some` in
+    /// production; `None` only in tests that don't exercise DBF output.
     pub dbf_event_tx: Option<tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>>,
     pub stream_counts: crate::cache::StreamCounts,
     pub ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
