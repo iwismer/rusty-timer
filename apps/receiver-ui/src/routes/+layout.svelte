@@ -12,6 +12,7 @@
   import StreamsTab from "$lib/components/StreamsTab.svelte";
   import ForwardersTab from "$lib/components/ForwardersTab.svelte";
   import AnnouncerTab from "$lib/components/AnnouncerTab.svelte";
+  import RacesTab from "$lib/components/RacesTab.svelte";
   import ConfigTab from "$lib/components/ConfigTab.svelte";
   import ModeTab from "$lib/components/ModeTab.svelte";
   import LogsTab from "$lib/components/LogsTab.svelte";
@@ -63,6 +64,8 @@
       <ForwardersTab />
     {:else if store.activeTab === "announcer"}
       <AnnouncerTab />
+    {:else if store.activeTab === "races"}
+      <RacesTab />
     {:else if store.activeTab === "config"}
       <ConfigTab />
     {:else if store.activeTab === "mode"}
