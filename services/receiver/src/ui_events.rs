@@ -19,6 +19,41 @@ pub struct LastRead {
     pub name: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct StreamMetricsPayload {
+    pub forwarder_id: String,
+    pub reader_ip: String,
+    pub raw_count: i64,
+    pub dedup_count: i64,
+    pub retransmit_count: i64,
+    pub lag_ms: Option<u64>,
+    pub epoch_raw_count: i64,
+    pub epoch_dedup_count: i64,
+    pub epoch_retransmit_count: i64,
+    pub unique_chips: i64,
+    pub epoch_last_received_at: Option<String>,
+    pub epoch_lag_ms: Option<u64>,
+}
+
+impl StreamMetricsPayload {
+    pub fn from_ws(msg: &rt_protocol::ReceiverStreamMetrics) -> Self {
+        Self {
+            forwarder_id: msg.forwarder_id.clone(),
+            reader_ip: msg.reader_ip.clone(),
+            raw_count: msg.raw_count,
+            dedup_count: msg.dedup_count,
+            retransmit_count: msg.retransmit_count,
+            lag_ms: msg.lag_ms,
+            epoch_raw_count: msg.epoch_raw_count,
+            epoch_dedup_count: msg.epoch_dedup_count,
+            epoch_retransmit_count: msg.epoch_retransmit_count,
+            unique_chips: msg.unique_chips,
+            epoch_last_received_at: msg.epoch_last_received_at.clone(),
+            epoch_lag_ms: msg.epoch_lag_ms,
+        }
+    }
+}
+
 /// Extract chip ID from IPICO raw frame bytes.
 /// The raw frame is ASCII text; characters 4..16 are the chip identifier
 /// (e.g. "000000012345"), matching the server's `tag_id` format.
@@ -60,6 +95,7 @@ pub enum ReceiverUiEvent {
         mode: rt_protocol::ReceiverMode,
     },
     LastRead(LastRead),
+    StreamMetricsUpdated(StreamMetricsPayload),
 }
 
 #[cfg(test)]
@@ -158,6 +194,52 @@ mod tests {
         assert_eq!(json["timestamp"], "14:23:05.123");
         assert!(json["bib"].is_null());
         assert!(json["name"].is_null());
+    }
+
+    #[test]
+    fn stream_metrics_updated_serializes_with_correct_type_tag() {
+        let event = ReceiverUiEvent::StreamMetricsUpdated(StreamMetricsPayload {
+            forwarder_id: "fwd-1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            raw_count: 100,
+            dedup_count: 80,
+            retransmit_count: 20,
+            lag_ms: Some(1500),
+            epoch_raw_count: 50,
+            epoch_dedup_count: 40,
+            epoch_retransmit_count: 10,
+            unique_chips: 30,
+            epoch_last_received_at: Some("2026-03-21T12:00:00Z".to_owned()),
+            epoch_lag_ms: Some(500),
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "stream_metrics_updated");
+        assert_eq!(json["forwarder_id"], "fwd-1");
+        assert_eq!(json["raw_count"], 100);
+        assert_eq!(json["lag_ms"], 1500);
+        assert_eq!(json["unique_chips"], 30);
+    }
+
+    #[test]
+    fn stream_metrics_updated_serializes_null_lag() {
+        let event = ReceiverUiEvent::StreamMetricsUpdated(StreamMetricsPayload {
+            forwarder_id: "fwd-1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            raw_count: 0,
+            dedup_count: 0,
+            retransmit_count: 0,
+            lag_ms: None,
+            epoch_raw_count: 0,
+            epoch_dedup_count: 0,
+            epoch_retransmit_count: 0,
+            unique_chips: 0,
+            epoch_last_received_at: None,
+            epoch_lag_ms: None,
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json["lag_ms"].is_null());
+        assert!(json["epoch_last_received_at"].is_null());
+        assert!(json["epoch_lag_ms"].is_null());
     }
 
     #[test]

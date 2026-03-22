@@ -4,6 +4,7 @@ import type {
   ReceiverMode,
   StatusResponse,
   StreamCountUpdate,
+  StreamMetrics,
   StreamsResponse,
 } from "./api";
 
@@ -41,6 +42,7 @@ export type SseCallbacks = {
   onStreamCountsUpdated: (updates: StreamCountUpdate[]) => void;
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;
+  onStreamMetricsUpdated: (metrics: StreamMetrics) => void;
 };
 
 let unlistenFns: UnlistenFn[] = [];
@@ -87,6 +89,22 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
         timestamp: event.payload.timestamp,
         bib: event.payload.bib ?? null,
         name: event.payload.name ?? null,
+      });
+    }),
+    listen<StreamMetrics>("stream_metrics_updated", (event) => {
+      callbacks.onStreamMetricsUpdated({
+        forwarder_id: event.payload.forwarder_id,
+        reader_ip: event.payload.reader_ip,
+        raw_count: event.payload.raw_count,
+        dedup_count: event.payload.dedup_count,
+        retransmit_count: event.payload.retransmit_count,
+        lag_ms: event.payload.lag_ms ?? null,
+        epoch_raw_count: event.payload.epoch_raw_count,
+        epoch_dedup_count: event.payload.epoch_dedup_count,
+        epoch_retransmit_count: event.payload.epoch_retransmit_count,
+        unique_chips: event.payload.unique_chips,
+        epoch_last_received_at: event.payload.epoch_last_received_at ?? null,
+        epoch_lag_ms: event.payload.epoch_lag_ms ?? null,
       });
     }),
   ]);

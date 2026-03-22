@@ -55,7 +55,7 @@ async fn receiver_handshake(
     loop {
         match client.recv_message().await.unwrap() {
             WsMessage::Heartbeat(hb) => break hb.session_id,
-            WsMessage::ReceiverModeApplied(_) => {}
+            WsMessage::ReceiverModeApplied(_) | WsMessage::ReceiverStreamMetrics(_) => {}
             other => panic!("expected Heartbeat or ReceiverModeApplied, got {:?}", other),
         }
     }
@@ -262,7 +262,11 @@ async fn test_receiver_v12_prefers_persisted_cursor_over_hello_resume() {
 
     match tokio::time::timeout(Duration::from_secs(1), rcv.recv_message()).await {
         Err(_) => {}
-        Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {}
+        Ok(Ok(
+            WsMessage::Heartbeat(_)
+            | WsMessage::ReceiverModeApplied(_)
+            | WsMessage::ReceiverStreamMetrics(_),
+        )) => {}
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             panic!(
                 "expected no replay with persisted cursor at tail, got {:?}",
@@ -546,7 +550,11 @@ async fn test_receiver_tail_at_cursor_gets_no_replay() {
 
     match tokio::time::timeout(Duration::from_secs(1), rcv.recv_message()).await {
         Err(_) => {} // expected: no replay batch
-        Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {} // heartbeat is fine
+        Ok(Ok(
+            WsMessage::Heartbeat(_)
+            | WsMessage::ReceiverModeApplied(_)
+            | WsMessage::ReceiverStreamMetrics(_),
+        )) => {} // heartbeat is fine
         Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
             panic!("expected no replay, got {:?}", batch)
         }
@@ -748,7 +756,11 @@ async fn test_receiver_handoff_remains_monotonic() {
             Ok(Ok(WsMessage::ReceiverEventBatch(batch))) => {
                 seqs.extend(batch.events.into_iter().map(|e| e.seq));
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {}
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => {}
             Ok(Ok(other)) => panic!("unexpected message {:?}", other),
             Ok(Err(e)) => panic!("{}", e),
             Err(_) => {}
@@ -925,7 +937,11 @@ async fn test_receiver_live_mode_progresses_under_heavy_replay() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => {}
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => {}
             Ok(Ok(_)) => {}
             Ok(Err(e)) => panic!("{}", e),
             Err(_) => {}

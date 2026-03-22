@@ -356,7 +356,11 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
                         break;
                     }
                 }
-                Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+                Ok(Ok(
+                    WsMessage::Heartbeat(_)
+                    | WsMessage::ReceiverModeApplied(_)
+                    | WsMessage::ReceiverStreamMetrics(_),
+                )) => continue,
                 _ => break,
             }
         }
@@ -435,7 +439,11 @@ async fn chaos_receiver_reconnect_resumes_correctly() {
                     break;
                 }
             }
-            Ok(Ok(WsMessage::Heartbeat(_) | WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(
+                WsMessage::Heartbeat(_)
+                | WsMessage::ReceiverModeApplied(_)
+                | WsMessage::ReceiverStreamMetrics(_),
+            )) => continue,
             _ => break,
         }
     }

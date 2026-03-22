@@ -207,6 +207,12 @@ where
                                     .ui_tx
                                     .send(crate::ui_events::ReceiverUiEvent::Resync);
                             }
+                            Ok(WsMessage::ReceiverStreamMetrics(metrics)) => {
+                                let payload = crate::ui_events::StreamMetricsPayload::from_ws(&metrics);
+                                let _ = deps.ui_tx.send(
+                                    crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(payload),
+                                );
+                            }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }
                             Ok(o) => debug!(?o,"ignoring"),

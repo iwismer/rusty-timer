@@ -541,9 +541,19 @@ fn should_emit_receiver_resync_for_dashboard_event(event_name: &str) -> bool {
     matches!(event_name, "resync")
 }
 
-fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) -> Option<String> {
+async fn refresh_dashboard_snapshot(state: &Arc<AppState>) {
+    state.emit_streams_snapshot().await;
+}
+
+fn consume_sse_line_for_event(
+    line: &str,
+    pending_event: &mut Option<String>,
+    pending_data: &mut Option<String>,
+) -> Option<(String, Option<String>)> {
     if line.is_empty() {
-        return pending_event.take();
+        let event = pending_event.take();
+        let data = pending_data.take();
+        return event.map(|e| (e, data));
     }
     if line.starts_with(':') {
         return None;
@@ -552,14 +562,41 @@ fn consume_sse_line_for_event(line: &str, pending_event: &mut Option<String>) ->
         let event_name = rest.trim();
         if event_name.is_empty() {
             pending_event.take();
+            pending_data.take();
         } else {
             *pending_event = Some(event_name.to_owned());
+        }
+    } else if let Some(rest) = line.strip_prefix("data:") {
+        match pending_data {
+            Some(existing) => {
+                existing.push('\n');
+                existing.push_str(rest.trim());
+            }
+            None => *pending_data = Some(rest.trim().to_owned()),
         }
     }
     None
 }
 
 use crate::control_api::http_base_url;
+
+async fn open_upstream_dashboard_events(
+    client: &reqwest::Client,
+    events_url: &str,
+    token: &str,
+) -> Result<reqwest::Response, String> {
+    let response = client
+        .get(events_url)
+        .bearer_auth(token)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("upstream returned {}", response.status()));
+    }
+    Ok(response)
+}
 
 async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
     let client = match reqwest::Client::builder()
@@ -569,7 +606,7 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
         Ok(client) => client,
         Err(e) => {
             state.logger.log_at(
-                UiLogLevel::Warn,
+                UiLogLevel::Error,
                 format!("failed to create upstream SSE client: {e}"),
             );
             return;
@@ -584,7 +621,14 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
 
         let profile = {
             let db = state.db.lock().await;
-            db.load_profile().ok().flatten()
+            match db.load_profile() {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load profile for dashboard SSE");
+                    None
+                }
+            }
         };
         let Some(profile) = profile else {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -605,8 +649,22 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
 
         let events_url = format!("{base_url}/api/v1/events");
 
-        match consume_upstream_dashboard_events(&state, &client, &events_url, &profile.token).await
-        {
+        let response =
+            match open_upstream_dashboard_events(&client, &events_url, &profile.token).await {
+                Ok(response) => response,
+                Err(e) => {
+                    if *state.connection_state.borrow() == ConnectionState::Connected {
+                        state.logger.log_at(
+                            UiLogLevel::Warn,
+                            format!("upstream dashboard SSE refresh disconnected: {e}"),
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+        match consume_upstream_dashboard_events(&state, response).await {
             Ok(()) => {}
             Err(e) => {
                 if *state.connection_state.borrow() == ConnectionState::Connected {
@@ -623,24 +681,12 @@ async fn run_upstream_dashboard_sse_refresher(state: Arc<AppState>) {
 
 async fn consume_upstream_dashboard_events(
     state: &Arc<AppState>,
-    client: &reqwest::Client,
-    events_url: &str,
-    token: &str,
+    response: reqwest::Response,
 ) -> Result<(), String> {
-    let response = client
-        .get(events_url)
-        .bearer_auth(token)
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("upstream returned {}", response.status()));
-    }
-
     let mut response = response;
     let mut pending_line_bytes: Vec<u8> = Vec::new();
     let mut pending_event: Option<String> = None;
+    let mut pending_data: Option<String> = None;
 
     loop {
         if *state.connection_state.borrow() != ConnectionState::Connected {
@@ -666,15 +712,17 @@ async fn consume_upstream_dashboard_events(
             }
 
             let line = String::from_utf8_lossy(&line_bytes).into_owned();
-            if let Some(event_name) = consume_sse_line_for_event(&line, &mut pending_event) {
+            if let Some((event_name, _data)) =
+                consume_sse_line_for_event(&line, &mut pending_event, &mut pending_data)
+            {
                 if should_refresh_stream_snapshot_for_dashboard_event(&event_name) {
-                    state.emit_streams_snapshot().await;
-                }
-                if should_emit_receiver_resync_for_dashboard_event(&event_name) {
-                    state.emit_resync();
+                    refresh_dashboard_snapshot(state).await;
                 }
                 if should_refresh_chip_lookup_for_dashboard_event(&event_name) {
                     refresh_chip_lookup(state).await;
+                }
+                if should_emit_receiver_resync_for_dashboard_event(&event_name) {
+                    state.emit_resync();
                 }
             }
         }
@@ -1072,7 +1120,9 @@ mod tests {
     use crate::ui_events::ReceiverUiEvent;
     use futures_util::{SinkExt, StreamExt};
     use rt_protocol::{Heartbeat, ReceiverMode, ReceiverModeApplied, ReplayTarget, WsMessage};
+    use std::collections::HashMap;
     use std::future::Future;
+    use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
     use tokio_tungstenite::accept_async;
@@ -1646,33 +1696,120 @@ mod tests {
     #[test]
     fn sse_event_parsing_emits_completed_event_name_on_frame_boundary() {
         let mut pending_event = None;
+        let mut pending_data = None;
         assert_eq!(
-            consume_sse_line_for_event("event: stream_updated", &mut pending_event),
+            consume_sse_line_for_event(
+                "event: stream_updated",
+                &mut pending_event,
+                &mut pending_data
+            ),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("data: {\"type\":\"stream_updated\"}", &mut pending_event),
+            consume_sse_line_for_event(
+                "data: {\"type\":\"stream_updated\"}",
+                &mut pending_event,
+                &mut pending_data
+            ),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("", &mut pending_event),
-            Some("stream_updated".to_owned())
+            consume_sse_line_for_event("", &mut pending_event, &mut pending_data),
+            Some((
+                "stream_updated".to_owned(),
+                Some("{\"type\":\"stream_updated\"}".to_owned())
+            ))
         );
         assert_eq!(pending_event, None);
+        assert_eq!(pending_data, None);
     }
 
     #[test]
     fn sse_event_parsing_ignores_comments_and_data_only_frames() {
         let mut pending_event = None;
+        let mut pending_data = None;
         assert_eq!(
-            consume_sse_line_for_event(": keepalive", &mut pending_event),
+            consume_sse_line_for_event(": keepalive", &mut pending_event, &mut pending_data),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("data: keepalive", &mut pending_event),
+            consume_sse_line_for_event("data: keepalive", &mut pending_event, &mut pending_data),
             None
         );
-        assert_eq!(consume_sse_line_for_event("", &mut pending_event), None);
+        assert_eq!(
+            consume_sse_line_for_event("", &mut pending_event, &mut pending_data),
+            None
+        );
+    }
+
+    #[test]
+    fn sse_parser_captures_data_payload() {
+        let mut pending_event: Option<String> = None;
+        let mut pending_data: Option<String> = None;
+
+        assert_eq!(
+            consume_sse_line_for_event(
+                "event: metrics_updated",
+                &mut pending_event,
+                &mut pending_data
+            ),
+            None
+        );
+        assert_eq!(
+            consume_sse_line_for_event(
+                r#"data: {"stream_id":"abc","raw_count":10}"#,
+                &mut pending_event,
+                &mut pending_data
+            ),
+            None
+        );
+        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        assert_eq!(
+            result,
+            Some((
+                "metrics_updated".to_owned(),
+                Some(r#"{"stream_id":"abc","raw_count":10}"#.to_owned())
+            ))
+        );
+        assert_eq!(pending_event, None);
+        assert_eq!(pending_data, None);
+    }
+
+    #[test]
+    fn sse_parser_returns_none_data_when_no_data_line() {
+        let mut pending_event: Option<String> = None;
+        let mut pending_data: Option<String> = None;
+
+        consume_sse_line_for_event(
+            "event: stream_created",
+            &mut pending_event,
+            &mut pending_data,
+        );
+        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        assert_eq!(result, Some(("stream_created".to_owned(), None)));
+    }
+
+    #[test]
+    fn sse_parser_concatenates_multiline_data() {
+        let mut pending_event = None;
+        let mut pending_data = None;
+        assert!(
+            consume_sse_line_for_event("event:test", &mut pending_event, &mut pending_data)
+                .is_none()
+        );
+        assert!(
+            consume_sse_line_for_event("data:line1", &mut pending_event, &mut pending_data)
+                .is_none()
+        );
+        assert!(
+            consume_sse_line_for_event("data:line2", &mut pending_event, &mut pending_data)
+                .is_none()
+        );
+        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        assert_eq!(
+            result,
+            Some(("test".to_owned(), Some("line1\nline2".to_owned())))
+        );
     }
 
     #[tokio::test]

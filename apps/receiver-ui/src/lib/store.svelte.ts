@@ -50,6 +50,7 @@ export const store = $state({
   // Streams
   streams: null as StreamsResponse | null,
   lastReads: new Map<string, LastRead>(),
+  streamMetrics: new Map<string, api.StreamMetrics>(),
 
   // Logs
   logEntries: [] as string[],
@@ -865,14 +866,41 @@ export function initStore(): void {
   initSSE({
     onStatusChanged: (s) => {
       store.status = s;
+      if (s.connection_state === "disconnected") {
+        store.streamMetrics = new Map();
+      }
     },
     onStreamsSnapshot: (s) => {
+      const previousEpochByKey = new Map(
+        (store.streams?.streams ?? []).map((st) => [
+          streamKey(st.forwarder_id, st.reader_ip),
+          st.stream_epoch,
+        ]),
+      );
       const refreshAllKeys = new Set(
         s.streams.map((st) => streamKey(st.forwarder_id, st.reader_ip)),
       );
       streamRefreshVersion += 1;
       store.streams = s;
       void prefetchEarliestEpochOptions(s.streams, refreshAllKeys);
+      // Prune stale metrics
+      const currentKeys = new Set(
+        s.streams.map((st) => streamKey(st.forwarder_id, st.reader_ip)),
+      );
+      const prunedMetrics = new Map(store.streamMetrics);
+      for (const key of prunedMetrics.keys()) {
+        if (!currentKeys.has(key)) prunedMetrics.delete(key);
+      }
+      for (const stream of s.streams) {
+        const key = streamKey(stream.forwarder_id, stream.reader_ip);
+        if (
+          !previousEpochByKey.has(key) ||
+          previousEpochByKey.get(key) !== stream.stream_epoch
+        ) {
+          prunedMetrics.delete(key);
+        }
+      }
+      store.streamMetrics = prunedMetrics;
     },
     onLogEntry: (entry) => {
       store.logEntries = [entry, ...store.logEntries].slice(0, 500);
@@ -894,7 +922,16 @@ export function initStore(): void {
       next.set(key, read);
       store.lastReads = next;
     },
-  })?.catch((e: unknown) => console.error("initSSE failed:", e));
+    onStreamMetricsUpdated: (metrics) => {
+      const key = streamKey(metrics.forwarder_id, metrics.reader_ip);
+      const next = new Map(store.streamMetrics);
+      next.set(key, metrics);
+      store.streamMetrics = next;
+    },
+  })?.catch((e: unknown) => {
+    console.error("initSSE failed:", e);
+    store.error = `Event listener initialization failed: ${String(e)}`;
+  });
 }
 
 export function destroyStore(): void {
