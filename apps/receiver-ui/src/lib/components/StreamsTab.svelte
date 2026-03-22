@@ -56,9 +56,12 @@
     return "bg-status-warn";
   }
 
+  let readerFetchError = $state<string | null>(null);
+
   function toggleExpand(key: string) {
     const wasExpanded = expandedKey === key;
     expandedKey = wasExpanded ? null : key;
+    readerFetchError = null;
     if (!wasExpanded) {
       // Fetch reader info when expanding
       const parts = key.split("/");
@@ -66,10 +69,12 @@
         const forwarderId = parts[0];
         const readerIp = parts.slice(1).join("/");
         void api.readerGetInfo(forwarderId, readerIp).catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
           console.warn(
             `Failed to fetch reader info for ${forwarderId}/${readerIp}:`,
             err,
           );
+          readerFetchError = `Failed to load reader info: ${msg}`;
         });
       }
     }
@@ -521,6 +526,15 @@
                         {stream.subscribed ? "Unsubscribe" : "Subscribe"}
                       </button>
                     </div>
+
+                    {#if readerFetchError}
+                      <div class="mt-2">
+                        <AlertBanner
+                          variant="warn"
+                          message={readerFetchError}
+                        />
+                      </div>
+                    {/if}
 
                     <ReaderControlPanel
                       readerIp={stream.reader_ip}

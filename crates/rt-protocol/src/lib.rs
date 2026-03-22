@@ -127,9 +127,13 @@ pub const SENTINEL_READ_TYPE_PREFIX: &str = "__";
 pub const READER_STATUS_CHANGED_READ_TYPE: &str = "__reader_status_changed";
 
 /// Sentinel `read_type` for reader-info-updated control messages.
+/// When a `ReadEvent` carries this type, its `raw_frame` contains the
+/// JSON-serialized `WsMessage::ReceiverReaderInfoUpdate` payload.
 pub const READER_INFO_UPDATED_READ_TYPE: &str = "__reader_info_updated";
 
 /// Sentinel `read_type` for reader-download-progress control messages.
+/// When a `ReadEvent` carries this type, its `raw_frame` contains the
+/// JSON-serialized `WsMessage::ReceiverReaderDownloadProgress` payload.
 pub const READER_DOWNLOAD_PROGRESS_READ_TYPE: &str = "__reader_download_progress";
 
 /// A batch of read events from a forwarder.

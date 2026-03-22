@@ -17,6 +17,21 @@
   } from "../lib/read-mode-form";
   import type { HelpContextName } from "../lib/help/help-types";
 
+  /** Reader info matching the Rust ReaderInfo struct. */
+  export interface ReaderInfoData {
+    banner?: string | null;
+    hardware?: { fw_version?: string | null; hw_code?: string | null; reader_id?: string | null } | null;
+    config?: { mode: string; timeout: number } | null;
+    tto_enabled?: boolean | null;
+    clock?: { reader_clock: string; drift_ms: number } | null;
+    estimated_stored_reads?: number | null;
+    recording?: boolean | null;
+    connect_failures?: number;
+  }
+
+  export type ReaderConnectionState = "connected" | "connecting" | "disconnected";
+  export type DownloadStateType = "downloading" | "complete" | "error" | "idle";
+
   let {
     readerIp,
     readerInfo = null,
@@ -39,10 +54,10 @@
     onReconnect,
   }: {
     readerIp: string;
-    readerInfo: any | null;
-    readerState: string;
+    readerInfo: ReaderInfoData | null;
+    readerState: ReaderConnectionState;
     downloadProgress: {
-      state: string;
+      state: DownloadStateType;
       reads_received: number;
       progress: number;
       total: number;
@@ -90,9 +105,11 @@
   function setFeedback(fb: { kind: "ok" | "err"; message: string }) {
     feedback = fb;
     clearTimeout(feedbackTimer);
+    // Errors persist longer so the user has time to read them
+    const timeout = fb.kind === "err" ? 8000 : 3000;
     feedbackTimer = setTimeout(() => {
       feedback = undefined;
-    }, 3000);
+    }, timeout);
   }
 
   function clearFeedback() {
@@ -100,13 +117,15 @@
     feedback = undefined;
   }
 
-  async function wrap(fn: () => Promise<void>) {
+  async function wrap(fn: () => Promise<void>, actionName?: string) {
     busy = true;
     clearFeedback();
     try {
       await fn();
     } catch (e: any) {
-      const msg = typeof e === "string" ? e : e?.message ?? "Action failed";
+      console.error(`ReaderControlPanel action failed${actionName ? ` (${actionName})` : ""}:`, e);
+      const detail = typeof e === "string" ? e : e?.message ?? "Unknown error";
+      const msg = actionName ? `${actionName} failed: ${detail}` : detail;
       setFeedback({ kind: "err", message: msg });
     } finally {
       busy = false;
@@ -117,7 +136,7 @@
     await wrap(async () => {
       await onSyncClock();
       setFeedback({ kind: "ok", message: "Clock synced" });
-    });
+    }, "Sync Clock");
   }
 
   async function handleSetReadMode() {
@@ -136,7 +155,7 @@
           ? `Mode set to ${formatReadMode(mode)} (${timeout}s)`
           : `Mode set to ${formatReadMode(mode)}`,
       });
-    });
+    }, "Set Read Mode");
   }
 
   async function handleSetTto() {
@@ -149,7 +168,7 @@
           ? "TTO reporting disabled"
           : "TTO reporting enabled",
       });
-    });
+    }, "Toggle TTO");
   }
 
   async function handleSetRecording() {
@@ -162,28 +181,28 @@
           ? "Recording stopped"
           : "Recording started",
       });
-    });
+    }, "Toggle Recording");
   }
 
   async function handleRefresh() {
     await wrap(async () => {
       await onRefresh();
       setFeedback({ kind: "ok", message: "Reader info refreshed" });
-    });
+    }, "Refresh");
   }
 
   async function handleClearRecords() {
     await wrap(async () => {
       await onClearRecords();
       setFeedback({ kind: "ok", message: "Clear records requested" });
-    });
+    }, "Clear Records");
   }
 
   async function handleStartDownload() {
     await wrap(async () => {
       await onStartDownload();
       setFeedback({ kind: "ok", message: "Download started" });
-    });
+    }, "Start Download");
   }
 
   async function handleStopDownload() {
@@ -191,14 +210,14 @@
     await wrap(async () => {
       await onStopDownload!();
       setFeedback({ kind: "ok", message: "Download stopped" });
-    });
+    }, "Stop Download");
   }
 
   async function handleReconnect() {
     await wrap(async () => {
       await onReconnect();
       setFeedback({ kind: "ok", message: "Reconnect requested" });
-    });
+    }, "Reconnect");
   }
 
   let isDisabled = $derived(disabled || busy);

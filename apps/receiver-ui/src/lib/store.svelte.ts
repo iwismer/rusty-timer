@@ -122,12 +122,12 @@ export const store = $state({
   streamEventTypeBusy: {} as Record<string, boolean>,
 
   // Reader control state (keyed by "forwarder_id/reader_ip")
-  readerInfos: new Map<string, unknown>(),
-  readerStates: new Map<string, string>(),
+  readerInfos: new Map<string, api.ReaderInfo | null>(),
+  readerStates: new Map<string, api.ReaderConnectionState>(),
   downloadProgress: new Map<
     string,
     {
-      state: string;
+      state: api.DownloadState;
       reads_received: number;
       progress: number;
       total: number;
@@ -289,7 +289,12 @@ function resolveReaderControlStreamKey(
   const stream = store.streams?.streams.find(
     (entry) => entry.stream_id === streamId && entry.reader_ip === readerIp,
   );
-  if (!stream) return null;
+  if (!stream) {
+    console.warn(
+      `reader event for unknown stream_id=${streamId}, reader_ip=${readerIp}`,
+    );
+    return null;
+  }
   return streamKey(stream.forwarder_id, stream.reader_ip);
 }
 

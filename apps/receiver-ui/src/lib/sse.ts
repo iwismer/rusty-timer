@@ -2,11 +2,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ForwarderMetricsUpdate,
   LastRead,
+  ReaderConnectionState,
+  ReaderInfo,
   ReceiverMode,
   StatusResponse,
   StreamCountUpdate,
   StreamMetrics,
   StreamsResponse,
+  DownloadState,
 } from "./api";
 
 // Payload types matching the Rust ReceiverUiEvent serde output.
@@ -38,14 +41,14 @@ type LastReadPayload = {
 export type ReaderInfoUpdatedPayload = {
   stream_id: string;
   reader_ip: string;
-  state: string;
-  reader_info: unknown;
+  state: ReaderConnectionState;
+  reader_info: ReaderInfo | null;
 };
 
 export type ReaderDownloadProgressPayload = {
   stream_id: string;
   reader_ip: string;
-  state: string;
+  state: DownloadState;
   reads_received: number;
   progress: number;
   total: number;

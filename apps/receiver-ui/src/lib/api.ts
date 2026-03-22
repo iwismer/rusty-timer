@@ -483,12 +483,44 @@ export async function resetAnnouncer(): Promise<void> {
   await invoke("reset_announcer");
 }
 
+// --------------- Reader control types ---------------
+
+export type ReaderConnectionState = "connected" | "connecting" | "disconnected";
+export type DownloadState = "downloading" | "complete" | "error" | "idle";
+
+export interface HardwareInfo {
+  fw_version?: string | null;
+  hw_code?: string | null;
+  reader_id?: string | null;
+}
+
+export interface Config3Info {
+  mode: string;
+  timeout: number;
+}
+
+export interface ClockInfo {
+  reader_clock: string;
+  drift_ms: number;
+}
+
+export interface ReaderInfo {
+  banner?: string | null;
+  hardware?: HardwareInfo | null;
+  config?: Config3Info | null;
+  tto_enabled?: boolean | null;
+  clock?: ClockInfo | null;
+  estimated_stored_reads?: number | null;
+  recording?: boolean | null;
+  connect_failures: number;
+}
+
 // --------------- Reader control commands ---------------
 
 export interface ReaderCommandResponse {
   ok: boolean;
   error?: string;
-  reader_info?: unknown;
+  reader_info?: ReaderInfo | null;
 }
 
 export interface ReaderSimpleResponse {

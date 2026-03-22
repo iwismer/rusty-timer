@@ -28,4 +28,9 @@ export type {
 } from "../lib/config-types";
 export * from "../lib/reader-view-model";
 export * from "../lib/read-mode-form";
+export type {
+  ReaderInfoData,
+  ReaderConnectionState as ReaderConnectionStateType,
+  DownloadStateType,
+} from "../components/ReaderControlPanel.svelte";
 export * from "../lib/help/index";

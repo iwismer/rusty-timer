@@ -723,7 +723,12 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Err(e) => { warn!(device_id = %device_id, error = %e, "invalid JSON in forwarder session message"); send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, "invalid JSON in message", false).await; break; }
                         }
                     }
-                    Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
+                    Ok(Some(Ok(Message::Ping(data)))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            warn!(device_id = %device_id, "failed to send Pong to forwarder, connection likely dead");
+                            break;
+                        }
+                    }
                     Ok(Some(Ok(Message::Close(_)))) | Ok(None) => { state.logger.log(format!("forwarder {device_id} disconnected")); break; }
                     Err(_) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} session timeout")); break; }
                     Ok(Some(Err(e))) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} WS error: {e}")); break; }

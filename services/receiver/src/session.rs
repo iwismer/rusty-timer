@@ -84,7 +84,7 @@ impl WsCommand {
 
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
-    /// Broadcast channel for local TCP proxy listeners (one per subscribed stream).
+    /// Broadcast channel that relays incoming read events to the per-stream EventBus for local TCP proxy listeners.
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
     /// Global broadcast channel for the DBF writer. Always `Some` in
     /// production; `None` only in tests that don't exercise DBF output.
@@ -341,23 +341,27 @@ where
                                 );
                             }
                             Ok(WsMessage::ReceiverReaderInfoUpdate(update)) => {
-                                let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderInfoUpdated {
+                                if deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderInfoUpdated {
                                     stream_id: update.stream_id,
-                                    reader_ip: update.reader_ip,
+                                    reader_ip: update.reader_ip.clone(),
                                     state: update.state,
                                     reader_info: update.reader_info,
-                                });
+                                }).is_err() {
+                                    warn!(reader_ip = %update.reader_ip, "ui_tx closed; reader info update dropped");
+                                }
                             }
                             Ok(WsMessage::ReceiverReaderDownloadProgress(progress)) => {
-                                let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderDownloadProgress {
+                                if deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderDownloadProgress {
                                     stream_id: progress.stream_id,
-                                    reader_ip: progress.reader_ip,
+                                    reader_ip: progress.reader_ip.clone(),
                                     state: progress.state,
                                     reads_received: progress.reads_received,
                                     progress: progress.progress,
                                     total: progress.total,
                                     error: progress.error,
-                                });
+                                }).is_err() {
+                                    warn!(reader_ip = %progress.reader_ip, "ui_tx closed; reader download progress dropped");
+                                }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }
