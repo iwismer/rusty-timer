@@ -436,9 +436,16 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-receiver-tauri
+
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install npm dependencies
         run: npm ci
@@ -447,7 +454,10 @@ jobs:
         run: npm run build --workspace "apps/receiver-ui"
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
+        shell: bash
+        run: |
+          cargo install cargo-binstall --locked
+          cargo binstall tauri-cli --version "^2" --no-confirm
 
       - name: Build Tauri app
         run: cargo tauri build --target x86_64-pc-windows-msvc
