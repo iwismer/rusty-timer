@@ -482,3 +482,124 @@ export async function putAnnouncerConfig(
 export async function resetAnnouncer(): Promise<void> {
   await invoke("reset_announcer");
 }
+
+// --------------- Reader control commands ---------------
+
+export interface ReaderCommandResponse {
+  ok: boolean;
+  error?: string;
+  reader_info?: unknown;
+}
+
+export interface ReaderSimpleResponse {
+  ok: boolean;
+  error?: string;
+}
+
+export async function readerGetInfo(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderCommandResponse> {
+  return invoke<ReaderCommandResponse>("reader_get_info", {
+    forwarderId,
+    readerIp,
+  });
+}
+
+export async function readerSyncClock(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderCommandResponse> {
+  return invoke<ReaderCommandResponse>("reader_sync_clock", {
+    forwarderId,
+    readerIp,
+  });
+}
+
+export async function readerSetReadMode(
+  forwarderId: string,
+  readerIp: string,
+  mode: string,
+  timeout: number,
+): Promise<ReaderCommandResponse> {
+  return invoke<ReaderCommandResponse>("reader_set_read_mode", {
+    forwarderId,
+    readerIp,
+    mode,
+    timeout,
+  });
+}
+
+export async function readerSetTto(
+  forwarderId: string,
+  readerIp: string,
+  enabled: boolean,
+): Promise<ReaderCommandResponse> {
+  return invoke<ReaderCommandResponse>("reader_set_tto", {
+    forwarderId,
+    readerIp,
+    enabled,
+  });
+}
+
+export async function readerSetRecording(
+  forwarderId: string,
+  readerIp: string,
+  enabled: boolean,
+): Promise<ReaderCommandResponse> {
+  return invoke<ReaderCommandResponse>("reader_set_recording", {
+    forwarderId,
+    readerIp,
+    enabled,
+  });
+}
+
+export async function readerClearRecords(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderSimpleResponse> {
+  return invoke<ReaderSimpleResponse>("reader_clear_records", {
+    forwarderId,
+    readerIp,
+  });
+}
+
+export async function readerStartDownload(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderSimpleResponse> {
+  return invoke<ReaderSimpleResponse>("reader_start_download", {
+    forwarderId,
+    readerIp,
+  });
+}
+
+export async function readerStopDownload(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderSimpleResponse> {
+  return invoke<ReaderSimpleResponse>("reader_stop_download", {
+    forwarderId,
+    readerIp,
+  });
+}
+
+export async function readerRefresh(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderCommandResponse> {
+  return invoke<ReaderCommandResponse>("reader_refresh", {
+    forwarderId,
+    readerIp,
+  });
+}
+
+export async function readerReconnect(
+  forwarderId: string,
+  readerIp: string,
+): Promise<ReaderSimpleResponse> {
+  return invoke<ReaderSimpleResponse>("reader_reconnect", {
+    forwarderId,
+    readerIp,
+  });
+}

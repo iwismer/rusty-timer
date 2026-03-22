@@ -121,6 +121,20 @@ export const store = $state({
   streamActionBusy: false,
   streamEventTypeBusy: {} as Record<string, boolean>,
 
+  // Reader control state (keyed by "forwarder_id/reader_ip")
+  readerInfos: new Map<string, unknown>(),
+  readerStates: new Map<string, string>(),
+  downloadProgress: new Map<
+    string,
+    {
+      state: string;
+      reads_received: number;
+      progress: number;
+      total: number;
+      error?: string;
+    }
+  >(),
+
   // Version info
   appVersion: "",
 });
@@ -1234,6 +1248,27 @@ export function initStore(): void {
       const next = new Map(store.streamMetrics);
       next.set(key, metrics);
       store.streamMetrics = next;
+    },
+    onReaderInfoUpdated: (payload) => {
+      const key = streamKey(payload.forwarder_id, payload.reader_ip);
+      const nextInfos = new Map(store.readerInfos);
+      nextInfos.set(key, payload.reader_info);
+      store.readerInfos = nextInfos;
+      const nextStates = new Map(store.readerStates);
+      nextStates.set(key, payload.reader_state);
+      store.readerStates = nextStates;
+    },
+    onReaderDownloadProgress: (payload) => {
+      const key = streamKey(payload.forwarder_id, payload.reader_ip);
+      const next = new Map(store.downloadProgress);
+      next.set(key, {
+        state: payload.state,
+        reads_received: payload.reads_received,
+        progress: payload.progress,
+        total: payload.total,
+        error: payload.error ?? undefined,
+      });
+      store.downloadProgress = next;
     },
   })?.catch((e: unknown) => {
     console.error("initSSE failed:", e);
