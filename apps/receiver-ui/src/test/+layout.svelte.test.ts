@@ -138,7 +138,7 @@ describe("receiver layout SSE updates", () => {
     });
   });
 
-  it("keeps forwarder totals authoritative and updates last_read_at from SSE timestamp", async () => {
+  it("aggregates stream counts into forwarder total_reads and updates last_read_at from wall clock", async () => {
     apiMocks.getForwarders.mockResolvedValueOnce({
       forwarders: [
         {
@@ -170,6 +170,12 @@ describe("receiver layout SSE updates", () => {
         reads_epoch: 4,
       },
     ]);
+
+    // stream_counts_updated should aggregate into forwarder total_reads
+    expect(store.forwarders?.[0]?.total_reads).toBe(15);
+    // unique_chips is server-authoritative, not updated by stream counts
+    expect(store.forwarders?.[0]?.unique_chips).toBe(3);
+
     callbacks.onLastRead({
       forwarder_id: "fwd-1",
       reader_ip: "10.0.0.1:10000",
@@ -179,11 +185,27 @@ describe("receiver layout SSE updates", () => {
       name: null,
     });
 
-    expect(store.forwarders?.[0]).toMatchObject({
-      unique_chips: 3,
-      total_reads: 10,
-      last_read_at: "2026-03-21T12:34:56.000Z",
+    // New chip should bump unique_chips
+    expect(store.forwarders?.[0]?.unique_chips).toBe(4);
+
+    // last_read_at should be wall-clock ISO (not the raw reader timestamp)
+    const lastReadAt = store.forwarders?.[0]?.last_read_at;
+    expect(lastReadAt).toBeTruthy();
+    expect(new Date(lastReadAt!).getTime()).not.toBeNaN();
+    expect(Math.abs(new Date(lastReadAt!).getTime() - Date.now())).toBeLessThan(
+      5000,
+    );
+
+    // Same chip again should NOT bump unique_chips
+    callbacks.onLastRead({
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      chip_id: "chip-4",
+      timestamp: "2026-03-21T12:35:00.000Z",
+      bib: null,
+      name: null,
     });
+    expect(store.forwarders?.[0]?.unique_chips).toBe(4);
   });
 
   it("clears stale forwarders on refresh failure so the error state is shown", async () => {
