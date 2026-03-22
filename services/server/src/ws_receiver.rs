@@ -398,6 +398,366 @@ async fn proxy_announcer_reset_reply(
     })
 }
 
+
+async fn proxy_races_list_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyRacesListRequest,
+) -> WsMessage {
+    match crate::repo::races::list_races(&state.pool).await {
+        Ok(rows) => {
+            let races: Vec<rt_protocol::RaceInfo> = rows
+                .into_iter()
+                .map(|r| rt_protocol::RaceInfo {
+                    race_id: r.race_id.to_string(),
+                    name: r.name,
+                    created_at: r.created_at.to_rfc3339(),
+                    participant_count: r.participant_count,
+                    chip_count: r.chip_count,
+                })
+                .collect();
+            WsMessage::ReceiverProxyRacesListResponse(rt_protocol::ReceiverProxyRacesListResponse {
+                request_id: req.request_id,
+                ok: true,
+                error: None,
+                races,
+            })
+        }
+        Err(e) => {
+            WsMessage::ReceiverProxyRacesListResponse(rt_protocol::ReceiverProxyRacesListResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e.to_string()),
+                races: vec![],
+            })
+        }
+    }
+}
+
+async fn proxy_race_create_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyRaceCreateRequest,
+) -> WsMessage {
+    let name = req.name.trim().to_owned();
+    if name.is_empty() {
+        return WsMessage::ReceiverProxyRaceCreateResponse(
+            rt_protocol::ReceiverProxyRaceCreateResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("race name must not be empty".into()),
+                race: None,
+            },
+        );
+    }
+    match crate::repo::races::create_race(&state.pool, &name).await {
+        Ok(row) => {
+            state.logger.log(format!(
+                "race \"{}\" created via receiver {}",
+                name, device_id
+            ));
+            let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+            WsMessage::ReceiverProxyRaceCreateResponse(
+                rt_protocol::ReceiverProxyRaceCreateResponse {
+                    request_id: req.request_id,
+                    ok: true,
+                    error: None,
+                    race: Some(rt_protocol::RaceInfo {
+                        race_id: row.race_id.to_string(),
+                        name: row.name,
+                        created_at: row.created_at.to_rfc3339(),
+                        participant_count: row.participant_count,
+                        chip_count: row.chip_count,
+                    }),
+                },
+            )
+        }
+        Err(e) => WsMessage::ReceiverProxyRaceCreateResponse(
+            rt_protocol::ReceiverProxyRaceCreateResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e.to_string()),
+                race: None,
+            },
+        ),
+    }
+}
+
+async fn proxy_race_delete_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyRaceDeleteRequest,
+) -> WsMessage {
+    let race_id = match Uuid::parse_str(&req.race_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return WsMessage::ReceiverProxyRaceDeleteResponse(
+                rt_protocol::ReceiverProxyRaceDeleteResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(format!("invalid race_id: {e}")),
+                },
+            );
+        }
+    };
+    if state.has_active_receiver_session_for_race(race_id).await {
+        return WsMessage::ReceiverProxyRaceDeleteResponse(
+            rt_protocol::ReceiverProxyRaceDeleteResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("cannot delete race: a receiver session is actively using it".into()),
+            },
+        );
+    }
+    match crate::repo::races::delete_race(&state.pool, race_id).await {
+        Ok(_) => {
+            state.logger.log(format!(
+                "race {} deleted via receiver {}",
+                race_id, device_id
+            ));
+            let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+            WsMessage::ReceiverProxyRaceDeleteResponse(
+                rt_protocol::ReceiverProxyRaceDeleteResponse {
+                    request_id: req.request_id,
+                    ok: true,
+                    error: None,
+                },
+            )
+        }
+        Err(e) => WsMessage::ReceiverProxyRaceDeleteResponse(
+            rt_protocol::ReceiverProxyRaceDeleteResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e.to_string()),
+            },
+        ),
+    }
+}
+
+async fn proxy_participants_get_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyParticipantsGetRequest,
+) -> WsMessage {
+    let race_id = match Uuid::parse_str(&req.race_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return WsMessage::ReceiverProxyParticipantsGetResponse(
+                rt_protocol::ReceiverProxyParticipantsGetResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(format!("invalid race_id: {e}")),
+                    participants: vec![],
+                    chips_without_participant: vec![],
+                },
+            );
+        }
+    };
+    let participants_result = crate::repo::races::list_participants(&state.pool, race_id).await;
+    let unmatched_result = crate::repo::races::list_unmatched_chips(&state.pool, race_id).await;
+    match (participants_result, unmatched_result) {
+        (Ok(part_rows), Ok(chip_rows)) => {
+            let participants: Vec<rt_protocol::ParticipantInfo> = part_rows
+                .into_iter()
+                .map(|p| rt_protocol::ParticipantInfo {
+                    bib: p.bib,
+                    first_name: p.first_name,
+                    last_name: p.last_name,
+                    gender: p.gender,
+                    affiliation: p.affiliation,
+                    chip_ids: p.chip_ids,
+                })
+                .collect();
+            let chips_without_participant: Vec<rt_protocol::UnmatchedChipInfo> = chip_rows
+                .into_iter()
+                .map(|c| rt_protocol::UnmatchedChipInfo {
+                    chip_id: c.chip_id,
+                    bib: c.bib,
+                })
+                .collect();
+            WsMessage::ReceiverProxyParticipantsGetResponse(
+                rt_protocol::ReceiverProxyParticipantsGetResponse {
+                    request_id: req.request_id,
+                    ok: true,
+                    error: None,
+                    participants,
+                    chips_without_participant,
+                },
+            )
+        }
+        (Err(e), _) | (_, Err(e)) => WsMessage::ReceiverProxyParticipantsGetResponse(
+            rt_protocol::ReceiverProxyParticipantsGetResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(e.to_string()),
+                participants: vec![],
+                chips_without_participant: vec![],
+            },
+        ),
+    }
+}
+
+async fn proxy_file_upload_reply(
+    state: AppState,
+    device_id: String,
+    req: rt_protocol::ReceiverProxyFileUploadRequest,
+) -> WsMessage {
+    use base64::Engine;
+
+    let race_id = match Uuid::parse_str(&req.race_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return WsMessage::ReceiverProxyFileUploadResponse(
+                rt_protocol::ReceiverProxyFileUploadResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(format!("invalid race_id: {e}")),
+                    imported: 0,
+                },
+            );
+        }
+    };
+    match crate::repo::races::race_exists(&state.pool, race_id).await {
+        Ok(false) => {
+            return WsMessage::ReceiverProxyFileUploadResponse(
+                rt_protocol::ReceiverProxyFileUploadResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("race not found".into()),
+                    imported: 0,
+                },
+            );
+        }
+        Err(e) => {
+            return WsMessage::ReceiverProxyFileUploadResponse(
+                rt_protocol::ReceiverProxyFileUploadResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(e.to_string()),
+                    imported: 0,
+                },
+            );
+        }
+        Ok(true) => {}
+    }
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(&req.file_data) {
+        Ok(b) => b,
+        Err(e) => {
+            return WsMessage::ReceiverProxyFileUploadResponse(
+                rt_protocol::ReceiverProxyFileUploadResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some(format!("base64 decode error: {e}")),
+                    imported: 0,
+                },
+            );
+        }
+    };
+    match req.upload_type.as_str() {
+        "participants" => {
+            let parsed = match timer_core::util::io::parse_participant_bytes(&bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    return WsMessage::ReceiverProxyFileUploadResponse(
+                        rt_protocol::ReceiverProxyFileUploadResponse {
+                            request_id: req.request_id,
+                            ok: false,
+                            error: Some(format!("parse error: {e}")),
+                            imported: 0,
+                        },
+                    );
+                }
+            };
+            let gender_strings: Vec<String> = parsed.iter().map(|p| p.gender.to_string()).collect();
+            let tuples: Vec<(i32, &str, &str, &str, Option<&str>)> = parsed
+                .iter()
+                .zip(gender_strings.iter())
+                .map(|(p, g)| {
+                    (
+                        p.bib,
+                        p.first_name.as_str(),
+                        p.last_name.as_str(),
+                        g.as_str(),
+                        p.affiliation.as_deref(),
+                    )
+                })
+                .collect();
+            match crate::repo::races::replace_participants(&state.pool, race_id, &tuples).await {
+                Ok(count) => {
+                    state.logger.log(format!(
+                        "race {} participants uploaded ({} rows) via receiver {}",
+                        race_id, count, device_id
+                    ));
+                    let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+                    WsMessage::ReceiverProxyFileUploadResponse(
+                        rt_protocol::ReceiverProxyFileUploadResponse {
+                            request_id: req.request_id,
+                            ok: true,
+                            error: None,
+                            imported: count as i64,
+                        },
+                    )
+                }
+                Err(e) => WsMessage::ReceiverProxyFileUploadResponse(
+                    rt_protocol::ReceiverProxyFileUploadResponse {
+                        request_id: req.request_id,
+                        ok: false,
+                        error: Some(e.to_string()),
+                        imported: 0,
+                    },
+                ),
+            }
+        }
+        "chips" => {
+            let parsed = match timer_core::util::io::parse_bibchip_bytes(&bytes) {
+                Ok(c) => c,
+                Err(e) => {
+                    return WsMessage::ReceiverProxyFileUploadResponse(
+                        rt_protocol::ReceiverProxyFileUploadResponse {
+                            request_id: req.request_id,
+                            ok: false,
+                            error: Some(format!("parse error: {e}")),
+                            imported: 0,
+                        },
+                    );
+                }
+            };
+            let tuples: Vec<(&str, i32)> = parsed.iter().map(|c| (c.id.as_str(), c.bib)).collect();
+            match crate::repo::races::replace_chips(&state.pool, race_id, &tuples).await {
+                Ok(count) => {
+                    state.logger.log(format!(
+                        "race {} chips uploaded ({} rows) via receiver {}",
+                        race_id, count, device_id
+                    ));
+                    let _ = state.dashboard_tx.send(DashboardEvent::Resync);
+                    WsMessage::ReceiverProxyFileUploadResponse(
+                        rt_protocol::ReceiverProxyFileUploadResponse {
+                            request_id: req.request_id,
+                            ok: true,
+                            error: None,
+                            imported: count as i64,
+                        },
+                    )
+                }
+                Err(e) => WsMessage::ReceiverProxyFileUploadResponse(
+                    rt_protocol::ReceiverProxyFileUploadResponse {
+                        request_id: req.request_id,
+                        ok: false,
+                        error: Some(e.to_string()),
+                        imported: 0,
+                    },
+                ),
+            }
+        }
+        other => WsMessage::ReceiverProxyFileUploadResponse(
+            rt_protocol::ReceiverProxyFileUploadResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(format!("unknown upload_type: {other}")),
+                imported: 0,
+            },
+        ),
+    }
+}
+
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
     let token_str = match token {
         Some(t) => t,
@@ -729,6 +1089,37 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                         req,
                                     ));
                                 }
+                                Ok(WsMessage::ReceiverProxyRacesListRequest(req)) => {
+                                    pending_proxy_replies
+                                        .spawn(proxy_races_list_reply(state.clone(), req));
+                                }
+                                Ok(WsMessage::ReceiverProxyRaceCreateRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_race_create_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyRaceDeleteRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_race_delete_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyParticipantsGetRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_participants_get_reply(
+                                        state.clone(),
+                                        req,
+                                    ));
+                                }
+                                Ok(WsMessage::ReceiverProxyFileUploadRequest(req)) => {
+                                    pending_proxy_replies.spawn(proxy_file_upload_reply(
+                                        state.clone(),
+                                        device_id.clone(),
+                                        req,
+                                    ));
+                                }
                                 Ok(_) => {
                                     send_ws_error(
                                         &mut socket,
@@ -809,6 +1200,56 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                                     request_id: r.request_id.clone(),
                                                     ok: false,
                                                     error: Some("server serialization error".into()),
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyRacesListResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyRacesListResponse(
+                                                rt_protocol::ReceiverProxyRacesListResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    races: vec![],
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyRaceCreateResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyRaceCreateResponse(
+                                                rt_protocol::ReceiverProxyRaceCreateResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    race: None,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyRaceDeleteResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyRaceDeleteResponse(
+                                                rt_protocol::ReceiverProxyRaceDeleteResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyParticipantsGetResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyParticipantsGetResponse(
+                                                rt_protocol::ReceiverProxyParticipantsGetResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    participants: vec![],
+                                                    chips_without_participant: vec![],
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyFileUploadResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyFileUploadResponse(
+                                                rt_protocol::ReceiverProxyFileUploadResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    imported: 0,
                                                 },
                                             ))
                                         }
