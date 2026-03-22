@@ -388,11 +388,12 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                                                         let mut guard = st.ws_cmd_tx.write().await;
                                                         *guard = None;
                                                     }
-                                                    match result {
+                                                    match &result {
                                                         Ok(()) => {
                                                             info!("WS session ended normally");
                                                         }
                                                         Err(e) => {
+                                                            warn!(error = %e, "WS session ended with error");
                                                             st.logger.log_at(
                                                                 UiLogLevel::Error,
                                                                 format!("WS session error: {e}"),
