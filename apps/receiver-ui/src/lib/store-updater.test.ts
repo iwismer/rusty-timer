@@ -300,7 +300,7 @@ describe("receiver updater store", () => {
     expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 
-  it("onStreamsSnapshot clears metrics for newly appearing streams", async () => {
+  it("onStreamsSnapshot keeps metrics for newly appearing streams", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");
 
@@ -310,27 +310,23 @@ describe("receiver updater store", () => {
     const callbacks = sseState.callbacks;
     expect(callbacks).toBeDefined();
 
-    // Pre-populate metrics for a stream
+    // Pre-populate metrics for a stream (simulates metrics arriving before snapshot)
     const key = streamKey("fwd-new", "10.0.0.1:10000");
-    store.streamMetrics = new Map([
-      [
-        key,
-        {
-          forwarder_id: "fwd-new",
-          reader_ip: "10.0.0.1:10000",
-          raw_count: 100,
-          dedup_count: 90,
-          retransmit_count: 10,
-          lag_ms: null,
-          epoch_raw_count: 50,
-          epoch_dedup_count: 45,
-          epoch_retransmit_count: 5,
-          epoch_lag_ms: null,
-          epoch_last_received_at: null,
-          unique_chips: 20,
-        },
-      ],
-    ]);
+    const metrics = {
+      forwarder_id: "fwd-new",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 100,
+      dedup_count: 90,
+      retransmit_count: 10,
+      lag_ms: null,
+      epoch_raw_count: 50,
+      epoch_dedup_count: 45,
+      epoch_retransmit_count: 5,
+      epoch_lag_ms: null,
+      epoch_last_received_at: null,
+      unique_chips: 20,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
     // No previous streams (simulates first snapshot or stream re-appearing)
     store.streams = null;
 
@@ -346,7 +342,8 @@ describe("receiver updater store", () => {
       upstream_error: null,
     });
 
-    expect(store.streamMetrics.has(key)).toBe(false);
+    // Metrics should be preserved — only prune on known epoch changes
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 
   it("keeps cached metrics across resync until replacement data arrives", async () => {

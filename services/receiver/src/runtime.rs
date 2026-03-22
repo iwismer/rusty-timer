@@ -245,7 +245,13 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
             _ = reconcile_interval.tick() => {
                 let current_subs = {
                     let db = state.db.lock().await;
-                    db.load_subscriptions().unwrap_or_default()
+                    match db.load_subscriptions() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!(error = %e, "failed to load subscriptions during reconcile, skipping tick");
+                            continue;
+                        }
+                    }
                 };
                 if current_subs != last_subs {
                     reconcile_proxies(&current_subs, &mut proxies, &event_bus, &state.logger).await;

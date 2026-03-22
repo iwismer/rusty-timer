@@ -61,28 +61,39 @@ async fn send_stream_metrics(
     state: &AppState,
     target: &ResolvedStreamTarget,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let metrics = match fetch_stream_metrics(&state.pool, target.stream_id).await? {
-        Some(m) => m,
-        None => return Ok(()), // No metrics row yet
+    let msg = if let Some(metrics) = fetch_stream_metrics(&state.pool, target.stream_id).await? {
+        let unique_chips =
+            count_unique_chips(&state.pool, target.stream_id, target.current_stream_epoch).await?;
+        WsMessage::ReceiverStreamMetrics(rt_protocol::ReceiverStreamMetrics {
+            forwarder_id: target.forwarder_id.clone(),
+            reader_ip: target.reader_ip.clone(),
+            raw_count: metrics.raw_count,
+            dedup_count: metrics.dedup_count,
+            retransmit_count: metrics.retransmit_count,
+            lag_ms: metrics.lag_ms,
+            epoch_raw_count: metrics.epoch_raw_count,
+            epoch_dedup_count: metrics.epoch_dedup_count,
+            epoch_retransmit_count: metrics.epoch_retransmit_count,
+            epoch_lag_ms: metrics.epoch_lag_ms,
+            epoch_last_received_at: metrics.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
+            unique_chips,
+        })
+    } else {
+        WsMessage::ReceiverStreamMetrics(rt_protocol::ReceiverStreamMetrics {
+            forwarder_id: target.forwarder_id.clone(),
+            reader_ip: target.reader_ip.clone(),
+            raw_count: 0,
+            dedup_count: 0,
+            retransmit_count: 0,
+            lag_ms: None,
+            epoch_raw_count: 0,
+            epoch_dedup_count: 0,
+            epoch_retransmit_count: 0,
+            epoch_lag_ms: None,
+            epoch_last_received_at: None,
+            unique_chips: 0,
+        })
     };
-
-    let unique_chips =
-        count_unique_chips(&state.pool, target.stream_id, target.current_stream_epoch).await?;
-
-    let msg = WsMessage::ReceiverStreamMetrics(rt_protocol::ReceiverStreamMetrics {
-        forwarder_id: target.forwarder_id.clone(),
-        reader_ip: target.reader_ip.clone(),
-        raw_count: metrics.raw_count,
-        dedup_count: metrics.dedup_count,
-        retransmit_count: metrics.retransmit_count,
-        lag_ms: metrics.lag_ms,
-        epoch_raw_count: metrics.epoch_raw_count,
-        epoch_dedup_count: metrics.epoch_dedup_count,
-        epoch_retransmit_count: metrics.epoch_retransmit_count,
-        epoch_lag_ms: metrics.epoch_lag_ms,
-        epoch_last_received_at: metrics.epoch_last_received_at.map(|ts| ts.to_rfc3339()),
-        unique_chips,
-    });
     let json = serde_json::to_string(&msg)?;
     socket.send(Message::Text(json.into())).await?;
     Ok(())
@@ -1181,10 +1192,15 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                     session_id: session_id.clone(),
                     events: events_to_send,
                 });
-                if let Ok(json) = serde_json::to_string(&batch)
-                    && socket.send(Message::Text(json.into())).await.is_err()
-                {
-                    break;
+                match serde_json::to_string(&batch) {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!(device_id = %device_id, error = %e, "failed to serialize event batch for receiver");
+                    }
                 }
                 sent_live_batch = true;
             }
@@ -1542,15 +1558,22 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                     epoch_last_received_at,
                                     unique_chips,
                                 });
-                                if let Ok(json) = serde_json::to_string(&msg)
-                                    && socket.send(Message::Text(json.into())).await.is_err()
-                                {
-                                    break;
+                                match serde_json::to_string(&msg) {
+                                    Ok(json) => {
+                                        if socket.send(Message::Text(json.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(device_id = %device_id, error = %e, "failed to serialize live stream metrics for receiver");
+                                    }
                                 }
                             }
                         }
                         Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(device_id = %device_id, skipped = n, "receiver dashboard event channel lagged, metrics updates may have been dropped");
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }

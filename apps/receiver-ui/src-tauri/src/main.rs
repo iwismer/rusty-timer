@@ -562,10 +562,14 @@ fn spawn_event_bridge(app_handle: tauri::AppHandle, state: &Arc<AppState>) {
         while let Some(item) = stream.next().await {
             match bridge_action_from_item(item) {
                 BridgeAction::EmitEvent { name, event } => {
-                    let _ = handle.emit(name, &event);
+                    if let Err(e) = handle.emit(name, &event) {
+                        warn!(event_name = name, error = %e, "failed to emit UI event to webview");
+                    }
                 }
                 BridgeAction::EmitResync => {
-                    let _ = handle.emit("resync", ());
+                    if let Err(e) = handle.emit("resync", ()) {
+                        warn!(error = %e, "failed to emit resync event to webview");
+                    }
                 }
             }
         }
