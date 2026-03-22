@@ -18,6 +18,7 @@ export interface StreamEntry {
   local_port: number | null;
   event_type?: "start" | "finish";
   online?: boolean;
+  reader_connected?: boolean;
   display_alias?: string;
   stream_epoch?: number;
   current_epoch_name?: string | null;

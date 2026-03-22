@@ -45,8 +45,12 @@
     return availableLastReadWidth() >= TIME_W;
   }
 
-  function dotClass(online: boolean | undefined | null): string {
-    if (online === true) return "bg-status-ok";
+  function dotClass(
+    online: boolean | undefined | null,
+    readerConnected: boolean | undefined | null,
+  ): string {
+    if (online === true && readerConnected === true) return "bg-status-ok";
+    if (online === true && readerConnected !== true) return "bg-status-warn";
     if (online === false) return "bg-status-err";
     return "bg-status-warn";
   }
@@ -218,6 +222,7 @@
                   <span
                     class="w-2.5 h-2.5 rounded-full shrink-0 {dotClass(
                       stream.online,
+                      stream.reader_connected,
                     )}"
                   ></span>
                   <span class="text-text-primary">

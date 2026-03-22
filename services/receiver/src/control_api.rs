@@ -280,6 +280,7 @@ impl AppState {
                     local_port: port,
                     event_type: local.map(|s| s.event_type),
                     online: Some(si.online),
+                    reader_connected: Some(si.reader_connected),
                     display_alias: si.display_alias.clone(),
                     stream_epoch: Some(si.stream_epoch),
                     current_epoch_name: si.current_epoch_name.clone(),
@@ -310,6 +311,7 @@ impl AppState {
                 local_port: port,
                 event_type: Some(sub.event_type),
                 online: None,
+                reader_connected: None,
                 display_alias: None,
                 stream_epoch: None,
                 current_epoch_name: None,
@@ -423,6 +425,8 @@ pub struct StreamEntry {
     pub event_type: Option<crate::db::EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reader_connected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -541,6 +545,8 @@ pub struct UpstreamStreamInfo {
     pub display_alias: Option<String>,
     pub stream_epoch: i64,
     pub online: bool,
+    #[serde(default)]
+    pub reader_connected: bool,
     pub current_epoch_name: Option<String>,
 }
 
