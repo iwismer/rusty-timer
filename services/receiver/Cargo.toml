@@ -29,6 +29,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 getrandom = "0.4"
 ipico-core = { path = "../../crates/ipico-core" }
 dbase = { version = "0.7", features = ["serde", "yore"] }
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
