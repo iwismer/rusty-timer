@@ -406,6 +406,79 @@ describe("receiver updater store", () => {
     expect(store.streamMetrics.get(key)).toEqual(metrics);
   });
 
+  it("onStreamsSnapshot clears metrics after reconnect when the concrete epoch changed", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    const metrics = {
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      raw_count: 12,
+      dedup_count: 11,
+      retransmit_count: 1,
+      lag_ms: 500,
+      epoch_raw_count: 7,
+      epoch_dedup_count: 6,
+      epoch_retransmit_count: 1,
+      epoch_lag_ms: 200,
+      epoch_last_received_at: "2026-03-21T12:00:00Z",
+      unique_chips: 4,
+    };
+    store.streamMetrics = new Map([[key, metrics]]);
+    store.streams = {
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 1,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: undefined,
+        } as any,
+      ],
+      degraded: true,
+      upstream_error: "connection state: Connecting",
+    });
+
+    expect(store.streamMetrics.get(key)).toEqual(metrics);
+
+    callbacks?.onStreamsSnapshot({
+      streams: [
+        {
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 7001,
+          stream_epoch: 2,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    });
+
+    expect(store.streamMetrics.has(key)).toBe(false);
+  });
+
   it("keeps cached metrics across resync until replacement data arrives", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");

@@ -130,6 +130,7 @@ let modeHydrationVersion = 0;
 let modeEditVersion = 0;
 let modeMutationVersion = 0;
 let streamRefreshVersion = 0;
+let lastConcreteEpochByKey = new Map<string, number>();
 
 // Load queue
 let loadAllInFlight = false;
@@ -221,6 +222,46 @@ export function setTargetedEpochInputs(value: Record<string, string>): void {
 
 export function streamKey(forwarder_id: string, reader_ip: string): string {
   return `${forwarder_id}/${reader_ip}`;
+}
+
+function captureConcreteEpochs(
+  streams: readonly api.StreamEntry[],
+): Map<string, number> {
+  const concreteEpochs = new Map(lastConcreteEpochByKey);
+  for (const stream of streams) {
+    if (stream.stream_epoch != null) {
+      concreteEpochs.set(
+        streamKey(stream.forwarder_id, stream.reader_ip),
+        stream.stream_epoch,
+      );
+    }
+  }
+  return concreteEpochs;
+}
+
+function nextConcreteEpochs(
+  previousConcreteEpochs: ReadonlyMap<string, number>,
+  streams: readonly api.StreamEntry[],
+): Map<string, number> {
+  const next = new Map<string, number>();
+  const currentKeys = new Set(
+    streams.map((stream) => streamKey(stream.forwarder_id, stream.reader_ip)),
+  );
+  for (const key of currentKeys) {
+    const previousEpoch = previousConcreteEpochs.get(key);
+    if (previousEpoch != null) {
+      next.set(key, previousEpoch);
+    }
+  }
+  for (const stream of streams) {
+    if (stream.stream_epoch != null) {
+      next.set(
+        streamKey(stream.forwarder_id, stream.reader_ip),
+        stream.stream_epoch,
+      );
+    }
+  }
+  return next;
 }
 
 export function parseStreamKey(value: string): api.StreamRef | null {
@@ -595,6 +636,10 @@ export async function loadAll(): Promise<void> {
     store.status = nextStatus;
     if (streamRefreshVersion === streamRefreshVersionAtStart) {
       store.streams = nextStreams;
+      lastConcreteEpochByKey = nextConcreteEpochs(
+        captureConcreteEpochs([]),
+        nextStreams.streams,
+      );
       void prefetchEarliestEpochOptions(nextStreams.streams);
     }
     store.logEntries = nextLogs.entries;
@@ -1133,6 +1178,9 @@ export function initStore(): void {
           st.stream_epoch,
         ]),
       );
+      const previousConcreteEpochByKey = captureConcreteEpochs(
+        store.streams?.streams ?? [],
+      );
       const refreshAllKeys = new Set(
         s.streams.map((st) => streamKey(st.forwarder_id, st.reader_ip)),
       );
@@ -1150,14 +1198,26 @@ export function initStore(): void {
       for (const stream of s.streams) {
         const key = streamKey(stream.forwarder_id, stream.reader_ip);
         const prevEpoch = previousEpochByKey.get(key);
+        const prevConcreteEpoch = previousConcreteEpochByKey.get(key);
         if (
           prevEpoch != null &&
           stream.stream_epoch != null &&
           prevEpoch !== stream.stream_epoch
         ) {
           prunedMetrics.delete(key);
+        } else if (
+          prevEpoch == null &&
+          stream.stream_epoch != null &&
+          prevConcreteEpoch != null &&
+          prevConcreteEpoch !== stream.stream_epoch
+        ) {
+          prunedMetrics.delete(key);
         }
       }
+      lastConcreteEpochByKey = nextConcreteEpochs(
+        previousConcreteEpochByKey,
+        s.streams,
+      );
       store.streamMetrics = prunedMetrics;
     },
     onLogEntry: (entry) => {
