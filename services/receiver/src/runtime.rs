@@ -1116,6 +1116,12 @@ where
                     });
                 }
             }
+            Ok(WsMessage::ReceiverStreamMetrics(metrics)) => {
+                let payload = crate::ui_events::StreamMetricsPayload::from_ws(&metrics);
+                let _ = ui_tx.send(crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(
+                    payload,
+                ));
+            }
             Ok(WsMessage::Error(err)) => {
                 return (
                     Err(crate::session::SessionError::ServerError(format!(
