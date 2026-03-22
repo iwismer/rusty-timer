@@ -436,7 +436,9 @@ async fn receiver_v12_live_keeps_streaming_while_forwarder_proxy_request_is_pend
             .unwrap()
         {
             WsMessage::ReceiverProxyConfigGetResponse(resp) => break resp,
-            WsMessage::ReceiverModeApplied(_) | WsMessage::Heartbeat(_) => continue,
+            WsMessage::ReceiverModeApplied(_)
+            | WsMessage::Heartbeat(_)
+            | WsMessage::ReceiverStreamMetrics(_) => continue,
             other => panic!("expected proxy response, got {other:?}"),
         }
     };
