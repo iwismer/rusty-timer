@@ -913,45 +913,134 @@ pub async fn get_streams(state: &AppState) -> StreamsResponse {
 }
 
 pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverError> {
-    let profile = {
-        let db = state.db.lock().await;
-        match db.load_profile() {
-            Ok(Some(p)) => p,
-            Ok(None) => return Err(ReceiverError::NotFound("no profile".to_owned())),
-            Err(e) => return Err(ReceiverError::Internal(e.to_string())),
+    let msg = rt_protocol::WsMessage::ReceiverProxyRacesListRequest(
+        rt_protocol::ReceiverProxyRacesListRequest {
+            request_id: generate_request_id(),
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyRacesListResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({ "races": r.races }))
         }
-    };
-
-    let Some(base) = http_base_url(&profile.server_url) else {
-        return Err(ReceiverError::BadRequest("invalid upstream URL".to_owned()));
-    };
-    let url = format!("{base}/api/v1/races");
-
-    let response = match state
-        .http_client
-        .get(&url)
-        .bearer_auth(profile.token)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return Err(ReceiverError::UpstreamError(format!("fetch failed: {e}")));
-        }
-    };
-
-    if !response.status().is_success() {
-        return Err(ReceiverError::UpstreamError(format!(
-            "server returned {}",
-            response.status()
-        )));
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
     }
+}
 
-    match response.json::<serde_json::Value>().await {
-        Ok(body) => Ok(body),
-        Err(e) => Err(ReceiverError::UpstreamError(format!(
-            "invalid JSON from upstream: {e}"
-        ))),
+pub async fn create_race(
+    state: &AppState,
+    name: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyRaceCreateRequest(
+        rt_protocol::ReceiverProxyRaceCreateRequest {
+            request_id: generate_request_id(),
+            name,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyRaceCreateResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!(r.race))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn delete_race(state: &AppState, race_id: String) -> Result<(), ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyRaceDeleteRequest(
+        rt_protocol::ReceiverProxyRaceDeleteRequest {
+            request_id: generate_request_id(),
+            race_id,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyRaceDeleteResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn get_participants(
+    state: &AppState,
+    race_id: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyParticipantsGetRequest(
+        rt_protocol::ReceiverProxyParticipantsGetRequest {
+            request_id: generate_request_id(),
+            race_id,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyParticipantsGetResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({
+                "participants": r.participants,
+                "chips_without_participant": r.chips_without_participant,
+            }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn upload_race_file(
+    state: &AppState,
+    race_id: String,
+    upload_type: String,
+    file_data: String,
+    file_name: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyFileUploadRequest(
+        rt_protocol::ReceiverProxyFileUploadRequest {
+            request_id: generate_request_id(),
+            race_id,
+            upload_type,
+            file_data,
+            file_name,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyFileUploadResponse(r) => {
+            if !r.ok {
+                return Err(ReceiverError::UpstreamError(
+                    r.error.unwrap_or_else(|| "unknown error".to_owned()),
+                ));
+            }
+            Ok(serde_json::json!({ "imported": r.imported }))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
     }
 }
 
