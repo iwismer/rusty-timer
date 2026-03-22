@@ -1730,10 +1730,7 @@ mod tests {
             None
         );
         assert_eq!(
-            consume_sse_line_for_event(
-                "data: {\"type\":\"stream_updated\"}",
-                &mut pending_event
-            ),
+            consume_sse_line_for_event("data: {\"type\":\"stream_updated\"}", &mut pending_event),
             None
         );
         assert_eq!(
@@ -1758,10 +1755,7 @@ mod tests {
             consume_sse_line_for_event("data: keepalive", &mut pending_event),
             None
         );
-        assert_eq!(
-            consume_sse_line_for_event("", &mut pending_event),
-            None
-        );
+        assert_eq!(consume_sse_line_for_event("", &mut pending_event), None);
     }
 
     #[test]
@@ -1797,29 +1791,17 @@ mod tests {
 
         consume_sse_line_for_event("event: stream_created", &mut pending_event);
         let result = consume_sse_line_for_event("", &mut pending_event);
-        assert_eq!(
-            result,
-            Some(("stream_created".to_owned(), "".to_owned()))
-        );
+        assert_eq!(result, Some(("stream_created".to_owned(), "".to_owned())));
     }
 
     #[test]
     fn sse_parser_concatenates_multiline_data() {
         let mut pending_event = PendingSseEvent::default();
-        assert!(
-            consume_sse_line_for_event("event:test", &mut pending_event).is_none()
-        );
-        assert!(
-            consume_sse_line_for_event("data:line1", &mut pending_event).is_none()
-        );
-        assert!(
-            consume_sse_line_for_event("data:line2", &mut pending_event).is_none()
-        );
+        assert!(consume_sse_line_for_event("event:test", &mut pending_event).is_none());
+        assert!(consume_sse_line_for_event("data:line1", &mut pending_event).is_none());
+        assert!(consume_sse_line_for_event("data:line2", &mut pending_event).is_none());
         let result = consume_sse_line_for_event("", &mut pending_event);
-        assert_eq!(
-            result,
-            Some(("test".to_owned(), "line1\nline2".to_owned()))
-        );
+        assert_eq!(result, Some(("test".to_owned(), "line1\nline2".to_owned())));
     }
 
     #[test]

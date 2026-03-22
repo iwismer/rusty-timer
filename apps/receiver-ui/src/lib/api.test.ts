@@ -345,6 +345,7 @@ describe("sse client", () => {
       onConnectionChange: vi.fn(),
       onStreamCountsUpdated: vi.fn(),
       onForwarderMetricsUpdated: vi.fn(),
+      onStreamMetricsUpdated: vi.fn(),
       onModeChanged: vi.fn(),
       onLastRead: vi.fn(),
     };
