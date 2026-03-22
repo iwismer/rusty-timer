@@ -887,15 +887,20 @@ export async function confirmUpdateInstall(): Promise<void> {
 
 // --------------- SSE + Init ---------------
 
-function applyForwarderLastRead(forwarderId: string, lastReadAt: string): void {
+function applyForwarderMetricsUpdate(update: api.ForwarderMetricsUpdate): void {
   if (!store.forwarders) return;
-  const idx = store.forwarders.findIndex((f) => f.forwarder_id === forwarderId);
+  const idx = store.forwarders.findIndex(
+    (f) => f.forwarder_id === update.forwarder_id,
+  );
   if (idx === -1) return;
 
-  const fwd = { ...store.forwarders[idx] };
-  fwd.last_read_at = lastReadAt;
   const next = [...store.forwarders];
-  next[idx] = fwd;
+  next[idx] = {
+    ...next[idx],
+    unique_chips: update.unique_chips,
+    total_reads: update.total_reads,
+    last_read_at: update.last_read_at,
+  };
   store.forwarders = next;
 }
 
@@ -986,6 +991,9 @@ export function initStore(): void {
       const needsResync = applyStreamCountUpdates(updates);
       if (needsResync) void loadAll();
     },
+    onForwarderMetricsUpdated: (update) => {
+      applyForwarderMetricsUpdate(update);
+    },
     onModeChanged: (mode) => {
       applyHydratedMode(mode);
     },
@@ -994,7 +1002,6 @@ export function initStore(): void {
       const next = new Map(store.lastReads);
       next.set(key, read);
       store.lastReads = next;
-      applyForwarderLastRead(read.forwarder_id, new Date().toISOString());
     },
     onStreamMetricsUpdated: (metrics) => {
       const key = streamKey(metrics.forwarder_id, metrics.reader_ip);

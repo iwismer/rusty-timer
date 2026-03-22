@@ -54,6 +54,13 @@ impl StreamMetricsPayload {
     }
 }
 
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct ForwarderMetricsUpdate {
+    pub forwarder_id: String,
+    pub unique_chips: i64,
+    pub total_reads: i64,
+    pub last_read_at: Option<String>,
+}
 /// Extract chip ID from IPICO raw frame bytes.
 /// The raw frame is ASCII text; characters 4..16 are the chip identifier
 /// (e.g. "000000012345"), matching the server's `tag_id` format.
@@ -91,6 +98,7 @@ pub enum ReceiverUiEvent {
     StreamCountsUpdated {
         updates: Vec<StreamCountUpdate>,
     },
+    ForwarderMetricsUpdated(ForwarderMetricsUpdate),
     ModeChanged {
         mode: rt_protocol::ReceiverMode,
     },
@@ -175,6 +183,22 @@ mod tests {
         assert_eq!(json["type"], "mode_changed");
         assert_eq!(json["mode"]["mode"], "race");
         assert_eq!(json["mode"]["race_id"], "race-1");
+    }
+
+    #[test]
+    fn forwarder_metrics_updated_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::ForwarderMetricsUpdated(ForwarderMetricsUpdate {
+            forwarder_id: "fwd-01".to_owned(),
+            unique_chips: 4,
+            total_reads: 15,
+            last_read_at: Some("2026-03-21T12:34:56.000Z".to_owned()),
+        });
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "forwarder_metrics_updated");
+        assert_eq!(json["forwarder_id"], "fwd-01");
+        assert_eq!(json["unique_chips"], 4);
+        assert_eq!(json["total_reads"], 15);
+        assert_eq!(json["last_read_at"], "2026-03-21T12:34:56.000Z");
     }
 
     #[test]

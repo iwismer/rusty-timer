@@ -26,6 +26,41 @@ struct ForwardersListResponse {
     forwarders: Vec<ForwarderListEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwarderMetricsSnapshot {
+    pub forwarder_id: String,
+    pub unique_chips: i64,
+    pub total_reads: i64,
+    pub last_read_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub async fn fetch_forwarder_metrics(
+    pool: &sqlx::PgPool,
+    forwarder_id: &str,
+) -> Result<Option<ForwarderMetricsSnapshot>, sqlx::Error> {
+    sqlx::query(
+        r#"SELECT s.forwarder_id,
+                  COUNT(DISTINCT e.tag_id) AS unique_chips,
+                  COUNT(e.stream_id) AS total_reads,
+                  MAX(e.received_at) AS last_read_at
+           FROM streams s
+           LEFT JOIN events e ON e.stream_id = s.stream_id AND e.stream_epoch = s.stream_epoch
+           WHERE s.forwarder_id = $1
+           GROUP BY s.forwarder_id"#,
+    )
+    .bind(forwarder_id)
+    .fetch_optional(pool)
+    .await
+    .map(|row| {
+        row.map(|row| ForwarderMetricsSnapshot {
+            forwarder_id: row.get("forwarder_id"),
+            unique_chips: row.get("unique_chips"),
+            total_reads: row.get("total_reads"),
+            last_read_at: row.get("last_read_at"),
+        })
+    })
+}
+
 /// GET /api/v1/forwarders — returns all known forwarders with reader connection
 /// status, unique chip counts, total reads, and last-read timestamp.
 /// Stats are scoped to each stream's current epoch.

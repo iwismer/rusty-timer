@@ -38,6 +38,7 @@ fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
         ReceiverUiEvent::LogEntry { .. } => "log_entry",
         ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
+        ReceiverUiEvent::ForwarderMetricsUpdated(_) => "forwarder_metrics_updated",
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
         ReceiverUiEvent::LastRead(_) => "last_read",
         ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",

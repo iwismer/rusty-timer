@@ -558,15 +558,33 @@ async fn refresh_dashboard_snapshot(state: &Arc<AppState>) {
     state.emit_streams_snapshot().await;
 }
 
+#[derive(Default)]
+struct PendingSseEvent {
+    event_name: Option<String>,
+    data_lines: Vec<String>,
+}
+
+fn parse_forwarder_metrics_dashboard_event(
+    event_name: &str,
+    data: &str,
+) -> Option<crate::ui_events::ForwarderMetricsUpdate> {
+    if event_name != "forwarder_metrics_updated" {
+        return None;
+    }
+    serde_json::from_str(data).ok()
+}
+
 fn consume_sse_line_for_event(
     line: &str,
-    pending_event: &mut Option<String>,
-    pending_data: &mut Option<String>,
-) -> Option<(String, Option<String>)> {
+    pending_event: &mut PendingSseEvent,
+) -> Option<(String, String)> {
     if line.is_empty() {
-        let event = pending_event.take();
-        let data = pending_data.take();
-        return event.map(|e| (e, data));
+        let data = pending_event.data_lines.join("\n");
+        pending_event.data_lines.clear();
+        return pending_event
+            .event_name
+            .take()
+            .map(|event_name| (event_name, data));
     }
     if line.starts_with(':') {
         return None;
@@ -574,19 +592,14 @@ fn consume_sse_line_for_event(
     if let Some(rest) = line.strip_prefix("event:") {
         let event_name = rest.trim();
         if event_name.is_empty() {
-            pending_event.take();
-            pending_data.take();
+            pending_event.event_name = None;
+            pending_event.data_lines.clear();
         } else {
-            *pending_event = Some(event_name.to_owned());
+            pending_event.event_name = Some(event_name.to_owned());
+            pending_event.data_lines.clear();
         }
     } else if let Some(rest) = line.strip_prefix("data:") {
-        match pending_data {
-            Some(existing) => {
-                existing.push('\n');
-                existing.push_str(rest.trim());
-            }
-            None => *pending_data = Some(rest.trim().to_owned()),
-        }
+        pending_event.data_lines.push(rest.trim_start().to_owned());
     }
     None
 }
@@ -698,8 +711,7 @@ async fn consume_upstream_dashboard_events(
 ) -> Result<(), String> {
     let mut response = response;
     let mut pending_line_bytes: Vec<u8> = Vec::new();
-    let mut pending_event: Option<String> = None;
-    let mut pending_data: Option<String> = None;
+    let mut pending_event = PendingSseEvent::default();
 
     loop {
         if *state.connection_state.borrow() != ConnectionState::Connected {
@@ -725,9 +737,13 @@ async fn consume_upstream_dashboard_events(
             }
 
             let line = String::from_utf8_lossy(&line_bytes).into_owned();
-            if let Some((event_name, _data)) =
-                consume_sse_line_for_event(&line, &mut pending_event, &mut pending_data)
+            if let Some((event_name, data)) = consume_sse_line_for_event(&line, &mut pending_event)
             {
+                if let Some(metrics) = parse_forwarder_metrics_dashboard_event(&event_name, &data) {
+                    let _ = state.ui_tx.send(
+                        crate::ui_events::ReceiverUiEvent::ForwarderMetricsUpdated(metrics),
+                    );
+                }
                 if should_refresh_stream_snapshot_for_dashboard_event(&event_name) {
                     refresh_dashboard_snapshot(state).await;
                 }
@@ -1708,121 +1724,128 @@ mod tests {
 
     #[test]
     fn sse_event_parsing_emits_completed_event_name_on_frame_boundary() {
-        let mut pending_event = None;
-        let mut pending_data = None;
+        let mut pending_event = PendingSseEvent::default();
         assert_eq!(
-            consume_sse_line_for_event(
-                "event: stream_updated",
-                &mut pending_event,
-                &mut pending_data
-            ),
+            consume_sse_line_for_event("event: stream_updated", &mut pending_event),
             None
         );
         assert_eq!(
             consume_sse_line_for_event(
                 "data: {\"type\":\"stream_updated\"}",
-                &mut pending_event,
-                &mut pending_data
+                &mut pending_event
             ),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("", &mut pending_event, &mut pending_data),
+            consume_sse_line_for_event("", &mut pending_event),
             Some((
                 "stream_updated".to_owned(),
-                Some("{\"type\":\"stream_updated\"}".to_owned())
+                "{\"type\":\"stream_updated\"}".to_owned()
             ))
         );
-        assert_eq!(pending_event, None);
-        assert_eq!(pending_data, None);
+        assert!(pending_event.event_name.is_none());
+        assert!(pending_event.data_lines.is_empty());
     }
 
     #[test]
     fn sse_event_parsing_ignores_comments_and_data_only_frames() {
-        let mut pending_event = None;
-        let mut pending_data = None;
+        let mut pending_event = PendingSseEvent::default();
         assert_eq!(
-            consume_sse_line_for_event(": keepalive", &mut pending_event, &mut pending_data),
+            consume_sse_line_for_event(": keepalive", &mut pending_event),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("data: keepalive", &mut pending_event, &mut pending_data),
+            consume_sse_line_for_event("data: keepalive", &mut pending_event),
             None
         );
         assert_eq!(
-            consume_sse_line_for_event("", &mut pending_event, &mut pending_data),
+            consume_sse_line_for_event("", &mut pending_event),
             None
         );
     }
 
     #[test]
     fn sse_parser_captures_data_payload() {
-        let mut pending_event: Option<String> = None;
-        let mut pending_data: Option<String> = None;
+        let mut pending_event = PendingSseEvent::default();
 
         assert_eq!(
-            consume_sse_line_for_event(
-                "event: metrics_updated",
-                &mut pending_event,
-                &mut pending_data
-            ),
+            consume_sse_line_for_event("event: metrics_updated", &mut pending_event),
             None
         );
         assert_eq!(
             consume_sse_line_for_event(
                 r#"data: {"stream_id":"abc","raw_count":10}"#,
-                &mut pending_event,
-                &mut pending_data
+                &mut pending_event
             ),
             None
         );
-        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        let result = consume_sse_line_for_event("", &mut pending_event);
         assert_eq!(
             result,
             Some((
                 "metrics_updated".to_owned(),
-                Some(r#"{"stream_id":"abc","raw_count":10}"#.to_owned())
+                r#"{"stream_id":"abc","raw_count":10}"#.to_owned()
             ))
         );
-        assert_eq!(pending_event, None);
-        assert_eq!(pending_data, None);
+        assert!(pending_event.event_name.is_none());
+        assert!(pending_event.data_lines.is_empty());
     }
 
     #[test]
-    fn sse_parser_returns_none_data_when_no_data_line() {
-        let mut pending_event: Option<String> = None;
-        let mut pending_data: Option<String> = None;
+    fn sse_parser_returns_empty_data_when_no_data_line() {
+        let mut pending_event = PendingSseEvent::default();
 
-        consume_sse_line_for_event(
-            "event: stream_created",
-            &mut pending_event,
-            &mut pending_data,
+        consume_sse_line_for_event("event: stream_created", &mut pending_event);
+        let result = consume_sse_line_for_event("", &mut pending_event);
+        assert_eq!(
+            result,
+            Some(("stream_created".to_owned(), "".to_owned()))
         );
-        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
-        assert_eq!(result, Some(("stream_created".to_owned(), None)));
     }
 
     #[test]
     fn sse_parser_concatenates_multiline_data() {
-        let mut pending_event = None;
-        let mut pending_data = None;
+        let mut pending_event = PendingSseEvent::default();
         assert!(
-            consume_sse_line_for_event("event:test", &mut pending_event, &mut pending_data)
-                .is_none()
+            consume_sse_line_for_event("event:test", &mut pending_event).is_none()
         );
         assert!(
-            consume_sse_line_for_event("data:line1", &mut pending_event, &mut pending_data)
-                .is_none()
+            consume_sse_line_for_event("data:line1", &mut pending_event).is_none()
         );
         assert!(
-            consume_sse_line_for_event("data:line2", &mut pending_event, &mut pending_data)
-                .is_none()
+            consume_sse_line_for_event("data:line2", &mut pending_event).is_none()
         );
-        let result = consume_sse_line_for_event("", &mut pending_event, &mut pending_data);
+        let result = consume_sse_line_for_event("", &mut pending_event);
         assert_eq!(
             result,
-            Some(("test".to_owned(), Some("line1\nline2".to_owned())))
+            Some(("test".to_owned(), "line1\nline2".to_owned()))
         );
+    }
+
+    #[test]
+    fn parse_forwarder_metrics_dashboard_event_extracts_payload() {
+        let parsed = parse_forwarder_metrics_dashboard_event(
+            "forwarder_metrics_updated",
+            r#"{"type":"forwarder_metrics_updated","forwarder_id":"fwd-1","unique_chips":4,"total_reads":15,"last_read_at":"2026-03-21T12:34:56.000Z"}"#,
+        )
+        .expect("forwarder metrics payload should parse");
+        assert_eq!(parsed.forwarder_id, "fwd-1");
+        assert_eq!(parsed.unique_chips, 4);
+        assert_eq!(parsed.total_reads, 15);
+        assert_eq!(
+            parsed.last_read_at.as_deref(),
+            Some("2026-03-21T12:34:56.000Z")
+        );
+    }
+
+    #[test]
+    fn dashboard_event_filter_does_not_trigger_stream_snapshot_for_forwarder_metrics() {
+        assert!(!should_refresh_stream_snapshot_for_dashboard_event(
+            "forwarder_metrics_updated"
+        ));
+        assert!(!should_emit_receiver_resync_for_dashboard_event(
+            "forwarder_metrics_updated"
+        ));
     }
 
     #[tokio::test]

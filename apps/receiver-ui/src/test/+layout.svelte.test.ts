@@ -138,7 +138,7 @@ describe("receiver layout SSE updates", () => {
     });
   });
 
-  it("keeps forwarder counts server-authored while updating last_read_at", async () => {
+  it("updates forwarder counts from authoritative forwarder_metrics_updated events", async () => {
     apiMocks.getForwarders.mockResolvedValueOnce({
       forwarders: [
         {
@@ -176,35 +176,19 @@ describe("receiver layout SSE updates", () => {
     expect(store.forwarders?.[0]?.total_reads).toBe(10);
     expect(store.forwarders?.[0]?.unique_chips).toBe(3);
 
-    callbacks.onLastRead({
+    callbacks.onForwarderMetricsUpdated({
       forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1:10000",
-      chip_id: "chip-4",
-      timestamp: "2026-03-21T12:34:56.000Z",
-      bib: null,
-      name: null,
+      unique_chips: 4,
+      total_reads: 15,
+      last_read_at: "2026-03-21T12:34:56.000Z",
     });
 
-    expect(store.forwarders?.[0]?.unique_chips).toBe(3);
+    expect(store.forwarders?.[0]?.total_reads).toBe(15);
+    expect(store.forwarders?.[0]?.unique_chips).toBe(4);
 
-    // last_read_at should be wall-clock ISO (not the raw reader timestamp)
+    // last_read_at should come from the authoritative server event.
     const lastReadAt = store.forwarders?.[0]?.last_read_at;
-    expect(lastReadAt).toBeTruthy();
-    expect(new Date(lastReadAt!).getTime()).not.toBeNaN();
-    expect(Math.abs(new Date(lastReadAt!).getTime() - Date.now())).toBeLessThan(
-      5000,
-    );
-
-    // Same chip again should NOT bump unique_chips
-    callbacks.onLastRead({
-      forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1:10000",
-      chip_id: "chip-4",
-      timestamp: "2026-03-21T12:35:00.000Z",
-      bib: null,
-      name: null,
-    });
-    expect(store.forwarders?.[0]?.unique_chips).toBe(3);
+    expect(lastReadAt).toBe("2026-03-21T12:34:56.000Z");
   });
 
   it("clears stale forwarders on refresh failure so the error state is shown", async () => {

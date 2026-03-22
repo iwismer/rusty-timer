@@ -75,6 +75,34 @@ async fn publish_stream_created(state: &AppState, stream_id: Uuid) {
     }
 }
 
+async fn publish_forwarder_metrics_updated(state: &AppState, forwarder_id: &str) {
+    match crate::http::forwarders_list::fetch_forwarder_metrics(&state.pool, forwarder_id).await {
+        Ok(Some(metrics)) => {
+            let _ = state
+                .dashboard_tx
+                .send(DashboardEvent::ForwarderMetricsUpdated {
+                    forwarder_id: metrics.forwarder_id,
+                    unique_chips: metrics.unique_chips,
+                    total_reads: metrics.total_reads,
+                    last_read_at: metrics.last_read_at.map(|ts| ts.to_rfc3339()),
+                });
+        }
+        Ok(None) => {
+            warn!(
+                forwarder_id = %forwarder_id,
+                "forwarder metrics update requested for unknown forwarder"
+            );
+        }
+        Err(e) => {
+            error!(
+                forwarder_id = %forwarder_id,
+                error = %e,
+                "failed to fetch forwarder metrics for dashboard update"
+            );
+        }
+    }
+}
+
 fn created_reader_ips_for_logging<'a>(
     requested_reader_ips: &'a [String],
     stream_map: &HashMap<String, Uuid>,
@@ -1067,6 +1095,8 @@ async fn handle_event_batch(
             last_reader_timestamp: m.last_reader_timestamp.clone(),
         });
     }
+
+    publish_forwarder_metrics_updated(state, device_id).await;
 
     Ok(())
 }

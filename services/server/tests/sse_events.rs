@@ -60,7 +60,7 @@ fn find_all_sse_event_data(collected: &str, event_name: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn test_sse_emits_stream_created_and_metrics_updated() {
+async fn test_sse_emits_stream_created_metrics_updated_and_forwarder_metrics_updated() {
     // 1. Start Postgres container
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
@@ -142,7 +142,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
         events: vec![ReadEvent {
             forwarder_id: "fwd-sse".to_owned(),
             reader_ip: "192.168.100.1:10000".to_owned(),
-            stream_epoch: 1,
+            stream_epoch: 7,
             seq: 1,
             reader_timestamp: "2026-02-17T12:00:00.000Z".to_owned(),
             raw_frame: "SSE_TEST_LINE".as_bytes().to_vec(),
@@ -165,6 +165,7 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     let mut collected = String::new();
     let mut saw_stream_created = false;
     let mut saw_metrics_updated = false;
+    let mut saw_forwarder_metrics_updated = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     while tokio::time::Instant::now() < deadline {
@@ -178,7 +179,10 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
                 if collected.contains("event: metrics_updated") {
                     saw_metrics_updated = true;
                 }
-                if saw_stream_created && saw_metrics_updated {
+                if collected.contains("event: forwarder_metrics_updated") {
+                    saw_forwarder_metrics_updated = true;
+                }
+                if saw_stream_created && saw_metrics_updated && saw_forwarder_metrics_updated {
                     break;
                 }
             }
@@ -205,6 +209,11 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     assert!(
         saw_metrics_updated,
         "expected 'event: metrics_updated' in SSE stream, got:\n{}",
+        collected
+    );
+    assert!(
+        saw_forwarder_metrics_updated,
+        "expected 'event: forwarder_metrics_updated' in SSE stream, got:\n{}",
         collected
     );
 
@@ -238,18 +247,34 @@ async fn test_sse_emits_stream_created_and_metrics_updated() {
     assert_eq!(metrics_updated_json["raw_count"].as_i64(), Some(1));
     assert_eq!(metrics_updated_json["dedup_count"].as_i64(), Some(1));
     assert_eq!(metrics_updated_json["retransmit_count"].as_i64(), Some(0));
-    assert_eq!(metrics_updated_json["epoch_raw_count"].as_i64(), Some(0));
-    assert_eq!(metrics_updated_json["epoch_dedup_count"].as_i64(), Some(0));
+    assert_eq!(metrics_updated_json["epoch_raw_count"].as_i64(), Some(1));
+    assert_eq!(metrics_updated_json["epoch_dedup_count"].as_i64(), Some(1));
     assert_eq!(
         metrics_updated_json["epoch_retransmit_count"].as_i64(),
         Some(0)
     );
-    assert_eq!(metrics_updated_json["epoch_lag_ms"].as_i64(), None);
-    assert_eq!(
-        metrics_updated_json["epoch_last_received_at"].as_str(),
-        None
-    );
+    assert!(metrics_updated_json["epoch_lag_ms"].is_number());
+    assert!(metrics_updated_json["epoch_last_received_at"].is_string());
     assert_eq!(metrics_updated_json["unique_chips"].as_i64(), Some(0));
+
+    let forwarder_metrics_updated_data =
+        find_sse_event_data(&collected, "forwarder_metrics_updated")
+            .expect("missing forwarder_metrics_updated payload");
+    let forwarder_metrics_updated_json: serde_json::Value =
+        serde_json::from_str(&forwarder_metrics_updated_data).unwrap();
+    assert_eq!(
+        forwarder_metrics_updated_json["forwarder_id"].as_str(),
+        Some("fwd-sse")
+    );
+    assert_eq!(
+        forwarder_metrics_updated_json["unique_chips"].as_i64(),
+        Some(0)
+    );
+    assert_eq!(
+        forwarder_metrics_updated_json["total_reads"].as_i64(),
+        Some(1)
+    );
+    assert!(forwarder_metrics_updated_json["last_read_at"].is_string());
 
     // Keep the container alive until the end of the test
     std::mem::forget(container);

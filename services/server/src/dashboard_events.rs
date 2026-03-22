@@ -62,6 +62,12 @@ pub enum DashboardEvent {
         last_tag_id: Option<String>,
         last_reader_timestamp: Option<String>,
     },
+    ForwarderMetricsUpdated {
+        forwarder_id: String,
+        unique_chips: i64,
+        total_reads: i64,
+        last_read_at: Option<String>,
+    },
     ForwarderRaceAssigned {
         forwarder_id: String,
         race_id: Option<Uuid>,
@@ -107,5 +113,21 @@ mod tests {
         assert_eq!(json["reads_received"], 42);
         assert_eq!(json["progress"], 50);
         assert_eq!(json["total"], 100);
+    }
+
+    #[test]
+    fn forwarder_metrics_updated_serializes_with_type_tag() {
+        let event = DashboardEvent::ForwarderMetricsUpdated {
+            forwarder_id: "fwd-1".to_owned(),
+            unique_chips: 4,
+            total_reads: 15,
+            last_read_at: Some("2026-03-21T12:34:56.000Z".to_owned()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "forwarder_metrics_updated");
+        assert_eq!(json["forwarder_id"], "fwd-1");
+        assert_eq!(json["unique_chips"], 4);
+        assert_eq!(json["total_reads"], 15);
+        assert_eq!(json["last_read_at"], "2026-03-21T12:34:56.000Z");
     }
 }

@@ -161,6 +161,13 @@ export interface ForwardersResponse {
   forwarders: ForwarderEntry[];
 }
 
+export interface ForwarderMetricsUpdate {
+  forwarder_id: string;
+  unique_chips: number;
+  total_reads: number;
+  last_read_at: string | null;
+}
+
 export interface ForwarderConfigResponse {
   ok: boolean;
   config: Record<string, unknown>;
