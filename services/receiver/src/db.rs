@@ -466,6 +466,41 @@ impl Db {
         Ok(count > 0)
     }
 
+    pub fn load_subscription_dbf_details(
+        &self,
+        fwd: &str,
+        ip: &str,
+    ) -> DbResult<Option<(usize, EventType)>> {
+        let result: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT s1.event_type,
+                        (
+                            SELECT COUNT(*)
+                            FROM subscriptions s2
+                            WHERE s2.forwarder_id < s1.forwarder_id
+                               OR (s2.forwarder_id = s1.forwarder_id AND s2.reader_ip < s1.reader_ip)
+                        ) AS subscription_index
+                 FROM subscriptions s1
+                 WHERE s1.forwarder_id = ?1 AND s1.reader_ip = ?2",
+                rusqlite::params![fwd, ip],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        result
+            .map(|(raw_event_type, idx)| {
+                let event_type = raw_event_type.parse::<EventType>().map_err(|e| {
+                    DbError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                let idx = usize::try_from(idx).map_err(|e| {
+                    DbError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                Ok((idx, event_type))
+            })
+            .transpose()
+    }
+
     fn load_receiver_mode_json_raw(&self) -> DbResult<Option<String>> {
         let raw: Option<Option<String>> = self
             .conn
@@ -902,5 +937,20 @@ mod tests {
         .unwrap();
         let subs = db.load_subscriptions().unwrap();
         assert_eq!(subs[0].event_type, EventType::Start);
+    }
+
+    #[test]
+    fn load_subscription_dbf_details_returns_latest_index_and_event_type() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_subscription("fwd2", "10.0.0.2", None, Some(EventType::Finish))
+            .unwrap();
+        db.save_subscription("fwd1", "10.0.0.1", None, Some(EventType::Start))
+            .unwrap();
+
+        let details = db
+            .load_subscription_dbf_details("fwd2", "10.0.0.2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(details, (1, EventType::Finish));
     }
 }

@@ -11,6 +11,7 @@ use std::convert::TryFrom;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fs2::FileExt;
 
@@ -19,7 +20,7 @@ use ipico_core::read::ChipRead;
 use rt_protocol::ReadEvent;
 use tokio::sync::{Mutex, broadcast, watch};
 
-use crate::db::{Db, EventType, Subscription};
+use crate::db::{Db, EventType};
 
 /// Reasons why a raw frame cannot be mapped to a [`DbfRecord`].
 #[derive(Debug)]
@@ -263,6 +264,19 @@ fn write_empty_header(file: &mut std::fs::File) -> std::io::Result<()> {
 /// is held for the duration of the write to prevent concurrent readers
 /// (e.g. Race Director) from seeing a partially-written record.
 pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
+    append_record_if_active(path, record, None).map(|_| ())
+}
+
+fn append_record_if_active(
+    path: &Path,
+    record: &DbfRecord,
+    cancel_flag: Option<&AtomicBool>,
+) -> std::io::Result<bool> {
+    let is_cancelled = || cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst));
+    if is_cancelled() {
+        return Ok(false);
+    }
+
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -271,6 +285,10 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
         .open(path)?;
 
     file.lock_exclusive()?;
+    if is_cancelled() {
+        file.unlock()?;
+        return Ok(false);
+    }
 
     // If the file was just created (empty), write the DBF header under the lock
     if file.metadata()?.len() == 0 {
@@ -293,6 +311,10 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
             1 + RECORD_DATA_LEN
         )));
     }
+    if is_cancelled() {
+        file.unlock()?;
+        return Ok(false);
+    }
 
     // Seek to where the new record should go: after all existing records
     let write_pos = header_size + (record_count as u64) * record_size;
@@ -313,7 +335,7 @@ pub fn append_record(path: &Path, record: &DbfRecord) -> std::io::Result<()> {
 
     file.flush()?;
     file.unlock()?;
-    Ok(())
+    Ok(true)
 }
 
 /// Rewrite the DBF file at `path` as empty (header only, zero records).
@@ -341,26 +363,16 @@ const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 10;
 /// Receives ReadEvents from the global broadcast channel, filters out sentinel
 /// types and unsubscribed/overflow readers, maps each event to a DBF record
 /// using the subscription's event type, and appends the record to the DBF file.
-///
-/// Subscriptions are cached locally and refreshed every 2 seconds to avoid
-/// acquiring the DB lock on every event.
 pub async fn run_dbf_writer(
     mut event_rx: broadcast::Receiver<ReadEvent>,
     db: Arc<Mutex<Db>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    cancel_flag: Arc<AtomicBool>,
     dbf_path: String,
     ui_tx: tokio::sync::broadcast::Sender<crate::ui_events::ReceiverUiEvent>,
 ) {
     let path = std::path::PathBuf::from(&dbf_path);
     tracing::debug!(path = %path.display(), "DBF writer started");
-
-    // Cache subscriptions — reload periodically rather than per-event
-    let mut cached_subs: Vec<Subscription> = {
-        let db = db.lock().await;
-        db.load_subscriptions().unwrap_or_default()
-    };
-    let mut sub_refresh = tokio::time::interval(std::time::Duration::from_secs(2));
-    sub_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut consecutive_failures: u32 = 0;
 
@@ -373,12 +385,6 @@ pub async fn run_dbf_writer(
                     break;
                 }
             }
-            _ = sub_refresh.tick() => {
-                let db = db.lock().await;
-                if let Ok(subs) = db.load_subscriptions() {
-                    cached_subs = subs;
-                }
-            }
             result = event_rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -387,11 +393,23 @@ pub async fn run_dbf_writer(
                             continue;
                         }
 
-                        let sub_index = cached_subs.iter().position(|s| {
-                            s.forwarder_id == event.forwarder_id && s.reader_ip == event.reader_ip
-                        });
+                        let sub_details = {
+                            let db = db.lock().await;
+                            db.load_subscription_dbf_details(&event.forwarder_id, &event.reader_ip)
+                        };
 
-                        let Some(idx) = sub_index else {
+                        let Some((idx, event_type)) = (match sub_details {
+                            Ok(details) => details,
+                            Err(e) => {
+                                tracing::warn!(
+                                    forwarder_id = %event.forwarder_id,
+                                    reader_ip = %event.reader_ip,
+                                    error = %e,
+                                    "failed to load subscription details for DBF write, skipping"
+                                );
+                                continue;
+                            }
+                        }) else {
                             tracing::debug!(fwd = %event.forwarder_id, ip = %event.reader_ip, "no subscription for event, skipping DBF write");
                             continue;
                         };
@@ -407,16 +425,21 @@ pub async fn run_dbf_writer(
                             );
                             continue;
                         }
-
-                        let event_type = cached_subs[idx].event_type;
                         let reader_index = idx as u8;
 
                         match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
                             Ok(record) => {
                                 let p = path.clone();
-                                match tokio::task::spawn_blocking(move || append_record(&p, &record)).await {
-                                    Ok(Ok(())) => {
+                                let cancel_flag = Arc::clone(&cancel_flag);
+                                match tokio::task::spawn_blocking(move || {
+                                    append_record_if_active(&p, &record, Some(cancel_flag.as_ref()))
+                                }).await {
+                                    Ok(Ok(true)) => {
                                         consecutive_failures = 0;
+                                    }
+                                    Ok(Ok(false)) => {
+                                        tracing::debug!(path = %path.display(), "DBF write cancelled before commit");
+                                        break;
                                     }
                                     Ok(Err(e)) => {
                                         consecutive_failures += 1;
@@ -728,11 +751,12 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
         let (ui_tx, _) = broadcast::channel(16);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let path = dbf_path.to_str().unwrap().to_owned();
         let db_clone = Arc::clone(&db);
         let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, path, ui_tx).await;
+            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
         });
 
         tx.send(rt_protocol::ReadEvent {
@@ -772,11 +796,12 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
         let (ui_tx, _) = broadcast::channel(16);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let path = dbf_path.to_str().unwrap().to_owned();
         let db_clone = Arc::clone(&db);
         let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, path, ui_tx).await;
+            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
         });
 
         tx.send(rt_protocol::ReadEvent {
@@ -808,6 +833,73 @@ mod tests {
                 _ => None,
             }),
             Some("000000012345".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn dbf_writer_uses_updated_event_type_without_waiting_for_cache_refresh() {
+        use std::sync::Arc;
+        use tokio::sync::{Mutex, broadcast, watch};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let dbf_path = dir.path().join("test.dbf");
+        let db = crate::db::Db::open(&db_path).unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, Some(EventType::Finish))
+            .unwrap();
+
+        let db = Arc::new(Mutex::new(db));
+        let (tx, _) = broadcast::channel::<rt_protocol::ReadEvent>(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let rx = tx.subscribe();
+        let (ui_tx, _) = broadcast::channel(16);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let path = dbf_path.to_str().unwrap().to_owned();
+        let db_clone = Arc::clone(&db);
+        let handle = tokio::spawn(async move {
+            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        {
+            let db = db.lock().await;
+            db.update_subscription_event_type("f1", "10.0.0.1", EventType::Start)
+                .unwrap();
+        }
+
+        tx.send(rt_protocol::ReadEvent {
+            forwarder_id: "f1".to_owned(),
+            reader_ip: "10.0.0.1".to_owned(),
+            stream_epoch: 1,
+            seq: 1,
+            reader_timestamp: "T".to_owned(),
+            raw_frame: sample_raw_frame(),
+            read_type: "RAW".to_owned(),
+        })
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        let mut reader = dbase::Reader::from_path(&dbf_path).unwrap();
+        let records: Vec<dbase::Record> = reader.read().unwrap();
+        assert_eq!(records.len(), 1, "should have exactly one record");
+        let r = &records[0];
+        assert_eq!(
+            r.get("EVENT").and_then(|v| match v {
+                FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
+                _ => None,
+            }),
+            Some("S".to_owned())
+        );
+        assert_eq!(
+            r.get("TPOINT").and_then(|v| match v {
+                FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
+                _ => None,
+            }),
+            Some("S".to_owned())
         );
     }
 
@@ -926,11 +1018,12 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let rx = tx.subscribe();
         let (ui_tx, _) = broadcast::channel(16);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let path = dbf_path.to_str().unwrap().to_owned();
         let db_clone = Arc::clone(&db);
         let handle = tokio::spawn(async move {
-            run_dbf_writer(rx, db_clone, shutdown_rx, path, ui_tx).await;
+            run_dbf_writer(rx, db_clone, shutdown_rx, cancel_flag, path, ui_tx).await;
         });
 
         // Send event for a forwarder/reader that is NOT subscribed
