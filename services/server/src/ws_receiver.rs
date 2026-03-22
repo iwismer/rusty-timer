@@ -723,6 +723,7 @@ async fn apply_race_refresh_forward_only(
     if !race_refresh_needed(&targets, subscriptions, baseline) {
         return Ok(false);
     }
+    let metric_targets = race_refresh_metric_targets(&targets, subscriptions, baseline);
 
     // Update stream info map with current target set before plan consumes targets.
     subscribed_stream_info.clear();
@@ -756,6 +757,15 @@ async fn apply_race_refresh_forward_only(
     socket
         .send(Message::Text(serde_json::to_string(&applied)?.into()))
         .await?;
+    for target in &metric_targets {
+        if let Err(e) = send_stream_metrics(socket, state, target).await {
+            warn!(
+                stream_id = %target.stream_id,
+                error = %e,
+                "failed to send refreshed stream metrics"
+            );
+        }
+    }
     let _ = state
         .update_receiver_session_selection(
             session_id,
@@ -808,6 +818,24 @@ fn race_refresh_needed(
     targets
         .iter()
         .any(|target| !baseline.includes(target.stream_id, target.current_stream_epoch))
+}
+
+fn race_refresh_metric_targets(
+    targets: &[ResolvedStreamTarget],
+    subscriptions: &[StreamSub],
+    baseline: &RaceBaseline,
+) -> Vec<ResolvedStreamTarget> {
+    let subscribed_stream_ids: HashSet<Uuid> =
+        subscriptions.iter().map(|sub| sub.stream_id).collect();
+
+    targets
+        .iter()
+        .filter(|target| {
+            !subscribed_stream_ids.contains(&target.stream_id)
+                || !baseline.includes(target.stream_id, target.current_stream_epoch)
+        })
+        .cloned()
+        .collect()
 }
 
 fn resume_cursor_map(

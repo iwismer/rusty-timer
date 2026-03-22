@@ -158,6 +158,29 @@ async fn recv_first_event_batch(
     }
 }
 
+async fn recv_stream_metrics(
+    client: &mut MockWsClient,
+    timeout: Duration,
+) -> ReceiverStreamMetrics {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timeout waiting for receiver stream metrics"
+        );
+        match tokio::time::timeout(remaining, client.recv_message()).await {
+            Ok(Ok(WsMessage::ReceiverStreamMetrics(metrics))) => return metrics,
+            Ok(Ok(WsMessage::ReceiverEventBatch(_))) => continue,
+            Ok(Ok(WsMessage::ReceiverModeApplied(_))) => continue,
+            Ok(Ok(WsMessage::Heartbeat(_))) => continue,
+            Ok(Ok(other)) => panic!("expected receiver stream metrics, got {other:?}"),
+            Ok(Err(err)) => panic!("recv error: {err}"),
+            Err(_) => panic!("timeout waiting for receiver stream metrics"),
+        }
+    }
+}
+
 async fn collect_event_lines_until_idle(
     client: &mut MockWsClient,
     max_total: Duration,
@@ -213,6 +236,7 @@ async fn collect_event_lines_until_idle(
             Ok(Ok(WsMessage::ReceiverModeApplied(_))) => {
                 saw_mode_applied = true;
             }
+            Ok(Ok(WsMessage::ReceiverStreamMetrics(_))) => continue,
             Ok(Ok(WsMessage::Heartbeat(_))) => continue,
             Ok(Ok(other)) => {
                 panic!("unexpected message while collecting receiver events: {other:?}")
@@ -587,6 +611,7 @@ async fn receiver_v12_race_includes_non_current_epoch_mapping_and_replays_on_new
                 }
                 Ok(WsMessage::ReceiverEventBatch(_)) => continue,
                 Ok(WsMessage::ReceiverModeApplied(_)) => continue,
+                Ok(WsMessage::ReceiverStreamMetrics(_)) => continue,
                 Ok(WsMessage::Heartbeat(_)) => continue,
                 Ok(other) => {
                     panic!("unexpected message while waiting for race refresh replay: {other:?}")
@@ -601,6 +626,151 @@ async fn receiver_v12_race_includes_non_current_epoch_mapping_and_replays_on_new
         refreshed.is_ok(),
         "new race streams must replay backlog after refresh"
     );
+}
+
+#[tokio::test]
+async fn receiver_v12_race_refresh_sends_metrics_for_new_streams() {
+    let (pool, addr) = start_server().await;
+    insert_token(
+        &pool,
+        "fwd-race-metrics-a",
+        "forwarder",
+        b"fwd-race-metrics-a-token",
+    )
+    .await;
+    insert_token(
+        &pool,
+        "fwd-race-metrics-b",
+        "forwarder",
+        b"fwd-race-metrics-b-token",
+    )
+    .await;
+    insert_token(
+        &pool,
+        "rcv-race-metrics",
+        "receiver",
+        b"rcv-race-metrics-token",
+    )
+    .await;
+
+    let race_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO races (race_id, name) VALUES ($1, $2)")
+        .bind(race_id)
+        .bind("Race Metrics")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut fwd_a = connect_forwarder(
+        addr,
+        "fwd-race-metrics-a-token",
+        "fwd-race-metrics-a",
+        "10.13.1.1:10000",
+    )
+    .await;
+    let fwd_a_session = match fwd_a.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {other:?}"),
+    };
+    let mut fwd_b = connect_forwarder(
+        addr,
+        "fwd-race-metrics-b-token",
+        "fwd-race-metrics-b",
+        "10.13.1.2:10000",
+    )
+    .await;
+    let fwd_b_session = match fwd_b.recv_message().await.unwrap() {
+        WsMessage::Heartbeat(h) => h.session_id,
+        other => panic!("expected heartbeat, got {other:?}"),
+    };
+
+    send_forwarder_event(
+        &mut fwd_a,
+        &fwd_a_session,
+        "fwd-race-metrics-a",
+        "10.13.1.1:10000",
+        1,
+        1,
+        "RACE_METRICS_A_E1_S1",
+    )
+    .await;
+
+    let stream_a_id = wait_for_stream_id(&pool, "fwd-race-metrics-a", "10.13.1.1:10000").await;
+    let stream_b_id = wait_for_stream_id(&pool, "fwd-race-metrics-b", "10.13.1.2:10000").await;
+
+    sqlx::query(
+        "INSERT INTO stream_epoch_races (stream_id, stream_epoch, race_id) VALUES ($1, $2, $3)",
+    )
+    .bind(stream_a_id)
+    .bind(1_i64)
+    .bind(race_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let hello = ReceiverHelloV12 {
+        receiver_id: "rcv-race-metrics".to_owned(),
+        mode: ReceiverMode::Race {
+            race_id: race_id.to_string(),
+        },
+        resume: vec![],
+    };
+    let (mut rcv, _session_id) = connect_receiver_v12(addr, "rcv-race-metrics-token", hello).await;
+
+    let initial_metrics = recv_stream_metrics(&mut rcv, Duration::from_secs(5)).await;
+    assert_eq!(initial_metrics.forwarder_id, "fwd-race-metrics-a");
+    assert_eq!(initial_metrics.reader_ip, "10.13.1.1:10000");
+    assert_eq!(initial_metrics.raw_count, 1);
+    assert_eq!(initial_metrics.dedup_count, 1);
+
+    send_forwarder_event(
+        &mut fwd_b,
+        &fwd_b_session,
+        "fwd-race-metrics-b",
+        "10.13.1.2:10000",
+        1,
+        1,
+        "RACE_METRICS_B_E1_S1",
+    )
+    .await;
+
+    sqlx::query(
+        "INSERT INTO stream_epoch_races (stream_id, stream_epoch, race_id) VALUES ($1, $2, $3)",
+    )
+    .bind(stream_b_id)
+    .bind(1_i64)
+    .bind(race_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let refreshed_metrics = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rcv.recv_message().await {
+                Ok(WsMessage::ReceiverStreamMetrics(metrics))
+                    if metrics.forwarder_id == "fwd-race-metrics-b"
+                        && metrics.reader_ip == "10.13.1.2:10000" =>
+                {
+                    break metrics;
+                }
+                Ok(WsMessage::ReceiverStreamMetrics(_)) => continue,
+                Ok(WsMessage::ReceiverEventBatch(_)) => continue,
+                Ok(WsMessage::ReceiverModeApplied(_)) => continue,
+                Ok(WsMessage::Heartbeat(_)) => continue,
+                Ok(other) => {
+                    panic!("unexpected message while waiting for race refresh metrics: {other:?}")
+                }
+                Err(err) => panic!("recv error: {err}"),
+            }
+        }
+    })
+    .await
+    .expect("new race stream must receive metrics after refresh");
+
+    assert_eq!(refreshed_metrics.raw_count, 1);
+    assert_eq!(refreshed_metrics.dedup_count, 1);
+    assert_eq!(refreshed_metrics.epoch_raw_count, 1);
+    assert_eq!(refreshed_metrics.epoch_dedup_count, 1);
 }
 
 #[tokio::test]
