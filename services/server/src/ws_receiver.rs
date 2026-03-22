@@ -936,6 +936,146 @@ async fn proxy_forwarder_race_set_reply(
     )
 }
 
+async fn proxy_reader_control_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyReaderControlRequest,
+) -> WsMessage {
+    use rt_protocol::{ReaderControlAction, ReceiverProxyReaderControlResponse};
+
+    // Validate reader_ip format (consistent with HTTP endpoints)
+    if req.reader_ip.parse::<std::net::SocketAddrV4>().is_err() {
+        return WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some("invalid reader_ip format".to_owned()),
+            reader_info: None,
+        });
+    }
+
+    // Look up the forwarder's command sender
+    let tx = {
+        let senders = state.forwarder_command_senders.read().await;
+        senders.get(&req.forwarder_id).cloned()
+    };
+    let Some(tx) = tx else {
+        return WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some("forwarder not connected".to_owned()),
+            reader_info: None,
+        });
+    };
+
+    // Fire-and-forget for ClearRecords and StartDownload
+    let is_fire_and_forget = matches!(
+        req.action,
+        ReaderControlAction::ClearRecords | ReaderControlAction::StartDownload
+    );
+
+    if is_fire_and_forget {
+        let cmd = crate::state::ForwarderCommand::ReaderControlFireAndForget {
+            reader_ip: req.reader_ip.clone(),
+            action: req.action,
+        };
+        return match tx.try_send(cmd) {
+            Ok(()) => {
+                WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: true,
+                    error: None,
+                    reader_info: None,
+                })
+            }
+            Err(_) => {
+                WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("forwarder command queue full or closed".to_owned()),
+                    reader_info: None,
+                })
+            }
+        };
+    }
+
+    // Request/response path
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let fwd_request_id = uuid::Uuid::new_v4().to_string();
+    let cmd = crate::state::ForwarderCommand::ReaderControl {
+        request_id: fwd_request_id,
+        reader_ip: req.reader_ip.clone(),
+        action: req.action,
+        reply: reply_tx,
+    };
+
+    let timeout = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(timeout, tx.send(cmd)).await {
+        Ok(Ok(())) => {} // sent successfully
+        Ok(Err(_)) => {
+            return WsMessage::ReceiverProxyReaderControlResponse(
+                ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("forwarder disconnected".to_owned()),
+                    reader_info: None,
+                },
+            );
+        }
+        Err(_) => {
+            return WsMessage::ReceiverProxyReaderControlResponse(
+                ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("timeout sending to forwarder".to_owned()),
+                    reader_info: None,
+                },
+            );
+        }
+    }
+
+    match tokio::time::timeout(timeout, reply_rx).await {
+        Ok(Ok(crate::state::ForwarderProxyReply::Response(resp))) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: resp.success,
+                error: resp.error,
+                reader_info: resp.reader_info,
+            })
+        }
+        Ok(Ok(crate::state::ForwarderProxyReply::Timeout)) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("forwarder timeout".to_owned()),
+                reader_info: None,
+            })
+        }
+        Ok(Ok(crate::state::ForwarderProxyReply::InternalError(msg))) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(msg),
+                reader_info: None,
+            })
+        }
+        Ok(Err(_)) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("forwarder disconnected".to_owned()),
+                reader_info: None,
+            })
+        }
+        Err(_) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("timeout waiting for forwarder response".to_owned()),
+                reader_info: None,
+            })
+        }
+    }
+}
+
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
     let token_str = match token {
         Some(t) => t,
@@ -1319,6 +1459,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                         req,
                                     ));
                                 }
+                                Ok(WsMessage::ReceiverProxyReaderControlRequest(req)) => {
+                                    pending_proxy_replies
+                                        .spawn(proxy_reader_control_reply(state.clone(), req));
+                                }
                                 Ok(_) => {
                                     send_ws_error(
                                         &mut socket,
@@ -1476,6 +1620,16 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                                     error: Some("server serialization error".into()),
                                                     forwarder_id: r.forwarder_id.clone(),
                                                     race_id: None,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyReaderControlResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyReaderControlResponse(
+                                                rt_protocol::ReceiverProxyReaderControlResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    reader_info: None,
                                                 },
                                             ))
                                         }
