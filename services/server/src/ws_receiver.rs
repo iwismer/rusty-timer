@@ -1274,6 +1274,44 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                             );
                                         }
                                     }
+                                } else if event.read_type == rt_protocol::READER_INFO_UPDATED_READ_TYPE {
+                                    match String::from_utf8(event.raw_frame) {
+                                        Ok(json) => {
+                                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                                warn!(
+                                                    stream_id = %sub.stream_id,
+                                                    "WS send failed for reader_info_updated; closing session"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                stream_id = %sub.stream_id,
+                                                error = %e,
+                                                "invalid UTF-8 in reader_info_updated payload"
+                                            );
+                                        }
+                                    }
+                                } else if event.read_type == rt_protocol::READER_DOWNLOAD_PROGRESS_READ_TYPE {
+                                    match String::from_utf8(event.raw_frame) {
+                                        Ok(json) => {
+                                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                                warn!(
+                                                    stream_id = %sub.stream_id,
+                                                    "WS send failed for reader_download_progress; closing session"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                stream_id = %sub.stream_id,
+                                                error = %e,
+                                                "invalid UTF-8 in reader_download_progress payload"
+                                            );
+                                        }
+                                    }
                                 } else {
                                     warn!(
                                         stream_id = %sub.stream_id,
