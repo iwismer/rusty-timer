@@ -509,7 +509,7 @@ async fn proxy_race_delete_reply(
         );
     }
     match crate::repo::races::delete_race(&state.pool, race_id).await {
-        Ok(_) => {
+        Ok(true) => {
             state.logger.log(format!(
                 "race {} deleted via receiver {}",
                 race_id, device_id
@@ -523,6 +523,13 @@ async fn proxy_race_delete_reply(
                 },
             )
         }
+        Ok(false) => WsMessage::ReceiverProxyRaceDeleteResponse(
+            rt_protocol::ReceiverProxyRaceDeleteResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("race not found".into()),
+            },
+        ),
         Err(e) => WsMessage::ReceiverProxyRaceDeleteResponse(
             rt_protocol::ReceiverProxyRaceDeleteResponse {
                 request_id: req.request_id,
@@ -651,8 +658,8 @@ async fn proxy_file_upload_reply(
             );
         }
     };
-    match req.upload_type.as_str() {
-        "participants" => {
+    match req.upload_type {
+        rt_protocol::UploadType::Participants => {
             let parsed = match timer_core::util::io::parse_participant_bytes(&bytes) {
                 Ok(p) => p,
                 Err(e) => {
@@ -706,7 +713,7 @@ async fn proxy_file_upload_reply(
                 ),
             }
         }
-        "chips" => {
+        rt_protocol::UploadType::Chips => {
             let parsed = match timer_core::util::io::parse_bibchip_bytes(&bytes) {
                 Ok(c) => c,
                 Err(e) => {
@@ -747,14 +754,6 @@ async fn proxy_file_upload_reply(
                 ),
             }
         }
-        other => WsMessage::ReceiverProxyFileUploadResponse(
-            rt_protocol::ReceiverProxyFileUploadResponse {
-                request_id: req.request_id,
-                ok: false,
-                error: Some(format!("unknown upload_type: {other}")),
-                imported: 0,
-            },
-        ),
     }
 }
 

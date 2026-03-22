@@ -107,7 +107,7 @@ export const RECEIVER_HELP = {
   races: {
     title: "Races",
     overview:
-      "Races organize participant and chip data for an event. Create a race, upload participants and chip mappings, then assign forwarders to it so chip reads resolve to bib numbers and names.",
+      "Races organize participant and chip data for an event. Create a race, then upload participants and chip mappings so chip reads can resolve to bib numbers and names.",
     fields: {
       create_race: {
         label: "Create Race",
@@ -126,6 +126,8 @@ export const RECEIVER_HELP = {
         detailHtml:
           "<strong>This action is irreversible.</strong> Deleting a race removes all of its participant data, chip mappings, and any forwarder-race associations. " +
           "Timing data (reads/events) is not affected — only the race metadata is deleted." +
+          "<br><br>" +
+          "A race cannot be deleted while a receiver session is actively using it." +
           "<br><br>" +
           "You will be asked to confirm before the delete proceeds.",
       },

@@ -952,7 +952,12 @@ pub async fn create_race(
                     r.error.unwrap_or_else(|| "unknown error".to_owned()),
                 ));
             }
-            Ok(serde_json::json!(r.race))
+            match r.race {
+                Some(race) => Ok(serde_json::json!(race)),
+                None => Err(ReceiverError::UpstreamError(
+                    "server returned success but no race data".to_owned(),
+                )),
+            }
         }
         _ => Err(ReceiverError::UpstreamError(
             "unexpected response type".to_owned(),
@@ -1019,11 +1024,20 @@ pub async fn upload_race_file(
     file_data: String,
     file_name: String,
 ) -> Result<serde_json::Value, ReceiverError> {
+    let upload_type_enum = match upload_type.as_str() {
+        "participants" => rt_protocol::UploadType::Participants,
+        "chips" => rt_protocol::UploadType::Chips,
+        other => {
+            return Err(ReceiverError::BadRequest(format!(
+                "invalid upload_type: {other}, expected 'participants' or 'chips'"
+            )));
+        }
+    };
     let msg = rt_protocol::WsMessage::ReceiverProxyFileUploadRequest(
         rt_protocol::ReceiverProxyFileUploadRequest {
             request_id: generate_request_id(),
             race_id,
-            upload_type,
+            upload_type: upload_type_enum,
             file_data,
             file_name,
         },
@@ -1234,7 +1248,7 @@ async fn send_ws_command(
 
     let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
         .await
-        .map_err(|_| ReceiverError::UpstreamError("server response timeout".to_owned()))?
+        .map_err(|_| ReceiverError::UpstreamError("upstream response timeout (15s)".to_owned()))?
         .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
 
     // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,

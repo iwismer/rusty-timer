@@ -275,7 +275,7 @@ export async function getParticipants(
 
 export async function uploadRaceFile(
   raceId: string,
-  uploadType: string,
+  uploadType: "participants" | "chips",
   fileData: string,
   fileName: string,
 ): Promise<UploadResult> {

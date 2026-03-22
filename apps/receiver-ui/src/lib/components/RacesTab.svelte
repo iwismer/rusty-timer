@@ -158,6 +158,9 @@
       uploadResult = `Successfully imported ${result.imported} participants.`;
       pplFile = null;
       await loadRaceDetail(store.selectedRaceId);
+      if (store.raceDetailError) {
+        uploadResult = `Imported ${result.imported} participants, but failed to refresh the list. Try navigating back and reopening the race.`;
+      }
     } catch (e) {
       uploadResult = `Error: ${String(e)}`;
     } finally {
@@ -180,6 +183,9 @@
       uploadResult = `Successfully imported ${result.imported} chip mappings.`;
       bibchipFile = null;
       await loadRaceDetail(store.selectedRaceId);
+      if (store.raceDetailError) {
+        uploadResult = `Imported ${result.imported} chip mappings, but failed to refresh the list. Try navigating back and reopening the race.`;
+      }
     } catch (e) {
       uploadResult = `Error: ${String(e)}`;
     } finally {

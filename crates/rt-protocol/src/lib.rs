@@ -1,8 +1,9 @@
 // rt-protocol: Remote forwarding protocol types and serialization.
 //
 // All WebSocket messages use a top-level `kind` field for discriminated
-// deserialization. The enum covers the frozen v1/v1.2 message kinds plus
-// reader-status tracking and reader-control extensions.
+// deserialization. The enum covers the v1/v1.2 message kinds, reader-status
+// tracking, reader-control extensions, receiver proxy commands, and race
+// management.
 
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
@@ -665,8 +666,11 @@ pub struct ReceiverProxyRacesListResponse {
 pub struct RaceInfo {
     pub race_id: String,
     pub name: String,
+    /// RFC 3339 timestamp.
     pub created_at: String,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub participant_count: i64,
+    #[serde(deserialize_with = "deserialize_non_negative_i64")]
     pub chip_count: i64,
 }
 
@@ -724,7 +728,8 @@ pub struct ReceiverProxyParticipantsGetResponse {
     pub chips_without_participant: Vec<UnmatchedChipInfo>,
 }
 
-/// A participant entry.
+/// A participant with their associated chip IDs, returned as part of
+/// `ReceiverProxyParticipantsGetResponse`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParticipantInfo {
     pub bib: i32,
@@ -735,11 +740,22 @@ pub struct ParticipantInfo {
     pub chip_ids: Vec<String>,
 }
 
-/// An unmatched chip entry.
+/// A chip-to-bib mapping where the bib does not correspond to any uploaded
+/// participant for the race.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnmatchedChipInfo {
     pub chip_id: String,
     pub bib: i32,
+}
+
+/// The kind of file being uploaded for a race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadType {
+    /// A .ppl participant file.
+    Participants,
+    /// A bib-chip mapping file.
+    Chips,
 }
 
 /// Receiver-to-server: upload a file (ppl or bibchip) for a race.
@@ -748,8 +764,7 @@ pub struct UnmatchedChipInfo {
 pub struct ReceiverProxyFileUploadRequest {
     pub request_id: String,
     pub race_id: String,
-    /// "participants" or "chips"
-    pub upload_type: String,
+    pub upload_type: UploadType,
     /// Base64-encoded file content.
     pub file_data: String,
     pub file_name: String,
@@ -771,8 +786,9 @@ pub struct ReceiverProxyFileUploadResponse {
 // ---------------------------------------------------------------------------
 
 /// All WebSocket message kinds in the v1/v1.2 protocols, plus reader
-/// status tracking, reader control extensions, and receiver-to-server
-/// proxy messages for remote forwarder management and announcer configuration.
+/// status tracking, reader control extensions, receiver-to-server
+/// proxy messages for remote forwarder management, announcer configuration,
+/// and race management.
 ///
 /// Serializes/deserializes using the `kind` field as a tag.
 ///
@@ -1378,7 +1394,7 @@ mod tests {
         let msg = WsMessage::ReceiverProxyFileUploadRequest(ReceiverProxyFileUploadRequest {
             request_id: "req-14".into(),
             race_id: "race-1".into(),
-            upload_type: "participants".into(),
+            upload_type: UploadType::Participants,
             file_data: "SGVsbG8gV29ybGQ=".into(),
             file_name: "participants.csv".into(),
         });
