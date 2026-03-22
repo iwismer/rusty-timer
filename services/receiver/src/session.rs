@@ -71,6 +71,7 @@ impl WsCommand {
             WsMessage::ReceiverProxyFileUploadRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyForwarderRaceGetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyForwarderRaceSetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyReaderControlRequest(r) => r.request_id.clone(),
             _ => return Err((message, reply)),
         };
         Ok(Self {
@@ -162,6 +163,7 @@ fn proxy_response_request_id(msg: &WsMessage) -> Option<&str> {
         WsMessage::ReceiverProxyFileUploadResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyReaderControlResponse(r) => Some(&r.request_id),
         _ => None,
     }
 }
@@ -337,6 +339,25 @@ where
                                 let _ = deps.ui_tx.send(
                                     crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(payload),
                                 );
+                            }
+                            Ok(WsMessage::ReceiverReaderInfoUpdate(update)) => {
+                                let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderInfoUpdated {
+                                    stream_id: update.stream_id,
+                                    reader_ip: update.reader_ip,
+                                    state: update.state,
+                                    reader_info: update.reader_info,
+                                });
+                            }
+                            Ok(WsMessage::ReceiverReaderDownloadProgress(progress)) => {
+                                let _ = deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderDownloadProgress {
+                                    stream_id: progress.stream_id,
+                                    reader_ip: progress.reader_ip,
+                                    state: progress.state,
+                                    reads_received: progress.reads_received,
+                                    progress: progress.progress,
+                                    total: progress.total,
+                                    error: progress.error,
+                                });
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }

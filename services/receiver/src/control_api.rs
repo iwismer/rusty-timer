@@ -1967,6 +1967,178 @@ pub async fn admin_update_port(
     }
 }
 
+/// Send a reader control action and return the response.
+async fn send_reader_control(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    action: rt_protocol::ReaderControlAction,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyReaderControlRequest(
+        rt_protocol::ReceiverProxyReaderControlRequest {
+            request_id: generate_request_id(),
+            forwarder_id,
+            reader_ip,
+            action,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyReaderControlResponse(r) => Ok(serde_json::json!({
+            "ok": r.ok,
+            "error": r.error,
+            "reader_info": r.reader_info,
+        })),
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn reader_get_info(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::GetInfo,
+    )
+    .await
+}
+
+pub async fn reader_sync_clock(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SyncClock,
+    )
+    .await
+}
+
+pub async fn reader_set_read_mode(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    mode: rt_protocol::ReadMode,
+    timeout: u8,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SetReadMode { mode, timeout },
+    )
+    .await
+}
+
+pub async fn reader_set_tto(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    enabled: bool,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SetTto { enabled },
+    )
+    .await
+}
+
+pub async fn reader_set_recording(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    enabled: bool,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SetRecording { enabled },
+    )
+    .await
+}
+
+pub async fn reader_clear_records(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::ClearRecords,
+    )
+    .await
+}
+
+pub async fn reader_start_download(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::StartDownload,
+    )
+    .await
+}
+
+pub async fn reader_stop_download(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::StopDownload,
+    )
+    .await
+}
+
+pub async fn reader_refresh(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::Refresh,
+    )
+    .await
+}
+
+pub async fn reader_reconnect(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::Reconnect,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
