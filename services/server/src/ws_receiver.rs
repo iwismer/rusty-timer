@@ -966,11 +966,9 @@ async fn proxy_reader_control_reply(
         });
     };
 
-    // Fire-and-forget for ClearRecords and StartDownload
-    let is_fire_and_forget = matches!(
-        req.action,
-        ReaderControlAction::ClearRecords | ReaderControlAction::StartDownload
-    );
+    // Fire-and-forget only for ClearRecords. StartDownload can fail
+    // synchronously (e.g. already in progress), so preserve its reply.
+    let is_fire_and_forget = matches!(req.action, ReaderControlAction::ClearRecords);
 
     if is_fire_and_forget {
         let cmd = crate::state::ForwarderCommand::ReaderControlFireAndForget {
@@ -2480,10 +2478,13 @@ async fn handle_receiver_ack(
 mod tests {
     use super::{
         RaceBaseline, ResolvedStreamTarget, StreamSub, plan_race_refresh_subscriptions,
-        race_refresh_needed,
+        proxy_reader_control_reply, race_refresh_needed,
     };
-    use rt_protocol::ReadEvent;
+    use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
+    use rt_protocol::{ReadEvent, ReaderControlAction, WsMessage};
+    use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     fn target(stream_id: Uuid, current_stream_epoch: i64) -> ResolvedStreamTarget {
@@ -2513,6 +2514,13 @@ mod tests {
             last_seq: 0,
             rx,
         }
+    }
+
+    fn make_lazy_pool() -> sqlx::PgPool {
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
+            .expect("lazy pool")
     }
 
     #[test]
@@ -2595,5 +2603,67 @@ mod tests {
             Some(512),
             "baseline should keep bounded state per stream across many epoch updates"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_reader_control_waits_for_start_download_response() {
+        let state = AppState::new(make_lazy_pool());
+        let (tx, mut rx) = mpsc::channel(1);
+        state
+            .forwarder_command_senders
+            .write()
+            .await
+            .insert("fwd-1".to_owned(), tx);
+
+        let handler = tokio::spawn(async move {
+            match rx.recv().await.expect("command should be sent") {
+                ForwarderCommand::ReaderControl {
+                    request_id,
+                    reader_ip,
+                    action,
+                    reply,
+                } => {
+                    assert_eq!(reader_ip, "10.0.0.1:10000");
+                    assert_eq!(action, ReaderControlAction::StartDownload);
+                    let _ = reply.send(ForwarderProxyReply::Response(
+                        rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: false,
+                            error: Some("download already in progress".to_owned()),
+                            reader_info: None,
+                        },
+                    ));
+                }
+                ForwarderCommand::ReaderControlFireAndForget { .. } => {
+                    panic!("start download must not be fire-and-forget");
+                }
+                ForwarderCommand::EpochReset(_) => panic!("unexpected epoch reset command"),
+                ForwarderCommand::ConfigGet { .. } => panic!("unexpected config get command"),
+                ForwarderCommand::ConfigSet { .. } => panic!("unexpected config set command"),
+                ForwarderCommand::Restart { .. } => panic!("unexpected restart command"),
+            }
+        });
+
+        let resp = proxy_reader_control_reply(
+            state,
+            rt_protocol::ReceiverProxyReaderControlRequest {
+                request_id: "req-1".to_owned(),
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                action: ReaderControlAction::StartDownload,
+            },
+        )
+        .await;
+
+        match resp {
+            WsMessage::ReceiverProxyReaderControlResponse(resp) => {
+                assert!(!resp.ok);
+                assert_eq!(resp.error.as_deref(), Some("download already in progress"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        handler.await.expect("handler task should finish");
     }
 }

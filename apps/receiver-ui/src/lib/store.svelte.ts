@@ -282,6 +282,17 @@ export function parseStreamKey(value: string): api.StreamRef | null {
   return { forwarder_id, reader_ip };
 }
 
+function resolveReaderControlStreamKey(
+  streamId: string,
+  readerIp: string,
+): string | null {
+  const stream = store.streams?.streams.find(
+    (entry) => entry.stream_id === streamId && entry.reader_ip === readerIp,
+  );
+  if (!stream) return null;
+  return streamKey(stream.forwarder_id, stream.reader_ip);
+}
+
 export function parseNonNegativeInt(raw: unknown): number | null {
   if (typeof raw === "number") {
     return !Number.isSafeInteger(raw) || raw < 0 ? null : raw;
@@ -1250,16 +1261,24 @@ export function initStore(): void {
       store.streamMetrics = next;
     },
     onReaderInfoUpdated: (payload) => {
-      const key = streamKey(payload.forwarder_id, payload.reader_ip);
+      const key = resolveReaderControlStreamKey(
+        payload.stream_id,
+        payload.reader_ip,
+      );
+      if (!key) return;
       const nextInfos = new Map(store.readerInfos);
       nextInfos.set(key, payload.reader_info);
       store.readerInfos = nextInfos;
       const nextStates = new Map(store.readerStates);
-      nextStates.set(key, payload.reader_state);
+      nextStates.set(key, payload.state);
       store.readerStates = nextStates;
     },
     onReaderDownloadProgress: (payload) => {
-      const key = streamKey(payload.forwarder_id, payload.reader_ip);
+      const key = resolveReaderControlStreamKey(
+        payload.stream_id,
+        payload.reader_ip,
+      );
+      if (!key) return;
       const next = new Map(store.downloadProgress);
       next.set(key, {
         state: payload.state,

@@ -36,14 +36,14 @@ type LastReadPayload = {
 };
 
 export type ReaderInfoUpdatedPayload = {
-  forwarder_id: string;
+  stream_id: string;
   reader_ip: string;
+  state: string;
   reader_info: unknown;
-  reader_state: string;
 };
 
 export type ReaderDownloadProgressPayload = {
-  forwarder_id: string;
+  stream_id: string;
   reader_ip: string;
   state: string;
   reads_received: number;
