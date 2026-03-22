@@ -5,6 +5,7 @@ use tracing::warn;
 
 const PROXY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Errors that can occur when proxying a command to a forwarder.
 #[derive(Debug)]
 pub enum ProxyError {
     NotConnected,
@@ -26,6 +27,7 @@ impl std::fmt::Display for ProxyError {
 
 impl std::error::Error for ProxyError {}
 
+/// Proxy a config-get request to a connected forwarder, waiting up to `PROXY_TIMEOUT` for a response.
 pub async fn proxy_config_get(
     state: &AppState,
     forwarder_id: &str,
@@ -45,6 +47,7 @@ pub async fn proxy_config_get(
     }
 }
 
+/// Proxy a config-set request to a connected forwarder, waiting up to `PROXY_TIMEOUT` for a response.
 pub async fn proxy_config_set(
     state: &AppState,
     forwarder_id: &str,
@@ -68,6 +71,7 @@ pub async fn proxy_config_set(
     }
 }
 
+/// Proxy a restart request to a connected forwarder, waiting up to `PROXY_TIMEOUT` for a response.
 pub async fn proxy_restart(
     state: &AppState,
     forwarder_id: &str,

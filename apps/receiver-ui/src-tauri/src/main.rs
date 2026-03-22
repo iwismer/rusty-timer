@@ -223,7 +223,7 @@ async fn shutdown_forwarder_device(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(rename_all = "snake_case")]
+#[tauri::command]
 async fn get_replay_target_epochs(
     state: State<'_, Arc<AppState>>,
     forwarder_id: String,

@@ -49,22 +49,23 @@ pub struct WsCommand {
 impl WsCommand {
     /// Create a new `WsCommand`, extracting `request_id` from the message.
     ///
-    /// # Panics
-    /// Panics if `message` is not a proxy request variant (i.e. does not
-    /// contain a `request_id` field).
-    pub fn new(message: WsMessage, reply: oneshot::Sender<WsMessage>) -> Self {
+    /// Returns `Err` if `message` is not a `ReceiverProxy*Request` variant.
+    pub fn new(
+        message: WsMessage,
+        reply: oneshot::Sender<WsMessage>,
+    ) -> Result<Self, (WsMessage, oneshot::Sender<WsMessage>)> {
         let request_id = match &message {
             WsMessage::ReceiverProxyConfigGetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyConfigSetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyRestartRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyDeviceControlRequest(r) => r.request_id.clone(),
-            other => panic!("WsCommand::new called with non-proxy message: {other:?}"),
+            _ => return Err((message, reply)),
         };
-        Self {
+        Ok(Self {
             message,
             request_id,
             reply,
-        }
+        })
     }
 }
 

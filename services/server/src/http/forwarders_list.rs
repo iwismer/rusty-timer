@@ -10,6 +10,25 @@ struct ReaderEntry {
     connected: bool,
 }
 
+#[derive(Serialize)]
+struct ForwarderListEntry {
+    forwarder_id: String,
+    display_name: Option<String>,
+    online: bool,
+    readers: Vec<ReaderEntry>,
+    unique_chips: i64,
+    total_reads: i64,
+    last_read_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ForwardersListResponse {
+    forwarders: Vec<ForwarderListEntry>,
+}
+
+/// GET /api/v1/forwarders — returns all known forwarders with reader connection
+/// status, unique chip counts, total reads, and last-read timestamp.
+/// Stats are scoped to each stream's current epoch.
 pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse {
     let rows = match sqlx::query(
         r#"SELECT s.forwarder_id,
@@ -107,27 +126,27 @@ pub async fn list_forwarders(State(state): State<AppState>) -> impl IntoResponse
     }
 
     // Build response sorted by forwarder_id
-    let mut result: Vec<serde_json::Value> = forwarders
+    let mut result: Vec<ForwarderListEntry> = forwarders
         .into_iter()
         .map(|(fwd_id, info)| {
             let (unique_chips, total_reads, last_read_at) =
                 stats_map.remove(&fwd_id).unwrap_or((0, 0, None));
-            serde_json::json!({
-                "forwarder_id": fwd_id,
-                "display_name": info.display_name,
-                "online": info.online,
-                "readers": info.readers,
-                "unique_chips": unique_chips,
-                "total_reads": total_reads,
-                "last_read_at": last_read_at.map(|t| t.to_rfc3339()),
-            })
+            ForwarderListEntry {
+                forwarder_id: fwd_id,
+                display_name: info.display_name,
+                online: info.online,
+                readers: info.readers,
+                unique_chips,
+                total_reads,
+                last_read_at: last_read_at.map(|t| t.to_rfc3339()),
+            }
         })
         .collect();
-    result.sort_by(|a, b| a["forwarder_id"].as_str().cmp(&b["forwarder_id"].as_str()));
+    result.sort_by(|a, b| a.forwarder_id.cmp(&b.forwarder_id));
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "forwarders": result })),
+        Json(ForwardersListResponse { forwarders: result }),
     )
         .into_response()
 }

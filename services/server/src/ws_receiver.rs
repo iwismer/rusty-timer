@@ -634,18 +634,44 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                 Ok(t) => t,
                                 Err(e) => {
                                     error!(device_id = %device_id, error = %e, "failed to serialize proxy reply");
-                                    // Send a minimal fallback error so the receiver doesn't hang
-                                    let request_id = match &msg {
-                                        WsMessage::ReceiverProxyConfigGetResponse(r) => &r.request_id,
-                                        WsMessage::ReceiverProxyConfigSetResponse(r) => &r.request_id,
-                                        WsMessage::ReceiverProxyControlResponse(r) => &r.request_id,
+                                    // Send a typed fallback error so the receiver doesn't hang.
+                                    // Match on the response to return the correct kind.
+                                    let fallback = match &msg {
+                                        WsMessage::ReceiverProxyConfigGetResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyConfigGetResponse(
+                                                ReceiverProxyConfigGetResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    config: serde_json::Value::Null,
+                                                    restart_needed: false,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyConfigSetResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyConfigSetResponse(
+                                                ReceiverProxyConfigSetResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    restart_needed: false,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyControlResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyControlResponse(
+                                                ReceiverProxyControlResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                },
+                                            ))
+                                        }
                                         _ => { continue; }
                                     };
-                                    let fallback = format!(
-                                        r#"{{"kind":"receiver_proxy_control_response","request_id":"{}","ok":false,"error":"server serialization error"}}"#,
-                                        request_id
-                                    );
-                                    let _ = socket.send(Message::Text(fallback.into())).await;
+                                    if let Ok(fallback_text) = fallback {
+                                        let _ = socket.send(Message::Text(fallback_text.into())).await;
+                                    }
                                     continue;
                                 }
                             };
@@ -655,6 +681,8 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                         }
                         Some(Err(err)) => {
                             error!(device_id = %device_id, error = %err, "proxy reply task panicked; keeping session alive");
+                            // The panicked task's request_id is lost, so the
+                            // receiver will time out after 15s for that request.
                             continue;
                         }
                         None => {}

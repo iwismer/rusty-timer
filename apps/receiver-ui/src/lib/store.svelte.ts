@@ -588,6 +588,9 @@ export async function loadAll(): Promise<void> {
     if (nextForwarders.ok) {
       store.forwarders = nextForwarders.forwarders.forwarders;
       store.forwardersError = null;
+      // Reset live-tracking caches so they don't carry stale data across refreshes.
+      seenChipsByForwarder.clear();
+      streamReadTotals.clear();
       syncSelectedForwarder();
     } else {
       store.forwarders = null;
@@ -633,6 +636,8 @@ export async function loadForwarders(): Promise<void> {
   try {
     const result = await api.getForwarders();
     store.forwarders = result.forwarders;
+    seenChipsByForwarder.clear();
+    streamReadTotals.clear();
     syncSelectedForwarder();
   } catch (error) {
     console.error("Failed to load forwarders:", error);
@@ -887,8 +892,10 @@ export async function confirmUpdateInstall(): Promise<void> {
 
 // --------------- SSE + Init ---------------
 
-// Track chips seen per forwarder so unique_chips can be bumped live.
-// Seeded from the server's count on load; only grows within a session.
+// Track chips seen per forwarder during this SSE session so unique_chips
+// can be bumped live for genuinely new chips.  Starts empty — chips already
+// counted by the server are not pre-populated, so duplicate arrivals of
+// already-known chips may over-count unique_chips until the next full reload.
 const seenChipsByForwarder = new Map<string, Set<string>>();
 
 function applyForwarderLastRead(

@@ -928,7 +928,8 @@ pub async fn get_races(state: &AppState) -> Result<serde_json::Value, ReceiverEr
 }
 
 // ---------------------------------------------------------------------------
-// Forwarder list + proxy commands (config, restart, device control)
+// Forwarder list (via HTTP to server) + proxy commands (via WS session:
+// config, restart, device control)
 // ---------------------------------------------------------------------------
 
 /// Generate a process-unique request ID for WS proxy commands.
@@ -989,9 +990,10 @@ pub async fn get_forwarders(state: &AppState) -> Result<serde_json::Value, Recei
 
 /// Send a WS command through the active session and wait for a response.
 ///
-/// Uses a 15s timeout, which intentionally exceeds the server-side 10s proxy
-/// timeout (`PROXY_TIMEOUT`) so that the server's timeout error is received
-/// rather than timing out locally.
+/// Uses a 15s timeout. Note: the server applies a 10s `PROXY_TIMEOUT` to both
+/// send and reply phases independently, so the server's total timeout can reach
+/// ~20s in degenerate cases. This means local timeout may fire first under
+/// backpressure.
 async fn send_ws_command(
     state: &AppState,
     message: rt_protocol::WsMessage,
@@ -1004,16 +1006,31 @@ async fn send_ws_command(
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let cmd = crate::session::WsCommand::new(message, reply_tx);
+    let cmd = crate::session::WsCommand::new(message, reply_tx).map_err(|_| {
+        ReceiverError::Internal("send_ws_command called with non-proxy message".to_owned())
+    })?;
 
     tx.send(cmd)
         .await
         .map_err(|_| ReceiverError::NotConnected("WS session closed".to_owned()))?;
 
-    tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
         .await
         .map_err(|_| ReceiverError::UpstreamError("forwarder response timeout".to_owned()))?
-        .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))
+        .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
+
+    // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,
+    // SERIALIZE_ERROR, SESSION_CLOSED) instead of falling through to the
+    // caller's catch-all "unexpected response type" branch.
+    if let rt_protocol::WsMessage::Error(err) = reply {
+        return if err.retryable {
+            Err(ReceiverError::NotConnected(err.message))
+        } else {
+            Err(ReceiverError::UpstreamError(err.message))
+        };
+    }
+
+    Ok(reply)
 }
 
 pub async fn get_forwarder_config(
