@@ -11,6 +11,7 @@
   let inFlightKeys = $state<Set<string>>(new Set());
   let inFlightAction = $state<string | null>(null);
   let feedback = $state<{ message: string; ok: boolean } | null>(null);
+  let confirmingClearData = $state(false);
   let confirmingFactoryReset = $state(false);
   let portEdits = $state<Map<string, string>>(new Map());
 
@@ -68,6 +69,7 @@
     action: () => Promise<{ deleted: number } | void>,
     label: string,
     actionId: string,
+    refreshGlobal: () => Promise<void> | void = () => globalLoadAll(),
   ) {
     inFlightAction = actionId;
     feedback = null;
@@ -80,7 +82,7 @@
       }
       await loadAll();
       // Also refresh global store state so other tabs see the changes.
-      void globalLoadAll();
+      await refreshGlobal();
     } catch {
       setFeedback(`${label}: failed.`, false);
     } finally {
@@ -176,6 +178,16 @@
       next.delete(actionKey);
       inFlightKeys = next;
     }
+  }
+
+  async function handleClearData() {
+    confirmingClearData = false;
+    await handleBulkAction(
+      () => api.clearData(),
+      "Clear data",
+      "clear-data",
+      () => globalLoadAll({ forceHydrateMode: true }),
+    );
   }
 
   async function handleFactoryReset() {
@@ -463,6 +475,46 @@
             ? "Resetting..."
             : "Reset Profile to Defaults"}
         </button>
+      </section>
+
+      <hr class="border-border" />
+
+      <!-- Clear Data -->
+      <section>
+        <h3 class="text-sm font-semibold text-status-err mb-1">Clear Data</h3>
+        <p class="text-xs text-text-muted m-0 mb-3">
+          Clear local subscriptions, cursors, mode, and DBF config. Keeps server
+          URL, token, receiver ID, and server-side races.
+        </p>
+        {#if confirmingClearData}
+          <div class="flex items-center gap-3">
+            <span class="text-sm text-status-err font-medium"
+              >Are you sure?</span
+            >
+            <button
+              onclick={handleClearData}
+              disabled={inFlightAction === "clear-data"}
+              class={btnDangerConfirm}
+            >
+              {inFlightAction === "clear-data"
+                ? "Clearing..."
+                : "Yes, Clear Data"}
+            </button>
+            <button
+              onclick={() => (confirmingClearData = false)}
+              class={btnNeutral}
+            >
+              Cancel
+            </button>
+          </div>
+        {:else}
+          <button
+            onclick={() => (confirmingClearData = true)}
+            class={btnDanger}
+          >
+            Clear Data...
+          </button>
+        {/if}
       </section>
 
       <hr class="border-border" />

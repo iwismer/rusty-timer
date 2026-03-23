@@ -499,6 +499,10 @@ export function getModeDirty(): boolean {
     : modeSignature(modePayload()) !== store.savedModePayload;
 }
 
+type LoadAllOptions = {
+  forceHydrateMode?: boolean;
+};
+
 // --------------- Actions ---------------
 
 export async function prefetchEarliestEpochOptions(
@@ -575,6 +579,17 @@ function hydrateMode(mode: ReceiverMode): void {
   );
 }
 
+function resetHydratedMode(): void {
+  hydrateMode({ mode: "live", streams: [], earliest_epochs: [] });
+  store.savedModePayload = JSON.stringify({
+    mode: "live",
+    streams: [],
+    earliest_epochs: [],
+  });
+  store.modeEditedSinceHydration = false;
+  modeHydrationVersion += 1;
+}
+
 export function applyHydratedMode(mode: ReceiverMode): void {
   hydrateMode(mode);
   store.savedModePayload = modeSignature(mode);
@@ -623,7 +638,7 @@ function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   return hasUnknown;
 }
 
-export async function loadAll(): Promise<void> {
+export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
   if (loadAllInFlight) {
     loadAllQueued = true;
     return;
@@ -689,13 +704,17 @@ export async function loadAll(): Promise<void> {
       store.selectedForwarderId = null;
     }
     if (
-      nextMode &&
-      !getModeDirty() &&
-      modeEditVersion === modeEditVersionAtStart &&
-      modeHydrationVersion === modeVersionAtStart &&
-      modeMutationVersion === modeMutationVersionAtStart
+      options.forceHydrateMode ||
+      (!getModeDirty() &&
+        modeEditVersion === modeEditVersionAtStart &&
+        modeHydrationVersion === modeVersionAtStart &&
+        modeMutationVersion === modeMutationVersionAtStart)
     ) {
-      applyHydratedMode(nextMode);
+      if (nextMode) {
+        applyHydratedMode(nextMode);
+      } else {
+        resetHydratedMode();
+      }
     }
 
     const p = await api.getProfile().catch(() => null);
