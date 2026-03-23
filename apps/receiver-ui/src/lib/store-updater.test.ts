@@ -208,6 +208,36 @@ describe("receiver updater store", () => {
     );
   });
 
+  it("force load resets dirty mode state after clear data removes persisted mode", async () => {
+    apiMocks.getMode.mockResolvedValueOnce({
+      mode: "race",
+      race_id: "11111111-1111-1111-1111-111111111111",
+    });
+
+    const { initStore, loadAll, markModeEdited, store } =
+      await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    store.modeDraft = "targeted_replay";
+    store.targetedEpochInputs = {
+      "fwd-1/10.0.0.1:10000": "12",
+    };
+    markModeEdited();
+
+    apiMocks.getMode.mockRejectedValueOnce(new Error("no mode configured"));
+
+    await loadAll({ forceHydrateMode: true });
+
+    expect(store.modeDraft).toBe("live");
+    expect(store.raceIdDraft).toBe("");
+    expect(store.targetedEpochInputs).toEqual({});
+    expect(store.savedModePayload).toBe(
+      JSON.stringify({ mode: "live", streams: [], earliest_epochs: [] }),
+    );
+  });
+
   it("clears cached metrics for a stream when a snapshot reports a newer epoch", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");

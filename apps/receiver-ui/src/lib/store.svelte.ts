@@ -499,6 +499,10 @@ export function getModeDirty(): boolean {
     : modeSignature(modePayload()) !== store.savedModePayload;
 }
 
+type LoadAllOptions = {
+  forceHydrateMode?: boolean;
+};
+
 // --------------- Actions ---------------
 
 export async function prefetchEarliestEpochOptions(
@@ -634,7 +638,7 @@ function applyStreamCountUpdates(updates: StreamCountUpdate[]): boolean {
   return hasUnknown;
 }
 
-export async function loadAll(): Promise<void> {
+export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
   if (loadAllInFlight) {
     loadAllQueued = true;
     return;
@@ -700,10 +704,11 @@ export async function loadAll(): Promise<void> {
       store.selectedForwarderId = null;
     }
     if (
-      !getModeDirty() &&
-      modeEditVersion === modeEditVersionAtStart &&
-      modeHydrationVersion === modeVersionAtStart &&
-      modeMutationVersion === modeMutationVersionAtStart
+      options.forceHydrateMode ||
+      (!getModeDirty() &&
+        modeEditVersion === modeEditVersionAtStart &&
+        modeHydrationVersion === modeVersionAtStart &&
+        modeMutationVersion === modeMutationVersionAtStart)
     ) {
       if (nextMode) {
         applyHydratedMode(nextMode);

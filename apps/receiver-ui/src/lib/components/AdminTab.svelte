@@ -69,6 +69,7 @@
     action: () => Promise<{ deleted: number } | void>,
     label: string,
     actionId: string,
+    refreshGlobal: () => Promise<void> | void = () => globalLoadAll(),
   ) {
     inFlightAction = actionId;
     feedback = null;
@@ -81,7 +82,7 @@
       }
       await loadAll();
       // Also refresh global store state so other tabs see the changes.
-      void globalLoadAll();
+      await refreshGlobal();
     } catch {
       setFeedback(`${label}: failed.`, false);
     } finally {
@@ -181,7 +182,12 @@
 
   async function handleClearData() {
     confirmingClearData = false;
-    await handleBulkAction(() => api.clearData(), "Clear data", "clear-data");
+    await handleBulkAction(
+      () => api.clearData(),
+      "Clear data",
+      "clear-data",
+      () => globalLoadAll({ forceHydrateMode: true }),
+    );
   }
 
   async function handleFactoryReset() {
@@ -477,8 +483,8 @@
       <section>
         <h3 class="text-sm font-semibold text-status-err mb-1">Clear Data</h3>
         <p class="text-xs text-text-muted m-0 mb-3">
-          Clear all subscriptions, cursors, races, mode, and DBF config. Keeps
-          server URL, token, and receiver ID.
+          Clear local subscriptions, cursors, mode, and DBF config. Keeps server
+          URL, token, receiver ID, and server-side races.
         </p>
         {#if confirmingClearData}
           <div class="flex items-center gap-3">
