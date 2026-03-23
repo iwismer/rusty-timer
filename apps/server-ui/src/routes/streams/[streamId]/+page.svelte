@@ -15,9 +15,26 @@
     forwarderRacesStore,
     racesStore,
     setForwarderRace,
+    readerStatesStore,
+    downloadProgressStore,
   } from "$lib/stores";
+  import {
+    syncReaderClock,
+    setReaderReadMode,
+    setReaderTto,
+    setReaderRecording,
+    clearReaderRecords,
+    startReaderDownload,
+    stopReaderDownload,
+    refreshReader,
+    reconnectReader,
+  } from "$lib/api";
   import { shouldFetchMetrics } from "$lib/streamMetricsLoader";
-  import { StatusBadge, Card } from "@rusty-timer/shared-ui";
+  import {
+    StatusBadge,
+    Card,
+    ReaderControlPanel,
+  } from "@rusty-timer/shared-ui";
   import ReadsTable from "$lib/components/ReadsTable.svelte";
   import { createLatestRequestGate } from "$lib/latestRequestGate";
 
@@ -655,6 +672,68 @@
         </div>
       </Card>
     </div>
+
+    {#if stream}
+      {@const rKey = `${stream.forwarder_id}:${stream.reader_ip}`}
+      {@const rs = $readerStatesStore[rKey]}
+      {@const dp = $downloadProgressStore[rKey]}
+      <div class="mb-6">
+        <Card title="Reader Control">
+          <ReaderControlPanel
+            readerIp={stream.reader_ip}
+            readerInfo={rs?.reader_info ?? null}
+            readerState={rs?.state ?? "disconnected"}
+            downloadProgress={dp
+              ? {
+                  ...dp,
+                  error: dp.error ?? undefined,
+                }
+              : null}
+            disabled={!stream.online || rs?.state !== "connected"}
+            onSyncClock={async () => {
+              await syncReaderClock(stream.forwarder_id, stream.reader_ip);
+            }}
+            onSetReadMode={async (mode, timeout) => {
+              await setReaderReadMode(
+                stream.forwarder_id,
+                stream.reader_ip,
+                mode as "raw" | "event" | "fsls",
+                timeout,
+              );
+            }}
+            onSetTto={async (enabled) => {
+              await setReaderTto(
+                stream.forwarder_id,
+                stream.reader_ip,
+                enabled,
+              );
+            }}
+            onSetRecording={async (enabled) => {
+              await setReaderRecording(
+                stream.forwarder_id,
+                stream.reader_ip,
+                enabled,
+              );
+            }}
+            onClearRecords={async () => {
+              await clearReaderRecords(stream.forwarder_id, stream.reader_ip);
+            }}
+            onStartDownload={async () => {
+              await startReaderDownload(stream.forwarder_id, stream.reader_ip);
+            }}
+            onStopDownload={async () => {
+              await stopReaderDownload(stream.forwarder_id, stream.reader_ip);
+            }}
+            onRefresh={async () => {
+              await refreshReader(stream.forwarder_id, stream.reader_ip);
+            }}
+            onReconnect={async () => {
+              await reconnectReader(stream.forwarder_id, stream.reader_ip);
+            }}
+          />
+        </Card>
+      </div>
+    {/if}
 
     <div class="mb-6">
       <Card title="Epoch Race Mapping">

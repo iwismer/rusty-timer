@@ -279,6 +279,7 @@ impl AppState {
                     reader_ip: si.reader_ip.clone(),
                     subscribed: local.is_some(),
                     local_port: port,
+                    stream_id: Some(si.stream_id.clone()),
                     event_type: local.map(|s| s.event_type),
                     online: Some(si.online),
                     reader_connected: Some(si.reader_connected),
@@ -310,6 +311,7 @@ impl AppState {
                 reader_ip: sub.reader_ip.clone(),
                 subscribed: true,
                 local_port: port,
+                stream_id: None,
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
@@ -422,6 +424,8 @@ pub struct StreamEntry {
     pub reader_ip: String,
     pub subscribed: bool,
     pub local_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_type: Option<crate::db::EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -772,12 +776,21 @@ pub async fn fetch_chip_lookup_for_forwarders(
         if !race_chips.contains_key(race_id) {
             let url = format!("{base}/api/v1/races/{race_id}/participants");
             let chips = match client.get(&url).bearer_auth(token).send().await {
-                Ok(r) if r.status().is_success() => r
-                    .json::<serde_json::Value>()
-                    .await
-                    .map(|b| parse_participants(&b))
-                    .unwrap_or_default(),
-                _ => FlatChipMap::new(),
+                Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                    Ok(b) => parse_participants(&b),
+                    Err(e) => {
+                        warn!(race_id = %race_id, error = %e, "failed to parse participants JSON for chip lookup");
+                        FlatChipMap::new()
+                    }
+                },
+                Ok(r) => {
+                    warn!(race_id = %race_id, status = %r.status(), "failed to fetch participants for chip lookup");
+                    FlatChipMap::new()
+                }
+                Err(e) => {
+                    warn!(race_id = %race_id, error = %e, "HTTP request failed for participants chip lookup");
+                    FlatChipMap::new()
+                }
             };
             race_chips.insert(race_id.clone(), chips);
         }
@@ -1292,10 +1305,12 @@ pub async fn set_forwarder_race(
 
 /// Send a WS command through the active session and wait for a response.
 ///
-/// Uses a 15s timeout. For forwarder proxy requests, the server applies a 10s
+/// Uses a 25s timeout. For forwarder proxy requests, the server applies a 10s
 /// `PROXY_TIMEOUT` to both send and reply phases independently, so the server's
-/// total timeout can reach ~20s in degenerate cases and the local timeout may
-/// fire first under backpressure. Non-forwarder proxy requests (announcer,
+/// total timeout can reach ~20s in degenerate cases. Reader control requests
+/// use a dedicated proxy path in `ws_receiver.rs::proxy_reader_control_reply`
+/// with its own 10s timeout per phase, consistent with but separate from the
+/// `forwarder_proxy.rs` implementation. Non-forwarder proxy requests (announcer,
 /// stream-list, race management) are handled server-side with no explicit
 /// timeout beyond the database query time.
 async fn send_ws_command(
@@ -1318,9 +1333,9 @@ async fn send_ws_command(
         .await
         .map_err(|_| ReceiverError::NotConnected("WS session closed".to_owned()))?;
 
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(15), reply_rx)
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(25), reply_rx)
         .await
-        .map_err(|_| ReceiverError::UpstreamError("upstream response timeout (15s)".to_owned()))?
+        .map_err(|_| ReceiverError::UpstreamError("upstream response timeout (25s)".to_owned()))?
         .map_err(|_| ReceiverError::UpstreamError("session closed before reply".to_owned()))?;
 
     // Surface structured errors from the session loop (e.g. WS_SEND_FAILED,
@@ -1965,6 +1980,176 @@ pub async fn admin_update_port(
         Ok(false) => Err(ReceiverError::NotFound("subscription not found".to_owned())),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
+}
+
+/// Send a reader control action and return the response.
+async fn send_reader_control(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    action: rt_protocol::ReaderControlAction,
+) -> Result<serde_json::Value, ReceiverError> {
+    let msg = rt_protocol::WsMessage::ReceiverProxyReaderControlRequest(
+        rt_protocol::ReceiverProxyReaderControlRequest {
+            request_id: generate_request_id(),
+            forwarder_id,
+            reader_ip,
+            action,
+        },
+    );
+    let response = send_ws_command(state, msg).await?;
+    match response {
+        rt_protocol::WsMessage::ReceiverProxyReaderControlResponse(r) => {
+            serde_json::to_value(&r).map_err(|e| ReceiverError::Internal(e.to_string()))
+        }
+        _ => Err(ReceiverError::UpstreamError(
+            "unexpected response type".to_owned(),
+        )),
+    }
+}
+
+pub async fn reader_get_info(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::GetInfo,
+    )
+    .await
+}
+
+pub async fn reader_sync_clock(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SyncClock,
+    )
+    .await
+}
+
+pub async fn reader_set_read_mode(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    mode: rt_protocol::ReadMode,
+    timeout: u8,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SetReadMode { mode, timeout },
+    )
+    .await
+}
+
+pub async fn reader_set_tto(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    enabled: bool,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SetTto { enabled },
+    )
+    .await
+}
+
+pub async fn reader_set_recording(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+    enabled: bool,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::SetRecording { enabled },
+    )
+    .await
+}
+
+pub async fn reader_clear_records(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::ClearRecords,
+    )
+    .await
+}
+
+pub async fn reader_start_download(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::StartDownload,
+    )
+    .await
+}
+
+pub async fn reader_stop_download(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::StopDownload,
+    )
+    .await
+}
+
+pub async fn reader_refresh(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::Refresh,
+    )
+    .await
+}
+
+pub async fn reader_reconnect(
+    state: &AppState,
+    forwarder_id: String,
+    reader_ip: String,
+) -> Result<serde_json::Value, ReceiverError> {
+    send_reader_control(
+        state,
+        forwarder_id,
+        reader_ip,
+        rt_protocol::ReaderControlAction::Reconnect,
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -2,11 +2,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ForwarderMetricsUpdate,
   LastRead,
+  ReaderConnectionState,
+  ReaderInfo,
   ReceiverMode,
   StatusResponse,
   StreamCountUpdate,
   StreamMetrics,
   StreamsResponse,
+  DownloadState,
 } from "./api";
 
 // Payload types matching the Rust ReceiverUiEvent serde output.
@@ -35,6 +38,23 @@ type LastReadPayload = {
   name?: string | null;
 };
 
+export type ReaderInfoUpdatedPayload = {
+  stream_id: string;
+  reader_ip: string;
+  state: ReaderConnectionState;
+  reader_info: ReaderInfo | null;
+};
+
+export type ReaderDownloadProgressPayload = {
+  stream_id: string;
+  reader_ip: string;
+  state: DownloadState;
+  reads_received: number;
+  progress: number;
+  total: number;
+  error?: string | null;
+};
+
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;
   onStreamsSnapshot: (streams: StreamsResponse) => void;
@@ -46,6 +66,8 @@ export type SseCallbacks = {
   onModeChanged: (mode: ReceiverMode) => void;
   onLastRead: (read: LastRead) => void;
   onStreamMetricsUpdated: (metrics: StreamMetrics) => void;
+  onReaderInfoUpdated?: (payload: ReaderInfoUpdatedPayload) => void;
+  onReaderDownloadProgress?: (payload: ReaderDownloadProgressPayload) => void;
 };
 
 let unlistenFns: UnlistenFn[] = [];
@@ -116,6 +138,15 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
         epoch_lag_ms: event.payload.epoch_lag_ms ?? null,
       });
     }),
+    listen<ReaderInfoUpdatedPayload>("reader_info_updated", (event) => {
+      callbacks.onReaderInfoUpdated?.(event.payload);
+    }),
+    listen<ReaderDownloadProgressPayload>(
+      "reader_download_progress",
+      (event) => {
+        callbacks.onReaderDownloadProgress?.(event.payload);
+      },
+    ),
   ]);
 }
 

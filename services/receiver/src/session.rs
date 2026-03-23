@@ -33,7 +33,7 @@ pub struct Session {
 /// have entries; reads from other forwarders are not enriched.
 pub type ChipLookup = HashMap<String, HashMap<String, (String, String)>>;
 
-/// A request sent from a Tauri command handler to the WS session loop.
+/// A request sent from the receiver's control API or Tauri command handler to the WS session loop.
 /// The session loop sends `message` over the WebSocket and routes the
 /// server's response back via the oneshot `reply` channel. Responses are
 /// matched to pending requests by `request_id`.
@@ -71,6 +71,7 @@ impl WsCommand {
             WsMessage::ReceiverProxyFileUploadRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyForwarderRaceGetRequest(r) => r.request_id.clone(),
             WsMessage::ReceiverProxyForwarderRaceSetRequest(r) => r.request_id.clone(),
+            WsMessage::ReceiverProxyReaderControlRequest(r) => r.request_id.clone(),
             _ => return Err((message, reply)),
         };
         Ok(Self {
@@ -83,7 +84,7 @@ impl WsCommand {
 
 pub struct SessionLoopDeps {
     pub db: Arc<Mutex<Db>>,
-    /// Per-stream broadcast channel for local proxy forwarding.
+    /// Broadcast channel that relays incoming read events to the per-stream EventBus for local TCP proxy listeners.
     pub event_tx: tokio::sync::broadcast::Sender<rt_protocol::ReadEvent>,
     /// Global broadcast channel for the DBF writer. Always `Some` in
     /// production; `None` only in tests that don't exercise DBF output.
@@ -162,6 +163,7 @@ fn proxy_response_request_id(msg: &WsMessage) -> Option<&str> {
         WsMessage::ReceiverProxyFileUploadResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyForwarderRaceGetResponse(r) => Some(&r.request_id),
         WsMessage::ReceiverProxyForwarderRaceSetResponse(r) => Some(&r.request_id),
+        WsMessage::ReceiverProxyReaderControlResponse(r) => Some(&r.request_id),
         _ => None,
     }
 }
@@ -337,6 +339,29 @@ where
                                 let _ = deps.ui_tx.send(
                                     crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(payload),
                                 );
+                            }
+                            Ok(WsMessage::ReceiverReaderInfoUpdate(update)) => {
+                                if deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderInfoUpdated {
+                                    stream_id: update.stream_id,
+                                    reader_ip: update.reader_ip.clone(),
+                                    state: update.state,
+                                    reader_info: update.reader_info,
+                                }).is_err() {
+                                    warn!(reader_ip = %update.reader_ip, "ui_tx closed; reader info update dropped");
+                                }
+                            }
+                            Ok(WsMessage::ReceiverReaderDownloadProgress(progress)) => {
+                                if deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ReaderDownloadProgress {
+                                    stream_id: progress.stream_id,
+                                    reader_ip: progress.reader_ip.clone(),
+                                    state: progress.state,
+                                    reads_received: progress.reads_received,
+                                    progress: progress.progress,
+                                    total: progress.total,
+                                    error: progress.error,
+                                }).is_err() {
+                                    warn!(reader_ip = %progress.reader_ip, "ui_tx closed; reader download progress dropped");
+                                }
                             }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }

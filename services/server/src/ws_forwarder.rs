@@ -607,21 +607,113 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             }
                             Ok(WsMessage::ReaderInfoUpdate(update)) => {
                                 let key = crate::state::reader_cache_key(&device_id, &update.reader_ip);
+                                // Merge: carry forward existing reader_info when the update is state-only
+                                let merged_info = if update.reader_info.is_some() {
+                                    update.reader_info.clone()
+                                } else {
+                                    state.reader_states.read().await
+                                        .get(&key)
+                                        .and_then(|c| c.reader_info.clone())
+                                };
                                 let cached = CachedReaderState {
                                     forwarder_id: device_id.clone(),
                                     reader_ip: update.reader_ip.clone(),
                                     state: update.state,
-                                    reader_info: update.reader_info.clone(),
+                                    reader_info: merged_info.clone(),
                                 };
                                 state.reader_states.write().await.insert(key, cached);
+
+                                // Tunnel to receivers via sentinel broadcast (before dashboard send moves fields)
+                                if let Some(stream_id) = stream_map.get(&update.reader_ip) {
+                                    let receiver_update = rt_protocol::ReceiverReaderInfoUpdate {
+                                        stream_id: *stream_id,
+                                        reader_ip: update.reader_ip.clone(),
+                                        state: update.state,
+                                        reader_info: merged_info.clone(),
+                                    };
+                                    match serde_json::to_string(
+                                        &rt_protocol::WsMessage::ReceiverReaderInfoUpdate(receiver_update),
+                                    ) {
+                                        Ok(json) => {
+                                            let tx = state.get_or_create_broadcast(*stream_id).await;
+                                            let _ = tx.send(rt_protocol::ReadEvent {
+                                                forwarder_id: device_id.clone(),
+                                                reader_ip: update.reader_ip.clone(),
+                                                stream_epoch: 0,
+                                                seq: 0,
+                                                reader_timestamp: String::new(),
+                                                raw_frame: json.into_bytes(),
+                                                read_type: rt_protocol::READER_INFO_UPDATED_READ_TYPE.to_owned(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                device_id = %device_id,
+                                                reader_ip = %update.reader_ip,
+                                                error = %e,
+                                                "failed to serialize ReceiverReaderInfoUpdate for broadcast"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    warn!(
+                                        device_id = %device_id,
+                                        reader_ip = %update.reader_ip,
+                                        "reader_info_update for unknown reader_ip"
+                                    );
+                                }
+
                                 let _ = state.dashboard_tx.send(DashboardEvent::ReaderInfoUpdated {
                                     forwarder_id: device_id.clone(),
                                     reader_ip: update.reader_ip,
                                     state: update.state,
-                                    reader_info: update.reader_info,
+                                    reader_info: merged_info,
                                 });
                             }
                             Ok(WsMessage::ReaderDownloadProgress(progress)) => {
+                                // Tunnel to receivers via sentinel broadcast (before dashboard send moves progress)
+                                if let Some(stream_id) = stream_map.get(&progress.reader_ip) {
+                                    let receiver_progress = rt_protocol::ReceiverReaderDownloadProgress {
+                                        stream_id: *stream_id,
+                                        reader_ip: progress.reader_ip.clone(),
+                                        state: progress.state,
+                                        reads_received: progress.reads_received,
+                                        progress: progress.progress,
+                                        total: progress.total,
+                                        error: progress.error.clone(),
+                                    };
+                                    match serde_json::to_string(
+                                        &rt_protocol::WsMessage::ReceiverReaderDownloadProgress(receiver_progress),
+                                    ) {
+                                        Ok(json) => {
+                                            let tx = state.get_or_create_broadcast(*stream_id).await;
+                                            let _ = tx.send(rt_protocol::ReadEvent {
+                                                forwarder_id: device_id.clone(),
+                                                reader_ip: progress.reader_ip.clone(),
+                                                stream_epoch: 0,
+                                                seq: 0,
+                                                reader_timestamp: String::new(),
+                                                raw_frame: json.into_bytes(),
+                                                read_type: rt_protocol::READER_DOWNLOAD_PROGRESS_READ_TYPE.to_owned(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                device_id = %device_id,
+                                                reader_ip = %progress.reader_ip,
+                                                error = %e,
+                                                "failed to serialize ReceiverReaderDownloadProgress for broadcast"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    warn!(
+                                        device_id = %device_id,
+                                        reader_ip = %progress.reader_ip,
+                                        "reader_download_progress for unknown reader_ip"
+                                    );
+                                }
+
                                 let _ = state.dashboard_tx.send(DashboardEvent::ReaderDownloadProgress {
                                     forwarder_id: device_id.clone(),
                                     progress,
@@ -631,7 +723,12 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                             Err(e) => { warn!(device_id = %device_id, error = %e, "invalid JSON in forwarder session message"); send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, "invalid JSON in message", false).await; break; }
                         }
                     }
-                    Ok(Some(Ok(Message::Ping(data)))) => { let _ = socket.send(Message::Pong(data)).await; }
+                    Ok(Some(Ok(Message::Ping(data)))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            warn!(device_id = %device_id, "failed to send Pong to forwarder, connection likely dead");
+                            break;
+                        }
+                    }
                     Ok(Some(Ok(Message::Close(_)))) | Ok(None) => { state.logger.log(format!("forwarder {device_id} disconnected")); break; }
                     Err(_) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} session timeout")); break; }
                     Ok(Some(Err(e))) => { state.logger.log_at(rt_ui_log::UiLogLevel::Warn, format!("forwarder {device_id} WS error: {e}")); break; }
@@ -830,6 +927,7 @@ fn expire_pending_requests<T>(
 
     for request_id in expired {
         if let Some((_, reply)) = pending.remove(&request_id) {
+            warn!(request_id = %request_id, "proxy request timed out");
             let _ = reply.send(ForwarderProxyReply::Timeout);
         }
     }

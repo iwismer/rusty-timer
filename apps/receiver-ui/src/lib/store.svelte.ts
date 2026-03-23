@@ -121,6 +121,20 @@ export const store = $state({
   streamActionBusy: false,
   streamEventTypeBusy: {} as Record<string, boolean>,
 
+  // Reader control state (keyed by "forwarder_id/reader_ip")
+  readerInfos: new Map<string, api.ReaderInfo | null>(),
+  readerStates: new Map<string, api.ReaderConnectionState>(),
+  downloadProgress: new Map<
+    string,
+    {
+      state: api.DownloadState;
+      reads_received: number;
+      progress: number;
+      total: number;
+      error?: string;
+    }
+  >(),
+
   // Version info
   appVersion: "",
 });
@@ -266,6 +280,22 @@ export function parseStreamKey(value: string): api.StreamRef | null {
   const reader_ip = value.slice(separator + 1).trim();
   if (!forwarder_id || !reader_ip) return null;
   return { forwarder_id, reader_ip };
+}
+
+function resolveReaderControlStreamKey(
+  streamId: string,
+  readerIp: string,
+): string | null {
+  const stream = store.streams?.streams.find(
+    (entry) => entry.stream_id === streamId && entry.reader_ip === readerIp,
+  );
+  if (!stream) {
+    console.warn(
+      `reader event for unknown stream_id=${streamId}, reader_ip=${readerIp}`,
+    );
+    return null;
+  }
+  return streamKey(stream.forwarder_id, stream.reader_ip);
 }
 
 export function parseNonNegativeInt(raw: unknown): number | null {
@@ -1234,6 +1264,35 @@ export function initStore(): void {
       const next = new Map(store.streamMetrics);
       next.set(key, metrics);
       store.streamMetrics = next;
+    },
+    onReaderInfoUpdated: (payload) => {
+      const key = resolveReaderControlStreamKey(
+        payload.stream_id,
+        payload.reader_ip,
+      );
+      if (!key) return;
+      const nextInfos = new Map(store.readerInfos);
+      nextInfos.set(key, payload.reader_info);
+      store.readerInfos = nextInfos;
+      const nextStates = new Map(store.readerStates);
+      nextStates.set(key, payload.state);
+      store.readerStates = nextStates;
+    },
+    onReaderDownloadProgress: (payload) => {
+      const key = resolveReaderControlStreamKey(
+        payload.stream_id,
+        payload.reader_ip,
+      );
+      if (!key) return;
+      const next = new Map(store.downloadProgress);
+      next.set(key, {
+        state: payload.state,
+        reads_received: payload.reads_received,
+        progress: payload.progress,
+        total: payload.total,
+        error: payload.error ?? undefined,
+      });
+      store.downloadProgress = next;
     },
   })?.catch((e: unknown) => {
     console.error("initSSE failed:", e);

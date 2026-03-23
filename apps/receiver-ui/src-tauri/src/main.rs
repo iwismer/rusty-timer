@@ -88,6 +88,8 @@ fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
         ReceiverUiEvent::LastRead(_) => "last_read",
         ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
+        ReceiverUiEvent::ReaderInfoUpdated { .. } => "reader_info_updated",
+        ReceiverUiEvent::ReaderDownloadProgress { .. } => "reader_download_progress",
     }
 }
 
@@ -548,6 +550,120 @@ async fn reset_announcer(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn reader_get_info(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_get_info(&state, forwarder_id, reader_ip)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_sync_clock(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_sync_clock(&state, forwarder_id, reader_ip)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_set_read_mode(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+    mode: rt_protocol::ReadMode,
+    timeout: u8,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_set_read_mode(&state, forwarder_id, reader_ip, mode, timeout)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_set_tto(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+    enabled: bool,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_set_tto(&state, forwarder_id, reader_ip, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_set_recording(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+    enabled: bool,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_set_recording(&state, forwarder_id, reader_ip, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_clear_records(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_clear_records(&state, forwarder_id, reader_ip)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_start_download(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_start_download(&state, forwarder_id, reader_ip)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_stop_download(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_stop_download(&state, forwarder_id, reader_ip)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_refresh(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_refresh(&state, forwarder_id, reader_ip)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reader_reconnect(
+    state: State<'_, Arc<AppState>>,
+    forwarder_id: String,
+    reader_ip: String,
+) -> CmdResult<serde_json::Value> {
+    control_api::reader_reconnect(&state, forwarder_id, reader_ip)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Event bridge: forward ReceiverUiEvent -> Tauri frontend events
 // ---------------------------------------------------------------------------
@@ -827,6 +943,16 @@ fn main() {
             get_announcer_config,
             put_announcer_config,
             reset_announcer,
+            reader_get_info,
+            reader_sync_clock,
+            reader_set_read_mode,
+            reader_set_tto,
+            reader_set_recording,
+            reader_clear_records,
+            reader_start_download,
+            reader_stop_download,
+            reader_refresh,
+            reader_reconnect,
         ])
         .build(tauri::generate_context!());
 

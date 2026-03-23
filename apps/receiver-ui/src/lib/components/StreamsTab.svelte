@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { AlertBanner } from "@rusty-timer/shared-ui";
+  import { AlertBanner, ReaderControlPanel } from "@rusty-timer/shared-ui";
   import { resizeWidth } from "$lib/actions/resizeWidth";
   import {
     store,
@@ -16,6 +16,7 @@
     setTargetedEpochInputs,
     markModeEdited,
   } from "$lib/store.svelte";
+  import * as api from "$lib/api";
   import { btnPrimary, btnSecondary } from "$lib/ui-classes";
 
   let tableWidth = $state(0);
@@ -55,8 +56,28 @@
     return "bg-status-warn";
   }
 
+  let readerFetchError = $state<string | null>(null);
+
   function toggleExpand(key: string) {
-    expandedKey = expandedKey === key ? null : key;
+    const wasExpanded = expandedKey === key;
+    expandedKey = wasExpanded ? null : key;
+    readerFetchError = null;
+    if (!wasExpanded) {
+      // Fetch reader info when expanding
+      const parts = key.split("/");
+      if (parts.length >= 2) {
+        const forwarderId = parts[0];
+        const readerIp = parts.slice(1).join("/");
+        void api.readerGetInfo(forwarderId, readerIp).catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `Failed to fetch reader info for ${forwarderId}/${readerIp}:`,
+            err,
+          );
+          readerFetchError = `Failed to load reader info: ${msg}`;
+        });
+      }
+    }
   }
 
   function formatLastReadTimestamp(timestamp: string): string {
@@ -505,6 +526,83 @@
                         {stream.subscribed ? "Unsubscribe" : "Subscribe"}
                       </button>
                     </div>
+
+                    {#if readerFetchError}
+                      <div class="mt-2">
+                        <AlertBanner
+                          variant="warn"
+                          message={readerFetchError}
+                        />
+                      </div>
+                    {/if}
+
+                    <ReaderControlPanel
+                      readerIp={stream.reader_ip}
+                      readerInfo={store.readerInfos.get(key) ?? null}
+                      readerState={store.readerStates.get(key) ??
+                        "disconnected"}
+                      downloadProgress={store.downloadProgress.get(key) ?? null}
+                      disabled={false}
+                      helpContext="forwarder"
+                      onSyncClock={async () => {
+                        await api.readerSyncClock(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                        );
+                      }}
+                      onSetReadMode={async (mode: string, timeout: number) => {
+                        await api.readerSetReadMode(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                          mode,
+                          timeout,
+                        );
+                      }}
+                      onSetTto={async (enabled: boolean) => {
+                        await api.readerSetTto(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                          enabled,
+                        );
+                      }}
+                      onSetRecording={async (enabled: boolean) => {
+                        await api.readerSetRecording(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                          enabled,
+                        );
+                      }}
+                      onClearRecords={async () => {
+                        await api.readerClearRecords(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                        );
+                      }}
+                      onStartDownload={async () => {
+                        await api.readerStartDownload(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                        );
+                      }}
+                      onStopDownload={async () => {
+                        await api.readerStopDownload(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                        );
+                      }}
+                      onRefresh={async () => {
+                        await api.readerRefresh(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                        );
+                      }}
+                      onReconnect={async () => {
+                        await api.readerReconnect(
+                          stream.forwarder_id,
+                          stream.reader_ip,
+                        );
+                      }}
+                    />
                   </div>
                 </td>
               </tr>

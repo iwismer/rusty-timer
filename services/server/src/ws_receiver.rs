@@ -936,6 +936,145 @@ async fn proxy_forwarder_race_set_reply(
     )
 }
 
+async fn proxy_reader_control_reply(
+    state: AppState,
+    req: rt_protocol::ReceiverProxyReaderControlRequest,
+) -> WsMessage {
+    use rt_protocol::{ReaderControlAction, ReceiverProxyReaderControlResponse};
+
+    // Validate reader_ip format (ip:port, consistent with HTTP endpoints)
+    if req.reader_ip.parse::<std::net::SocketAddrV4>().is_err() {
+        return WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some("invalid reader_ip format".to_owned()),
+            reader_info: None,
+        });
+    }
+
+    // Look up the forwarder's command sender
+    let tx = {
+        let senders = state.forwarder_command_senders.read().await;
+        senders.get(&req.forwarder_id).cloned()
+    };
+    let Some(tx) = tx else {
+        return WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+            request_id: req.request_id,
+            ok: false,
+            error: Some("forwarder not connected".to_owned()),
+            reader_info: None,
+        });
+    };
+
+    // ClearRecords is fire-and-forget because it has no meaningful failure mode
+    // the caller needs to handle. All other actions use request/response to
+    // propagate errors (e.g., StartDownload can fail if already in progress).
+    let is_fire_and_forget = matches!(req.action, ReaderControlAction::ClearRecords);
+
+    if is_fire_and_forget {
+        let cmd = crate::state::ForwarderCommand::ReaderControlFireAndForget {
+            reader_ip: req.reader_ip.clone(),
+            action: req.action,
+        };
+        return match tx.try_send(cmd) {
+            Ok(()) => {
+                WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: true,
+                    error: None,
+                    reader_info: None,
+                })
+            }
+            Err(_) => {
+                WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("forwarder command queue full or closed".to_owned()),
+                    reader_info: None,
+                })
+            }
+        };
+    }
+
+    // Request/response path
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let fwd_request_id = uuid::Uuid::new_v4().to_string();
+    let cmd = crate::state::ForwarderCommand::ReaderControl {
+        request_id: fwd_request_id,
+        reader_ip: req.reader_ip.clone(),
+        action: req.action,
+        reply: reply_tx,
+    };
+
+    let timeout = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(timeout, tx.send(cmd)).await {
+        Ok(Ok(())) => {} // sent successfully
+        Ok(Err(_)) => {
+            return WsMessage::ReceiverProxyReaderControlResponse(
+                ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("forwarder disconnected".to_owned()),
+                    reader_info: None,
+                },
+            );
+        }
+        Err(_) => {
+            return WsMessage::ReceiverProxyReaderControlResponse(
+                ReceiverProxyReaderControlResponse {
+                    request_id: req.request_id,
+                    ok: false,
+                    error: Some("timeout sending to forwarder".to_owned()),
+                    reader_info: None,
+                },
+            );
+        }
+    }
+
+    match tokio::time::timeout(timeout, reply_rx).await {
+        Ok(Ok(crate::state::ForwarderProxyReply::Response(resp))) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: resp.success,
+                error: resp.error,
+                reader_info: resp.reader_info,
+            })
+        }
+        Ok(Ok(crate::state::ForwarderProxyReply::Timeout)) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("forwarder timeout".to_owned()),
+                reader_info: None,
+            })
+        }
+        Ok(Ok(crate::state::ForwarderProxyReply::InternalError(msg))) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some(msg),
+                reader_info: None,
+            })
+        }
+        Ok(Err(_)) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("forwarder disconnected".to_owned()),
+                reader_info: None,
+            })
+        }
+        Err(_) => {
+            WsMessage::ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse {
+                request_id: req.request_id,
+                ok: false,
+                error: Some("timeout waiting for forwarder response".to_owned()),
+                reader_info: None,
+            })
+        }
+    }
+}
+
 async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: Option<String>) {
     let token_str = match token {
         Some(t) => t,
@@ -1134,6 +1273,44 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                             );
                                         }
                                     }
+                                } else if event.read_type == rt_protocol::READER_INFO_UPDATED_READ_TYPE {
+                                    match String::from_utf8(event.raw_frame) {
+                                        Ok(json) => {
+                                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                                warn!(
+                                                    stream_id = %sub.stream_id,
+                                                    "WS send failed for reader_info_updated; closing session"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                stream_id = %sub.stream_id,
+                                                error = %e,
+                                                "invalid UTF-8 in reader_info_updated payload"
+                                            );
+                                        }
+                                    }
+                                } else if event.read_type == rt_protocol::READER_DOWNLOAD_PROGRESS_READ_TYPE {
+                                    match String::from_utf8(event.raw_frame) {
+                                        Ok(json) => {
+                                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                                warn!(
+                                                    stream_id = %sub.stream_id,
+                                                    "WS send failed for reader_download_progress; closing session"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                stream_id = %sub.stream_id,
+                                                error = %e,
+                                                "invalid UTF-8 in reader_download_progress payload"
+                                            );
+                                        }
+                                    }
                                 } else {
                                     warn!(
                                         stream_id = %sub.stream_id,
@@ -1319,6 +1496,10 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                         req,
                                     ));
                                 }
+                                Ok(WsMessage::ReceiverProxyReaderControlRequest(req)) => {
+                                    pending_proxy_replies
+                                        .spawn(proxy_reader_control_reply(state.clone(), req));
+                                }
                                 Ok(_) => {
                                     send_ws_error(
                                         &mut socket,
@@ -1476,6 +1657,16 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                                     error: Some("server serialization error".into()),
                                                     forwarder_id: r.forwarder_id.clone(),
                                                     race_id: None,
+                                                },
+                                            ))
+                                        }
+                                        WsMessage::ReceiverProxyReaderControlResponse(r) => {
+                                            serde_json::to_string(&WsMessage::ReceiverProxyReaderControlResponse(
+                                                rt_protocol::ReceiverProxyReaderControlResponse {
+                                                    request_id: r.request_id.clone(),
+                                                    ok: false,
+                                                    error: Some("server serialization error".into()),
+                                                    reader_info: None,
                                                 },
                                             ))
                                         }
@@ -2288,10 +2479,13 @@ async fn handle_receiver_ack(
 mod tests {
     use super::{
         RaceBaseline, ResolvedStreamTarget, StreamSub, plan_race_refresh_subscriptions,
-        race_refresh_needed,
+        proxy_reader_control_reply, race_refresh_needed,
     };
-    use rt_protocol::ReadEvent;
+    use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
+    use rt_protocol::{ReadEvent, ReaderControlAction, WsMessage};
+    use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     fn target(stream_id: Uuid, current_stream_epoch: i64) -> ResolvedStreamTarget {
@@ -2321,6 +2515,13 @@ mod tests {
             last_seq: 0,
             rx,
         }
+    }
+
+    fn make_lazy_pool() -> sqlx::PgPool {
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
+            .expect("lazy pool")
     }
 
     #[test]
@@ -2403,5 +2604,67 @@ mod tests {
             Some(512),
             "baseline should keep bounded state per stream across many epoch updates"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_reader_control_waits_for_start_download_response() {
+        let state = AppState::new(make_lazy_pool());
+        let (tx, mut rx) = mpsc::channel(1);
+        state
+            .forwarder_command_senders
+            .write()
+            .await
+            .insert("fwd-1".to_owned(), tx);
+
+        let handler = tokio::spawn(async move {
+            match rx.recv().await.expect("command should be sent") {
+                ForwarderCommand::ReaderControl {
+                    request_id,
+                    reader_ip,
+                    action,
+                    reply,
+                } => {
+                    assert_eq!(reader_ip, "10.0.0.1:10000");
+                    assert_eq!(action, ReaderControlAction::StartDownload);
+                    let _ = reply.send(ForwarderProxyReply::Response(
+                        rt_protocol::ReaderControlResponse {
+                            request_id,
+                            reader_ip,
+                            success: false,
+                            error: Some("download already in progress".to_owned()),
+                            reader_info: None,
+                        },
+                    ));
+                }
+                ForwarderCommand::ReaderControlFireAndForget { .. } => {
+                    panic!("start download must not be fire-and-forget");
+                }
+                ForwarderCommand::EpochReset(_) => panic!("unexpected epoch reset command"),
+                ForwarderCommand::ConfigGet { .. } => panic!("unexpected config get command"),
+                ForwarderCommand::ConfigSet { .. } => panic!("unexpected config set command"),
+                ForwarderCommand::Restart { .. } => panic!("unexpected restart command"),
+            }
+        });
+
+        let resp = proxy_reader_control_reply(
+            state,
+            rt_protocol::ReceiverProxyReaderControlRequest {
+                request_id: "req-1".to_owned(),
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                action: ReaderControlAction::StartDownload,
+            },
+        )
+        .await;
+
+        match resp {
+            WsMessage::ReceiverProxyReaderControlResponse(resp) => {
+                assert!(!resp.ok);
+                assert_eq!(resp.error.as_deref(), Some("download already in progress"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        handler.await.expect("handler task should finish");
     }
 }

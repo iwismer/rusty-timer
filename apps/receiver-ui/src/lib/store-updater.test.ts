@@ -810,4 +810,57 @@ describe("receiver updater store", () => {
     );
     expect(store.streams.streams[0]?.event_type).toBe("start");
   });
+
+  it("maps reader control events from stream_id back to the stream key", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store, streamKey } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    const callbacks = sseState.callbacks;
+    expect(callbacks).toBeDefined();
+
+    store.streams = {
+      streams: [
+        {
+          stream_id: "stream-1",
+          forwarder_id: "fwd-1",
+          reader_ip: "10.0.0.1:10000",
+          subscribed: true,
+          local_port: 10100,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    } as any;
+
+    callbacks?.onReaderInfoUpdated?.({
+      stream_id: "stream-1",
+      reader_ip: "10.0.0.1:10000",
+      state: "connected",
+      reader_info: { banner: "IPICO Reader" },
+    } as any);
+
+    callbacks?.onReaderDownloadProgress?.({
+      stream_id: "stream-1",
+      reader_ip: "10.0.0.1:10000",
+      state: "downloading",
+      reads_received: 42,
+      progress: 100,
+      total: 200,
+      error: null,
+    } as any);
+
+    const key = streamKey("fwd-1", "10.0.0.1:10000");
+    expect(store.readerInfos.get(key)).toEqual({ banner: "IPICO Reader" });
+    expect(store.readerStates.get(key)).toBe("connected");
+    expect(store.downloadProgress.get(key)).toEqual({
+      state: "downloading",
+      reads_received: 42,
+      progress: 100,
+      total: 200,
+      error: undefined,
+    });
+  });
 });

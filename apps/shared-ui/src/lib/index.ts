@@ -13,6 +13,7 @@ export { default as HelpDialog } from "../components/HelpDialog.svelte";
 export { default as HelpTip } from "../components/HelpTip.svelte";
 export { default as HelpSearch } from "../components/HelpSearch.svelte";
 export { default as AnnouncerConfigForm } from "../components/AnnouncerConfigForm.svelte";
+export { default as ReaderControlPanel } from "../components/ReaderControlPanel.svelte";
 export type {
   AnnouncerConfigApi,
   AnnouncerConfig,
@@ -27,4 +28,9 @@ export type {
 } from "../lib/config-types";
 export * from "../lib/reader-view-model";
 export * from "../lib/read-mode-form";
+export type {
+  ReaderInfoData,
+  ReaderConnectionState as ReaderConnectionStateType,
+  DownloadStateType,
+} from "../components/ReaderControlPanel.svelte";
 export * from "../lib/help/index";

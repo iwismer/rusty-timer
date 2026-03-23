@@ -104,6 +104,21 @@ pub enum ReceiverUiEvent {
     },
     LastRead(LastRead),
     StreamMetricsUpdated(StreamMetricsPayload),
+    ReaderInfoUpdated {
+        stream_id: uuid::Uuid,
+        reader_ip: String,
+        state: rt_protocol::ReaderConnectionState,
+        reader_info: Option<rt_protocol::ReaderInfo>,
+    },
+    ReaderDownloadProgress {
+        stream_id: uuid::Uuid,
+        reader_ip: String,
+        state: rt_protocol::DownloadState,
+        reads_received: u32,
+        progress: u64,
+        total: u64,
+        error: Option<String>,
+    },
 }
 
 #[cfg(test)]
