@@ -23,7 +23,7 @@ IPICO Reader ─TCP─► Forwarder (Pi)         │
                               ▼ WSS :443
                     ┌── Timing Tent ──────┐
                     │  Receiver           │
-                    │  :9090 (control UI) │
+                    │  (Tauri desktop UI) │
                     │  :10000+ (TCP out)  │
                     │    │                │
                     │    ▼                │
@@ -37,11 +37,11 @@ IPICO Reader ─TCP─► Forwarder (Pi)         │
 | Component | Port | Protocol | Direction | Notes |
 |-----------|------|----------|-----------|-------|
 | IPICO Reader | 10000 | TCP | Reader → Forwarder | Standard IPICO reader port |
-| Forwarder status | 80 (default on SBC) or 8080 | HTTP | LAN only | Health check + embedded UI |
+| Forwarder status | 8080 (default) | HTTP | Localhost by default (`127.0.0.1:8080`); SBC setup may bind to `0.0.0.0:80` | Health check + embedded UI |
 | Server | 8080 | HTTP/WS | Inbound from forwarders + receivers | Put behind a reverse proxy for TLS |
 | Reverse proxy | 80, 443 | HTTPS/WSS | Public | Caddy, nginx, etc. |
 | PostgreSQL | 5432 | TCP | Server → Postgres | Internal only; never expose publicly |
-| Receiver control | 9090 | HTTP | Localhost only | Receiver UI + control API |
+| Receiver (Tauri) | — | — | — | Desktop UI via Tauri IPC (no HTTP control port) |
 | Receiver TCP out | 10000+ | TCP | Localhost only | One port per subscribed stream |
 
 ## Firewall Rules

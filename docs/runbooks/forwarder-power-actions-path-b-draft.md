@@ -1,4 +1,9 @@
-# Forwarder Power Actions: Path B Draft (No `sudo`, Keep `NoNewPrivileges=yes`)
+# Forwarder Power Actions: Path B (No `sudo`, Keep `NoNewPrivileges=yes`)
+
+> **Status: Implemented.** All changes described in this document have been applied.
+> The `sudo` fallback has been removed, polkit rules are installed by `rt-setup.sh`,
+> and the forwarder uses `systemctl --no-ask-password` only. This document is retained
+> as a design record.
 
 ## Goal
 
@@ -6,15 +11,15 @@ Enable `restart-device` and `shutdown-device` from the forwarder UI without call
 
 ## Why Path B
 
-Current behavior attempts this sequence:
+The previous behavior attempted this sequence:
 1. `systemctl --no-ask-password reboot|poweroff`
 2. fallback to `sudo -n systemctl ...`
 
-This conflicts with hardening intent because `NoNewPrivileges=yes` is designed to prevent gaining new privileges via `execve()` (including setuid/setgid paths).
+This conflicted with hardening intent because `NoNewPrivileges=yes` is designed to prevent gaining new privileges via `execve()` (including setuid/setgid paths).
 
-Path B removes `sudo` from the runtime path and authorizes only the exact reboot/shutdown operations through polkit.
+Path B removed `sudo` from the runtime path and authorizes only the exact reboot/shutdown operations through polkit.
 
-## Proposed Architecture
+## Architecture
 
 1. Keep the forwarder service unit hardened (`NoNewPrivileges=yes`).
 2. Remove `sudo` fallback from `services/forwarder/src/status_http.rs`.
@@ -60,12 +65,12 @@ Notes:
 - Rule file should be owned by `root:root` with mode `0644` (or stricter if distro policy requires).
 - Setup should fail fast if `/etc/polkit-1/rules.d` is unavailable.
 
-## Code Changes (Draft)
+## Code Changes (Completed)
 
 ### `services/forwarder/src/status_http.rs`
 
-1. Remove `run_power_action_command_with_sudo()`.
-2. Simplify `run_power_action_command()` to one execution path:
+1. Removed the `sudo` fallback.
+2. Simplified `run_power_action_command()` to one execution path:
 - `systemctl --no-ask-password reboot|poweroff`
 3. Keep `power_action_auth_failed()` mapping to `HTTP 403` for denied polkit auth.
 4. Keep detailed stderr/stdout surfacing for operator diagnostics.

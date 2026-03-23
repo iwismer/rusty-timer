@@ -12,7 +12,7 @@
 
 - **[Server deployment](../deploy/server/)** — Docker Compose setup, reverse proxy, token provisioning
 - **[Forwarder on Raspberry Pi](../deploy/sbc/)** — SD card flashing, cloud-init, setup script
-- **[Systemd services](../deploy/systemd/)** — Service unit files for forwarder and receiver
+- **[Systemd services](../deploy/systemd/)** — Service unit file for the forwarder
 - **[Network architecture](network-architecture.md)** — Ports, firewall rules, and production network layout
 
 ## Operations Runbooks
@@ -33,11 +33,26 @@ Each service has its own README with configuration reference and build instructi
 
 - **[Forwarder](../services/forwarder/)** — TOML configuration, reader targets, batch settings
 - **[Server](../services/server/)** — Environment variables, API endpoints, Docker build
-- **[Receiver](../services/receiver/)** — Control API, subscription model, port assignment
+- **[Receiver](../services/receiver/)** — Subscription model, port assignment, Tauri IPC commands
 - **[Streamer](../services/streamer/)** — CLI flags, multi-reader fanout
+- **[Emulator](../services/emulator/)** — Synthetic IPICO reader for local testing
+
+## Frontend Apps
+
+- **[Server UI](../apps/server-ui/)** — SvelteKit dashboard (streams, metrics, announcer)
+- **[Receiver UI](../apps/receiver-ui/)** — Tauri v2 + SvelteKit desktop app
+- **[Forwarder UI](../apps/forwarder-ui/)** — SvelteKit web UI for forwarder status/control
 
 ## Protocol & Internals
 
 - **[rt-protocol](../crates/rt-protocol/)** — WebSocket message definitions (v1 / v1.2)
 - **[ipico-core](../crates/ipico-core/)** — IPICO chip-read parsing
+- **[timer-core](../crates/timer-core/)** — Shared timing data model (races, participants, chips)
+- **[emulator](../crates/emulator/)** — IPICO reader emulator library (fault injection, multi-reader)
+- **[rt-test-utils](../crates/rt-test-utils/)** — MockWsServer + MockWsClient test helpers
+- **[rt-updater](../crates/rt-updater/)** — Auto-updater workflow
 - **[IPICO control protocol](ipico-protocol/ipico-control-protocol.md)** — Reader control commands
+
+## Testing
+
+- **[Integration tests](../tests/integration/)** — E2E, chaos, and durability tests (requires Docker)

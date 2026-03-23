@@ -65,7 +65,8 @@ journalctl -u rt-forwarder -f
 # Check systemd status.
 sudo systemctl status rt-forwarder
 
-# Check the status HTTP endpoint (if reachable on the local network).
+# Check the status HTTP endpoint.
+# Default bind is 127.0.0.1:8080; SBC deployments via rt-setup.sh may use 0.0.0.0:80.
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
@@ -230,8 +231,9 @@ The server operator triggers the reset via the server HTTP API:
 
 ```bash
 # Replace {stream_id} with the UUID from GET /api/v1/streams.
-curl -X POST https://timing.example.com/api/v1/streams/{stream_id}/reset-epoch \
-  -H "Authorization: Bearer <admin-token>"
+# This endpoint is unauthenticated (no Bearer token needed).
+# Returns HTTP 204 on success, HTTP 409 if the forwarder is not connected.
+curl -X POST https://timing.example.com/api/v1/streams/{stream_id}/reset-epoch
 ```
 
 The server sends an `epoch_reset_command` to the connected forwarder.

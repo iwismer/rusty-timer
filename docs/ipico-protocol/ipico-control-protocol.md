@@ -61,6 +61,10 @@ open questions.
 - [`captures/testreads`](./captures/testreads)
 - [`captures/turnon-con-dis.pcapng`](./captures/turnon-con-dis.pcapng)
 - [`captures/setclock.pcapng`](./captures/setclock.pcapng)
+- [`captures/another3-clockset.pcapng`](./captures/another3-clockset.pcapng)
+- [`captures/connect5k.pcapng`](./captures/connect5k.pcapng)
+- [`captures/fsls single read.pcapng`](./captures/fsls%20single%20read.pcapng)
+- [`captures/fsls multiple reads.pcapng`](./captures/fsls%20multiple%20reads.pcapng)
 - [`IPICO-Reader-Serial-Protocol-100-20071120.pdf`](./IPICO-Reader-Serial-Protocol-100-20071120.pdf)
 - [`scripts/parse_pcap.py`](../../scripts/parse_pcap.py)
 
@@ -102,6 +106,10 @@ variants in the captures are therefore later-firmware extensions.
 | `docs/ipico-protocol/captures/another4-clockset.pcapng` | Clock set with post-SET verify sleep (500ms); confirms verify sees target second but drift ±250ms from sub-second misalignment |
 | `docs/ipico-protocol/captures/another5-clockset.pcapng` | Clock set with pre-SET alignment delay; drift reduced to ~25ms across all 6 sync attempts |
 | `docs/ipico-protocol/captures/tto-enable.pcapng` | Two TTO-enable attempts via `0x11` query; reader returns 10-byte format response (`LL=0a`) instead of the 8-byte form seen in earlier captures |
+| `docs/ipico-protocol/captures/another3-clockset.pcapng` | Additional clock set capture |
+| `docs/ipico-protocol/captures/connect5k.pcapng` | Connection capture with 5K reader scenario |
+| `docs/ipico-protocol/captures/fsls single read.pcapng` | Single FSLS-mode read capture |
+| `docs/ipico-protocol/captures/fsls multiple reads.pcapng` | Multiple FSLS-mode reads capture |
 
 ## Protocol Families
 
