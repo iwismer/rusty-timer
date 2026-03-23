@@ -104,8 +104,9 @@ a second.
 
 Example: `12065046` → `12:06:50.46`
 
-Note: The raw IPICO protocol provides higher precision (1/256th second), but the
-DBF format truncates to hundredths.
+Note: The raw IPICO protocol encodes centiseconds (0x00–0x63, i.e. 1/100th second).
+The `ipico-core` parser stores this as `millis = centiseconds * 10`. The DBF format
+uses the same hundredths precision, so no truncation occurs.
 
 #### RUNERNO
 

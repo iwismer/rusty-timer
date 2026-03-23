@@ -61,6 +61,7 @@ applied automatically on startup.
 | `BIND_ADDR` | `0.0.0.0:8080` | TCP address the HTTP/WS server listens on |
 | `LOG_LEVEL` | `info` | Tracing filter (e.g. `debug`, `info`, `warn`) |
 | `DATABASE_POOL_SIZE` | `10` | Maximum number of Postgres connections in the pool |
+| `DASHBOARD_DIR` | (none) | Path to a directory of static dashboard files to serve |
 
 ```bash
 DATABASE_URL=postgres://rt:secret@localhost:5432/rusty_timer \
@@ -92,8 +93,11 @@ The server exposes:
 ## Step 3: Configure and Run the Forwarder
 
 The forwarder reads its configuration exclusively from a TOML file. The default path
-is `/etc/rusty-timer/forwarder.toml`. There is currently no command-line flag to
-override the path; place the file at the default location or create a symlink.
+is `/etc/rusty-timer/forwarder.toml`. You can override it with `--config <path>`:
+
+```bash
+cargo run --release -p forwarder -- --config /path/to/forwarder.toml
+```
 
 ### Token file
 
@@ -128,7 +132,6 @@ prune_watermark_pct = 80
 bind = "0.0.0.0:8081"
 
 [uplink]
-batch_mode       = "immediate"
 batch_flush_ms   = 100
 batch_max_events = 50
 

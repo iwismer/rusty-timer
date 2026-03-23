@@ -222,7 +222,7 @@ authoritative exports come from the server's Postgres database.
 |---|---|---|
 | Not receiving events | Not connected to server | Check server URL and token in profile |
 | Integrity check failure | SQLite corruption | Delete local DB and restart |
-| Port collision | Two streams with same last octet | Set `local_fallback_port` override |
+| Port collision | Two streams with same last octet | Set `local_port_override` in subscription |
 | Duplicate events | Normal at-least-once behavior | Receiver deduplicates from local cache |
 | Missing events after reconnect | Server replay working | Wait for replay to complete |
 | Old events replaying | Cursor reset | Check cursor in local SQLite DB |

@@ -54,13 +54,12 @@ See `deploy/server/README.md` for image build/publish and reverse-proxy examples
 
 ### First-time startup
 
-On first startup, the server automatically applies the database migration:
-```
-migrations/0001_init.sql
-```
+On first startup, the server automatically applies all database migrations
+(currently `0001_init.sql` through `0010_reader_connected.sql`).
 
-This creates the required tables: `device_tokens`, `streams`, `events`,
-`stream_metrics`, and `receiver_cursors`.
+These create the required tables including: `device_tokens`, `streams`, `events`,
+`stream_metrics`, `receiver_cursors`, `races`, `participants`, `chips`,
+`stream_epoch_metadata`, and `announcer_config`.
 
 ### Provision device tokens
 
@@ -103,6 +102,7 @@ The server is configured via environment variables (12-factor model):
 | `BIND_ADDR` | `0.0.0.0:8080` | HTTP/WS listen address |
 | `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 | `DATABASE_POOL_SIZE` | `10` | Maximum number of Postgres connections in the pool |
+| `DASHBOARD_DIR` | (none) | Optional path to a directory of static dashboard files to serve |
 
 No TOML config file — all config from environment.
 
