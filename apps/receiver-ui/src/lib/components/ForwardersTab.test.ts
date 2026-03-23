@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
   getForwarders: vi.fn(),
+  getStreamMetrics: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("$lib/api", () => apiMocks);
