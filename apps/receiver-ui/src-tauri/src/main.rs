@@ -219,6 +219,13 @@ async fn get_streams(state: State<'_, Arc<AppState>>) -> CmdResult<control_api::
 }
 
 #[tauri::command]
+async fn get_stream_metrics(
+    state: State<'_, Arc<AppState>>,
+) -> CmdResult<Vec<receiver::ui_events::StreamMetricsPayload>> {
+    Ok(control_api::get_stream_metrics(&state).await)
+}
+
+#[tauri::command]
 async fn put_earliest_epoch(
     state: State<'_, Arc<AppState>>,
     body: control_api::EarliestEpochRequest,
@@ -905,6 +912,7 @@ fn main() {
             get_mode,
             put_mode,
             get_streams,
+            get_stream_metrics,
             put_earliest_epoch,
             get_races,
             create_race,

@@ -46,6 +46,8 @@ pub struct AppState {
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
     pub stream_counts: crate::cache::StreamCounts,
+    pub stream_metrics_cache:
+        Arc<RwLock<HashMap<(String, String), crate::ui_events::StreamMetricsPayload>>>,
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
@@ -95,6 +97,7 @@ impl AppState {
             upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
             stream_counts: crate::cache::StreamCounts::new(),
+            stream_metrics_cache: Arc::new(RwLock::new(HashMap::new())),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
             http_client,
@@ -119,6 +122,27 @@ impl AppState {
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
         self.dbf_config_version.subscribe()
+    }
+
+    pub async fn cache_stream_metrics(&self, payload: &crate::ui_events::StreamMetricsPayload) {
+        let key = (payload.forwarder_id.clone(), payload.reader_ip.clone());
+        self.stream_metrics_cache
+            .write()
+            .await
+            .insert(key, payload.clone());
+    }
+
+    pub async fn clear_stream_metrics_cache(&self) {
+        self.stream_metrics_cache.write().await.clear();
+    }
+
+    pub async fn get_stream_metrics_snapshot(&self) -> Vec<crate::ui_events::StreamMetricsPayload> {
+        self.stream_metrics_cache
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn request_disconnect_shutdown(&self) {
@@ -930,6 +954,10 @@ pub async fn put_earliest_epoch(
 
 pub async fn get_streams(state: &AppState) -> StreamsResponse {
     state.build_streams_response().await
+}
+
+pub async fn get_stream_metrics(state: &AppState) -> Vec<crate::ui_events::StreamMetricsPayload> {
+    state.get_stream_metrics_snapshot().await
 }
 
 // ---------------------------------------------------------------------------

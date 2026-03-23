@@ -229,6 +229,10 @@ export async function getStreams(): Promise<StreamsResponse> {
   return invoke<StreamsResponse>("get_streams");
 }
 
+export async function getStreamMetrics(): Promise<StreamMetrics[]> {
+  return invoke<StreamMetrics[]>("get_stream_metrics");
+}
+
 export async function putSubscriptions(
   subscriptions: SubscriptionItem[],
 ): Promise<void> {

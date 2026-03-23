@@ -95,6 +95,8 @@ pub struct SessionLoopDeps {
     pub connection_state: watch::Receiver<ConnectionState>,
     pub chip_lookup: Arc<tokio::sync::RwLock<ChipLookup>>,
     pub ws_cmd_rx: mpsc::Receiver<WsCommand>,
+    pub stream_metrics_cache:
+        Arc<tokio::sync::RwLock<HashMap<(String, String), crate::ui_events::StreamMetricsPayload>>>,
 }
 
 fn apply_batch_counts(
@@ -336,6 +338,10 @@ where
                             }
                             Ok(WsMessage::ReceiverStreamMetrics(metrics)) => {
                                 let payload = crate::ui_events::StreamMetricsPayload::from_ws(&metrics);
+                                {
+                                    let key = (payload.forwarder_id.clone(), payload.reader_ip.clone());
+                                    deps.stream_metrics_cache.write().await.insert(key, payload.clone());
+                                }
                                 let _ = deps.ui_tx.send(
                                     crate::ui_events::ReceiverUiEvent::StreamMetricsUpdated(payload),
                                 );
