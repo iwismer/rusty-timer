@@ -30,6 +30,7 @@ const apiMocks = vi.hoisted(() => ({
   putDbfConfig: vi.fn().mockResolvedValue(undefined),
   clearDbf: vi.fn().mockResolvedValue(undefined),
   updateSubscriptionEventType: vi.fn().mockResolvedValue(undefined),
+  getStreamMetrics: vi.fn().mockResolvedValue([]),
 }));
 
 const desktopUpdaterMocks = vi.hoisted(() => ({

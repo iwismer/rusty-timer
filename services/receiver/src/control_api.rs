@@ -46,6 +46,8 @@ pub struct AppState {
     pub upstream_url: Arc<RwLock<Option<String>>>,
     pub ui_tx: broadcast::Sender<ReceiverUiEvent>,
     pub stream_counts: crate::cache::StreamCounts,
+    pub stream_metrics_cache:
+        Arc<RwLock<HashMap<(String, String), crate::ui_events::StreamMetricsPayload>>>,
     pub receiver_id: Arc<RwLock<String>>,
     pub db_integrity_ok: bool,
     pub http_client: reqwest::Client,
@@ -95,6 +97,7 @@ impl AppState {
             upstream_url: Arc::new(RwLock::new(None)),
             ui_tx,
             stream_counts: crate::cache::StreamCounts::new(),
+            stream_metrics_cache: Arc::new(RwLock::new(HashMap::new())),
             receiver_id: Arc::new(RwLock::new(receiver_id)),
             db_integrity_ok,
             http_client,
@@ -119,6 +122,27 @@ impl AppState {
 
     pub fn dbf_config_rx(&self) -> watch::Receiver<u64> {
         self.dbf_config_version.subscribe()
+    }
+
+    pub async fn cache_stream_metrics(&self, payload: &crate::ui_events::StreamMetricsPayload) {
+        let key = (payload.forwarder_id.clone(), payload.reader_ip.clone());
+        self.stream_metrics_cache
+            .write()
+            .await
+            .insert(key, payload.clone());
+    }
+
+    pub async fn clear_stream_metrics_cache(&self) {
+        self.stream_metrics_cache.write().await.clear();
+    }
+
+    pub async fn get_stream_metrics_snapshot(&self) -> Vec<crate::ui_events::StreamMetricsPayload> {
+        self.stream_metrics_cache
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn request_disconnect_shutdown(&self) {
@@ -930,6 +954,10 @@ pub async fn put_earliest_epoch(
 
 pub async fn get_streams(state: &AppState) -> StreamsResponse {
     state.build_streams_response().await
+}
+
+pub async fn get_stream_metrics(state: &AppState) -> Vec<crate::ui_events::StreamMetricsPayload> {
+    state.get_stream_metrics_snapshot().await
 }
 
 // ---------------------------------------------------------------------------
@@ -1752,6 +1780,7 @@ pub async fn disconnect(state: &AppState) {
     if current == ConnectionState::Disconnected {
         return;
     }
+    state.clear_stream_metrics_cache().await;
     state
         .set_connection_state(ConnectionState::Disconnecting)
         .await;
@@ -2218,6 +2247,38 @@ mod tests {
         state.request_process_shutdown();
         shutdown_rx.changed().await.unwrap();
         assert_eq!(*shutdown_rx.borrow(), ShutdownSignal::Terminate);
+    }
+
+    #[tokio::test]
+    async fn disconnect_clears_cached_stream_metrics() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        state.set_connection_state(ConnectionState::Connected).await;
+
+        state
+            .cache_stream_metrics(&crate::ui_events::StreamMetricsPayload {
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                raw_count: 10,
+                dedup_count: 9,
+                retransmit_count: 1,
+                lag_ms: Some(250),
+                epoch_raw_count: 4,
+                epoch_dedup_count: 3,
+                epoch_retransmit_count: 1,
+                unique_chips: 2,
+                epoch_last_received_at: Some("2026-03-22T12:00:00Z".to_owned()),
+                epoch_lag_ms: Some(125),
+            })
+            .await;
+
+        disconnect(&state).await;
+
+        assert!(state.get_stream_metrics_snapshot().await.is_empty());
+        assert_eq!(
+            *state.connection_state.borrow(),
+            ConnectionState::Disconnecting
+        );
     }
 
     async fn run_test_server(router: Router) -> std::net::SocketAddr {

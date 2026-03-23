@@ -4,7 +4,10 @@ use receiver::control_api::ConnectionState;
 use receiver::db::Db;
 use receiver::session::{SessionError, SessionLoopDeps, run_session_loop};
 use receiver::ui_events::ReceiverUiEvent;
-use rt_protocol::{ErrorMessage, ReadEvent, ReceiverEventBatch, ReceiverModeApplied, WsMessage};
+use rt_protocol::{
+    ErrorMessage, ReadEvent, ReceiverEventBatch, ReceiverModeApplied, ReceiverStreamMetrics,
+    WsMessage,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -116,6 +119,7 @@ async fn run_session_loop_persists_high_water_and_sends_receiver_ack() {
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await
@@ -201,6 +205,7 @@ async fn run_session_loop_drops_events_while_reconnect_is_pending() {
             connection_state: watch::channel(ConnectionState::Connecting).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await
@@ -247,6 +252,7 @@ async fn run_session_loop_returns_connection_closed_on_non_retryable_error() {
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -289,6 +295,7 @@ async fn run_session_loop_exits_ok_on_retryable_error() {
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -333,6 +340,7 @@ async fn run_session_loop_replies_to_ping_with_pong() {
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -370,6 +378,7 @@ async fn run_session_loop_stops_on_shutdown_signal() {
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     ));
 
@@ -419,6 +428,7 @@ async fn run_session_loop_emits_mode_applied_logs_to_ui_channel() {
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -491,6 +501,7 @@ async fn run_session_loop_emits_resync_to_ui_channel_on_reader_status_changed() 
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await;
@@ -603,11 +614,79 @@ async fn run_session_loop_withholds_ack_when_save_cursor_fails() {
             connection_state: watch::channel(ConnectionState::Connected).1,
             chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         },
     )
     .await
     .unwrap();
 
     no_ack_rx.await.expect("server handler should complete");
+    join_server_task(task).await;
+}
+
+#[tokio::test]
+async fn run_session_loop_caches_stream_metrics() {
+    let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+        let metrics = WsMessage::ReceiverStreamMetrics(ReceiverStreamMetrics {
+            forwarder_id: "fwd-1".to_owned(),
+            reader_ip: "10.0.0.1:10000".to_owned(),
+            raw_count: 30,
+            dedup_count: 28,
+            retransmit_count: 2,
+            lag_ms: Some(75),
+            epoch_raw_count: 10,
+            epoch_dedup_count: 9,
+            epoch_retransmit_count: 1,
+            epoch_lag_ms: Some(40),
+            epoch_last_received_at: Some("2026-03-22T14:00:00Z".to_owned()),
+            unique_chips: 5,
+        });
+        ws.send(Message::Text(
+            serde_json::to_string(&metrics).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+        ws.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+    let metrics_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+    let result = run_session_loop(
+        ws,
+        "session-metrics".to_owned(),
+        SessionLoopDeps {
+            db,
+            event_tx,
+            dbf_event_tx: None,
+            stream_counts: StreamCounts::new(),
+            ui_tx,
+            shutdown: shutdown_rx,
+            connection_state: watch::channel(ConnectionState::Connected).1,
+            chip_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            ws_cmd_rx: tokio::sync::mpsc::channel(1).1,
+            stream_metrics_cache: Arc::clone(&metrics_cache),
+        },
+    )
+    .await;
+
+    assert!(result.is_ok());
+
+    let cached = metrics_cache.read().await;
+    assert_eq!(cached.len(), 1, "expected one cached metrics entry");
+    let entry = cached
+        .get(&("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()))
+        .expect("metrics for fwd-1/10.0.0.1:10000");
+    assert_eq!(entry.raw_count, 30);
+    assert_eq!(entry.dedup_count, 28);
+    assert_eq!(entry.unique_chips, 5);
+
     join_server_task(task).await;
 }

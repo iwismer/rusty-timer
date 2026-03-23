@@ -656,6 +656,7 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
       nextMode,
       nextRaces,
       nextForwarders,
+      nextMetrics,
     ] = await Promise.all([
       api.getStatus(),
       api.getStreams(),
@@ -669,6 +670,13 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
           ok: false as const,
           error: String(error),
         })),
+      api.getStreamMetrics().catch((e: unknown) => {
+        console.warn(
+          "getStreamMetrics failed, will rely on real-time updates:",
+          e,
+        );
+        return [] as api.StreamMetrics[];
+      }),
     ]);
 
     await loadDbfConfig();
@@ -681,6 +689,13 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
         nextStreams.streams,
       );
       void prefetchEarliestEpochOptions(nextStreams.streams);
+    }
+    if (nextMetrics.length > 0) {
+      const merged = new Map(store.streamMetrics);
+      for (const m of nextMetrics) {
+        merged.set(streamKey(m.forwarder_id, m.reader_ip), m);
+      }
+      store.streamMetrics = merged;
     }
     store.logEntries = nextLogs.entries;
     if (nextRaces) {

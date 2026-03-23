@@ -49,6 +49,7 @@ const apiMocks = vi.hoisted(() => ({
   getDbfConfig: vi.fn().mockResolvedValue({ enabled: false, path: "" }),
   putDbfConfig: vi.fn().mockResolvedValue(undefined),
   clearDbf: vi.fn().mockResolvedValue(undefined),
+  getStreamMetrics: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("$lib/api", () => apiMocks);
@@ -231,6 +232,34 @@ describe("receiver layout SSE updates", () => {
     });
     expect(screen.queryByText("Forwarder 1")).not.toBeInTheDocument();
     expect(store.forwarders).toBeNull();
+  });
+
+  it("merges cached stream metrics into store on initial load", async () => {
+    apiMocks.getStreamMetrics.mockResolvedValueOnce([
+      {
+        forwarder_id: "fwd-1",
+        reader_ip: "10.0.0.1:10000",
+        raw_count: 50,
+        dedup_count: 45,
+        retransmit_count: 5,
+        lag_ms: 100,
+        epoch_raw_count: 20,
+        epoch_dedup_count: 18,
+        epoch_retransmit_count: 2,
+        unique_chips: 10,
+        epoch_last_received_at: "2026-03-22T12:00:00Z",
+        epoch_lag_ms: 50,
+      },
+    ]);
+
+    render(Layout);
+
+    await waitFor(() => {
+      const entry = store.streamMetrics.get("fwd-1/10.0.0.1:10000");
+      expect(entry).toBeTruthy();
+      expect(entry?.raw_count).toBe(50);
+      expect(entry?.unique_chips).toBe(10);
+    });
   });
 
   it("renders nested route content", async () => {
