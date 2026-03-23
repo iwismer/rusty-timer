@@ -330,6 +330,10 @@ export async function resetProfile(): Promise<void> {
   await invoke("admin_reset_profile");
 }
 
+export async function clearData(): Promise<void> {
+  await invoke("admin_clear_data");
+}
+
 export async function factoryReset(): Promise<void> {
   await invoke("admin_factory_reset");
 }

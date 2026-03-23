@@ -401,6 +401,19 @@ impl Db {
         Ok(())
     }
 
+    pub fn clear_data(&mut self) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM cursors")?;
+        tx.execute_batch("DELETE FROM earliest_epochs")?;
+        tx.execute_batch("DELETE FROM subscriptions")?;
+        tx.execute(
+            "UPDATE profile SET update_mode = ?1, receiver_mode_json = NULL, dbf_enabled = 0, dbf_path = 'C:\\winrace\\Files\\IPICO.DBF'",
+            rusqlite::params![DEFAULT_UPDATE_MODE],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn factory_reset(&mut self) -> DbResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
@@ -781,6 +794,33 @@ mod tests {
         assert_eq!(p.server_url, "");
         assert_eq!(p.token, "");
         assert_eq!(p.receiver_id, None);
+        assert!(db.load_subscriptions().unwrap().is_empty());
+        assert!(db.load_cursors().unwrap().is_empty());
+        assert!(db.load_earliest_epochs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_data_preserves_profile_connection_fields() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile("wss://example.com", "tok", "check-only", Some("recv-1"))
+            .unwrap();
+        db.save_dbf_config(&DbfConfig {
+            enabled: true,
+            path: r"D:\race\output.dbf".to_owned(),
+        })
+        .unwrap();
+        db.save_subscription("f1", "10.0.0.1", None, None).unwrap();
+        db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
+        db.save_earliest_epoch("f1", "10.0.0.1", 7).unwrap();
+        db.clear_data().unwrap();
+        let p = db.load_profile().unwrap().unwrap();
+        assert_eq!(p.server_url, "wss://example.com");
+        assert_eq!(p.token, "tok");
+        assert_eq!(p.receiver_id, Some("recv-1".to_owned()));
+        // Non-profile fields should be reset
+        let dbf = db.load_dbf_config().unwrap();
+        assert!(!dbf.enabled);
+        assert_eq!(dbf.path, DEFAULT_DBF_PATH);
         assert!(db.load_subscriptions().unwrap().is_empty());
         assert!(db.load_cursors().unwrap().is_empty());
         assert!(db.load_earliest_epochs().unwrap().is_empty());

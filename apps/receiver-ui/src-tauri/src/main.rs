@@ -475,6 +475,13 @@ async fn admin_reset_profile(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn admin_clear_data(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
+    control_api::admin_clear_data(&state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn admin_factory_reset(state: State<'_, Arc<AppState>>) -> CmdResult<()> {
     control_api::admin_factory_reset(&state)
         .await
@@ -934,6 +941,7 @@ fn main() {
             admin_purge_subscriptions,
             admin_update_port,
             admin_reset_profile,
+            admin_clear_data,
             admin_factory_reset,
             get_dbf_config,
             put_dbf_config,

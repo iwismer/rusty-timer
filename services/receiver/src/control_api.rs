@@ -1942,6 +1942,25 @@ pub async fn admin_reset_profile(state: &AppState) -> Result<(), ReceiverError> 
     }
 }
 
+pub async fn admin_clear_data(state: &AppState) -> Result<(), ReceiverError> {
+    let current = state.connection_state.borrow().clone();
+    if current != ConnectionState::Disconnected {
+        state
+            .set_connection_state(ConnectionState::Disconnecting)
+            .await;
+        state.request_disconnect_shutdown();
+    }
+    let mut db = state.db.lock().await;
+    match db.clear_data() {
+        Ok(()) => {
+            drop(db);
+            state.emit_streams_snapshot().await;
+            Ok(())
+        }
+        Err(e) => Err(ReceiverError::Internal(e.to_string())),
+    }
+}
+
 pub async fn admin_factory_reset(state: &AppState) -> Result<(), ReceiverError> {
     let current = state.connection_state.borrow().clone();
     if current != ConnectionState::Disconnected {

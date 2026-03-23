@@ -11,6 +11,7 @@
   let inFlightKeys = $state<Set<string>>(new Set());
   let inFlightAction = $state<string | null>(null);
   let feedback = $state<{ message: string; ok: boolean } | null>(null);
+  let confirmingClearData = $state(false);
   let confirmingFactoryReset = $state(false);
   let portEdits = $state<Map<string, string>>(new Map());
 
@@ -176,6 +177,11 @@
       next.delete(actionKey);
       inFlightKeys = next;
     }
+  }
+
+  async function handleClearData() {
+    confirmingClearData = false;
+    await handleBulkAction(() => api.clearData(), "Clear data", "clear-data");
   }
 
   async function handleFactoryReset() {
@@ -463,6 +469,46 @@
             ? "Resetting..."
             : "Reset Profile to Defaults"}
         </button>
+      </section>
+
+      <hr class="border-border" />
+
+      <!-- Clear Data -->
+      <section>
+        <h3 class="text-sm font-semibold text-status-err mb-1">Clear Data</h3>
+        <p class="text-xs text-text-muted m-0 mb-3">
+          Clear all subscriptions, cursors, races, mode, and DBF config. Keeps
+          server URL, token, and receiver ID.
+        </p>
+        {#if confirmingClearData}
+          <div class="flex items-center gap-3">
+            <span class="text-sm text-status-err font-medium"
+              >Are you sure?</span
+            >
+            <button
+              onclick={handleClearData}
+              disabled={inFlightAction === "clear-data"}
+              class={btnDangerConfirm}
+            >
+              {inFlightAction === "clear-data"
+                ? "Clearing..."
+                : "Yes, Clear Data"}
+            </button>
+            <button
+              onclick={() => (confirmingClearData = false)}
+              class={btnNeutral}
+            >
+              Cancel
+            </button>
+          </div>
+        {:else}
+          <button
+            onclick={() => (confirmingClearData = true)}
+            class={btnDanger}
+          >
+            Clear Data...
+          </button>
+        {/if}
       </section>
 
       <hr class="border-border" />
