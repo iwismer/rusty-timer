@@ -4,6 +4,9 @@ import { svelteTesting } from "@testing-library/svelte/vite";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  server: {
+    host: "127.0.0.1",
+  },
   plugins: [tailwindcss(), sveltekit(), svelteTesting()],
   define: {
     __BUILD_DATE__: JSON.stringify(new Date().toISOString().split("T")[0]),
