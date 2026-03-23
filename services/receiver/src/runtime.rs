@@ -1295,7 +1295,10 @@ mod tests {
     use crate::ports::stream_key;
     use crate::ui_events::ReceiverUiEvent;
     use futures_util::{SinkExt, StreamExt};
-    use rt_protocol::{Heartbeat, ReceiverMode, ReceiverModeApplied, ReplayTarget, WsMessage};
+    use rt_protocol::{
+        Heartbeat, ReceiverMode, ReceiverModeApplied, ReceiverStreamMetrics, ReplayTarget,
+        WsMessage,
+    };
     use std::collections::HashMap;
     use std::future::Future;
     use std::sync::Arc;
@@ -1444,6 +1447,77 @@ mod tests {
                 .any(|entry| entry.contains("replay capped at 1000 events")),
             "expected second warning log entry, got: {log_entries:?}"
         );
+
+        task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn handshake_caches_stream_metrics() {
+        let (addr, task) = run_raw_ws_server_once(|mut ws| async move {
+            let _hello = ws.next().await.expect("hello frame").expect("hello ws");
+
+            let metrics = WsMessage::ReceiverStreamMetrics(ReceiverStreamMetrics {
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                raw_count: 50,
+                dedup_count: 45,
+                retransmit_count: 5,
+                lag_ms: Some(100),
+                epoch_raw_count: 20,
+                epoch_dedup_count: 18,
+                epoch_retransmit_count: 2,
+                epoch_lag_ms: Some(50),
+                epoch_last_received_at: Some("2026-03-22T12:00:00Z".to_owned()),
+                unique_chips: 10,
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&metrics)
+                    .expect("serialize metrics")
+                    .into(),
+            ))
+            .await
+            .expect("send metrics");
+
+            let heartbeat = WsMessage::Heartbeat(Heartbeat {
+                session_id: "session-metrics".to_owned(),
+                device_id: "test-receiver".to_owned(),
+            });
+            ws.send(Message::Text(
+                serde_json::to_string(&heartbeat)
+                    .expect("serialize heartbeat")
+                    .into(),
+            ))
+            .await
+            .expect("send heartbeat");
+        })
+        .await;
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .expect("connect");
+        let db = Arc::new(tokio::sync::Mutex::new(Db::open_in_memory().expect("db")));
+        let (ui_tx, _ui_rx) = tokio::sync::broadcast::channel::<ReceiverUiEvent>(8);
+        let http_client = reqwest::Client::new();
+        let metrics_cache = tokio::sync::RwLock::new(std::collections::HashMap::new());
+        let (result, _ws) = do_handshake(
+            ws,
+            &db,
+            &ui_tx,
+            "test-receiver",
+            &http_client,
+            &metrics_cache,
+        )
+        .await;
+        assert!(result.is_ok(), "handshake should succeed");
+
+        let cached = metrics_cache.read().await;
+        assert_eq!(cached.len(), 1, "expected one cached metrics entry");
+        let entry = cached
+            .get(&("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()))
+            .expect("metrics for fwd-1/10.0.0.1:10000");
+        assert_eq!(entry.raw_count, 50);
+        assert_eq!(entry.dedup_count, 45);
+        assert_eq!(entry.unique_chips, 10);
 
         task.await.expect("server task");
     }

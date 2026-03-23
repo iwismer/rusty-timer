@@ -655,7 +655,13 @@ export async function loadAll(): Promise<void> {
           ok: false as const,
           error: String(error),
         })),
-      api.getStreamMetrics().catch(() => [] as api.StreamMetrics[]),
+      api.getStreamMetrics().catch((e: unknown) => {
+        console.warn(
+          "getStreamMetrics failed, will rely on real-time updates:",
+          e,
+        );
+        return [] as api.StreamMetrics[];
+      }),
     ]);
 
     await loadDbfConfig();
