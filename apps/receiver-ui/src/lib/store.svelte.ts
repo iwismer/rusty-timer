@@ -575,6 +575,17 @@ function hydrateMode(mode: ReceiverMode): void {
   );
 }
 
+function resetHydratedMode(): void {
+  hydrateMode({ mode: "live", streams: [], earliest_epochs: [] });
+  store.savedModePayload = JSON.stringify({
+    mode: "live",
+    streams: [],
+    earliest_epochs: [],
+  });
+  store.modeEditedSinceHydration = false;
+  modeHydrationVersion += 1;
+}
+
 export function applyHydratedMode(mode: ReceiverMode): void {
   hydrateMode(mode);
   store.savedModePayload = modeSignature(mode);
@@ -689,13 +700,16 @@ export async function loadAll(): Promise<void> {
       store.selectedForwarderId = null;
     }
     if (
-      nextMode &&
       !getModeDirty() &&
       modeEditVersion === modeEditVersionAtStart &&
       modeHydrationVersion === modeVersionAtStart &&
       modeMutationVersion === modeMutationVersionAtStart
     ) {
-      applyHydratedMode(nextMode);
+      if (nextMode) {
+        applyHydratedMode(nextMode);
+      } else {
+        resetHydratedMode();
+      }
     }
 
     const p = await api.getProfile().catch(() => null);

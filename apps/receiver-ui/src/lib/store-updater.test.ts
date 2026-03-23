@@ -182,6 +182,32 @@ describe("receiver updater store", () => {
     expect(store.savedReceiverId).toBe("recv-live");
   });
 
+  it("resets hydrated mode to default live mode when no mode is configured", async () => {
+    apiMocks.getMode.mockResolvedValueOnce({
+      mode: "race",
+      race_id: "11111111-1111-1111-1111-111111111111",
+    });
+
+    const { initStore, loadAll, store } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    expect(store.modeDraft).toBe("race");
+    expect(store.raceIdDraft).toBe("11111111-1111-1111-1111-111111111111");
+
+    apiMocks.getMode.mockRejectedValueOnce(new Error("no mode configured"));
+
+    await loadAll();
+
+    expect(store.modeDraft).toBe("live");
+    expect(store.raceIdDraft).toBe("");
+    expect(store.targetedEpochInputs).toEqual({});
+    expect(store.savedModePayload).toBe(
+      JSON.stringify({ mode: "live", streams: [], earliest_epochs: [] }),
+    );
+  });
+
   it("clears cached metrics for a stream when a snapshot reports a newer epoch", async () => {
     const sseState = mockSseInitWithCallbacks();
     const { initStore, store, streamKey } = await import("./store.svelte");

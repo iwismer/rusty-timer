@@ -1954,7 +1954,9 @@ pub async fn admin_clear_data(state: &AppState) -> Result<(), ReceiverError> {
     match db.clear_data() {
         Ok(()) => {
             drop(db);
+            state.notify_dbf_config_changed();
             state.emit_streams_snapshot().await;
+            state.emit_resync();
             Ok(())
         }
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
@@ -2272,5 +2274,53 @@ mod tests {
         .unwrap();
 
         assert_eq!(ids, vec!["fwd-a", "fwd-b"]);
+    }
+
+    #[tokio::test]
+    async fn admin_clear_data_notifies_dbf_watchers_and_requests_ui_resync() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_profile(
+            "wss://example.com",
+            "tok",
+            DEFAULT_UPDATE_MODE,
+            Some("recv-1"),
+        )
+        .unwrap();
+        db.save_dbf_config(&crate::db::DbfConfig {
+            enabled: true,
+            path: r"D:\race\output.dbf".to_owned(),
+        })
+        .unwrap();
+        db.save_receiver_mode(&ReceiverMode::Race {
+            race_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+        })
+        .unwrap();
+
+        let (state, _shutdown_rx) = AppState::new(db, "recv-1".to_owned());
+        let mut dbf_config_rx = state.dbf_config_rx();
+        let mut ui_rx = state.ui_tx.subscribe();
+
+        admin_clear_data(&state).await.unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            dbf_config_rx.changed(),
+        )
+        .await
+        .expect("clear data should notify DBF config subscribers")
+        .expect("DBF config channel should stay open");
+
+        let mut saw_resync = false;
+        for _ in 0..3 {
+            let event = tokio::time::timeout(std::time::Duration::from_millis(100), ui_rx.recv())
+                .await
+                .expect("clear data should emit UI events")
+                .expect("UI event channel should stay open");
+            if matches!(event, ReceiverUiEvent::Resync) {
+                saw_resync = true;
+                break;
+            }
+        }
+        assert!(saw_resync, "clear data should request a UI resync");
     }
 }
