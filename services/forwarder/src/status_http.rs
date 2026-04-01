@@ -233,6 +233,56 @@ impl SubsystemStatus {
     }
 }
 
+#[cfg(feature = "eink")]
+fn subsystem_to_display_state(
+    ss: &SubsystemStatus,
+    cpu_temp: Option<f32>,
+) -> rt_eink::state::DisplayState {
+    let readers = ss
+        .readers()
+        .iter()
+        .map(|(addr, r)| {
+            // Reader addresses are "ip:port" — extract just the IP.
+            let ip = addr
+                .rsplit_once(':')
+                .map_or(addr.as_str(), |(ip, _)| ip)
+                .to_owned();
+            rt_eink::state::ReaderDisplayState {
+                ip,
+                state: match r.state {
+                    ReaderConnectionState::Connected => {
+                        rt_eink::state::ReaderConnectionState::Connected
+                    }
+                    ReaderConnectionState::Connecting => {
+                        rt_eink::state::ReaderConnectionState::Connecting
+                    }
+                    ReaderConnectionState::Disconnected => {
+                        rt_eink::state::ReaderConnectionState::Disconnected
+                    }
+                },
+                drift_ms: r
+                    .reader_info
+                    .as_ref()
+                    .and_then(|info| info.clock.as_ref())
+                    .map(|c| c.drift_ms),
+                session_reads: r.reads_since_restart,
+            }
+        })
+        .collect();
+
+    let total_reads: u64 = ss.readers().values().map(|r| r.reads_since_restart).sum();
+
+    rt_eink::state::DisplayState {
+        forwarder_name: None, // Set separately via display_name field
+        local_ip: ss.local_ip.clone(),
+        server_connected: ss.uplink_connected(),
+        readers,
+        total_reads,
+        cpu_temp_celsius: cpu_temp,
+        battery: None, // Future PiSugar integration
+    }
+}
+
 // ---------------------------------------------------------------------------
 // StatusServer handle
 // ---------------------------------------------------------------------------
@@ -252,6 +302,12 @@ pub struct StatusServer {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
+    #[cfg(feature = "eink")]
+    display_tx: Option<tokio::sync::watch::Sender<rt_eink::state::DisplayState>>,
+    #[cfg(feature = "eink")]
+    display_name: Arc<Mutex<Option<String>>>,
+    #[cfg(feature = "eink")]
+    cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
 /// Holds the config file path and a write lock for read-modify-write operations.
@@ -337,6 +393,8 @@ impl StatusServer {
                 uplink_connected: ss.uplink_connected(),
                 restart_needed: ss.restart_needed(),
             });
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Mark that a restart is needed to apply saved config changes.
@@ -360,6 +418,8 @@ impl StatusServer {
                 uplink_connected: connected,
                 restart_needed: ss.restart_needed(),
             });
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Set the forwarder ID (call once at startup).
@@ -370,6 +430,8 @@ impl StatusServer {
     /// Set the detected local IP (call once at startup).
     pub async fn set_local_ip(&self, ip: Option<String>) {
         self.subsystem.lock().await.local_ip = ip;
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Set the update mode (controls check-only vs check-and-download behavior).
@@ -448,6 +510,37 @@ impl StatusServer {
         &self.reconnect_notifies
     }
 
+    #[cfg(feature = "eink")]
+    async fn publish_display_state(&self) {
+        if let Some(ref tx) = self.display_tx {
+            let ss = self.subsystem.lock().await;
+            let cpu_temp = *self.cpu_temp.lock().await;
+            let mut state = subsystem_to_display_state(&ss, cpu_temp);
+            state.forwarder_name = self.display_name.lock().await.clone();
+            tx.send_replace(state);
+        }
+    }
+
+    #[cfg(feature = "eink")]
+    pub fn set_display_sender(
+        &mut self,
+        tx: tokio::sync::watch::Sender<rt_eink::state::DisplayState>,
+    ) {
+        self.display_tx = Some(tx);
+    }
+
+    #[cfg(feature = "eink")]
+    pub async fn set_display_name(&self, name: Option<String>) {
+        *self.display_name.lock().await = name;
+        self.publish_display_state().await;
+    }
+
+    #[cfg(feature = "eink")]
+    pub async fn set_cpu_temp(&self, temp: Option<f32>) {
+        *self.cpu_temp.lock().await = temp;
+        self.publish_display_state().await;
+    }
+
     /// Retrieve a clone of the cached reader info for a given reader IP.
     pub async fn get_reader_info(
         &self,
@@ -474,6 +567,8 @@ impl StatusServer {
                 ip: reader_ip.to_owned(),
                 info,
             });
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Update reader info only if the reader has not transitioned to Disconnected.
@@ -508,6 +603,8 @@ impl StatusServer {
                 ip: reader_ip.to_owned(),
                 info,
             });
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     pub fn register_control_client(
@@ -545,6 +642,8 @@ impl StatusServer {
                 reader_info: None,
             });
         }
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Seed a reader's total historical count from durable journal state.
@@ -553,6 +652,8 @@ impl StatusServer {
         if let Some(r) = ss.readers.get_mut(reader_ip) {
             r.reads_total = total;
         }
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
@@ -572,6 +673,8 @@ impl StatusServer {
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
         }
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Update a reader's connection state.
@@ -594,6 +697,8 @@ impl StatusServer {
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
         }
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Record a successful chip read for a reader.
@@ -615,6 +720,8 @@ impl StatusServer {
                     current_epoch_name: r.current_epoch_name.clone(),
                 });
         }
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     /// Start the status HTTP server without a journal (epoch reset returns 404).
@@ -672,6 +779,12 @@ impl StatusServer {
             control_clients,
             download_trackers,
             reconnect_notifies,
+            #[cfg(feature = "eink")]
+            display_tx: None,
+            #[cfg(feature = "eink")]
+            display_name: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "eink")]
+            cpu_temp: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -724,6 +837,12 @@ impl StatusServer {
             control_clients,
             download_trackers,
             reconnect_notifies,
+            #[cfg(feature = "eink")]
+            display_tx: None,
+            #[cfg(feature = "eink")]
+            display_name: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "eink")]
+            cpu_temp: Arc::new(Mutex::new(None)),
         })
     }
 }
