@@ -11,6 +11,7 @@
     LogViewer,
     HelpTip,
     HelpDialog,
+    BatteryIndicator,
   } from "@rusty-timer/shared-ui";
   import type { ForwarderStatus } from "$lib/api";
   import {
@@ -72,6 +73,10 @@
     Record<string, { kind: "ok" | "err"; message: string } | undefined>
   >({});
   let downloadState = $state<Record<string, DownloadProgressEvent | null>>({});
+  let upsState = $state<{
+    available: boolean;
+    status: any | null;
+  } | null>(null);
   let downloadHandles: Record<string, DownloadProgressHandle> = {};
   let localClockStr = $state("");
   let readerInfoReceivedAt = $state<Record<string, number>>({});
@@ -681,6 +686,9 @@
           status = null;
         }
       },
+      onUpsStatusChanged: (payload) => {
+        upsState = { available: payload.available, status: payload.status };
+      },
       onUpdateStatusChanged: (us) => {
         if (
           (us.status === "available" || us.status === "downloaded") &&
@@ -735,6 +743,23 @@
     </div>
   {/if}
 
+  {#if upsState}
+    {#if upsState.status && !upsState.status.power_plugged}
+      <div class="mb-4">
+        <AlertBanner
+          variant="warn"
+          message="Running on battery power ({upsState.status
+            .battery_percent}%)"
+        />
+      </div>
+    {/if}
+    {#if !upsState.available}
+      <div class="mb-4">
+        <AlertBanner variant="warn" message="UPS unavailable" />
+      </div>
+    {/if}
+  {/if}
+
   <h1 class="text-xl font-bold text-text-primary mb-6">Forwarder</h1>
 
   {#if status}
@@ -783,6 +808,17 @@
               state={status.restart_needed ? "warn" : "ok"}
             />
           </dd>
+          {#if upsState}
+            <dt class="text-text-muted">Battery</dt>
+            <dd>
+              <BatteryIndicator
+                percent={upsState.status?.battery_percent ?? null}
+                charging={upsState.status?.charging ?? false}
+                available={upsState.available}
+                configured
+              />
+            </dd>
+          {/if}
         </dl>
         <div class="flex gap-2 mt-3 pt-3 border-t border-border">
           <button
