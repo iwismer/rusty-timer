@@ -653,6 +653,12 @@ mod tests {
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
             },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -1488,6 +1494,12 @@ token_file = "/tmp/test-token"
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
             },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
+            },
             readers: vec![],
         };
 
@@ -1723,6 +1735,12 @@ token_file = "/tmp/test-token"
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
             },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -1836,6 +1854,12 @@ token_file = "/tmp/test-token"
             },
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
+            },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
             },
             readers: vec![],
         };
