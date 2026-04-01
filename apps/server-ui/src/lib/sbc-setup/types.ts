@@ -15,4 +15,5 @@ export interface SbcSetupFormData {
   statusBind: string;
   displayName: string;
   setupScriptUrl: string;
+  upsEnabled: boolean;
 }

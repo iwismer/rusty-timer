@@ -22,6 +22,7 @@ function baseConfig(): SbcSetupFormData {
     displayName: "rt-fwd-01",
     setupScriptUrl:
       "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
+    upsEnabled: false,
   };
 }
 
