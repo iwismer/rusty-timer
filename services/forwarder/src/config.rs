@@ -36,6 +36,8 @@ pub struct ForwarderConfig {
     pub update: UpdateConfig,
     pub ups: UpsConfig,
     pub readers: Vec<ReaderConfig>,
+    #[cfg(feature = "eink")]
+    pub eink: Option<rt_eink::state::EinkConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +108,8 @@ pub struct RawConfig {
     pub update: Option<RawUpdateConfig>,
     pub ups: Option<RawUpsConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
+    #[cfg(feature = "eink")]
+    pub eink: Option<rt_eink::state::EinkConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,6 +375,8 @@ pub fn load_config_from_str(
         update,
         ups,
         readers,
+        #[cfg(feature = "eink")]
+        eink: raw.eink,
     })
 }
 
@@ -540,5 +546,13 @@ target = "192.168.1.100"
             err.to_string().contains("ups.upstream_heartbeat_secs"),
             "error: {err}"
         );
+    }
+
+    #[test]
+    fn eink_section_absent_parses_ok() {
+        let (toml, _dir) = minimal_toml("");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        #[cfg(feature = "eink")]
+        assert!(cfg.eink.is_none());
     }
 }
