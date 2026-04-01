@@ -234,10 +234,10 @@ mod tests {
             "expected at least 5 draw calls, got {}",
             calls.len()
         );
-        assert_eq!(calls[0].1, true, "calls[0] must be full (initial)");
-        assert_eq!(calls[1].1, false, "calls[1] must be partial");
-        assert_eq!(calls[2].1, false, "calls[2] must be partial");
-        assert_eq!(calls[3].1, false, "calls[3] must be partial");
-        assert_eq!(calls[4].1, true, "calls[4] must be full (interval reached)");
+        assert!(calls[0].1, "calls[0] must be full (initial)");
+        assert!(!calls[1].1, "calls[1] must be partial");
+        assert!(!calls[2].1, "calls[2] must be partial");
+        assert!(!calls[3].1, "calls[3] must be partial");
+        assert!(calls[4].1, "calls[4] must be full (interval reached)");
     }
 }

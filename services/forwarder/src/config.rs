@@ -551,8 +551,8 @@ target = "192.168.1.100"
     #[test]
     fn eink_section_absent_parses_ok() {
         let (toml, _dir) = minimal_toml("");
-        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        let _cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         #[cfg(feature = "eink")]
-        assert!(cfg.eink.is_none());
+        assert!(_cfg.eink.is_none());
     }
 }

@@ -1805,6 +1805,7 @@ dependencies = [
  "futures-util",
  "ipico-core",
  "reqwest 0.13.2",
+ "rt-eink",
  "rt-protocol",
  "rt-test-utils",
  "rt-ui-http",
@@ -4736,6 +4737,7 @@ dependencies = [
  "rppal",
  "serde",
  "tokio",
+ "toml 1.0.7+spec-1.1.0",
  "tracing",
 ]
 

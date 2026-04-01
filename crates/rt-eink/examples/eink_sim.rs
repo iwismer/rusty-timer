@@ -1,6 +1,6 @@
 //! Desktop simulator for the e-ink display layout.
 //!
-//! Run with: cargo run -p rt-eink --example eink_sim --features simulator
+//! Run with: cargo run -p rt-eink --example `eink_sim` --features simulator
 
 #[cfg(not(feature = "simulator"))]
 fn main() {
