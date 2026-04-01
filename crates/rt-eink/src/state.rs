@@ -1,10 +1,10 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Display state — the bridge between forwarder and display
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DisplayState {
     pub forwarder_name: Option<String>,
     pub local_ip: Option<String>,
@@ -30,7 +30,8 @@ impl DisplayState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReaderConnectionState {
     /// Sort order: Connected < Connecting < Disconnected (connected first).
     Connected = 0,
@@ -38,7 +39,7 @@ pub enum ReaderConnectionState {
     Disconnected = 2,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReaderDisplayState {
     pub ip: String,
     pub state: ReaderConnectionState,
@@ -46,7 +47,7 @@ pub struct ReaderDisplayState {
     pub session_reads: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BatteryState {
     pub percent: u8,
     pub charging: bool,

@@ -190,7 +190,7 @@ def build_forwarder_toml(emulators: list[EmulatorSpec]) -> str:
     return FORWARDER_TOML_HEADER + "\n" + readers
 
 
-def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> list[tuple[str, str]]:
+def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info", eink_sim: bool = False) -> list[tuple[str, str]]:
     dashboard_build_dir = REPO_ROOT / "apps" / "server-ui" / "build"
     dashboard_env = ""
     if dashboard_build_dir.is_dir():
@@ -217,7 +217,15 @@ def build_panes(emulators: list[EmulatorSpec], *, log_level: str = "info") -> li
         f"RT_RECEIVER_ID={shlex.quote(RECEIVER_DEVICE_ID)} cargo tauri dev"
     )
     panes_after_emulator = PANES_AFTER_EMULATOR + [("Receiver", receiver_cmd)]
-    return panes_before_emulator + emu_panes + panes_after_emulator
+    all_panes = panes_before_emulator + emu_panes + panes_after_emulator
+    if eink_sim:
+        eink_cmd = (
+            f'cd "{REPO_ROOT}" && '
+            "cargo run -p rt-eink --example eink_sim --features simulator "
+            "-- --url http://127.0.0.1:8081"
+        )
+        all_panes.append(("E-Ink Sim", eink_cmd))
+    return all_panes
 
 console = Console()
 stderr_console = Console(stderr=True)
@@ -1028,8 +1036,9 @@ def detect_and_launch(
     bibchip_path: Path | None = None,
     ppl_path: Path | None = None,
     log_level: str = "info",
+    eink_sim: bool = False,
 ) -> None:
-    panes = build_panes(emulators, log_level=log_level)
+    panes = build_panes(emulators, log_level=log_level, eink_sim=eink_sim)
     bg_threads: list[threading.Thread] = []
     if bibchip_path or ppl_path:
         console.print("[dim]Race data will be uploaded to server when ready.[/dim]")
@@ -1087,6 +1096,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--log-level", default="info", metavar="LEVEL",
         help="Log level for the server (default: info)",
+    )
+    parser.add_argument(
+        "--eink-sim", action="store_true",
+        help="Launch the e-ink display simulator (polls forwarder for live state)",
     )
     return parser.parse_args()
 
@@ -1161,7 +1174,7 @@ def main() -> None:
     ))
     setup(skip_build=args.no_build, emulators=emulators)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
-    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path, log_level=args.log_level)
+    detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path, log_level=args.log_level, eink_sim=args.eink_sim)
 
 
 if __name__ == "__main__":

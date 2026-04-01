@@ -5,16 +5,18 @@ edition = "2024"
 
 [features]
 hardware = ["dep:epd-waveshare", "dep:rppal"]
-simulator = ["dep:embedded-graphics-simulator"]
+simulator = ["dep:embedded-graphics-simulator", "dep:reqwest"]
 
 [dependencies]
 embedded-graphics = "0.8"
 epd-waveshare = { version = "0.5", features = ["graphics"], optional = true }
 rppal = { version = "0.22", optional = true }
 embedded-graphics-simulator = { version = "0.7", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 toml = "1.0"

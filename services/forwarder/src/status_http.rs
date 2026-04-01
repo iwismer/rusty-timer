@@ -1977,6 +1977,49 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
     }
 }
 
+/// Returns the current display state as JSON, matching the `DisplayState` schema
+/// from `rt-eink`. Used by the desktop e-ink simulator to render live forwarder data.
+async fn display_state_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+) -> axum::Json<serde_json::Value> {
+    let ss = state.subsystem.lock().await;
+    let readers: Vec<serde_json::Value> = ss
+        .readers
+        .iter()
+        .map(|(addr, r)| {
+            let ip = addr.rsplit_once(':').map_or(addr.as_str(), |(ip, _)| ip);
+            let state_str = match r.state {
+                ReaderConnectionState::Connected => "connected",
+                ReaderConnectionState::Connecting => "connecting",
+                ReaderConnectionState::Disconnected => "disconnected",
+            };
+            let drift_ms = r
+                .reader_info
+                .as_ref()
+                .and_then(|info| info.clock.as_ref())
+                .map(|c| c.drift_ms);
+            serde_json::json!({
+                "ip": ip,
+                "state": state_str,
+                "drift_ms": drift_ms,
+                "session_reads": r.reads_since_restart,
+            })
+        })
+        .collect();
+
+    let total_reads: u64 = ss.readers.values().map(|r| r.reads_since_restart).sum();
+
+    axum::Json(serde_json::json!({
+        "forwarder_name": null,
+        "local_ip": ss.local_ip,
+        "server_connected": ss.uplink_connected(),
+        "readers": readers,
+        "total_reads": total_reads,
+        "cpu_temp_celsius": null,
+        "battery": null,
+    }))
+}
+
 async fn logs_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> axum::Json<serde_json::Value> {
@@ -2916,6 +2959,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             post(control_shutdown_device_handler::<J>),
         )
         .route("/api/v1/status", get(status_json_handler::<J>))
+        .route("/api/v1/display-state", get(display_state_handler::<J>))
         .route("/api/v1/logs", get(logs_handler::<J>))
         .route("/api/v1/events", get(events_handler::<J>))
         .route("/api/v1/readers/{ip}/info", get(reader_info_handler::<J>))
