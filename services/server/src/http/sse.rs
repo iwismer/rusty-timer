@@ -31,6 +31,9 @@ pub async fn dashboard_sse(
                 crate::dashboard_events::DashboardEvent::ReaderDownloadProgress { .. } => {
                     "reader_download_progress"
                 }
+                crate::dashboard_events::DashboardEvent::ForwarderUpsUpdated { .. } => {
+                    "forwarder_ups_updated"
+                }
                 crate::dashboard_events::DashboardEvent::LogEntry { .. } => "log_entry",
             };
             match serde_json::to_string(&event) {

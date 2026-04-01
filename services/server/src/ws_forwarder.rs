@@ -719,6 +719,84 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     progress,
                                 });
                             }
+                            Ok(WsMessage::ForwarderUpsStatus(ups)) => {
+                                // 1. Check power_plugged transition for event logging
+                                let prev_plugged = {
+                                    let cache = state.forwarder_ups_cache.read().await;
+                                    cache.get(&device_id).and_then(|c| c.status.as_ref().map(|s| s.power_plugged))
+                                };
+
+                                // 2. Update cache
+                                {
+                                    let mut cache = state.forwarder_ups_cache.write().await;
+                                    cache.insert(device_id.clone(), crate::state::CachedUpsState {
+                                        available: ups.available,
+                                        status: ups.status.clone(),
+                                    });
+                                }
+
+                                // 3. Log power_plugged transitions to DB
+                                if let Some(ref status) = ups.status {
+                                    if let Some(was_plugged) = prev_plugged {
+                                        if was_plugged && !status.power_plugged {
+                                            let _ = sqlx::query(
+                                                "INSERT INTO forwarder_ups_events (forwarder_id, event_type, battery_percent) VALUES ($1, 'power_lost', $2)"
+                                            )
+                                            .bind(&device_id)
+                                            .bind(status.battery_percent as i16)
+                                            .execute(&state.pool)
+                                            .await;
+                                        } else if !was_plugged && status.power_plugged {
+                                            let _ = sqlx::query(
+                                                "INSERT INTO forwarder_ups_events (forwarder_id, event_type, battery_percent) VALUES ($1, 'power_restored', $2)"
+                                            )
+                                            .bind(&device_id)
+                                            .bind(status.battery_percent as i16)
+                                            .execute(&state.pool)
+                                            .await;
+                                        }
+                                    }
+                                }
+
+                                // 4. Emit dashboard SSE event
+                                let _ = state.dashboard_tx.send(DashboardEvent::ForwarderUpsUpdated {
+                                    forwarder_id: device_id.clone(),
+                                    available: ups.available,
+                                    status: ups.status.clone(),
+                                });
+
+                                // 5. Broadcast sentinel ReadEvent on one of the forwarder's streams
+                                if ups.status.is_some() {
+                                    if let Some(first_sid) = stream_map.values().next() {
+                                        let sentinel_msg = WsMessage::ForwarderUpsStatus(rt_protocol::ForwarderUpsStatus {
+                                            forwarder_id: device_id.clone(),
+                                            available: ups.available,
+                                            status: ups.status.clone(),
+                                        });
+                                        match serde_json::to_string(&sentinel_msg) {
+                                            Ok(json) => {
+                                                let tx = state.get_or_create_broadcast(*first_sid).await;
+                                                let _ = tx.send(rt_protocol::ReadEvent {
+                                                    forwarder_id: device_id.clone(),
+                                                    reader_ip: String::new(),
+                                                    stream_epoch: 0,
+                                                    seq: 0,
+                                                    reader_timestamp: String::new(),
+                                                    raw_frame: json.into_bytes(),
+                                                    read_type: rt_protocol::FORWARDER_UPS_STATUS_READ_TYPE.to_owned(),
+                                                });
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    device_id = %device_id,
+                                                    error = %e,
+                                                    "failed to serialize ForwarderUpsStatus for sentinel broadcast"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
                             Err(e) => { warn!(device_id = %device_id, error = %e, "invalid JSON in forwarder session message"); send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, "invalid JSON in message", false).await; break; }
                         }
@@ -891,6 +969,17 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                 });
             }
         }
+    }
+    // Clear UPS cache for this forwarder
+    {
+        state.forwarder_ups_cache.write().await.remove(&device_id);
+        let _ = state
+            .dashboard_tx
+            .send(DashboardEvent::ForwarderUpsUpdated {
+                forwarder_id: device_id.clone(),
+                available: false,
+                status: None,
+            });
     }
     {
         let mut senders = state.forwarder_command_senders.write().await;
