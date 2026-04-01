@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 embed-ui = ["dep:rust-embed", "rt-ui-http/embed-ui"]
+eink = ["dep:rt-eink"]
 
 [lib]
 name = "forwarder"
@@ -38,6 +39,7 @@ rt-updater = { path = "../../crates/rt-updater" }
 ipico-core = { path = "../../crates/ipico-core" }
 async-stream = "0.3"
 rust-embed = { version = "8", optional = true }
+rt-eink = { path = "../../crates/rt-eink", features = ["hardware"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
