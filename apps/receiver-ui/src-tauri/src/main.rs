@@ -90,6 +90,7 @@ fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
         ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
         ReceiverUiEvent::ReaderInfoUpdated { .. } => "reader_info_updated",
         ReceiverUiEvent::ReaderDownloadProgress { .. } => "reader_download_progress",
+        ReceiverUiEvent::ForwarderUpsUpdated { .. } => "forwarder_ups_updated",
     }
 }
 
