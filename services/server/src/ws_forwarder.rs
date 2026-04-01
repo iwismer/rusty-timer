@@ -736,25 +736,25 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 }
 
                                 // 3. Log power_plugged transitions to DB
-                                if let Some(ref status) = ups.status {
-                                    if let Some(was_plugged) = prev_plugged {
-                                        if was_plugged && !status.power_plugged {
-                                            let _ = sqlx::query(
-                                                "INSERT INTO forwarder_ups_events (forwarder_id, event_type, battery_percent) VALUES ($1, 'power_lost', $2)"
-                                            )
-                                            .bind(&device_id)
-                                            .bind(status.battery_percent as i16)
-                                            .execute(&state.pool)
-                                            .await;
-                                        } else if !was_plugged && status.power_plugged {
-                                            let _ = sqlx::query(
-                                                "INSERT INTO forwarder_ups_events (forwarder_id, event_type, battery_percent) VALUES ($1, 'power_restored', $2)"
-                                            )
-                                            .bind(&device_id)
-                                            .bind(status.battery_percent as i16)
-                                            .execute(&state.pool)
-                                            .await;
-                                        }
+                                if let Some(ref status) = ups.status
+                                    && let Some(was_plugged) = prev_plugged
+                                {
+                                    if was_plugged && !status.power_plugged {
+                                        let _ = sqlx::query(
+                                            "INSERT INTO forwarder_ups_events (forwarder_id, event_type, battery_percent) VALUES ($1, 'power_lost', $2)"
+                                        )
+                                        .bind(&device_id)
+                                        .bind(status.battery_percent as i16)
+                                        .execute(&state.pool)
+                                        .await;
+                                    } else if !was_plugged && status.power_plugged {
+                                        let _ = sqlx::query(
+                                            "INSERT INTO forwarder_ups_events (forwarder_id, event_type, battery_percent) VALUES ($1, 'power_restored', $2)"
+                                        )
+                                        .bind(&device_id)
+                                        .bind(status.battery_percent as i16)
+                                        .execute(&state.pool)
+                                        .await;
                                     }
                                 }
 
@@ -766,8 +766,9 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                 });
 
                                 // 5. Broadcast sentinel ReadEvent on one of the forwarder's streams
-                                if ups.status.is_some() {
-                                    if let Some(first_sid) = stream_map.values().next() {
+                                if ups.status.is_some()
+                                    && let Some(first_sid) = stream_map.values().next()
+                                {
                                         let sentinel_msg = WsMessage::ForwarderUpsStatus(rt_protocol::ForwarderUpsStatus {
                                             forwarder_id: device_id.clone(),
                                             available: ups.available,
@@ -794,7 +795,6 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                                 );
                                             }
                                         }
-                                    }
                                 }
                             }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
