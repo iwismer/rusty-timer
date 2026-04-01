@@ -12,12 +12,13 @@ embedded-graphics = "0.8"
 epd-waveshare = { version = "0.5", features = ["graphics"], optional = true }
 rppal = { version = "0.22", optional = true }
 embedded-graphics-simulator = { version = "0.7", optional = true }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 toml = "1.0"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
 
 [lints]
 workspace = true
