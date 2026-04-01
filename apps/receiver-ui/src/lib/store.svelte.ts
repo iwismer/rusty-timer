@@ -135,6 +135,12 @@ export const store = $state({
     }
   >(),
 
+  // UPS state (keyed by forwarder_id)
+  upsState: new Map<
+    string,
+    { available: boolean; status: api.UpsStatus | null }
+  >(),
+
   // Version info
   appVersion: "",
 });
@@ -1186,6 +1192,20 @@ function applyForwarderMetricsUpdate(update: api.ForwarderMetricsUpdate): void {
   store.forwarders = next;
 }
 
+function applyForwarderUpsUpdate(
+  forwarderId: string,
+  available: boolean,
+  status: api.UpsStatus | null,
+): void {
+  const next = new Map(store.upsState);
+  if (!available && status === null) {
+    next.delete(forwarderId);
+  } else {
+    next.set(forwarderId, { available, status });
+  }
+  store.upsState = next;
+}
+
 export function initStore(): void {
   void loadAll();
 
@@ -1327,6 +1347,13 @@ export function initStore(): void {
         error: payload.error ?? undefined,
       });
       store.downloadProgress = next;
+    },
+    onForwarderUpsUpdated: (payload) => {
+      applyForwarderUpsUpdate(
+        payload.forwarder_id,
+        payload.available,
+        payload.status,
+      );
     },
   })?.catch((e: unknown) => {
     console.error("initSSE failed:", e);
