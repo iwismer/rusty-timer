@@ -1244,14 +1244,14 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                         available: cached.available,
                         status: cached.status.clone(),
                     });
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        if socket.send(Message::Text(json.into())).await.is_err() {
-                            warn!(
-                                device_id = %device_id,
-                                forwarder_id = %target.forwarder_id,
-                                "failed to send initial UPS snapshot"
-                            );
-                        }
+                    if let Ok(json) = serde_json::to_string(&msg)
+                        && socket.send(Message::Text(json.into())).await.is_err()
+                    {
+                        warn!(
+                            device_id = %device_id,
+                            forwarder_id = %target.forwarder_id,
+                            "failed to send initial UPS snapshot"
+                        );
                     }
                 }
             }
