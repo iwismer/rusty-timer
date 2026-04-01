@@ -11,6 +11,7 @@ import {
   readerStatesStore,
   setReaderState,
   setDownloadProgress,
+  setUpsState,
 } from "./stores";
 import {
   getForwarderRaces,
@@ -150,6 +151,15 @@ export function initSSE(): void {
       }
     },
   );
+
+  eventSource.addEventListener("forwarder_ups_updated", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data);
+      setUpsState(data.forwarder_id, data.available, data.status ?? null);
+    } catch (err) {
+      console.error("Failed to parse forwarder_ups_updated event:", err);
+    }
+  });
 
   eventSource.addEventListener("resync", async () => {
     await resync();

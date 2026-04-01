@@ -111,6 +111,26 @@ export function setDownloadProgress(
   downloadProgressStore.update((s) => ({ ...s, [key]: progress }));
 }
 
+export const upsStateStore = writable<
+  Record<string, { available: boolean; status: any | null }>
+>({});
+
+export function setUpsState(
+  forwarderId: string,
+  available: boolean,
+  status: any | null,
+): void {
+  upsStateStore.update((current) => {
+    const next = { ...current };
+    if (!available && status === null) {
+      delete next[forwarderId];
+    } else {
+      next[forwarderId] = { available, status };
+    }
+    return next;
+  });
+}
+
 export function resetStores(): void {
   streamsStore.set([]);
   metricsStore.set({});
@@ -123,4 +143,5 @@ export function resetStores(): void {
   announcerConfigErrorStore.set(null);
   readerStatesStore.set({});
   downloadProgressStore.set({});
+  upsStateStore.set({});
 }
