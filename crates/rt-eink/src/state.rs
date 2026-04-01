@@ -115,3 +115,62 @@ fn default_min_refresh_interval_ms() -> u64 {
 fn default_telemetry_interval_secs() -> u64 {
     30
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_state_has_zero_reads_and_no_readers() {
+        let state = DisplayState::initial();
+        assert_eq!(state.total_reads, 0);
+        assert!(state.readers.is_empty());
+        assert!(state.local_ip.is_none());
+        assert!(!state.server_connected);
+        assert!(state.cpu_temp_celsius.is_none());
+        assert!(state.battery.is_none());
+    }
+
+    #[test]
+    fn reader_connection_state_sort_order() {
+        assert!(ReaderConnectionState::Connected < ReaderConnectionState::Connecting);
+        assert!(ReaderConnectionState::Connecting < ReaderConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn eink_config_deserializes_defaults() {
+        let config: EinkConfig = toml::from_str("").unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.model, DisplayModel::Epd2in13V2);
+        assert_eq!(config.refresh_mode, RefreshMode::Hybrid);
+        assert_eq!(config.full_refresh_interval, 10);
+        assert_eq!(config.min_refresh_interval_ms, 1000);
+        assert_eq!(config.telemetry_interval_secs, 30);
+    }
+
+    #[test]
+    fn eink_config_deserializes_all_fields() {
+        let toml_str = r#"
+            enabled = false
+            model = "2in13_v3"
+            refresh_mode = "full_only"
+            full_refresh_interval = 20
+            min_refresh_interval_ms = 500
+            telemetry_interval_secs = 60
+        "#;
+        let config: EinkConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.model, DisplayModel::Epd2in13V3);
+        assert_eq!(config.refresh_mode, RefreshMode::FullOnly);
+        assert_eq!(config.full_refresh_interval, 20);
+        assert_eq!(config.min_refresh_interval_ms, 500);
+        assert_eq!(config.telemetry_interval_secs, 60);
+    }
+
+    #[test]
+    fn eink_config_partial_only_mode() {
+        let toml_str = r#"refresh_mode = "partial_only""#;
+        let config: EinkConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.refresh_mode, RefreshMode::PartialOnly);
+    }
+}
