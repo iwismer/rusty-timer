@@ -1230,6 +1230,33 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
             }
         }
 
+        // Push initial UPS status for each unique forwarder in the subscription set.
+        {
+            let mut seen_forwarders = std::collections::HashSet::new();
+            let ups_cache = state.forwarder_ups_cache.read().await;
+            for target in &resolved_targets {
+                if !seen_forwarders.insert(target.forwarder_id.clone()) {
+                    continue;
+                }
+                if let Some(cached) = ups_cache.get(&target.forwarder_id) {
+                    let msg = WsMessage::ForwarderUpsStatus(rt_protocol::ForwarderUpsStatus {
+                        forwarder_id: target.forwarder_id.clone(),
+                        available: cached.available,
+                        status: cached.status.clone(),
+                    });
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            warn!(
+                                device_id = %device_id,
+                                forwarder_id = %target.forwarder_id,
+                                "failed to send initial UPS snapshot"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Build a lookup map so we can filter live metrics events to only
         // the streams this receiver is subscribed to.
         let mut subscribed_stream_info: HashMap<Uuid, (String, String)> = resolved_targets
@@ -1308,6 +1335,25 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                                 stream_id = %sub.stream_id,
                                                 error = %e,
                                                 "invalid UTF-8 in reader_download_progress payload"
+                                            );
+                                        }
+                                    }
+                                } else if event.read_type == rt_protocol::FORWARDER_UPS_STATUS_READ_TYPE {
+                                    match String::from_utf8(event.raw_frame) {
+                                        Ok(json) => {
+                                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                                warn!(
+                                                    stream_id = %sub.stream_id,
+                                                    "WS send failed for forwarder_ups_status; closing session"
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                stream_id = %sub.stream_id,
+                                                error = %e,
+                                                "invalid UTF-8 in forwarder_ups_status payload"
                                             );
                                         }
                                     }
