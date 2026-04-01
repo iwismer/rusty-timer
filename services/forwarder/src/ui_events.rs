@@ -36,6 +36,10 @@ pub enum ForwarderUiEvent {
         #[serde(flatten)]
         info: crate::reader_control::ReaderInfo,
     },
+    UpsStatusChanged {
+        available: bool,
+        status: Option<rt_protocol::UpsStatus>,
+    },
 }
 
 #[cfg(test)]
@@ -91,6 +95,38 @@ mod tests {
         assert_eq!(json["type"], "reader_info_updated");
         assert_eq!(json["ip"], "192.168.0.155");
         assert_eq!(json["hardware"]["fw_version"], "15.8");
+    }
+
+    #[test]
+    fn ups_status_changed_serializes_with_type_tag() {
+        let event = ForwarderUiEvent::UpsStatusChanged {
+            available: true,
+            status: Some(rt_protocol::UpsStatus {
+                battery_percent: 85,
+                battery_voltage_mv: 4050,
+                charging: true,
+                power_plugged: true,
+                temperature_cdeg: 3200,
+                sampled_at: 1700000000,
+            }),
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "ups_status_changed");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["status"]["battery_percent"], 85);
+        assert_eq!(json["status"]["power_plugged"], true);
+    }
+
+    #[test]
+    fn ups_status_changed_unavailable_serializes_with_null_status() {
+        let event = ForwarderUiEvent::UpsStatusChanged {
+            available: false,
+            status: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "ups_status_changed");
+        assert_eq!(json["available"], false);
+        assert!(json["status"].is_null());
     }
 
     #[test]

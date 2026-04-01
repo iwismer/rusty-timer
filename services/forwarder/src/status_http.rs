@@ -55,8 +55,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rt_updater::UpdateStatus;
 use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -123,6 +123,13 @@ pub struct ReaderStatus {
     pub reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
+/// UPS daemon availability + latest readings snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpsStatusState {
+    pub available: bool,
+    pub status: Option<rt_protocol::UpsStatus>,
+}
+
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
 ///
 /// Ready = config loaded + journal open + worker tasks started.
@@ -141,6 +148,8 @@ pub struct SubsystemStatus {
     pub update_mode: rt_updater::UpdateMode,
     /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
     restart_needed: bool,
+    /// UPS status snapshot (None if UPS monitoring is not configured).
+    ups_status: Option<UpsStatusState>,
 }
 
 impl SubsystemStatus {
@@ -157,6 +166,7 @@ impl SubsystemStatus {
             staged_update_path: None,
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
+            ups_status: None,
         }
     }
 
@@ -173,6 +183,7 @@ impl SubsystemStatus {
             staged_update_path: None,
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
+            ups_status: None,
         }
     }
 
@@ -209,6 +220,16 @@ impl SubsystemStatus {
     /// Return a reference to the readers map.
     pub fn readers(&self) -> &HashMap<String, ReaderStatus> {
         &self.readers
+    }
+
+    /// Set the UPS status snapshot.
+    pub fn set_ups_status(&mut self, state: UpsStatusState) {
+        self.ups_status = Some(state);
+    }
+
+    /// Return the current UPS status snapshot, if any.
+    pub fn ups_status(&self) -> Option<&UpsStatusState> {
+        self.ups_status.as_ref()
     }
 }
 
@@ -367,6 +388,11 @@ impl StatusServer {
     /// Record the filesystem path of a downloaded update artifact ready to apply.
     pub async fn set_staged_update_path(&self, path: std::path::PathBuf) {
         self.subsystem.lock().await.staged_update_path = Some(path);
+    }
+
+    /// Update the UPS status snapshot in the subsystem state.
+    pub async fn set_ups_status(&self, state: UpsStatusState) {
+        self.subsystem.lock().await.set_ups_status(state);
     }
 
     pub fn control_clients(
@@ -1814,6 +1840,7 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
                 crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { .. } => {
                     "reader_info_updated"
                 }
+                crate::ui_events::ForwarderUiEvent::UpsStatusChanged { .. } => "ups_status_changed",
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
