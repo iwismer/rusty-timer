@@ -920,7 +920,7 @@ async fn mark_restart_needed_and_emit(
 /// payload, and calls `update_config_file` to persist the change.
 ///
 /// Recognised sections: `"general"`, `"server"`, `"auth"`, `"journal"`,
-/// `"uplink"`, `"status_http"`, `"control"`, `"update"`, `"readers"`.
+/// `"uplink"`, `"status_http"`, `"control"`, `"update"`, `"ups"`, `"readers"`.
 pub async fn apply_section_update(
     section: &str,
     payload: &serde_json::Value,
@@ -1065,6 +1065,52 @@ pub async fn apply_section_update(
             .await?;
             subsystem.lock().await.update_mode = parsed_mode;
             Ok(())
+        }
+        "ups" => {
+            let enabled = optional_bool_field(payload, "enabled")?;
+            let daemon_addr = optional_string_field(payload, "daemon_addr")?;
+            let poll_interval_secs = optional_u64_field(payload, "poll_interval_secs")?;
+            let upstream_heartbeat_secs = optional_u64_field(payload, "upstream_heartbeat_secs")?;
+
+            if let Some(interval) = poll_interval_secs {
+                if !(1..=60).contains(&interval) {
+                    return Err(bad_request_error(
+                        "poll_interval_secs must be between 1 and 60",
+                    ));
+                }
+            }
+            if let Some(heartbeat) = upstream_heartbeat_secs {
+                if !(10..=300).contains(&heartbeat) {
+                    return Err(bad_request_error(
+                        "upstream_heartbeat_secs must be between 10 and 300",
+                    ));
+                }
+            }
+            if let Some(ref addr) = daemon_addr {
+                let trimmed = addr.trim();
+                if !trimmed.is_empty() {
+                    if trimmed.parse::<std::net::SocketAddr>().is_err() {
+                        let parts: Vec<&str> = trimmed.rsplitn(2, ':').collect();
+                        if parts.len() != 2 || parts[0].parse::<u16>().is_err() {
+                            return Err(bad_request_error(&format!(
+                                "daemon_addr must be a valid host:port, got '{}'",
+                                trimmed
+                            )));
+                        }
+                    }
+                }
+            }
+
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                raw.ups = Some(crate::config::RawUpsConfig {
+                    enabled,
+                    daemon_addr,
+                    poll_interval_secs,
+                    upstream_heartbeat_secs,
+                });
+                Ok(())
+            })
+            .await
         }
         "readers" => {
             let readers_val = payload.get("readers").ok_or_else(|| {
@@ -2730,6 +2776,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/config/update",
             post(post_config_update_handler::<J>),
         )
+        .route("/api/v1/config/ups", post(post_config_ups_handler::<J>))
         .route(
             "/api/v1/config/readers",
             post(post_config_readers_handler::<J>),
@@ -3299,6 +3346,13 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
     body: Bytes,
 ) -> Response {
     post_config_section_handler("status_http", state, body, None).await
+}
+
+async fn post_config_ups_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    post_config_section_handler("ups", state, body, None).await
 }
 
 async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
@@ -6263,5 +6317,140 @@ target = "192.168.1.100:10000"
         let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
         assert_eq!(target.second(), 1);
         assert_eq!(target.nanosecond(), 0);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_accepts_valid_values() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/ups",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true,"daemon_addr":"127.0.0.1:8423","poll_interval_secs":5,"upstream_heartbeat_secs":30}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_rejects_invalid_poll_interval() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/ups", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"poll_interval_secs":0}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_rejects_invalid_daemon_addr() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/ups", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"daemon_addr":"not-valid"}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
