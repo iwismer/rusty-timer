@@ -37,46 +37,43 @@ pub async fn run_eink_task<F>(
     loop {
         tokio::select! {
             result = state_rx.changed() => {
-                match result {
-                    Err(_) => {
-                        info!("eink task: watch sender dropped, stopping");
-                        break;
-                    }
-                    Ok(()) => {
-                        // Debounce: if last refresh was too recent, sleep the remainder.
-                        let elapsed = last_refresh.elapsed();
-                        if elapsed < min_refresh {
-                            tokio::time::sleep(min_refresh - elapsed).await;
-                        }
+                if result.is_err() {
+                    info!("eink task: watch sender dropped, stopping");
+                    break;
+                }
 
-                        let state = state_rx.borrow_and_update().clone();
-                        let full = decide_full(&config, partial_count);
-                        debug!(full, "eink refresh on state change");
-                        draw_fn(&state, full);
-                        last_refresh = Instant::now();
-                        if !full {
-                            partial_count += 1;
-                        } else {
-                            partial_count = 0;
-                        }
-                    }
+                // Debounce: if last refresh was too recent, sleep the remainder.
+                let elapsed = last_refresh.elapsed();
+                if elapsed < min_refresh {
+                    tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap()).await;
+                }
+
+                let state = state_rx.borrow_and_update().clone();
+                let full = decide_full(&config, partial_count);
+                debug!(full, "eink refresh on state change");
+                draw_fn(&state, full);
+                last_refresh = Instant::now();
+                if full {
+                    partial_count = 0;
+                } else {
+                    partial_count += 1;
                 }
             }
             _ = telemetry_tick.tick() => {
                 // Periodic redraw (e.g., to update clock / telemetry even when state unchanged).
                 let elapsed = last_refresh.elapsed();
                 if elapsed < min_refresh {
-                    tokio::time::sleep(min_refresh - elapsed).await;
+                    tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap()).await;
                 }
                 let state = state_rx.borrow_and_update().clone();
                 let full = decide_full(&config, partial_count);
                 debug!(full, "eink refresh on telemetry tick");
                 draw_fn(&state, full);
                 last_refresh = Instant::now();
-                if !full {
-                    partial_count += 1;
-                } else {
+                if full {
                     partial_count = 0;
+                } else {
+                    partial_count += 1;
                 }
             }
         }

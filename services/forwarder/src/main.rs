@@ -156,6 +156,7 @@ async fn main() {
     let subsystem = SubsystemStatus::not_ready("starting".to_owned());
     let config_state = Arc::new(ConfigState::new(config_path.clone()));
     let restart_signal = Arc::new(Notify::new());
+    #[allow(unused_mut)]
     let mut status_server = match StatusServer::start_with_config(
         status_cfg,
         subsystem,

@@ -28,7 +28,7 @@ const INDICATOR_GAP: u32 = 4;
 const LEFT_TEXT_X: i32 = (INDICATOR_SIZE + INDICATOR_GAP) as i32;
 const RIGHT_X: i32 = DIVIDER_X as i32 + 5;
 /// Center X of the right column.
-const RIGHT_CENTER_X: i32 = (DIVIDER_X as i32 + DISPLAY_WIDTH as i32) / 2;
+const RIGHT_CENTER_X: i32 = i32::midpoint(DIVIDER_X as i32, DISPLAY_WIDTH as i32);
 
 // ---------------------------------------------------------------------------
 // Public render function
@@ -103,7 +103,7 @@ where
 
     // CPU temperature.
     if let Some(temp) = state.cpu_temp_celsius {
-        let temp_str = format!("{:.1}C", temp);
+        let temp_str = format!("{temp:.1}C");
         Text::new(&temp_str, Point::new(RIGHT_X, info_y), small_style).draw(target)?;
         info_y += SMALL_CHAR_H as i32 + 2;
     }
@@ -147,7 +147,7 @@ where
     let line2_y = y + SMALL_CHAR_H as i32 + 2;
     let drift_str = format_drift(reader.drift_ms);
     let reads_str = format!("{}r", reader.session_reads);
-    let info_str = format!("{} {}", drift_str, reads_str);
+    let info_str = format!("{drift_str} {reads_str}");
     Text::new(
         &info_str,
         Point::new(LEFT_TEXT_X, line2_y + SMALL_CHAR_H as i32 - 2),
@@ -173,7 +173,7 @@ pub(crate) fn format_drift(drift_ms: Option<i64>) -> String {
             } else {
                 // Clamp to ±999 ms (already guaranteed by the branches above).
                 let clamped = ms.clamp(-999, 999);
-                format!("{}ms", clamped)
+                format!("{clamped}ms")
             }
         }
     }

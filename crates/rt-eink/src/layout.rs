@@ -9,7 +9,7 @@ pub const DISPLAY_HEIGHT: u32 = 122;
 pub const DIVIDER_X: u32 = 125;
 pub const MAX_VISIBLE_READERS: usize = 4;
 
-/// Two lines of FONT_7X13 at 13 px each.
+/// Two lines of `FONT_7X13` at 13 px each.
 const READER_BLOCK_HEIGHT: u32 = 26;
 
 // ---------------------------------------------------------------------------
