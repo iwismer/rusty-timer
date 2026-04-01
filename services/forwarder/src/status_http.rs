@@ -1072,31 +1072,29 @@ pub async fn apply_section_update(
             let poll_interval_secs = optional_u64_field(payload, "poll_interval_secs")?;
             let upstream_heartbeat_secs = optional_u64_field(payload, "upstream_heartbeat_secs")?;
 
-            if let Some(interval) = poll_interval_secs {
-                if !(1..=60).contains(&interval) {
-                    return Err(bad_request_error(
-                        "poll_interval_secs must be between 1 and 60",
-                    ));
-                }
+            if let Some(interval) = poll_interval_secs
+                && !(1..=60).contains(&interval)
+            {
+                return Err(bad_request_error(
+                    "poll_interval_secs must be between 1 and 60",
+                ));
             }
-            if let Some(heartbeat) = upstream_heartbeat_secs {
-                if !(10..=300).contains(&heartbeat) {
-                    return Err(bad_request_error(
-                        "upstream_heartbeat_secs must be between 10 and 300",
-                    ));
-                }
+            if let Some(heartbeat) = upstream_heartbeat_secs
+                && !(10..=300).contains(&heartbeat)
+            {
+                return Err(bad_request_error(
+                    "upstream_heartbeat_secs must be between 10 and 300",
+                ));
             }
             if let Some(ref addr) = daemon_addr {
                 let trimmed = addr.trim();
-                if !trimmed.is_empty() {
-                    if trimmed.parse::<std::net::SocketAddr>().is_err() {
-                        let parts: Vec<&str> = trimmed.rsplitn(2, ':').collect();
-                        if parts.len() != 2 || parts[0].parse::<u16>().is_err() {
-                            return Err(bad_request_error(&format!(
-                                "daemon_addr must be a valid host:port, got '{}'",
-                                trimmed
-                            )));
-                        }
+                if !trimmed.is_empty() && trimmed.parse::<std::net::SocketAddr>().is_err() {
+                    let parts: Vec<&str> = trimmed.rsplitn(2, ':').collect();
+                    if parts.len() != 2 || parts[0].parse::<u16>().is_err() {
+                        return Err(bad_request_error(format!(
+                            "daemon_addr must be a valid host:port, got '{}'",
+                            trimmed
+                        )));
                     }
                 }
             }
