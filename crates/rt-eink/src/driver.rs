@@ -3,9 +3,12 @@
 //! Only compiled when the `hardware` feature is enabled.
 
 use crate::state::DisplayModel;
-use rppal::gpio::Gpio;
+use epd_waveshare::epd2in13_v2::{Display2in13, Epd2in13};
+use epd_waveshare::prelude::*;
+use rppal::gpio::{Gpio, InputPin, OutputPin};
+use rppal::hal::Delay;
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// GPIO pin assignments for the Waveshare 2.13" E-Ink HAT.
 const PIN_DC: u8 = 25;
@@ -38,58 +41,89 @@ impl std::error::Error for DriverError {}
 
 /// Wraps the initialized SPI, GPIO pins, and e-ink display driver.
 pub struct EinkDriver {
-    model: DisplayModel,
     spi: Spi,
-    _gpio: Gpio,
+    epd: Epd2in13<Spi, OutputPin, InputPin, OutputPin, OutputPin, Delay>,
+    delay: Delay,
+    display: Display2in13,
 }
 
 impl EinkDriver {
     /// Initialize the SPI bus, GPIO pins, and e-ink display controller.
     pub fn new(model: DisplayModel) -> Result<Self, DriverError> {
-        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
+        let mut spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
             .map_err(|e| DriverError::Spi(e.to_string()))?;
 
         let gpio = Gpio::new().map_err(|e| DriverError::Gpio(e.to_string()))?;
 
-        let _dc = gpio
-            .get(PIN_DC)
-            .map_err(|e| DriverError::Gpio(format!("DC pin {PIN_DC}: {e}")))?;
-        let _rst = gpio
-            .get(PIN_RST)
-            .map_err(|e| DriverError::Gpio(format!("RST pin {PIN_RST}: {e}")))?;
-        let _busy = gpio
-            .get(PIN_BUSY)
-            .map_err(|e| DriverError::Gpio(format!("BUSY pin {PIN_BUSY}: {e}")))?;
-        let _cs = gpio
+        let cs = gpio
             .get(PIN_CS)
-            .map_err(|e| DriverError::Gpio(format!("CS pin {PIN_CS}: {e}")))?;
+            .map_err(|e| DriverError::Gpio(format!("CS pin {PIN_CS}: {e}")))?
+            .into_output();
+        let busy = gpio
+            .get(PIN_BUSY)
+            .map_err(|e| DriverError::Gpio(format!("BUSY pin {PIN_BUSY}: {e}")))?
+            .into_input();
+        let dc = gpio
+            .get(PIN_DC)
+            .map_err(|e| DriverError::Gpio(format!("DC pin {PIN_DC}: {e}")))?
+            .into_output();
+        let rst = gpio
+            .get(PIN_RST)
+            .map_err(|e| DriverError::Gpio(format!("RST pin {PIN_RST}: {e}")))?
+            .into_output();
+
+        let mut delay = Delay::new();
+
+        let epd = Epd2in13::new(&mut spi, cs, busy, dc, rst, &mut delay)
+            .map_err(|e| DriverError::Display(format!("EPD init: {e:?}")))?;
+
+        let display = Display2in13::default();
 
         info!(?model, "e-ink display driver initialized");
 
         Ok(Self {
-            model,
             spi,
-            _gpio: gpio,
+            epd,
+            delay,
+            display,
         })
     }
 
+    /// Get a mutable reference to the display framebuffer for drawing.
+    pub fn display_mut(&mut self) -> &mut Display2in13 {
+        &mut self.display
+    }
+
     /// Perform a full display refresh (slow, clears ghosting).
-    pub fn full_refresh(&mut self, buffer: &[u8]) -> Result<(), DriverError> {
-        let _ = (buffer, self.model, &self.spi);
-        warn!("full_refresh: hardware display update not yet implemented");
+    pub fn full_refresh(&mut self) -> Result<(), DriverError> {
+        self.epd
+            .set_refresh(&mut self.spi, &mut self.delay, RefreshLut::Full)
+            .map_err(|e| DriverError::Display(format!("set full LUT: {e:?}")))?;
+        self.epd
+            .update_and_display_frame(&mut self.spi, self.display.buffer(), &mut self.delay)
+            .map_err(|e| DriverError::Display(format!("full refresh: {e:?}")))?;
+        debug!("full refresh complete");
         Ok(())
     }
 
     /// Perform a partial display refresh (fast, may accumulate ghosting).
-    pub fn partial_refresh(&mut self, buffer: &[u8]) -> Result<(), DriverError> {
-        let _ = (buffer, self.model, &self.spi);
-        warn!("partial_refresh: hardware display update not yet implemented");
+    pub fn partial_refresh(&mut self) -> Result<(), DriverError> {
+        self.epd
+            .set_refresh(&mut self.spi, &mut self.delay, RefreshLut::Quick)
+            .map_err(|e| DriverError::Display(format!("set partial LUT: {e:?}")))?;
+        self.epd
+            .update_and_display_frame(&mut self.spi, self.display.buffer(), &mut self.delay)
+            .map_err(|e| DriverError::Display(format!("partial refresh: {e:?}")))?;
+        debug!("partial refresh complete");
         Ok(())
     }
 
     /// Put the display controller to sleep to reduce idle power draw.
     pub fn sleep(&mut self) -> Result<(), DriverError> {
-        warn!("sleep: hardware sleep not yet implemented");
+        self.epd
+            .sleep(&mut self.spi, &mut self.delay)
+            .map_err(|e| DriverError::Display(format!("sleep: {e:?}")))?;
+        info!("e-ink display sleeping");
         Ok(())
     }
 }

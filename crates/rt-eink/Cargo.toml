@@ -10,7 +10,7 @@ simulator = ["dep:embedded-graphics-simulator", "dep:reqwest"]
 [dependencies]
 embedded-graphics = "0.8"
 epd-waveshare = { version = "0.5", features = ["graphics"], optional = true }
-rppal = { version = "0.22", optional = true }
+rppal = { version = "0.22", features = ["embedded-hal-0"], optional = true }
 embedded-graphics-simulator = { version = "0.7", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }

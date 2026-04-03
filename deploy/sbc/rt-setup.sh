@@ -429,6 +429,14 @@ ensure_prerequisites() {
   id -u "${SERVICE_USER}" &>/dev/null || \
     useradd -r -s /bin/false -m -d "${DATA_DIR}" "${SERVICE_USER}"
 
+  # Grant SPI and GPIO access for e-ink display (if groups exist).
+  if getent group spi &>/dev/null; then
+    usermod -aG spi "${SERVICE_USER}" 2>/dev/null || true
+  fi
+  if getent group gpio &>/dev/null; then
+    usermod -aG gpio "${SERVICE_USER}" 2>/dev/null || true
+  fi
+
   # Create directories
   mkdir -p "${CONFIG_DIR}" "${DATA_DIR}"
   chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
@@ -717,6 +725,21 @@ target = "${reader}"
 enabled = true
 EOF
   done
+
+  # Append e-ink display config if SPI is enabled and the binary supports it.
+  if [[ -e /dev/spidev0.0 ]]; then
+    cat >> "${CONFIG_DIR}/forwarder.toml" <<EOF
+
+[eink]
+enabled = true
+model = "2in13_v2"
+refresh_mode = "hybrid"
+full_refresh_interval = 10
+min_refresh_interval_ms = 1000
+telemetry_interval_secs = 30
+EOF
+    echo "E-ink display config added (SPI detected)"
+  fi
 
   chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}/forwarder.toml"
 

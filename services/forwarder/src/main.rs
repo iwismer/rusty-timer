@@ -301,13 +301,40 @@ async fn main() {
 
                 // Spawn the e-ink display task.
                 let eink_cfg = eink_config.clone();
+                let eink_model = eink_config.model;
                 tokio::spawn(async move {
-                    rt_eink::task::run_eink_task(display_rx, eink_cfg, |_state, _full| {
-                        // TODO: Connect to EinkDriver for real hardware rendering.
-                        // The render_display() function produces the framebuffer;
-                        // EinkDriver sends it to the display.
-                    })
-                    .await;
+                    match rt_eink::driver::EinkDriver::new(eink_model) {
+                        Ok(mut driver) => {
+                            rt_eink::task::run_eink_task(display_rx, eink_cfg, |state, full| {
+                                use embedded_graphics::pixelcolor::BinaryColor;
+                                use embedded_graphics::prelude::*;
+                                driver.display_mut().clear(BinaryColor::Off).ok();
+                                if let Err(e) =
+                                    rt_eink::render::render_display(driver.display_mut(), state)
+                                {
+                                    tracing::warn!("eink render error: {e}");
+                                    return;
+                                }
+                                let result = if full {
+                                    driver.full_refresh()
+                                } else {
+                                    driver.partial_refresh()
+                                };
+                                if let Err(e) = result {
+                                    tracing::warn!("eink refresh error: {e}");
+                                }
+                            })
+                            .await;
+                            if let Err(e) = driver.sleep() {
+                                tracing::warn!("eink sleep error on shutdown: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "e-ink display init failed (continuing without display): {e}"
+                            );
+                        }
+                    }
                 });
 
                 info!("e-ink display task spawned");
