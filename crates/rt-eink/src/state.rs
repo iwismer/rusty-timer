@@ -57,7 +57,7 @@ pub struct BatteryState {
 // Configuration — deserialized from TOML [eink] section
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EinkConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -86,7 +86,7 @@ impl Default for EinkConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DisplayModel {
     #[default]
     #[serde(rename = "2in13_v2")]
@@ -95,7 +95,7 @@ pub enum DisplayModel {
     Epd2in13V3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefreshMode {
     #[default]
