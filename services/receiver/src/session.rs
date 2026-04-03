@@ -369,6 +369,15 @@ where
                                     warn!(reader_ip = %progress.reader_ip, "ui_tx closed; reader download progress dropped");
                                 }
                             }
+                            Ok(WsMessage::ForwarderUpsStatus(ups)) => {
+                                if deps.ui_tx.send(crate::ui_events::ReceiverUiEvent::ForwarderUpsUpdated {
+                                    forwarder_id: ups.forwarder_id,
+                                    available: ups.available,
+                                    status: ups.status,
+                                }).is_err() {
+                                    warn!("ui_tx closed; forwarder UPS update dropped");
+                                }
+                            }
                             Ok(WsMessage::Heartbeat(_)) => {}
                             Ok(WsMessage::Error(err)) => { error!(code=%err.code); if !err.retryable { return Err(SessionError::ConnectionClosed); } break; }
                             Ok(o) => debug!(?o,"ignoring"),

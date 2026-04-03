@@ -717,10 +717,12 @@ export async function loadAll(options: LoadAllOptions = {}): Promise<void> {
     }
     if (nextForwarders.ok) {
       store.forwarders = nextForwarders.forwarders.forwarders;
+      pruneUpsStateForOnlineForwarders(store.forwarders);
       store.forwardersError = null;
       syncSelectedForwarder();
     } else {
       store.forwarders = null;
+      pruneUpsStateForOnlineForwarders(null);
       store.forwardersError = nextForwarders.error;
       store.selectedForwarderId = null;
     }
@@ -767,10 +769,12 @@ export async function loadForwarders(): Promise<void> {
   try {
     const result = await api.getForwarders();
     store.forwarders = result.forwarders;
+    pruneUpsStateForOnlineForwarders(store.forwarders);
     syncSelectedForwarder();
   } catch (error) {
     console.error("Failed to load forwarders:", error);
     store.forwarders = null;
+    pruneUpsStateForOnlineForwarders(null);
     store.forwardersError = String(error);
     store.selectedForwarderId = null;
   }
@@ -1198,12 +1202,29 @@ function applyForwarderUpsUpdate(
   status: api.UpsStatus | null,
 ): void {
   const next = new Map(store.upsState);
-  if (!available && status === null) {
-    next.delete(forwarderId);
-  } else {
-    next.set(forwarderId, { available, status });
-  }
+  next.set(forwarderId, { available, status });
   store.upsState = next;
+}
+
+function pruneUpsStateForOnlineForwarders(
+  forwarders: api.ForwarderEntry[] | null,
+): void {
+  if (!forwarders) {
+    store.upsState = new Map();
+    return;
+  }
+
+  const onlineForwarders = new Set(
+    forwarders
+      .filter((forwarder) => forwarder.online)
+      .map((forwarder) => forwarder.forwarder_id),
+  );
+
+  store.upsState = new Map(
+    Array.from(store.upsState.entries()).filter(([forwarderId]) =>
+      onlineForwarders.has(forwarderId),
+    ),
+  );
 }
 
 export function initStore(): void {

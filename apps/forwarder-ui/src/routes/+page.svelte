@@ -100,6 +100,7 @@
     try {
       status = await api.getStatus();
       if (status) {
+        upsState = status.ups_status ?? null;
         const now = Date.now();
         const rebuilt = rebuildReaderCachesFromStatus(
           status,
@@ -684,6 +685,7 @@
         sseConnected = connected;
         if (!connected) {
           status = null;
+          upsState = null;
         }
       },
       onUpsStatusChanged: (payload) => {

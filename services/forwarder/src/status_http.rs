@@ -1790,6 +1790,7 @@ struct StatusJsonResponse {
     ready_reason: Option<String>,
     uplink_connected: bool,
     restart_needed: bool,
+    ups_status: Option<UpsStatusState>,
     readers: Vec<ReaderStatusJson>,
 }
 
@@ -1839,6 +1840,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         ready_reason: ss.reason.clone(),
         uplink_connected: ss.uplink_connected(),
         restart_needed: ss.restart_needed(),
+        ups_status: ss.ups_status().cloned(),
         readers,
     };
 
@@ -3540,6 +3542,19 @@ mod tests {
         server
             .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
             .await;
+        server
+            .set_ups_status(UpsStatusState {
+                available: false,
+                status: Some(rt_protocol::UpsStatus {
+                    battery_percent: 42,
+                    battery_voltage_mv: 3890,
+                    charging: false,
+                    power_plugged: false,
+                    temperature_cdeg: 3010,
+                    sampled_at: 1711929600000,
+                }),
+            })
+            .await;
 
         let addr = server.local_addr();
         let client = reqwest::Client::new();
@@ -3556,6 +3571,9 @@ mod tests {
         assert_eq!(body["ready"], true);
         assert_eq!(body["uplink_connected"], false);
         assert_eq!(body["restart_needed"], false);
+        assert_eq!(body["ups_status"]["available"], false);
+        assert_eq!(body["ups_status"]["status"]["battery_percent"], 42);
+        assert_eq!(body["ups_status"]["status"]["power_plugged"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
     }

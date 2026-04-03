@@ -52,7 +52,7 @@ async fn run_ups_loop(
     let ui_tx = status.ui_sender();
 
     // Tracking state
-    let mut daemon_was_available = false;
+    let mut last_reported_available: Option<bool> = None;
     let mut last_status: Option<UpsStatus> = None;
     let mut last_send = tokio::time::Instant::now();
     let mut warned_power_unplugged = false;
@@ -70,9 +70,8 @@ async fn run_ups_loop(
         match crate::pisugar_client::poll_status(&config.daemon_addr).await {
             Ok(new_status) => {
                 // Transition: unavailable -> available
-                if !daemon_was_available {
+                if last_reported_available != Some(true) {
                     info!(addr = %config.daemon_addr, "PiSugar daemon is now available");
-                    daemon_was_available = true;
                 }
 
                 // Warning: power unplugged
@@ -118,7 +117,7 @@ async fn run_ups_loop(
                     })
                     .await;
 
-                if readings_changed || heartbeat_due {
+                if last_reported_available != Some(true) || readings_changed || heartbeat_due {
                     let msg = ForwarderUpsStatus {
                         forwarder_id: forwarder_id.clone(),
                         available: true,
@@ -131,42 +130,45 @@ async fn run_ups_loop(
                     });
                     let _ = ups_tx.send(msg);
 
+                    last_reported_available = Some(true);
                     last_send = tokio::time::Instant::now();
                 }
 
                 last_status = Some(new_status);
             }
             Err(e) => {
-                // Only log + send on transition (available -> unavailable)
-                if daemon_was_available {
+                let stale_status = last_status.clone();
+
+                status
+                    .set_ups_status(UpsStatusState {
+                        available: false,
+                        status: stale_status.clone(),
+                    })
+                    .await;
+
+                // Only log + send on transition (available -> unavailable), including
+                // the initial boot state when the daemon is unreachable.
+                if last_reported_available != Some(false) {
                     warn!(
                         addr = %config.daemon_addr,
                         error = %e,
                         "PiSugar daemon became unavailable"
                     );
-                    daemon_was_available = false;
-                    last_status = None;
                     warned_power_unplugged = false;
                     warned_low_battery = false;
-
-                    status
-                        .set_ups_status(UpsStatusState {
-                            available: false,
-                            status: None,
-                        })
-                        .await;
 
                     let msg = ForwarderUpsStatus {
                         forwarder_id: forwarder_id.clone(),
                         available: false,
-                        status: None,
+                        status: stale_status.clone(),
                     };
                     let _ = ui_tx.send(ForwarderUiEvent::UpsStatusChanged {
                         available: false,
-                        status: None,
+                        status: stale_status,
                     });
                     let _ = ups_tx.send(msg);
 
+                    last_reported_available = Some(false);
                     last_send = tokio::time::Instant::now();
                 }
                 // If already unavailable, stay silent (no repeated warnings)
@@ -285,15 +287,58 @@ mod tests {
 
         let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), server, shutdown_rx);
 
-        // The task starts with daemon_was_available=false, so the first failure
-        // should NOT produce a message (no transition). We should get a timeout.
-        let result =
-            tokio::time::timeout(Duration::from_secs(3), handle.ups_status_rx.recv()).await;
+        let msg = tokio::time::timeout(Duration::from_secs(3), handle.ups_status_rx.recv())
+            .await
+            .expect("timeout waiting for UPS unavailable status")
+            .expect("channel closed");
 
-        assert!(
-            result.is_err(),
-            "should not receive a message when daemon was never available"
-        );
+        assert_eq!(msg.forwarder_id, "fwd-test");
+        assert!(!msg.available);
+        assert!(msg.status.is_none());
+
+        shutdown_tx.send(true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ups_task_preserves_last_status_when_daemon_becomes_unavailable() {
+        let addr = mock_pisugar(vec![standard_responses()]).await;
+
+        let config = UpsConfig {
+            enabled: true,
+            daemon_addr: addr,
+            poll_interval_secs: 1,
+            upstream_heartbeat_secs: 60,
+        };
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let server = crate::status_http::StatusServer::start(
+            crate::status_http::StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "test".to_owned(),
+            },
+            crate::status_http::SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), server, shutdown_rx);
+
+        let first = tokio::time::timeout(Duration::from_secs(5), handle.ups_status_rx.recv())
+            .await
+            .expect("timeout waiting for initial UPS status")
+            .expect("channel closed");
+        assert!(first.available);
+        let first_status = first.status.expect("initial status");
+
+        let second = tokio::time::timeout(Duration::from_secs(5), handle.ups_status_rx.recv())
+            .await
+            .expect("timeout waiting for UPS unavailable status")
+            .expect("channel closed");
+
+        assert!(!second.available);
+        let second_status = second.status.expect("stale status retained");
+        assert_eq!(second_status, first_status);
 
         shutdown_tx.send(true).unwrap();
     }

@@ -122,13 +122,25 @@ export function setUpsState(
 ): void {
   upsStateStore.update((current) => {
     const next = { ...current };
-    if (!available && status === null) {
-      delete next[forwarderId];
-    } else {
-      next[forwarderId] = { available, status };
-    }
+    next[forwarderId] = { available, status };
     return next;
   });
+}
+
+export function pruneUpsStateForOnlineForwarders(streams: StreamEntry[]): void {
+  const onlineForwarders = new Set(
+    streams
+      .filter((stream) => stream.online)
+      .map((stream) => stream.forwarder_id),
+  );
+
+  upsStateStore.update((current) =>
+    Object.fromEntries(
+      Object.entries(current).filter(([forwarderId]) =>
+        onlineForwarders.has(forwarderId),
+      ),
+    ),
+  );
 }
 
 export function resetStores(): void {
