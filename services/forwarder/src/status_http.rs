@@ -362,16 +362,18 @@ impl StatusServer {
 
     /// Mark all local subsystems as ready.
     pub async fn set_ready(&self) {
-        let mut ss = self.subsystem.lock().await;
-        ss.ready = true;
-        ss.reason = None;
-        let _ = self
-            .ui_tx
-            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-                ready: ss.is_ready(),
-                uplink_connected: ss.uplink_connected(),
-                restart_needed: ss.restart_needed(),
-            });
+        {
+            let mut ss = self.subsystem.lock().await;
+            ss.ready = true;
+            ss.reason = None;
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+                    ready: ss.is_ready(),
+                    uplink_connected: ss.uplink_connected(),
+                    restart_needed: ss.restart_needed(),
+                });
+        }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -388,15 +390,17 @@ impl StatusServer {
 
     /// Update the uplink connection state (does not affect readiness).
     pub async fn set_uplink_connected(&self, connected: bool) {
-        let mut ss = self.subsystem.lock().await;
-        ss.set_uplink_connected(connected);
-        let _ = self
-            .ui_tx
-            .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
-                ready: ss.is_ready(),
-                uplink_connected: connected,
-                restart_needed: ss.restart_needed(),
-            });
+        {
+            let mut ss = self.subsystem.lock().await;
+            ss.set_uplink_connected(connected);
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::StatusChanged {
+                    ready: ss.is_ready(),
+                    uplink_connected: connected,
+                    restart_needed: ss.restart_needed(),
+                });
+        }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -531,16 +535,18 @@ impl StatusServer {
         reader_ip: &str,
         info: crate::reader_control::ReaderInfo,
     ) {
-        let mut ss = self.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(reader_ip) {
-            r.reader_info = Some(info.clone());
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                r.reader_info = Some(info.clone());
+            }
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+                    ip: reader_ip.to_owned(),
+                    info,
+                });
         }
-        let _ = self
-            .ui_tx
-            .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-                ip: reader_ip.to_owned(),
-                info,
-            });
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -554,29 +560,31 @@ impl StatusServer {
         reader_ip: &str,
         info: crate::reader_control::ReaderInfo,
     ) {
-        let mut ss = self.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(reader_ip) {
-            if r.state == ReaderConnectionState::Disconnected {
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                if r.state == ReaderConnectionState::Disconnected {
+                    tracing::debug!(
+                        reader_ip,
+                        "dropping reader info update for disconnected reader"
+                    );
+                    return;
+                }
+                r.reader_info = Some(info.clone());
+            } else {
                 tracing::debug!(
                     reader_ip,
-                    "dropping reader info update for disconnected reader"
+                    "reader IP not found in map, skipping info update"
                 );
                 return;
             }
-            r.reader_info = Some(info.clone());
-        } else {
-            tracing::debug!(
-                reader_ip,
-                "reader IP not found in map, skipping info update"
-            );
-            return;
+            let _ = self
+                .ui_tx
+                .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
+                    ip: reader_ip.to_owned(),
+                    info,
+                });
         }
-        let _ = self
-            .ui_tx
-            .send(crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated {
-                ip: reader_ip.to_owned(),
-                info,
-            });
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
     }
@@ -604,17 +612,19 @@ impl StatusServer {
     /// Each entry is `(reader_addr, local_port)` where `reader_addr` is `"ip:port"`
     /// and `local_port` is the port the forwarder listens on to re-expose reads.
     pub async fn init_readers(&self, readers: &[(String, u16)]) {
-        let mut ss = self.subsystem.lock().await;
-        for (addr, local_port) in readers {
-            ss.readers.entry(addr.clone()).or_insert(ReaderStatus {
-                state: ReaderConnectionState::Disconnected,
-                last_seen: None,
-                reads_since_restart: 0,
-                reads_total: 0,
-                local_port: *local_port,
-                current_epoch_name: None,
-                reader_info: None,
-            });
+        {
+            let mut ss = self.subsystem.lock().await;
+            for (addr, local_port) in readers {
+                ss.readers.entry(addr.clone()).or_insert(ReaderStatus {
+                    state: ReaderConnectionState::Disconnected,
+                    last_seen: None,
+                    reads_since_restart: 0,
+                    reads_total: 0,
+                    local_port: *local_port,
+                    current_epoch_name: None,
+                    reader_info: None,
+                });
+            }
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -622,9 +632,11 @@ impl StatusServer {
 
     /// Seed a reader's total historical count from durable journal state.
     pub async fn set_reader_total(&self, reader_ip: &str, total: i64) {
-        let mut ss = self.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(reader_ip) {
-            r.reads_total = total;
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                r.reads_total = total;
+            }
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -632,20 +644,22 @@ impl StatusServer {
 
     /// Set the current epoch name for a reader and broadcast a ReaderUpdated SSE event.
     pub async fn set_reader_epoch_name(&self, reader_ip: &str, name: Option<String>) {
-        let mut ss = self.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(reader_ip) {
-            r.current_epoch_name = name;
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                    ip: reader_ip.to_owned(),
-                    state: (&r.state).into(),
-                    reads_session: r.reads_since_restart,
-                    reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                    local_port: r.local_port,
-                    current_epoch_name: r.current_epoch_name.clone(),
-                });
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                r.current_epoch_name = name;
+                let _ = self
+                    .ui_tx
+                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                        ip: reader_ip.to_owned(),
+                        state: (&r.state).into(),
+                        reads_session: r.reads_since_restart,
+                        reads_total: r.reads_total,
+                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                        local_port: r.local_port,
+                        current_epoch_name: r.current_epoch_name.clone(),
+                    });
+            }
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -653,23 +667,25 @@ impl StatusServer {
 
     /// Update a reader's connection state.
     pub async fn update_reader_state(&self, reader_ip: &str, state: ReaderConnectionState) {
-        let mut ss = self.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(reader_ip) {
-            if state == ReaderConnectionState::Disconnected {
-                r.reader_info = None;
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                if state == ReaderConnectionState::Disconnected {
+                    r.reader_info = None;
+                }
+                r.state = state;
+                let _ = self
+                    .ui_tx
+                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                        ip: reader_ip.to_owned(),
+                        state: (&r.state).into(),
+                        reads_session: r.reads_since_restart,
+                        reads_total: r.reads_total,
+                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                        local_port: r.local_port,
+                        current_epoch_name: r.current_epoch_name.clone(),
+                    });
             }
-            r.state = state;
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                    ip: reader_ip.to_owned(),
-                    state: (&r.state).into(),
-                    reads_session: r.reads_since_restart,
-                    reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                    local_port: r.local_port,
-                    current_epoch_name: r.current_epoch_name.clone(),
-                });
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -677,22 +693,24 @@ impl StatusServer {
 
     /// Record a successful chip read for a reader.
     pub async fn record_read(&self, reader_ip: &str) {
-        let mut ss = self.subsystem.lock().await;
-        if let Some(r) = ss.readers.get_mut(reader_ip) {
-            r.reads_since_restart += 1;
-            r.reads_total += 1;
-            r.last_seen = Some(Instant::now());
-            let _ = self
-                .ui_tx
-                .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
-                    ip: reader_ip.to_owned(),
-                    state: (&r.state).into(),
-                    reads_session: r.reads_since_restart,
-                    reads_total: r.reads_total,
-                    last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
-                    local_port: r.local_port,
-                    current_epoch_name: r.current_epoch_name.clone(),
-                });
+        {
+            let mut ss = self.subsystem.lock().await;
+            if let Some(r) = ss.readers.get_mut(reader_ip) {
+                r.reads_since_restart += 1;
+                r.reads_total += 1;
+                r.last_seen = Some(Instant::now());
+                let _ = self
+                    .ui_tx
+                    .send(crate::ui_events::ForwarderUiEvent::ReaderUpdated {
+                        ip: reader_ip.to_owned(),
+                        state: (&r.state).into(),
+                        reads_session: r.reads_since_restart,
+                        reads_total: r.reads_total,
+                        last_seen_secs: r.last_seen.map(|t| t.elapsed().as_secs()),
+                        local_port: r.local_port,
+                        current_epoch_name: r.current_epoch_name.clone(),
+                    });
+            }
         }
         #[cfg(feature = "eink")]
         self.publish_display_state().await;
@@ -5748,6 +5766,32 @@ target = "192.168.1.100:10000"
 
         let body: serde_json::Value = resp.json().await.expect("json body");
         assert_eq!(body["readers"][0]["current_epoch_name"], "Race Day");
+    }
+
+    #[cfg(feature = "eink")]
+    #[tokio::test]
+    async fn set_ready_with_display_sender_does_not_deadlock() {
+        let mut server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::not_ready("booting".to_owned()),
+        )
+        .await
+        .expect("start status server");
+
+        let (display_tx, mut display_rx) =
+            tokio::sync::watch::channel(rt_eink::state::DisplayState::initial());
+        server.set_display_sender(display_tx);
+
+        tokio::time::timeout(Duration::from_millis(100), server.set_ready())
+            .await
+            .expect("set_ready timed out");
+        tokio::time::timeout(Duration::from_millis(100), display_rx.changed())
+            .await
+            .expect("display state publish timed out")
+            .expect("display state sender dropped");
     }
 
     #[tokio::test]

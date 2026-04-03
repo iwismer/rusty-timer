@@ -301,41 +301,60 @@ async fn main() {
 
                 // Spawn the e-ink display task.
                 let eink_cfg = eink_config.clone();
-                let eink_model = eink_config.model;
-                tokio::spawn(async move {
-                    match rt_eink::driver::EinkDriver::new(eink_model) {
-                        Ok(mut driver) => {
-                            rt_eink::task::run_eink_task(display_rx, eink_cfg, |state, full| {
-                                use embedded_graphics::pixelcolor::BinaryColor;
-                                use embedded_graphics::prelude::*;
-                                driver.display_mut().clear(BinaryColor::Off).ok();
-                                if let Err(e) =
-                                    rt_eink::render::render_display(driver.display_mut(), state)
-                                {
-                                    tracing::warn!("eink render error: {e}");
-                                    return;
+                #[cfg(target_os = "linux")]
+                {
+                    let eink_model = eink_config.model;
+                    tokio::spawn(async move {
+                        match rt_eink::driver::EinkDriver::new(eink_model) {
+                            Ok(mut driver) => {
+                                rt_eink::task::run_eink_task(
+                                    display_rx,
+                                    eink_cfg,
+                                    |state, full| {
+                                        use embedded_graphics::pixelcolor::BinaryColor;
+                                        use embedded_graphics::prelude::*;
+                                        driver.display_mut().clear(BinaryColor::Off).ok();
+                                        if let Err(e) = rt_eink::render::render_display(
+                                            driver.display_mut(),
+                                            state,
+                                        ) {
+                                            tracing::warn!("eink render error: {e}");
+                                            return;
+                                        }
+                                        let result = if full {
+                                            driver.full_refresh()
+                                        } else {
+                                            driver.partial_refresh()
+                                        };
+                                        if let Err(e) = result {
+                                            tracing::warn!("eink refresh error: {e}");
+                                        }
+                                    },
+                                )
+                                .await;
+                                if let Err(e) = driver.sleep() {
+                                    tracing::warn!("eink sleep error on shutdown: {e}");
                                 }
-                                let result = if full {
-                                    driver.full_refresh()
-                                } else {
-                                    driver.partial_refresh()
-                                };
-                                if let Err(e) = result {
-                                    tracing::warn!("eink refresh error: {e}");
-                                }
-                            })
-                            .await;
-                            if let Err(e) = driver.sleep() {
-                                tracing::warn!("eink sleep error on shutdown: {e}");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "e-ink display init failed (continuing without display): {e}"
+                                );
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                "e-ink display init failed (continuing without display): {e}"
-                            );
-                        }
-                    }
-                });
+                    });
+                }
+
+                #[cfg(not(target_os = "linux"))]
+                {
+                    tokio::spawn(async move {
+                        rt_eink::task::run_eink_task(display_rx, eink_cfg, |_state, _full| {})
+                            .await;
+                    });
+                    warn!(
+                        "e-ink hardware updates are only supported on Linux; using no-op renderer"
+                    );
+                }
 
                 info!("e-ink display task spawned");
             } else {
@@ -740,6 +759,8 @@ mod tests {
                 enabled: true,
                 local_fallback_port: None,
             }],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1571,6 +1592,8 @@ token_file = "/tmp/test-token"
                 mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1810,6 +1833,8 @@ token_file = "/tmp/test-token"
                 enabled: true,
                 local_fallback_port: None,
             }],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1920,6 +1945,8 @@ token_file = "/tmp/test-token"
                 mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
