@@ -8,12 +8,14 @@ import {
   toGeneralPayload,
   toControlPayload,
   toReadersPayload,
+  toUpsPayload,
   toUpdatePayload,
   validateGeneral,
   validateServer,
   validateAuth,
   validateJournal,
   validateUplink,
+  validateUps,
   validateStatusHttp,
   validateReaders,
   defaultFallbackPort,
@@ -48,6 +50,10 @@ function makeForm(overrides: Partial<ForwarderConfigFormState> = {}): ForwarderC
     uplinkBatchFlushMs: "",
     uplinkBatchMaxEvents: "",
     statusHttpBind: "",
+    upsEnabled: false,
+    upsDaemonAddr: "",
+    upsPollIntervalSecs: "",
+    upsUpstreamHeartbeatSecs: "",
     controlAllowPowerActions: false,
     updateMode: "",
     readers: [makeReader()],
@@ -230,6 +236,21 @@ describe("fromConfig", () => {
   it("reads update.mode when present", () => {
     const form = fromConfig({ update: { mode: "check-only" } });
     expect(form.updateMode).toBe("check-only");
+  });
+
+  it("reads ups settings when present", () => {
+    const form = fromConfig({
+      ups: {
+        enabled: true,
+        daemon_addr: "127.0.0.1:8423",
+        poll_interval_secs: 5,
+        upstream_heartbeat_secs: 60,
+      },
+    });
+    expect(form.upsEnabled).toBe(true);
+    expect(form.upsDaemonAddr).toBe("127.0.0.1:8423");
+    expect(form.upsPollIntervalSecs).toBe("5");
+    expect(form.upsUpstreamHeartbeatSecs).toBe("60");
   });
 
   it("defaults updateMode to empty string when update section missing", () => {
@@ -422,6 +443,22 @@ describe("payload builders", () => {
       } as ForwarderConfigFormState),
     ).toEqual({ mode: null });
   });
+
+  it("serializes ups settings", () => {
+    expect(
+      toUpsPayload({
+        upsEnabled: true,
+        upsDaemonAddr: "127.0.0.1:8423",
+        upsPollIntervalSecs: "5",
+        upsUpstreamHeartbeatSecs: "60",
+      } as ForwarderConfigFormState),
+    ).toEqual({
+      enabled: true,
+      daemon_addr: "127.0.0.1:8423",
+      poll_interval_secs: 5,
+      upstream_heartbeat_secs: 60,
+    });
+  });
 });
 
 describe("validateGeneral", () => {
@@ -523,6 +560,46 @@ describe("validateUplink", () => {
 
   it("rejects non-integer batch max events", () => {
     expect(validateUplink(makeForm({ uplinkBatchMaxEvents: "3.5" }))).toBeTruthy();
+  });
+});
+
+describe("validateUps", () => {
+  it("passes when UPS is disabled", () => {
+    expect(validateUps(makeForm())).toBeNull();
+  });
+
+  it("passes when enabled UPS uses backend defaults", () => {
+    expect(
+      validateUps(
+        makeForm({
+          upsEnabled: true,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("passes for valid UPS settings", () => {
+    expect(
+      validateUps(
+        makeForm({
+          upsEnabled: true,
+          upsDaemonAddr: "127.0.0.1:8423",
+          upsPollIntervalSecs: "5",
+          upsUpstreamHeartbeatSecs: "60",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects malformed UPS daemon address when provided", () => {
+    expect(
+      validateUps(
+        makeForm({
+          upsEnabled: true,
+          upsDaemonAddr: "not-valid",
+        }),
+      ),
+    ).toBeTruthy();
   });
 });
 

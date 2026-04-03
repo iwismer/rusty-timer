@@ -1806,6 +1806,37 @@ async fn handle_receiver_socket(mut socket: WebSocket, state: AppState, token: O
                                 }
                             }
                         }
+                        Ok(DashboardEvent::ForwarderUpsUpdated {
+                            forwarder_id,
+                            available,
+                            status,
+                        }) => {
+                            if !forwarder_is_subscribed(&subscribed_stream_info, &forwarder_id) {
+                                continue;
+                            }
+
+                            let msg = WsMessage::ForwarderUpsStatus(
+                                rt_protocol::ForwarderUpsStatus {
+                                    forwarder_id,
+                                    available,
+                                    status,
+                                },
+                            );
+                            match serde_json::to_string(&msg) {
+                                Ok(json) => {
+                                    if socket.send(Message::Text(json.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        device_id = %device_id,
+                                        error = %e,
+                                        "failed to serialize live forwarder UPS update for receiver"
+                                    );
+                                }
+                            }
+                        }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!(device_id = %device_id, skipped = n, "receiver dashboard event channel lagged, metrics updates may have been dropped");
@@ -1843,6 +1874,15 @@ fn mode_race_id(mode: &ReceiverMode) -> Option<Uuid> {
         ReceiverMode::Race { race_id } => Uuid::parse_str(race_id).ok(),
         ReceiverMode::Live { .. } | ReceiverMode::TargetedReplay { .. } => None,
     }
+}
+
+fn forwarder_is_subscribed(
+    subscribed_stream_info: &HashMap<Uuid, (String, String)>,
+    forwarder_id: &str,
+) -> bool {
+    subscribed_stream_info
+        .values()
+        .any(|(subscribed_forwarder_id, _reader_ip)| subscribed_forwarder_id == forwarder_id)
 }
 
 fn mode_snapshot(mode: &ReceiverMode) -> ReceiverSelectionSnapshot {
@@ -2524,8 +2564,8 @@ async fn handle_receiver_ack(
 #[cfg(test)]
 mod tests {
     use super::{
-        RaceBaseline, ResolvedStreamTarget, StreamSub, plan_race_refresh_subscriptions,
-        proxy_reader_control_reply, race_refresh_needed,
+        RaceBaseline, ResolvedStreamTarget, StreamSub, forwarder_is_subscribed,
+        plan_race_refresh_subscriptions, proxy_reader_control_reply, race_refresh_needed,
     };
     use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
     use rt_protocol::{ReadEvent, ReaderControlAction, WsMessage};
@@ -2568,6 +2608,18 @@ mod tests {
             .max_connections(1)
             .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
             .expect("lazy pool")
+    }
+
+    #[test]
+    fn forwarder_is_subscribed_matches_any_stream_for_forwarder() {
+        let stream_a = Uuid::new_v4();
+        let stream_b = Uuid::new_v4();
+        let mut subscribed_stream_info = HashMap::new();
+        subscribed_stream_info.insert(stream_a, ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()));
+        subscribed_stream_info.insert(stream_b, ("fwd-1".to_owned(), "10.0.0.2:10000".to_owned()));
+
+        assert!(forwarder_is_subscribed(&subscribed_stream_info, "fwd-1"));
+        assert!(!forwarder_is_subscribed(&subscribed_stream_info, "fwd-2"));
     }
 
     #[test]

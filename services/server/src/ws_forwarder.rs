@@ -765,37 +765,6 @@ async fn handle_forwarder_socket(mut socket: WebSocket, state: AppState, token: 
                                     status: ups.status.clone(),
                                 });
 
-                                // 5. Broadcast sentinel ReadEvent on one of the forwarder's streams
-                                if ups.status.is_some()
-                                    && let Some(first_sid) = stream_map.values().next()
-                                {
-                                        let sentinel_msg = WsMessage::ForwarderUpsStatus(rt_protocol::ForwarderUpsStatus {
-                                            forwarder_id: device_id.clone(),
-                                            available: ups.available,
-                                            status: ups.status.clone(),
-                                        });
-                                        match serde_json::to_string(&sentinel_msg) {
-                                            Ok(json) => {
-                                                let tx = state.get_or_create_broadcast(*first_sid).await;
-                                                let _ = tx.send(rt_protocol::ReadEvent {
-                                                    forwarder_id: device_id.clone(),
-                                                    reader_ip: String::new(),
-                                                    stream_epoch: 0,
-                                                    seq: 0,
-                                                    reader_timestamp: String::new(),
-                                                    raw_frame: json.into_bytes(),
-                                                    read_type: rt_protocol::FORWARDER_UPS_STATUS_READ_TYPE.to_owned(),
-                                                });
-                                            }
-                                            Err(e) => {
-                                                error!(
-                                                    device_id = %device_id,
-                                                    error = %e,
-                                                    "failed to serialize ForwarderUpsStatus for sentinel broadcast"
-                                                );
-                                            }
-                                        }
-                                }
                             }
                             Ok(_) => { warn!(device_id = %device_id, "unexpected message kind"); }
                             Err(e) => { warn!(device_id = %device_id, error = %e, "invalid JSON in forwarder session message"); send_ws_error(&mut socket, error_codes::PROTOCOL_ERROR, "invalid JSON in message", false).await; break; }

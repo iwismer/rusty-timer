@@ -10,6 +10,7 @@
     toUplinkPayload,
     toStatusHttpPayload,
     toControlPayload,
+    toUpsPayload,
     toUpdatePayload,
     toReadersPayload,
     validateGeneral,
@@ -17,6 +18,7 @@
     validateAuth,
     validateJournal,
     validateUplink,
+    validateUps,
     validateStatusHttp,
     validateReaders,
     defaultFallbackPort,
@@ -66,6 +68,10 @@
   let uplinkBatchFlushMs = $state("");
   let uplinkBatchMaxEvents = $state("");
   let statusHttpBind = $state("");
+  let upsEnabled = $state(false);
+  let upsDaemonAddr = $state("");
+  let upsPollIntervalSecs = $state("");
+  let upsUpstreamHeartbeatSecs = $state("");
   let updateMode = $state("");
   let checkingUpdate = $state(false);
   let checkMessage = $state<string | null>(null);
@@ -183,6 +189,10 @@
     uplinkBatchFlushMs = form.uplinkBatchFlushMs;
     uplinkBatchMaxEvents = form.uplinkBatchMaxEvents;
     statusHttpBind = form.statusHttpBind;
+    upsEnabled = form.upsEnabled;
+    upsDaemonAddr = form.upsDaemonAddr;
+    upsPollIntervalSecs = form.upsPollIntervalSecs;
+    upsUpstreamHeartbeatSecs = form.upsUpstreamHeartbeatSecs;
     updateMode = form.updateMode;
     persistedAllowPowerActions = form.controlAllowPowerActions;
     controlAllowPowerActions = form.controlAllowPowerActions;
@@ -201,6 +211,10 @@
       uplinkBatchFlushMs,
       uplinkBatchMaxEvents,
       statusHttpBind,
+      upsEnabled,
+      upsDaemonAddr,
+      upsPollIntervalSecs,
+      upsUpstreamHeartbeatSecs,
       updateMode,
       controlAllowPowerActions,
       readers: readers.map((reader) => ({ ...reader })),
@@ -277,6 +291,9 @@
   }
   function saveStatusHttp() {
     saveSectionWithValidation("status_http", validateStatusHttp, toStatusHttpPayload);
+  }
+  function saveUps() {
+    saveSectionWithValidation("ups", validateUps, toUpsPayload);
   }
   async function saveControl() {
     const saved = await saveSection("control", toControlPayload(currentFormState()));
@@ -883,6 +900,59 @@
                   : 'text-status-err'}"
               >
                 {sectionMessages["status_http"].text}
+              </p>
+            {/if}
+          </Card>
+
+          <Card title="UPS (PiSugar)" helpSection="ups" helpContext="forwarder">
+            <div class="space-y-3">
+              <label class="block text-sm font-medium text-text-secondary">
+                <span class="inline-flex items-center gap-2">
+                  <input type="checkbox" bind:checked={upsEnabled} class="accent-accent" />
+                  Enable UPS monitoring <HelpTip fieldKey="enabled" sectionKey="ups" context="forwarder" />
+                </span>
+              </label>
+              <label class="block text-sm font-medium text-text-secondary">
+                Daemon Address <HelpTip fieldKey="daemon_addr" sectionKey="ups" context="forwarder" />
+                <input
+                  type="text"
+                  bind:value={upsDaemonAddr}
+                  placeholder="127.0.0.1:8423"
+                  class="mt-1 {inputClass}"
+                />
+                <p class={hintClass}>Optional. Leave blank to use the PiSugar default daemon address.</p>
+              </label>
+              <label class="block text-sm font-medium text-text-secondary">
+                Poll Interval (seconds) <HelpTip fieldKey="poll_interval_secs" sectionKey="ups" context="forwarder" />
+                <input type="number" bind:value={upsPollIntervalSecs} min="1" max="60" class="mt-1 {inputClass}" />
+                <p class={hintClass}>Optional. Leave blank to use the default 5-second polling interval.</p>
+              </label>
+              <label class="block text-sm font-medium text-text-secondary">
+                Heartbeat Interval (seconds) <HelpTip fieldKey="upstream_heartbeat_secs" sectionKey="ups" context="forwarder" />
+                <input
+                  type="number"
+                  bind:value={upsUpstreamHeartbeatSecs}
+                  min="10"
+                  max="300"
+                  class="mt-1 {inputClass}"
+                />
+                <p class={hintClass}>Optional. Leave blank to use the default 60-second upstream heartbeat.</p>
+              </label>
+            </div>
+            <button
+              class={saveBtnClass}
+              onclick={saveUps}
+              disabled={savingSection["ups"]}
+            >
+              {savingSection["ups"] ? "Saving..." : "Save UPS"}
+            </button>
+            {#if sectionMessages["ups"]}
+              <p
+                class="text-xs mt-1 m-0 {sectionMessages['ups'].ok
+                  ? 'text-status-ok'
+                  : 'text-status-err'}"
+              >
+                {sectionMessages["ups"].text}
               </p>
             {/if}
           </Card>
