@@ -91,13 +91,12 @@ where
         info_y += SMALL_CHAR_H as i32 + 2;
     }
 
-    // Server status: "Svr:" + filled/empty square indicator.
+    // Server status: indicator square + "Server".
     {
-        let svr_label = "Svr:";
-        Text::new(svr_label, Point::new(RIGHT_X, info_y), small_style).draw(target)?;
-        let sq_x = RIGHT_X + svr_label.len() as i32 * SMALL_CHAR_W as i32 + 2;
         let sq_y = info_y - INDICATOR_SIZE as i32 + 2;
-        draw_filled_square(target, Point::new(sq_x, sq_y), state.server_connected)?;
+        draw_filled_square(target, Point::new(RIGHT_X, sq_y), state.server_connected)?;
+        let text_x = RIGHT_X + INDICATOR_SIZE as i32 + INDICATOR_GAP as i32;
+        Text::new("Server", Point::new(text_x, info_y), small_style).draw(target)?;
         info_y += SMALL_CHAR_H as i32 + 2;
     }
 
@@ -136,8 +135,10 @@ where
 {
     let small_style = MonoTextStyle::new(&FONT_7X13, BinaryColor::On);
 
-    // Line 1: connection indicator + IP address.
-    let indicator_y = y; // top of indicator
+    // Connection indicator, vertically centered across both lines.
+    // Each reader block is 2 lines (SMALL_CHAR_H) + 2px gap = 28px total.
+    let block_h = SMALL_CHAR_H as i32 * 2 + 2;
+    let indicator_y = y + (block_h - INDICATOR_SIZE as i32) / 2;
     draw_connection_indicator(target, Point::new(0, indicator_y), reader.state)?;
 
     let ip_y = y + SMALL_CHAR_H as i32 - 2; // baseline align with indicator
