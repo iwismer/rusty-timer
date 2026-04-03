@@ -69,6 +69,16 @@ fn detect_local_ip(target_ip: &str) -> Option<String> {
     Some(local_addr.ip().to_string())
 }
 
+/// Read CPU temperature from the Linux thermal zone.
+///
+/// Returns `None` on non-Linux platforms or if the file cannot be read.
+#[cfg(feature = "eink")]
+fn read_cpu_temp() -> Option<f32> {
+    let content = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
+    let millidegrees: f32 = content.trim().parse().ok()?;
+    Some(millidegrees / 1000.0)
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -146,7 +156,8 @@ async fn main() {
     let subsystem = SubsystemStatus::not_ready("starting".to_owned());
     let config_state = Arc::new(ConfigState::new(config_path.clone()));
     let restart_signal = Arc::new(Notify::new());
-    let status_server = match StatusServer::start_with_config(
+    #[allow(unused_mut)]
+    let mut status_server = match StatusServer::start_with_config(
         status_cfg,
         subsystem,
         journal.clone(),
@@ -261,6 +272,96 @@ async fn main() {
         info!(local_ip = %ip, "detected local IP");
     }
     status_server.set_local_ip(local_ip).await;
+
+    // --- E-ink display (optional, compile-time gated) ---
+    #[cfg(feature = "eink")]
+    {
+        if let Some(ref eink_config) = cfg.eink {
+            if eink_config.enabled {
+                let (display_tx, display_rx) =
+                    tokio::sync::watch::channel(rt_eink::state::DisplayState::initial());
+
+                status_server.set_display_sender(display_tx);
+                status_server
+                    .set_display_name(cfg.display_name.clone())
+                    .await;
+
+                // Spawn CPU temperature polling task.
+                let temp_interval_secs = eink_config.telemetry_interval_secs;
+                let ss_temp = status_server.clone();
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(temp_interval_secs));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tick.tick().await;
+                        let temp = read_cpu_temp();
+                        ss_temp.set_cpu_temp(temp).await;
+                    }
+                });
+
+                // Spawn the e-ink display task.
+                let eink_cfg = eink_config.clone();
+                #[cfg(target_os = "linux")]
+                {
+                    let eink_model = eink_config.model;
+                    tokio::spawn(async move {
+                        match rt_eink::driver::EinkDriver::new(eink_model) {
+                            Ok(mut driver) => {
+                                rt_eink::task::run_eink_task(
+                                    display_rx,
+                                    eink_cfg,
+                                    |state, full| {
+                                        use embedded_graphics::pixelcolor::BinaryColor;
+                                        use embedded_graphics::prelude::*;
+                                        driver.display_mut().clear(BinaryColor::Off).ok();
+                                        if let Err(e) = rt_eink::render::render_display(
+                                            driver.display_mut(),
+                                            state,
+                                        ) {
+                                            tracing::warn!("eink render error: {e}");
+                                            return;
+                                        }
+                                        let result = if full {
+                                            driver.full_refresh()
+                                        } else {
+                                            driver.partial_refresh()
+                                        };
+                                        if let Err(e) = result {
+                                            tracing::warn!("eink refresh error: {e}");
+                                        }
+                                    },
+                                )
+                                .await;
+                                if let Err(e) = driver.sleep() {
+                                    tracing::warn!("eink sleep error on shutdown: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "e-ink display init failed (continuing without display): {e}"
+                                );
+                            }
+                        }
+                    });
+                }
+
+                #[cfg(not(target_os = "linux"))]
+                {
+                    tokio::spawn(async move {
+                        rt_eink::task::run_eink_task(display_rx, eink_cfg, |_state, _full| {})
+                            .await;
+                    });
+                    warn!(
+                        "e-ink hardware updates are only supported on Linux; using no-op renderer"
+                    );
+                }
+
+                info!("e-ink display task spawned");
+            } else {
+                info!("e-ink display configured but disabled");
+            }
+        }
+    }
 
     // Create channel for reader status updates
     let (reader_status_tx, reader_status_rx) =
@@ -658,6 +759,8 @@ mod tests {
                 enabled: true,
                 local_fallback_port: None,
             }],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1489,6 +1592,8 @@ token_file = "/tmp/test-token"
                 mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1728,6 +1833,8 @@ token_file = "/tmp/test-token"
                 enabled: true,
                 local_fallback_port: None,
             }],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1838,6 +1945,8 @@ token_file = "/tmp/test-token"
                 mode: rt_updater::UpdateMode::default(),
             },
             readers: vec![],
+            #[cfg(feature = "eink")]
+            eink: None,
         };
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

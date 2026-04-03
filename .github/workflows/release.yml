@@ -248,7 +248,7 @@ jobs:
           FEATURES=""
           case "${{ env.SERVICE }}" in
             forwarder)
-              FEATURES="--features embed-ui"
+              FEATURES="--features embed-ui,eink"
               ;;
           esac
           $BUILD_CMD build --release --target ${{ matrix.target }} --package ${{ env.SERVICE }} --bin ${{ env.SERVICE }} $FEATURES
