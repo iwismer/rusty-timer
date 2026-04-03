@@ -91,8 +91,6 @@ pub enum DisplayModel {
     #[default]
     #[serde(rename = "2in13_v2")]
     Epd2in13V2,
-    #[serde(rename = "2in13_v3")]
-    Epd2in13V3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -153,7 +151,7 @@ mod tests {
     fn eink_config_deserializes_all_fields() {
         let toml_str = r#"
             enabled = false
-            model = "2in13_v3"
+            model = "2in13_v2"
             refresh_mode = "full_only"
             full_refresh_interval = 20
             min_refresh_interval_ms = 500
@@ -161,7 +159,7 @@ mod tests {
         "#;
         let config: EinkConfig = toml::from_str(toml_str).unwrap();
         assert!(!config.enabled);
-        assert_eq!(config.model, DisplayModel::Epd2in13V3);
+        assert_eq!(config.model, DisplayModel::Epd2in13V2);
         assert_eq!(config.refresh_mode, RefreshMode::FullOnly);
         assert_eq!(config.full_refresh_interval, 20);
         assert_eq!(config.min_refresh_interval_ms, 500);
@@ -173,5 +171,12 @@ mod tests {
         let toml_str = r#"refresh_mode = "partial_only""#;
         let config: EinkConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.refresh_mode, RefreshMode::PartialOnly);
+    }
+
+    #[test]
+    fn eink_config_rejects_unsupported_display_model() {
+        let toml_str = r#"model = "2in13_v3""#;
+        let err = toml::from_str::<EinkConfig>(toml_str).unwrap_err();
+        assert!(err.to_string().contains("2in13_v3"), "error: {err}");
     }
 }

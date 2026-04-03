@@ -89,10 +89,6 @@ class TransactionTests(unittest.TestCase):
                 "--release",
                 "--package",
                 "receiver",
-                "--bin",
-                "receiver",
-                "--features",
-                "embed-ui",
             ]:
                 raise subprocess.CalledProcessError(1, cmd, stderr="boom")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -222,7 +218,7 @@ class ReleaseWorkflowParityTests(unittest.TestCase):
                 "--bin",
                 "forwarder",
                 "--features",
-                "embed-ui",
+                "embed-ui,eink",
             ],
             calls,
         )
@@ -547,7 +543,7 @@ class DryRunBehaviorTests(unittest.TestCase):
                 "--bin",
                 "forwarder",
                 "--features",
-                "embed-ui",
+                "embed-ui,eink",
             ],
             calls,
         )

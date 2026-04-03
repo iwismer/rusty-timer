@@ -252,6 +252,14 @@ def service_uses_embed_ui(service: str) -> bool:
     return service in EMBED_UI_SERVICES
 
 
+def service_build_features(service: str) -> list[str]:
+    if service == "forwarder":
+        return ["embed-ui", "eink"]
+    if service_uses_embed_ui(service):
+        return ["embed-ui"]
+    return []
+
+
 def service_ui_workspace(service: str) -> str | None:
     return UI_WORKSPACES.get(service)
 
@@ -324,8 +332,9 @@ def run_release_workflow_checks(
     # other services have a standalone binary target.
     if service != "receiver":
         build_cmd.extend(["--bin", service])
-    if service_uses_embed_ui(service):
-        build_cmd.extend(["--features", "embed-ui"])
+    features = service_build_features(service)
+    if features:
+        build_cmd.extend(["--features", ",".join(features)])
 
     print(style(f"  [{step}] Run release build", role="step"))
     step += 1
