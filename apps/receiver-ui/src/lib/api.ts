@@ -197,6 +197,20 @@ export interface ForwarderMetricsUpdate {
   last_read_at: string | null;
 }
 
+export interface UpsStatus {
+  battery_percent: number;
+  battery_voltage_mv: number;
+  charging: boolean;
+  power_plugged: boolean;
+  temperature_cdeg: number;
+  sampled_at: number;
+}
+
+export interface ForwarderUpsState {
+  available: boolean;
+  status: UpsStatus | null;
+}
+
 export interface ForwarderConfigResponse {
   ok: boolean;
   config: Record<string, unknown>;

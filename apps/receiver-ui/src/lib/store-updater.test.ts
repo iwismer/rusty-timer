@@ -920,4 +920,95 @@ describe("receiver updater store", () => {
       error: undefined,
     });
   });
+
+  it("keeps configured-but-unavailable UPS entries when the server sends no sampled status yet", async () => {
+    const sseState = mockSseInitWithCallbacks();
+    const { initStore, store } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    sseState.callbacks?.onForwarderUpsUpdated?.({
+      forwarder_id: "fwd-1",
+      available: false,
+      status: null,
+    });
+
+    expect(store.upsState.get("fwd-1")).toEqual({
+      available: false,
+      status: null,
+    });
+  });
+
+  it("drops UPS entries for forwarders that are no longer online after reload", async () => {
+    apiMocks.getForwarders.mockResolvedValueOnce({
+      forwarders: [
+        {
+          forwarder_id: "fwd-1",
+          display_name: "Start",
+          online: true,
+          readers: [],
+          unique_chips: 0,
+          total_reads: 0,
+          last_read_at: null,
+        },
+      ],
+    });
+
+    const { initStore, loadAll, store } = await import("./store.svelte");
+
+    initStore();
+    await flushAsyncWork();
+
+    store.upsState = new Map([
+      [
+        "fwd-1",
+        {
+          available: true,
+          status: {
+            battery_percent: 80,
+            battery_voltage_mv: 4010,
+            charging: false,
+            power_plugged: true,
+            temperature_cdeg: 2500,
+            sampled_at: 1711929600000,
+          },
+        },
+      ],
+      [
+        "fwd-2",
+        {
+          available: false,
+          status: null,
+        },
+      ],
+    ]);
+
+    apiMocks.getForwarders.mockResolvedValueOnce({
+      forwarders: [
+        {
+          forwarder_id: "fwd-1",
+          display_name: "Start",
+          online: true,
+          readers: [],
+          unique_chips: 0,
+          total_reads: 0,
+          last_read_at: null,
+        },
+        {
+          forwarder_id: "fwd-2",
+          display_name: "Finish",
+          online: false,
+          readers: [],
+          unique_chips: 0,
+          total_reads: 0,
+          last_read_at: null,
+        },
+      ],
+    });
+
+    await loadAll();
+
+    expect(Array.from(store.upsState.keys())).toEqual(["fwd-1"]);
+  });
 });

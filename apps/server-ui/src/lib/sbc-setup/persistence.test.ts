@@ -38,6 +38,7 @@ describe("readSbcSetupPreference", () => {
       displayName: "rt-fwd-02",
       setupScriptUrl:
         "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
+      upsEnabled: false,
       ipBaseOctet: 50,
     };
     vi.stubGlobal("localStorage", {
@@ -85,6 +86,7 @@ describe("writeSbcSetupPreference", () => {
       displayName: "",
       setupScriptUrl:
         "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
+      upsEnabled: false,
       ipBaseOctet: 50,
     };
     const result = writeSbcSetupPreference(data);
@@ -116,6 +118,7 @@ describe("writeSbcSetupPreference", () => {
       displayName: "",
       setupScriptUrl:
         "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
+      upsEnabled: false,
       ipBaseOctet: 50,
     };
     const result = writeSbcSetupPreference(data);

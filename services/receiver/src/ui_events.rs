@@ -119,6 +119,11 @@ pub enum ReceiverUiEvent {
         total: u64,
         error: Option<String>,
     },
+    ForwarderUpsUpdated {
+        forwarder_id: String,
+        available: bool,
+        status: Option<rt_protocol::UpsStatus>,
+    },
 }
 
 #[cfg(test)]
@@ -279,6 +284,27 @@ mod tests {
         assert!(json["lag_ms"].is_null());
         assert!(json["epoch_last_received_at"].is_null());
         assert!(json["epoch_lag_ms"].is_null());
+    }
+
+    #[test]
+    fn forwarder_ups_updated_serializes_with_type_tag() {
+        let event = ReceiverUiEvent::ForwarderUpsUpdated {
+            forwarder_id: "fwd-01".to_owned(),
+            available: true,
+            status: Some(rt_protocol::UpsStatus {
+                battery_percent: 73,
+                battery_voltage_mv: 3870,
+                charging: true,
+                power_plugged: true,
+                temperature_cdeg: 4250,
+                sampled_at: 1711929600000,
+            }),
+        };
+        let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "forwarder_ups_updated");
+        assert_eq!(json["forwarder_id"], "fwd-01");
+        assert_eq!(json["available"], true);
+        assert_eq!(json["status"]["battery_percent"], 73);
     }
 
     #[test]

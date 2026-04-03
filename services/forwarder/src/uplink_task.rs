@@ -707,6 +707,9 @@ pub(crate) async fn run_uplink(
     restart_signal: Arc<Notify>,
     logger: Arc<rt_ui_log::UiLogger<ForwarderUiEvent>>,
     mut reader_status_rx: tokio::sync::mpsc::UnboundedReceiver<rt_protocol::ReaderStatusUpdate>,
+    mut ups_status_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<rt_protocol::ForwarderUpsStatus>,
+    >,
 ) {
     let ui_tx = status.ui_sender();
     let server_url = format!(
@@ -811,6 +814,22 @@ pub(crate) async fn run_uplink(
         if !drain_ok {
             status.set_uplink_connected(false).await;
             continue; // reconnect via outer loop
+        }
+
+        // Send initial UPS status if available
+        if let Some(ref mut ups_rx) = ups_status_rx {
+            let mut latest: Option<rt_protocol::ForwarderUpsStatus> = None;
+            while let Ok(msg) = ups_rx.try_recv() {
+                latest = Some(msg);
+            }
+            if let Some(msg) = latest {
+                let ws_msg = WsMessage::ForwarderUpsStatus(msg);
+                if session.send_message(&ws_msg).await.is_err() {
+                    warn!("failed to send UPS status during initial burst; reconnecting");
+                    status.set_uplink_connected(false).await;
+                    continue;
+                }
+            }
         }
 
         // Replay unacked events from journal
@@ -1028,6 +1047,21 @@ pub(crate) async fn run_uplink(
                     if session.send_message(&msg).await.is_err() {
                         warn!("failed to send reader status update; reconnecting");
                         break 'uplink;
+                    }
+                    continue 'uplink;
+                }
+                ups_msg = async {
+                    match ups_status_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(msg) = ups_msg {
+                        let ws_msg = WsMessage::ForwarderUpsStatus(msg);
+                        if session.send_message(&ws_msg).await.is_err() {
+                            warn!("failed to send UPS status; reconnecting");
+                            break 'uplink;
+                        }
                     }
                     continue 'uplink;
                 }

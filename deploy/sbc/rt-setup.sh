@@ -26,6 +26,7 @@ STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
 POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules"
+PISUGAR_SERVER_VERSION="1.7.8"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -797,6 +798,94 @@ verify() {
   fi
 }
 
+setup_ups() {
+  local ups_enabled="0"
+  if is_noninteractive_mode; then
+    ups_enabled="$(bool_env_is_true "${RT_SETUP_UPS_ENABLED:-0}")"
+  else
+    read -rp "Do you have a PiSugar UPS HAT installed? [y/N] " answer
+    if [[ "${answer}" =~ ^[Yy]$ ]]; then
+      ups_enabled="1"
+    fi
+  fi
+
+  if [[ "${ups_enabled}" != "1" ]]; then
+    log "Skipping PiSugar UPS setup"
+    return
+  fi
+
+  log "Setting up PiSugar UPS support..."
+
+  # 1. Enable I2C
+  if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt 2>/dev/null; then
+    echo "dtparam=i2c_arm=on" >> /boot/config.txt
+    log "Enabled I2C in /boot/config.txt"
+  else
+    log "I2C already enabled"
+  fi
+
+  # 2. Install pisugar-server
+  local arch
+  arch="$(detect_arch)"
+  local deb_arch
+  case "${arch}" in
+    aarch64-unknown-linux-gnu) deb_arch="arm64" ;;
+    armv7-unknown-linux-gnueabihf) deb_arch="armhf" ;;
+    *) log "ERROR: unsupported architecture for pisugar-server: ${arch}"; return 1 ;;
+  esac
+
+  local deb_url="https://github.com/PiSugar/PiSugar/releases/download/v${PISUGAR_SERVER_VERSION}/pisugar-server_${PISUGAR_SERVER_VERSION}_${deb_arch}.deb"
+  local deb_file="/tmp/pisugar-server_${PISUGAR_SERVER_VERSION}_${deb_arch}.deb"
+
+  log "Downloading pisugar-server v${PISUGAR_SERVER_VERSION}..."
+  curl -fsSL -o "${deb_file}" "${deb_url}"
+  dpkg -i "${deb_file}" || apt-get install -f -y
+  rm -f "${deb_file}"
+
+  # 3. Configure pisugar-server
+  mkdir -p /etc/pisugar-server
+  cat > /etc/pisugar-server/config.json <<'PISUGAR_EOF'
+{
+  "safe_shutdown_level": 10,
+  "safe_shutdown_delay": 30,
+  "auto_power_on": true,
+  "soft_poweroff": true,
+  "soft_poweroff_shell": "shutdown --poweroff 0"
+}
+PISUGAR_EOF
+  log "Wrote pisugar-server config"
+
+  # 4. Enable and start pisugar-server
+  systemctl enable pisugar-server.service
+  systemctl start pisugar-server.service || true
+  log "pisugar-server service enabled and started"
+
+  # 5. Add systemd ordering
+  local service_file="/etc/systemd/system/rt-forwarder.service"
+  if [[ -f "${service_file}" ]]; then
+    if ! grep -q "After=pisugar-server.service" "${service_file}"; then
+      sed -i '/^\[Unit\]/a After=pisugar-server.service' "${service_file}"
+      systemctl daemon-reload
+      log "Added After=pisugar-server.service to rt-forwarder.service"
+    fi
+  fi
+
+  # 6. Update forwarder.toml
+  local config_file="${CONFIG_DIR}/forwarder.toml"
+  if [[ -f "${config_file}" ]]; then
+    if ! grep -q '^\[ups\]' "${config_file}"; then
+      cat >> "${config_file}" <<'UPS_EOF'
+
+[ups]
+enabled = true
+UPS_EOF
+      log "Added [ups] section to forwarder.toml"
+    fi
+  fi
+
+  log "PiSugar UPS setup complete"
+}
+
 main() {
   echo "=== rt-forwarder Setup ==="
   echo ""
@@ -814,6 +903,7 @@ main() {
   download_binary
   configure
   install_service
+  setup_ups
 
   if [[ "${VERIFY_POLICY}" == "run_verify" ]]; then
     verify

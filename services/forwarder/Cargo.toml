@@ -36,6 +36,7 @@ rt-ui-log = { path = "../../crates/rt-ui-log" }
 rt-ui-http = { path = "../../crates/rt-ui-http" }
 rt-updater = { path = "../../crates/rt-updater" }
 ipico-core = { path = "../../crates/ipico-core" }
+thiserror = "2"
 async-stream = "0.3"
 rust-embed = { version = "8", optional = true }
 

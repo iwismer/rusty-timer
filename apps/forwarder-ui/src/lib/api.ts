@@ -50,6 +50,17 @@ export interface ForwarderStatus {
   ready_reason: string | null;
   uplink_connected: boolean;
   restart_needed: boolean;
+  ups_status?: {
+    available: boolean;
+    status: {
+      battery_percent: number;
+      battery_voltage_mv: number;
+      charging: boolean;
+      power_plugged: boolean;
+      temperature_cdeg: number;
+      sampled_at: number;
+    } | null;
+  } | null;
   readers: ReaderStatus[];
 }
 

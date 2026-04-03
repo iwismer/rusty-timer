@@ -15,6 +15,10 @@ export type ForwarderSseCallbacks = {
     data: { ip: string } & import("./api").ReaderInfo,
   ) => void;
   onUpdateStatusChanged: (status: UpdateStatusResponse) => void;
+  onUpsStatusChanged?: (payload: {
+    available: boolean;
+    status: any | null;
+  }) => void;
 };
 
 let handle: SseHandle | null = null;
@@ -46,6 +50,12 @@ export function initSSE(callbacks: ForwarderSseCallbacks): void {
       },
       reader_info_updated: (data: { ip: string } & ReaderInfo) => {
         callbacks.onReaderInfoUpdated(data);
+      },
+      ups_status_changed: (data: {
+        available: boolean;
+        status: any | null;
+      }) => {
+        callbacks.onUpsStatusChanged?.(data);
       },
     },
     (connected) => {

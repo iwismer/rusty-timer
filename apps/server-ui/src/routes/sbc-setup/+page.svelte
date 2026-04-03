@@ -47,6 +47,7 @@
     statusBind: "0.0.0.0:80",
     displayName: "",
     setupScriptUrl: DEFAULT_SETUP_SCRIPT_URL,
+    upsEnabled: false,
   };
 
   let form: SbcSetupFormData = $state({ ...DEFAULTS });
@@ -704,6 +705,20 @@
             placeholder={DEFAULT_SETUP_SCRIPT_URL}
             class="mt-1 block w-full rounded border px-3 py-2 text-sm bg-surface-0 text-text-primary font-mono border-border"
           />
+        </div>
+
+        <!-- PiSugar UPS -->
+        <div>
+          <label class="flex items-center gap-2">
+            <input type="checkbox" bind:checked={form.upsEnabled} />
+            <span>PiSugar UPS</span>
+          </label>
+          {#if form.upsEnabled}
+            <p class="text-xs text-gray-500 ml-6">
+              Installs pisugar-server and configures safe shutdown. Requires
+              PiSugar 3 HAT.
+            </p>
+          {/if}
         </div>
       </div>
     </Card>

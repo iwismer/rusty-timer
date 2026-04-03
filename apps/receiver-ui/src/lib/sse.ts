@@ -10,6 +10,7 @@ import type {
   StreamMetrics,
   StreamsResponse,
   DownloadState,
+  UpsStatus,
 } from "./api";
 
 // Payload types matching the Rust ReceiverUiEvent serde output.
@@ -55,6 +56,12 @@ export type ReaderDownloadProgressPayload = {
   error?: string | null;
 };
 
+export type ForwarderUpsUpdatedPayload = {
+  forwarder_id: string;
+  available: boolean;
+  status: UpsStatus | null;
+};
+
 export type SseCallbacks = {
   onStatusChanged: (status: StatusResponse) => void;
   onStreamsSnapshot: (streams: StreamsResponse) => void;
@@ -68,6 +75,7 @@ export type SseCallbacks = {
   onStreamMetricsUpdated: (metrics: StreamMetrics) => void;
   onReaderInfoUpdated?: (payload: ReaderInfoUpdatedPayload) => void;
   onReaderDownloadProgress?: (payload: ReaderDownloadProgressPayload) => void;
+  onForwarderUpsUpdated?: (payload: ForwarderUpsUpdatedPayload) => void;
 };
 
 let unlistenFns: UnlistenFn[] = [];
@@ -147,6 +155,9 @@ export async function initSSE(callbacks: SseCallbacks): Promise<void> {
         callbacks.onReaderDownloadProgress?.(event.payload);
       },
     ),
+    listen<ForwarderUpsUpdatedPayload>("forwarder_ups_updated", (event) => {
+      callbacks.onForwarderUpsUpdated?.(event.payload);
+    }),
   ]);
 }
 

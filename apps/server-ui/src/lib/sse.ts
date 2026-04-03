@@ -2,6 +2,7 @@ import {
   addOrUpdateStream,
   forwarderRacesStore,
   patchStream,
+  pruneUpsStateForOnlineForwarders,
   replaceStreams,
   setRaces,
   setMetrics,
@@ -9,9 +10,12 @@ import {
   pushLog,
   logsStore,
   readerStatesStore,
+  streamsStore,
   setReaderState,
   setDownloadProgress,
+  setUpsState,
 } from "./stores";
+import { get } from "svelte/store";
 import {
   getForwarderRaces,
   getLogs,
@@ -69,6 +73,7 @@ export function initSSE(): void {
       const update: StreamUpdatedEvent = JSON.parse(e.data);
       const { stream_id, ...fields } = update;
       patchStream(stream_id, fields);
+      pruneUpsStateForOnlineForwarders(get(streamsStore));
       for (const listener of streamUpdatedListeners) {
         listener(update);
       }
@@ -151,6 +156,15 @@ export function initSSE(): void {
     },
   );
 
+  eventSource.addEventListener("forwarder_ups_updated", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data);
+      setUpsState(data.forwarder_id, data.available, data.status ?? null);
+    } catch (err) {
+      console.error("Failed to parse forwarder_ups_updated event:", err);
+    }
+  });
+
   eventSource.addEventListener("resync", async () => {
     await resync();
   });
@@ -222,6 +236,7 @@ async function resync(): Promise<void> {
 
       if (streamsResp.status === "fulfilled") {
         replaceStreams(streamsResp.value.streams);
+        pruneUpsStateForOnlineForwarders(streamsResp.value.streams);
       }
       if (racesResp.status === "fulfilled") {
         setRaces(racesResp.value.races);

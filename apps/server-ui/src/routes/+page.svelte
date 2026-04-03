@@ -26,6 +26,7 @@
     AlertBanner,
     HelpTip,
     HelpDialog,
+    BatteryIndicator,
   } from "@rusty-timer/shared-ui";
   import {
     formatReadMode,
@@ -43,7 +44,11 @@
     initialTimeoutDraft,
     resolveTimeoutSeconds,
   } from "@rusty-timer/shared-ui/lib/read-mode-form";
-  import { readerStatesStore, downloadProgressStore } from "$lib/stores";
+  import {
+    readerStatesStore,
+    downloadProgressStore,
+    upsStateStore,
+  } from "$lib/stores";
   import {
     syncReaderClock,
     setReaderReadMode,
@@ -655,6 +660,16 @@
           <h2 class="text-sm font-semibold text-text-primary m-0">
             {group.displayName}
           </h2>
+          {#if $upsStateStore[group.forwarderId]}
+            {@const ups = $upsStateStore[group.forwarderId]}
+            <BatteryIndicator
+              percent={ups.status?.battery_percent ?? null}
+              charging={ups.status?.charging ?? false}
+              available={ups.available}
+              configured
+              compact
+            />
+          {/if}
           <StatusBadge
             label="{stats.onlineCount}/{stats.totalStreams} online"
             state={stats.onlineCount === 0
