@@ -8,13 +8,12 @@ use epd_waveshare::prelude::*;
 use rppal::gpio::{Gpio, InputPin, OutputPin};
 use rppal::hal::Delay;
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// GPIO pin assignments for the Waveshare 2.13" E-Ink HAT.
 const PIN_DC: u8 = 25;
 const PIN_RST: u8 = 17;
 const PIN_BUSY: u8 = 24;
-const PIN_CS: u8 = 8;
 
 /// SPI clock speed in Hz (4 MHz — Waveshare recommended).
 const SPI_CLOCK_HZ: u32 = 4_000_000;
@@ -42,7 +41,7 @@ impl std::error::Error for DriverError {}
 /// Wraps the initialized SPI, GPIO pins, and e-ink display driver.
 pub struct EinkDriver {
     spi: Spi,
-    epd: Epd2in13<Spi, OutputPin, InputPin, OutputPin, OutputPin, Delay>,
+    epd: Epd2in13<Spi, InputPin, OutputPin, OutputPin, Delay>,
     delay: Delay,
     display: Display2in13,
 }
@@ -55,10 +54,6 @@ impl EinkDriver {
 
         let gpio = Gpio::new().map_err(|e| DriverError::Gpio(e.to_string()))?;
 
-        let cs = gpio
-            .get(PIN_CS)
-            .map_err(|e| DriverError::Gpio(format!("CS pin {PIN_CS}: {e}")))?
-            .into_output();
         let busy = gpio
             .get(PIN_BUSY)
             .map_err(|e| DriverError::Gpio(format!("BUSY pin {PIN_BUSY}: {e}")))?
@@ -74,7 +69,7 @@ impl EinkDriver {
 
         let mut delay = Delay::new();
 
-        let epd = Epd2in13::new(&mut spi, cs, busy, dc, rst, &mut delay)
+        let epd = Epd2in13::new(&mut spi, busy, dc, rst, &mut delay, None)
             .map_err(|e| DriverError::Display(format!("EPD init: {e:?}")))?;
 
         let display = Display2in13::default();

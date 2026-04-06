@@ -228,6 +228,7 @@ PermissionsStartOnly=true
 ExecStartPre=${APPLY_STAGED_HELPER}
 User=rt-forwarder
 Group=rt-forwarder
+SupplementaryGroups=spi gpio
 ExecStart=/usr/local/bin/rt-forwarder
 WorkingDirectory=/var/lib/rusty-timer
 Environment=RUST_LOG=info
@@ -245,6 +246,8 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/rusty-timer
 ReadWritePaths=/etc/rusty-timer
+DeviceAllow=/dev/spidev0.0 rw
+DeviceAllow=/dev/gpiomem rw
 TimeoutStopSec=30s
 
 [Install]
@@ -732,7 +735,7 @@ EOF
 
 [eink]
 enabled = true
-model = "2in13_v2"
+model = "2in13_v4"
 refresh_mode = "hybrid"
 full_refresh_interval = 10
 min_refresh_interval_ms = 1000

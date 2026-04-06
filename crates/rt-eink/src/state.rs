@@ -88,9 +88,11 @@ impl Default for EinkConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DisplayModel {
-    #[default]
     #[serde(rename = "2in13_v2")]
     Epd2in13V2,
+    #[default]
+    #[serde(rename = "2in13_v4")]
+    Epd2in13V4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -140,7 +142,7 @@ mod tests {
     fn eink_config_deserializes_defaults() {
         let config: EinkConfig = toml::from_str("").unwrap();
         assert!(config.enabled);
-        assert_eq!(config.model, DisplayModel::Epd2in13V2);
+        assert_eq!(config.model, DisplayModel::Epd2in13V4);
         assert_eq!(config.refresh_mode, RefreshMode::Hybrid);
         assert_eq!(config.full_refresh_interval, 10);
         assert_eq!(config.min_refresh_interval_ms, 1000);
@@ -151,7 +153,7 @@ mod tests {
     fn eink_config_deserializes_all_fields() {
         let toml_str = r#"
             enabled = false
-            model = "2in13_v2"
+            model = "2in13_v4"
             refresh_mode = "full_only"
             full_refresh_interval = 20
             min_refresh_interval_ms = 500
@@ -159,11 +161,18 @@ mod tests {
         "#;
         let config: EinkConfig = toml::from_str(toml_str).unwrap();
         assert!(!config.enabled);
-        assert_eq!(config.model, DisplayModel::Epd2in13V2);
+        assert_eq!(config.model, DisplayModel::Epd2in13V4);
         assert_eq!(config.refresh_mode, RefreshMode::FullOnly);
         assert_eq!(config.full_refresh_interval, 20);
         assert_eq!(config.min_refresh_interval_ms, 500);
         assert_eq!(config.telemetry_interval_secs, 60);
+    }
+
+    #[test]
+    fn eink_config_deserializes_v2_model() {
+        let toml_str = r#"model = "2in13_v2""#;
+        let config: EinkConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model, DisplayModel::Epd2in13V2);
     }
 
     #[test]

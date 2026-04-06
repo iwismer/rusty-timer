@@ -134,6 +134,9 @@ assert_contains "${unit}" "ExecStartPre=/usr/local/lib/rt-forwarder-apply-staged
 assert_contains "${unit}" "Environment=RT_FORWARDER_UPDATE_APPLY_VIA_RESTART=1" "unit should enable restart-based update apply mode"
 assert_contains "${unit}" "AmbientCapabilities=CAP_NET_BIND_SERVICE" "unit should allow binding to privileged ports"
 assert_contains "${unit}" "ExecStart=/usr/local/bin/rt-forwarder" "unit should run forwarder binary"
+assert_contains "${unit}" "SupplementaryGroups=spi gpio" "unit should grant SPI and GPIO group access for e-ink"
+assert_contains "${unit}" "DeviceAllow=/dev/spidev0.0 rw" "unit should allow access to the SPI device for e-ink"
+assert_contains "${unit}" "DeviceAllow=/dev/gpiomem rw" "unit should allow access to GPIO memory for e-ink"
 
 apply_script="$(render_apply_staged_script)"
 assert_contains "${apply_script}" "STAGED_PATH=\"/var/lib/rusty-timer/.forwarder-staged\"" "apply helper should use staged path"
