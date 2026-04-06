@@ -63,6 +63,35 @@ assert_eq "skip_verify" "$(install_verify_policy yes n)" "active service + no re
 assert_eq "run_verify" "$(install_verify_policy yes y)" "active service + yes restart should run verify"
 assert_eq "run_verify" "$(install_verify_policy no '')" "inactive service should run verify"
 
+# --- post-UPS restart decision helper ---
+assert_eq "1" "$(should_restart_after_ups_setup 1 run_verify)" "UPS setup should trigger a restart when verification will run"
+assert_eq "0" "$(should_restart_after_ups_setup 0 run_verify)" "UPS-disabled setup should not trigger a restart"
+assert_eq "0" "$(should_restart_after_ups_setup 1 skip_verify)" "UPS setup should not override a deferred restart choice"
+
+main_log=()
+require_root() { main_log+=("require_root"); }
+ensure_prerequisites() { main_log+=("ensure_prerequisites"); }
+download_binary() { main_log+=("download_binary"); }
+configure() { main_log+=("configure"); }
+install_service() { main_log+=("install_service"); VERIFY_POLICY="run_verify"; }
+setup_ups() { main_log+=("setup_ups"); UPS_SETUP_ENABLED="1"; }
+verify() { main_log+=("verify"); }
+write_done_marker_if_requested() { main_log+=("write_done_marker_if_requested"); }
+systemctl() { main_log+=("systemctl:$*"); }
+
+RT_SETUP_NONINTERACTIVE=1
+RT_SETUP_UPS_ENABLED=1
+VERIFY_POLICY="run_verify"
+main >/dev/null
+
+assert_eq "setup_ups" "${main_log[5]}" "main should run UPS setup before deciding on a restart"
+assert_eq "systemctl:restart rt-forwarder" "${main_log[6]}" "main should restart the forwarder after UPS setup before verification"
+assert_eq "verify" "${main_log[7]}" "main should verify after the UPS-triggered restart"
+
+unset RT_SETUP_NONINTERACTIVE
+unset RT_SETUP_UPS_ENABLED
+unset main_log
+
 # --- non-interactive env helpers ---
 assert_eq "0" "$(bool_env_is_true '')" "empty env should be false"
 assert_eq "1" "$(bool_env_is_true '1')" "1 should be true"

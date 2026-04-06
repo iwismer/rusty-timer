@@ -21,6 +21,7 @@ DATA_DIR="/var/lib/rusty-timer"
 SERVICE_USER="rt-forwarder"
 STATUS_BIND="0.0.0.0:80"
 VERIFY_POLICY="run_verify"
+UPS_SETUP_ENABLED="0"
 FORWARDER_BIN_PATH="${INSTALL_DIR}/rt-forwarder"
 STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
@@ -383,6 +384,17 @@ install_verify_policy() {
     printf 'skip_verify\n'
   else
     printf 'run_verify\n'
+  fi
+}
+
+should_restart_after_ups_setup() {
+  local ups_enabled="$1"
+  local verify_policy="$2"
+
+  if [[ "${ups_enabled}" == "1" && "${verify_policy}" == "run_verify" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
   fi
 }
 
@@ -810,9 +822,12 @@ setup_ups() {
   fi
 
   if [[ "${ups_enabled}" != "1" ]]; then
+    UPS_SETUP_ENABLED="0"
     log "Skipping PiSugar UPS setup"
     return
   fi
+
+  UPS_SETUP_ENABLED="1"
 
   # In interactive mode, prompt for shutdown settings (with defaults)
   if ! is_noninteractive_mode; then
@@ -928,6 +943,11 @@ main() {
   configure
   install_service
   setup_ups
+
+  if [[ "$(should_restart_after_ups_setup "${UPS_SETUP_ENABLED}" "${VERIFY_POLICY}")" == "1" ]]; then
+    echo "Restarting rt-forwarder to apply UPS configuration."
+    systemctl restart rt-forwarder
+  fi
 
   if [[ "${VERIFY_POLICY}" == "run_verify" ]]; then
     verify
