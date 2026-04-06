@@ -814,6 +814,14 @@ setup_ups() {
     return
   fi
 
+  # In interactive mode, prompt for shutdown settings (with defaults)
+  if ! is_noninteractive_mode; then
+    read -rp "Battery shutdown level % [5]: " input_level
+    [[ -n "${input_level}" ]] && RT_SETUP_UPS_SHUTDOWN_LEVEL="${input_level}"
+    read -rp "Shutdown delay in seconds [30]: " input_delay
+    [[ -n "${input_delay}" ]] && RT_SETUP_UPS_SHUTDOWN_DELAY="${input_delay}"
+  fi
+
   log "Setting up PiSugar UPS support..."
 
   # 1. Enable I2C
@@ -839,21 +847,37 @@ setup_ups() {
 
   log "Downloading pisugar-server v${PISUGAR_SERVER_VERSION}..."
   curl -fsSL -o "${deb_file}" "${deb_url}"
-  dpkg -i "${deb_file}" || apt-get install -f -y
+
+  # Pre-seed debconf to avoid interactive prompts during dpkg install
+  if command -v debconf-set-selections &>/dev/null; then
+    debconf-set-selections <<DEBCONF_EOF
+pisugar-server pisugar-server/model select PiSugar 3
+pisugar-server pisugar-server/auth-username string admin
+pisugar-server pisugar-server/auth-password password admin
+DEBCONF_EOF
+    log "Pre-seeded debconf selections for pisugar-server"
+  fi
+
+  DEBIAN_FRONTEND=noninteractive dpkg -i "${deb_file}" || apt-get install -f -y
   rm -f "${deb_file}"
 
   # 3. Configure pisugar-server
+  local shutdown_level="${RT_SETUP_UPS_SHUTDOWN_LEVEL:-5}"
+  local shutdown_delay="${RT_SETUP_UPS_SHUTDOWN_DELAY:-30}"
   mkdir -p /etc/pisugar-server
-  cat > /etc/pisugar-server/config.json <<'PISUGAR_EOF'
+  cat > /etc/pisugar-server/config.json <<PISUGAR_EOF
 {
-  "safe_shutdown_level": 10,
-  "safe_shutdown_delay": 30,
+  "model": "PiSugar 3",
+  "safe_shutdown_level": ${shutdown_level},
+  "safe_shutdown_delay": ${shutdown_delay},
   "auto_power_on": true,
   "soft_poweroff": true,
-  "soft_poweroff_shell": "shutdown --poweroff 0"
+  "soft_poweroff_shell": "shutdown --poweroff 0",
+  "long_tap_enable": true,
+  "long_tap_shell": "sudo shutdown now"
 }
 PISUGAR_EOF
-  log "Wrote pisugar-server config"
+  log "Wrote pisugar-server config (shutdown at ${shutdown_level}%, delay ${shutdown_delay}s)"
 
   # 4. Enable and start pisugar-server
   systemctl enable pisugar-server.service

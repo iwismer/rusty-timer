@@ -60,7 +60,7 @@ pub struct CachedReaderState {
 
 pub type ReaderStateCache = Arc<RwLock<HashMap<String, CachedReaderState>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CachedUpsState {
     pub available: bool,
     pub status: Option<rt_protocol::UpsStatus>,

@@ -16,4 +16,6 @@ export interface SbcSetupFormData {
   displayName: string;
   setupScriptUrl: string;
   upsEnabled: boolean;
+  upsShutdownLevel: number;
+  upsShutdownDelay: number;
 }

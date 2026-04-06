@@ -1885,6 +1885,44 @@ fn forwarder_is_subscribed(
         .any(|(subscribed_forwarder_id, _reader_ip)| subscribed_forwarder_id == forwarder_id)
 }
 
+async fn cached_ups_snapshot_messages_for_new_forwarders(
+    state: &AppState,
+    previous_stream_info: &HashMap<Uuid, (String, String)>,
+    current_stream_info: &HashMap<Uuid, (String, String)>,
+) -> Vec<WsMessage> {
+    let previous_forwarders: std::collections::HashSet<&str> = previous_stream_info
+        .values()
+        .map(|(forwarder_id, _reader_ip)| forwarder_id.as_str())
+        .collect();
+
+    let mut new_forwarder_ids: Vec<String> = current_stream_info
+        .values()
+        .filter(|&(forwarder_id, _reader_ip)| !previous_forwarders.contains(forwarder_id.as_str()))
+        .map(|(forwarder_id, _reader_ip)| forwarder_id.clone())
+        .collect();
+    new_forwarder_ids.sort();
+    new_forwarder_ids.dedup();
+
+    if new_forwarder_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let cache = state.forwarder_ups_cache.read().await;
+    new_forwarder_ids
+        .into_iter()
+        .filter_map(|forwarder_id| {
+            cache
+                .get(&forwarder_id)
+                .map(|cached| rt_protocol::ForwarderUpsStatus {
+                    forwarder_id,
+                    available: cached.available,
+                    status: cached.status.clone(),
+                })
+        })
+        .map(WsMessage::ForwarderUpsStatus)
+        .collect()
+}
+
 fn mode_snapshot(mode: &ReceiverMode) -> ReceiverSelectionSnapshot {
     ReceiverSelectionSnapshot::Mode {
         mode_summary: mode_summary(mode),
@@ -2044,6 +2082,7 @@ async fn apply_race_refresh_forward_only(
         return Ok(false);
     }
     let metric_targets = race_refresh_metric_targets(&targets, subscriptions, baseline);
+    let previous_stream_info = subscribed_stream_info.clone();
 
     // Update stream info map with current target set before plan consumes targets.
     subscribed_stream_info.clear();
@@ -2085,6 +2124,17 @@ async fn apply_race_refresh_forward_only(
                 "failed to send refreshed stream metrics"
             );
         }
+    }
+    for msg in cached_ups_snapshot_messages_for_new_forwarders(
+        state,
+        &previous_stream_info,
+        subscribed_stream_info,
+    )
+    .await
+    {
+        socket
+            .send(Message::Text(serde_json::to_string(&msg)?.into()))
+            .await?;
     }
     let _ = state
         .update_receiver_session_selection(
@@ -2564,10 +2614,11 @@ async fn handle_receiver_ack(
 #[cfg(test)]
 mod tests {
     use super::{
-        RaceBaseline, ResolvedStreamTarget, StreamSub, forwarder_is_subscribed,
+        RaceBaseline, ResolvedStreamTarget, StreamSub,
+        cached_ups_snapshot_messages_for_new_forwarders, forwarder_is_subscribed,
         plan_race_refresh_subscriptions, proxy_reader_control_reply, race_refresh_needed,
     };
-    use crate::state::{AppState, ForwarderCommand, ForwarderProxyReply};
+    use crate::state::{AppState, CachedUpsState, ForwarderCommand, ForwarderProxyReply};
     use rt_protocol::{ReadEvent, ReaderControlAction, WsMessage};
     use sqlx::postgres::PgPoolOptions;
     use std::collections::HashMap;
@@ -2620,6 +2671,53 @@ mod tests {
 
         assert!(forwarder_is_subscribed(&subscribed_stream_info, "fwd-1"));
         assert!(!forwarder_is_subscribed(&subscribed_stream_info, "fwd-2"));
+    }
+
+    #[tokio::test]
+    async fn cached_ups_snapshot_messages_include_only_new_forwarders() {
+        let state = AppState::new(make_lazy_pool());
+        state.forwarder_ups_cache.write().await.insert(
+            "fwd-2".to_owned(),
+            CachedUpsState {
+                available: false,
+                status: Some(rt_protocol::UpsStatus {
+                    battery_percent: 19,
+                    battery_voltage_mv: 3780,
+                    charging: false,
+                    power_plugged: false,
+                    temperature_cdeg: 2600,
+                    sampled_at: 1711929600000,
+                }),
+            },
+        );
+
+        let previous = HashMap::from([(
+            Uuid::new_v4(),
+            ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()),
+        )]);
+        let current = HashMap::from([
+            (
+                Uuid::new_v4(),
+                ("fwd-1".to_owned(), "10.0.0.1:10000".to_owned()),
+            ),
+            (
+                Uuid::new_v4(),
+                ("fwd-2".to_owned(), "10.0.0.2:10000".to_owned()),
+            ),
+        ]);
+
+        let snapshots =
+            cached_ups_snapshot_messages_for_new_forwarders(&state, &previous, &current).await;
+
+        assert_eq!(snapshots.len(), 1);
+        assert!(matches!(
+            &snapshots[0],
+            WsMessage::ForwarderUpsStatus(rt_protocol::ForwarderUpsStatus {
+                forwarder_id,
+                available: false,
+                status: Some(status),
+            }) if forwarder_id == "fwd-2" && status.battery_percent == 19
+        ));
     }
 
     #[test]

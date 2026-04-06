@@ -127,6 +127,12 @@ export function setUpsState(
   });
 }
 
+export function replaceUpsState(
+  next: Record<string, { available: boolean; status: any | null }>,
+): void {
+  upsStateStore.set({ ...next });
+}
+
 export function pruneUpsStateForOnlineForwarders(streams: StreamEntry[]): void {
   const onlineForwarders = new Set(
     streams

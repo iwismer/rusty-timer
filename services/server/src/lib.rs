@@ -120,6 +120,10 @@ pub fn build_router(state: AppState, dashboard_dir: Option<PathBuf>) -> Router {
             get(http::reader_control::get_all_reader_states),
         )
         .route(
+            "/api/v1/forwarder-ups",
+            get(http::reader_control::get_all_forwarder_ups),
+        )
+        .route(
             "/api/v1/forwarders/{forwarder_id}/readers/{reader_ip}/info",
             get(http::reader_control::get_reader_info),
         )

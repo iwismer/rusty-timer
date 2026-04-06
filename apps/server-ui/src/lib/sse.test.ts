@@ -54,6 +54,8 @@ import {
   metricsStore,
   resetStores,
   setMetrics,
+  setUpsState,
+  upsStateStore,
   racesStore,
   forwarderRacesStore,
   logsStore,
@@ -93,6 +95,9 @@ describe("sse", () => {
       }
       if (url.includes("/api/v1/reader-states")) {
         return Promise.resolve(makeResponse({ reader_states: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(makeResponse({ forwarder_ups: {} }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -319,6 +324,91 @@ describe("sse", () => {
     expect(get(forwarderRacesStore)).toEqual({});
   });
 
+  it("resync replaces stale UPS state from the cached UPS endpoint", async () => {
+    const { initSSE } = await import("./sse");
+
+    setUpsState("fwd-stale", true, {
+      battery_percent: 90,
+      battery_voltage_mv: 4100,
+      charging: true,
+      power_plugged: true,
+      temperature_cdeg: 2400,
+      sampled_at: 1711929600000,
+    });
+
+    mockFetch.mockImplementation((input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/v1/streams")) {
+        return Promise.resolve(
+          makeResponse({
+            streams: [
+              {
+                stream_id: "s1",
+                forwarder_id: "fwd-1",
+                reader_ip: "10.0.0.1:10000",
+                display_alias: null,
+                forwarder_display_name: null,
+                online: true,
+                reader_connected: true,
+                stream_epoch: 1,
+                created_at: "2026-01-01T00:00:00Z",
+              },
+            ],
+          }),
+        );
+      }
+      if (url.includes("/api/v1/races")) {
+        return Promise.resolve(makeResponse({ races: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-races")) {
+        return Promise.resolve(makeResponse({ assignments: [] }));
+      }
+      if (url.includes("/api/v1/logs")) {
+        return Promise.resolve(makeResponse({ entries: [] }));
+      }
+      if (url.includes("/api/v1/reader-states")) {
+        return Promise.resolve(makeResponse({ reader_states: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(
+          makeResponse({
+            forwarder_ups: {
+              "fwd-1": {
+                available: false,
+                status: {
+                  battery_percent: 14,
+                  battery_voltage_mv: 3760,
+                  charging: false,
+                  power_plugged: false,
+                  temperature_cdeg: 2550,
+                  sampled_at: 1711933200000,
+                },
+              },
+            },
+          }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
+    });
+
+    initSSE();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(get(upsStateStore)).toEqual({
+      "fwd-1": {
+        available: false,
+        status: {
+          battery_percent: 14,
+          battery_voltage_mv: 3760,
+          charging: false,
+          power_plugged: false,
+          temperature_cdeg: 2550,
+          sampled_at: 1711933200000,
+        },
+      },
+    });
+  });
+
   it("resync still updates streams when race refresh fails", async () => {
     const { initSSE } = await import("./sse");
 
@@ -354,6 +444,9 @@ describe("sse", () => {
       if (url.includes("/api/v1/reader-states")) {
         return Promise.resolve(makeResponse({ reader_states: [] }));
       }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(makeResponse({ forwarder_ups: {} }));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
@@ -383,22 +476,25 @@ describe("sse", () => {
       if (url.includes("/api/v1/reader-states")) {
         return Promise.resolve(makeResponse({ reader_states: [] }));
       }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(makeResponse({ forwarder_ups: {} }));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
     const { initSSE } = await import("./sse");
     initSSE();
 
-    // Eager startup sync should run immediately (streams, races, forwarder assignments, logs, and reader states).
-    expect(mockFetch).toHaveBeenCalledTimes(5);
+    // Eager startup sync should run immediately (streams, races, forwarder assignments, logs, reader states, and UPS state).
+    expect(mockFetch).toHaveBeenCalledTimes(6);
 
     // onopen should trigger exactly one follow-up sync.
     await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(mockFetch).toHaveBeenCalledTimes(10);
+    expect(mockFetch).toHaveBeenCalledTimes(12);
 
     // No additional fetches without explicit resync triggers.
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(mockFetch).toHaveBeenCalledTimes(10);
+    expect(mockFetch).toHaveBeenCalledTimes(12);
   });
 
   it("updates streams even when logs fetch fails during resync", async () => {
@@ -438,6 +534,9 @@ describe("sse", () => {
       }
       if (url.includes("/api/v1/reader-states")) {
         return Promise.resolve(makeResponse({ reader_states: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(makeResponse({ forwarder_ups: {} }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -493,6 +592,9 @@ describe("sse", () => {
       if (url.includes("/api/v1/reader-states")) {
         return Promise.resolve(makeResponse({ reader_states: [] }));
       }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(makeResponse({ forwarder_ups: {} }));
+      }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
 
@@ -503,12 +605,12 @@ describe("sse", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     es.emit("resync", "{}");
 
-    expect(mockFetch).toHaveBeenCalledTimes(5);
+    expect(mockFetch).toHaveBeenCalledTimes(6);
 
     resolveFirstStream(makeResponse({ streams: [streamA] }));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(mockFetch).toHaveBeenCalledTimes(10);
+    expect(mockFetch).toHaveBeenCalledTimes(12);
     expect(streamCalls).toBe(2);
     expect(get(streamsStore)[0].online).toBe(true);
   });
@@ -541,6 +643,9 @@ describe("sse", () => {
       }
       if (url.includes("/api/v1/reader-states")) {
         return Promise.resolve(makeResponse({ reader_states: [] }));
+      }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(makeResponse({ forwarder_ups: {} }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });
@@ -592,6 +697,9 @@ describe("sse", () => {
             ],
           }),
         );
+      }
+      if (url.includes("/api/v1/forwarder-ups")) {
+        return Promise.resolve(makeResponse({ forwarder_ups: {} }));
       }
       return Promise.reject(new Error(`unexpected fetch URL: ${url}`));
     });

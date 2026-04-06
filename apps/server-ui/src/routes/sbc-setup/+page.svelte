@@ -48,6 +48,8 @@
     displayName: "",
     setupScriptUrl: DEFAULT_SETUP_SCRIPT_URL,
     upsEnabled: false,
+    upsShutdownLevel: 5,
+    upsShutdownDelay: 30,
   };
 
   let form: SbcSetupFormData = $state({ ...DEFAULTS });
@@ -718,6 +720,40 @@
               Installs pisugar-server and configures safe shutdown. Requires
               PiSugar 3 HAT.
             </p>
+            <div class="ml-6 mt-2 grid grid-cols-2 gap-3">
+              <div>
+                <label
+                  for="upsShutdownLevel"
+                  class="block text-xs font-medium text-text-secondary"
+                >
+                  Shutdown battery level (%)
+                </label>
+                <input
+                  id="upsShutdownLevel"
+                  type="number"
+                  min="0"
+                  max="100"
+                  bind:value={form.upsShutdownLevel}
+                  class="mt-1 block w-full rounded border px-3 py-2 text-sm bg-surface-0 text-text-primary border-border"
+                />
+              </div>
+              <div>
+                <label
+                  for="upsShutdownDelay"
+                  class="block text-xs font-medium text-text-secondary"
+                >
+                  Shutdown delay (seconds)
+                </label>
+                <input
+                  id="upsShutdownDelay"
+                  type="number"
+                  min="0"
+                  max="300"
+                  bind:value={form.upsShutdownDelay}
+                  class="mt-1 block w-full rounded border px-3 py-2 text-sm bg-surface-0 text-text-primary border-border"
+                />
+              </div>
+            </div>
           {/if}
         </div>
       </div>

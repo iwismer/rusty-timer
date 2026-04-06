@@ -29,6 +29,8 @@ function renderSetupEnv(config: SbcSetupFormData): string {
   ];
   if (config.upsEnabled) {
     lines.push("RT_SETUP_UPS_ENABLED=1");
+    lines.push(`RT_SETUP_UPS_SHUTDOWN_LEVEL=${config.upsShutdownLevel}`);
+    lines.push(`RT_SETUP_UPS_SHUTDOWN_DELAY=${config.upsShutdownDelay}`);
   }
   return lines.join("\n") + "\n";
 }

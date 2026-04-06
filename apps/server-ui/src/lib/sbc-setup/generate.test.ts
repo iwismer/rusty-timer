@@ -23,6 +23,8 @@ function baseConfig(): SbcSetupFormData {
     setupScriptUrl:
       "https://raw.githubusercontent.com/iwismer/rusty-timer/master/deploy/sbc/rt-setup.sh",
     upsEnabled: false,
+    upsShutdownLevel: 5,
+    upsShutdownDelay: 30,
   };
 }
 

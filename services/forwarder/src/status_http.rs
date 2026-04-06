@@ -1068,7 +1068,10 @@ pub async fn apply_section_update(
         }
         "ups" => {
             let enabled = optional_bool_field(payload, "enabled")?;
-            let daemon_addr = optional_string_field(payload, "daemon_addr")?;
+            let daemon_addr = optional_string_field(payload, "daemon_addr")?.and_then(|addr| {
+                let trimmed = addr.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            });
             let poll_interval_secs = optional_u64_field(payload, "poll_interval_secs")?;
             let upstream_heartbeat_secs = optional_u64_field(payload, "upstream_heartbeat_secs")?;
 
@@ -1086,16 +1089,15 @@ pub async fn apply_section_update(
                     "upstream_heartbeat_secs must be between 10 and 300",
                 ));
             }
-            if let Some(ref addr) = daemon_addr {
-                let trimmed = addr.trim();
-                if !trimmed.is_empty() && trimmed.parse::<std::net::SocketAddr>().is_err() {
-                    let parts: Vec<&str> = trimmed.rsplitn(2, ':').collect();
-                    if parts.len() != 2 || parts[0].parse::<u16>().is_err() {
-                        return Err(bad_request_error(format!(
-                            "daemon_addr must be a valid host:port, got '{}'",
-                            trimmed
-                        )));
-                    }
+            if let Some(ref addr) = daemon_addr
+                && addr.parse::<std::net::SocketAddr>().is_err()
+            {
+                let parts: Vec<&str> = addr.rsplitn(2, ':').collect();
+                if parts.len() != 2 || parts[0].parse::<u16>().is_err() {
+                    return Err(bad_request_error(format!(
+                        "daemon_addr must be a valid host:port, got '{}'",
+                        addr
+                    )));
                 }
             }
 
@@ -6468,5 +6470,56 @@ target = "192.168.1.100:10000"
             .await
             .expect("post config ups");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_normalizes_blank_daemon_addr_to_default() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        let token_file = NamedTempFile::new().expect("create temp token");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "{}"
+[[readers]]
+target = "192.168.1.100:10000"
+ "#,
+            token_file.path().display()
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/ups", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true,"daemon_addr":""}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let saved = std::fs::read_to_string(config_file.path()).expect("read saved config");
+        let loaded =
+            crate::config::load_config_from_str(&saved, config_file.path()).expect("load config");
+        assert_eq!(loaded.ups.daemon_addr, "127.0.0.1:8423");
     }
 }

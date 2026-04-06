@@ -3,6 +3,7 @@ import {
   forwarderRacesStore,
   patchStream,
   pruneUpsStateForOnlineForwarders,
+  replaceUpsState,
   replaceStreams,
   setRaces,
   setMetrics,
@@ -18,6 +19,7 @@ import {
 import { get } from "svelte/store";
 import {
   getForwarderRaces,
+  getForwarderUps,
   getLogs,
   getRaces,
   getReaderStates,
@@ -204,12 +206,14 @@ async function resync(): Promise<void> {
         assignmentsResp,
         logsResp,
         readerStatesResp,
+        forwarderUpsResp,
       ] = await Promise.allSettled([
         getStreams(),
         getRaces(),
         getForwarderRaces(),
         getLogs(),
         getReaderStates(),
+        getForwarderUps(),
       ]);
 
       if (streamsResp.status === "rejected") {
@@ -233,10 +237,15 @@ async function resync(): Promise<void> {
           readerStatesResp.reason,
         );
       }
+      if (forwarderUpsResp.status === "rejected") {
+        console.error(
+          "resync: failed to fetch forwarder UPS state",
+          forwarderUpsResp.reason,
+        );
+      }
 
       if (streamsResp.status === "fulfilled") {
         replaceStreams(streamsResp.value.streams);
-        pruneUpsStateForOnlineForwarders(streamsResp.value.streams);
       }
       if (racesResp.status === "fulfilled") {
         setRaces(racesResp.value.races);
@@ -260,6 +269,14 @@ async function resync(): Promise<void> {
           next[`${rs.forwarder_id}:${rs.reader_ip}`] = rs;
         }
         readerStatesStore.set(next);
+      }
+      replaceUpsState(
+        forwarderUpsResp.status === "fulfilled"
+          ? forwarderUpsResp.value.forwarder_ups
+          : {},
+      );
+      if (streamsResp.status === "fulfilled") {
+        pruneUpsStateForOnlineForwarders(streamsResp.value.streams);
       }
       if (!resyncQueued) break;
     }
