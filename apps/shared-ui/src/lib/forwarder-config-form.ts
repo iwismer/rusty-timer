@@ -80,6 +80,10 @@ export interface ForwarderConfigFormState {
   uplinkBatchFlushMs: string;
   uplinkBatchMaxEvents: string;
   statusHttpBind: string;
+  upsEnabled: boolean;
+  upsDaemonAddr: string;
+  upsPollIntervalSecs: string;
+  upsUpstreamHeartbeatSecs: string;
   updateMode: string;
   controlAllowPowerActions: boolean;
   readers: ReaderEntry[];
@@ -108,6 +112,7 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
   const journal = asRecord(cfg.journal);
   const uplink = asRecord(cfg.uplink);
   const statusHttp = asRecord(cfg.status_http);
+  const ups = asRecord(cfg.ups);
   const update = asRecord(cfg.update);
   const control = asRecord(cfg.control);
 
@@ -145,6 +150,14 @@ export function fromConfig(cfg: Record<string, unknown>): ForwarderConfigFormSta
     uplinkBatchMaxEvents:
       uplink.batch_max_events != null ? String(uplink.batch_max_events) : "",
     statusHttpBind: asString(statusHttp.bind),
+    upsEnabled: ups.enabled === true,
+    upsDaemonAddr: asString(ups.daemon_addr),
+    upsPollIntervalSecs:
+      ups.poll_interval_secs != null ? String(ups.poll_interval_secs) : "",
+    upsUpstreamHeartbeatSecs:
+      ups.upstream_heartbeat_secs != null
+        ? String(ups.upstream_heartbeat_secs)
+        : "",
     updateMode: asString(update.mode),
     controlAllowPowerActions: control.allow_power_actions === true,
     readers,
@@ -207,6 +220,21 @@ export function toControlPayload(
   form: ForwarderConfigFormState,
 ): Record<string, unknown> {
   return { allow_power_actions: form.controlAllowPowerActions };
+}
+
+export function toUpsPayload(
+  form: ForwarderConfigFormState,
+): Record<string, unknown> {
+  return {
+    enabled: form.upsEnabled,
+    daemon_addr: form.upsDaemonAddr.trim() || null,
+    poll_interval_secs: form.upsPollIntervalSecs
+      ? Number(form.upsPollIntervalSecs)
+      : null,
+    upstream_heartbeat_secs: form.upsUpstreamHeartbeatSecs
+      ? Number(form.upsUpstreamHeartbeatSecs)
+      : null,
+  };
 }
 
 export function toUpdatePayload(
@@ -301,6 +329,31 @@ export function validateStatusHttp(
   return null;
 }
 
+export function validateUps(form: ForwarderConfigFormState): string | null {
+  if (!form.upsEnabled) return null;
+
+  const daemonAddr = form.upsDaemonAddr.trim();
+  if (daemonAddr && !isValidHostPort(daemonAddr)) {
+    return "UPS daemon address must be a valid host:port.";
+  }
+
+  if (form.upsPollIntervalSecs) {
+    const poll = Number(form.upsPollIntervalSecs);
+    if (!Number.isInteger(poll) || poll < 1 || poll > 60) {
+      return "UPS poll interval must be an integer between 1 and 60 seconds.";
+    }
+  }
+
+  if (form.upsUpstreamHeartbeatSecs) {
+    const heartbeat = Number(form.upsUpstreamHeartbeatSecs);
+    if (!Number.isInteger(heartbeat) || heartbeat < 10 || heartbeat > 300) {
+      return "UPS heartbeat interval must be an integer between 10 and 300 seconds.";
+    }
+  }
+
+  return null;
+}
+
 function isValidIpv4Bind(bind: string): boolean {
   const match = bind.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/);
   if (!match) return false;
@@ -314,6 +367,14 @@ function isValidIpv4Bind(bind: string): boolean {
     return false;
   }
   return true;
+}
+
+function isValidHostPort(value: string): boolean {
+  const idx = value.lastIndexOf(":");
+  if (idx <= 0 || idx === value.length - 1) return false;
+  const host = value.slice(0, idx);
+  const port = Number(value.slice(idx + 1));
+  return host.length > 0 && Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
 function isValidIpv4(ip: string): boolean {

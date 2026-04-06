@@ -278,6 +278,22 @@ async fn main() {
         });
     }
 
+    // Spawn UPS monitoring task (if enabled)
+    let ups_handle = if cfg.ups.enabled {
+        let ss = status_server.clone();
+        let rx = shutdown_rx.clone();
+        let fwd_id = forwarder_id.clone();
+        Some(forwarder::ups_task::spawn_ups_task(
+            cfg.ups.clone(),
+            fwd_id,
+            ss,
+            rx,
+        ))
+    } else {
+        None
+    };
+    let ups_status_rx = ups_handle.map(|h| h.ups_status_rx);
+
     // Spawn uplink task
     {
         let j = journal.clone();
@@ -303,6 +319,7 @@ async fn main() {
                 rs,
                 lg,
                 reader_status_rx,
+                ups_status_rx,
             )
             .await;
         });
@@ -653,6 +670,12 @@ mod tests {
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
             },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -691,6 +714,7 @@ mod tests {
             restart_signal,
             lg,
             reader_status_rx,
+            None,
         ));
 
         let (sent_extra_batch_on_first_session, saw_second_session) =
@@ -1488,6 +1512,12 @@ token_file = "/tmp/test-token"
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
             },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
+            },
             readers: vec![],
         };
 
@@ -1519,6 +1549,7 @@ token_file = "/tmp/test-token"
             restart_signal,
             lg,
             reader_status_rx,
+            None,
         ));
 
         // 7. Wait for results
@@ -1723,6 +1754,12 @@ token_file = "/tmp/test-token"
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
             },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
+            },
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -1760,6 +1797,7 @@ token_file = "/tmp/test-token"
             restart_signal,
             lg,
             reader_status_rx,
+            None,
         ));
 
         timeout(std::time::Duration::from_secs(2), ready_rx)
@@ -1837,6 +1875,12 @@ token_file = "/tmp/test-token"
             update: forwarder::config::UpdateConfig {
                 mode: rt_updater::UpdateMode::default(),
             },
+            ups: forwarder::config::UpsConfig {
+                enabled: false,
+                daemon_addr: "127.0.0.1:8423".to_string(),
+                poll_interval_secs: 5,
+                upstream_heartbeat_secs: 60,
+            },
             readers: vec![],
         };
 
@@ -1870,6 +1914,7 @@ token_file = "/tmp/test-token"
             restart_signal,
             lg,
             reader_status_rx,
+            None,
         ));
 
         let log_entry = timeout(std::time::Duration::from_secs(2), async {

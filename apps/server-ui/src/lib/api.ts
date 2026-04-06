@@ -127,9 +127,22 @@ export async function getLogs(): Promise<LogsResponse> {
   return apiFetch<LogsResponse>("/api/v1/logs");
 }
 
+export interface ForwarderUpsEntry {
+  available: boolean;
+  status: Record<string, unknown> | null;
+}
+
+export interface ForwarderUpsResponse {
+  forwarder_ups: Record<string, ForwarderUpsEntry>;
+}
+
 /** GET /api/v1/streams */
 export async function getStreams(): Promise<StreamsResponse> {
   return apiFetch<StreamsResponse>("/api/v1/streams");
+}
+
+export async function getForwarderUps(): Promise<ForwarderUpsResponse> {
+  return apiFetch<ForwarderUpsResponse>("/api/v1/forwarder-ups");
 }
 
 /** PATCH /api/v1/streams/{stream_id} — update display alias */

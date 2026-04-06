@@ -353,6 +353,12 @@ pub async fn get_all_reader_states(State(state): State<AppState>) -> impl IntoRe
     Json(serde_json::json!({ "reader_states": states }))
 }
 
+pub async fn get_all_forwarder_ups(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = state.forwarder_ups_cache.read().await;
+    let states = cache.clone();
+    Json(serde_json::json!({ "forwarder_ups": states }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

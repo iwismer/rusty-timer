@@ -59,6 +59,7 @@ class SbcCloudInitConfig:
     status_bind: str = DEFAULT_STATUS_BIND
     setup_script_url: str = DEFAULT_SETUP_SCRIPT_URL
     setup_done_marker: str = DEFAULT_DONE_MARKER
+    ups_enabled: bool = False
 
 
 def yaml_quote(value: str) -> str:
@@ -322,7 +323,7 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
         raise ValueError("auto-first-boot config is missing setup values")
 
     reader_targets_csv = ",".join(config.reader_targets)
-    lines = (
+    lines = [
         "RT_SETUP_NONINTERACTIVE=1",
         "RT_SETUP_ALLOW_POWER_ACTIONS=1",
         "RT_SETUP_OVERWRITE_CONFIG=0",
@@ -333,7 +334,9 @@ def render_setup_env_content(config: SbcCloudInitConfig) -> str:
         f"RT_SETUP_READER_TARGETS={shell_quote(reader_targets_csv)}",
         f"RT_SETUP_STATUS_BIND={shell_quote(config.status_bind)}",
         f"RT_SETUP_DONE_MARKER={shell_quote(config.setup_done_marker)}",
-    )
+    ]
+    if config.ups_enabled:
+        lines.append("RT_SETUP_UPS_ENABLED=1")
     return "\n".join(lines) + "\n"
 
 
@@ -341,6 +344,8 @@ def render_user_data(config: SbcCloudInitConfig) -> str:
     packages = ["avahi-daemon", "ca-certificates", "jq"]
     if config.auto_first_boot:
         packages.extend(["curl", "tar", "coreutils"])
+    if config.ups_enabled:
+        packages.append("i2c-tools")
 
     package_lines = "\n".join(f"  - {pkg}" for pkg in packages)
     text = (

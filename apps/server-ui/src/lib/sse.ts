@@ -2,6 +2,8 @@ import {
   addOrUpdateStream,
   forwarderRacesStore,
   patchStream,
+  pruneUpsStateForOnlineForwarders,
+  replaceUpsState,
   replaceStreams,
   setRaces,
   setMetrics,
@@ -9,11 +11,15 @@ import {
   pushLog,
   logsStore,
   readerStatesStore,
+  streamsStore,
   setReaderState,
   setDownloadProgress,
+  setUpsState,
 } from "./stores";
+import { get } from "svelte/store";
 import {
   getForwarderRaces,
+  getForwarderUps,
   getLogs,
   getRaces,
   getReaderStates,
@@ -69,6 +75,7 @@ export function initSSE(): void {
       const update: StreamUpdatedEvent = JSON.parse(e.data);
       const { stream_id, ...fields } = update;
       patchStream(stream_id, fields);
+      pruneUpsStateForOnlineForwarders(get(streamsStore));
       for (const listener of streamUpdatedListeners) {
         listener(update);
       }
@@ -151,6 +158,15 @@ export function initSSE(): void {
     },
   );
 
+  eventSource.addEventListener("forwarder_ups_updated", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data);
+      setUpsState(data.forwarder_id, data.available, data.status ?? null);
+    } catch (err) {
+      console.error("Failed to parse forwarder_ups_updated event:", err);
+    }
+  });
+
   eventSource.addEventListener("resync", async () => {
     await resync();
   });
@@ -190,12 +206,14 @@ async function resync(): Promise<void> {
         assignmentsResp,
         logsResp,
         readerStatesResp,
+        forwarderUpsResp,
       ] = await Promise.allSettled([
         getStreams(),
         getRaces(),
         getForwarderRaces(),
         getLogs(),
         getReaderStates(),
+        getForwarderUps(),
       ]);
 
       if (streamsResp.status === "rejected") {
@@ -217,6 +235,12 @@ async function resync(): Promise<void> {
         console.error(
           "resync: failed to fetch reader states",
           readerStatesResp.reason,
+        );
+      }
+      if (forwarderUpsResp.status === "rejected") {
+        console.error(
+          "resync: failed to fetch forwarder UPS state",
+          forwarderUpsResp.reason,
         );
       }
 
@@ -245,6 +269,14 @@ async function resync(): Promise<void> {
           next[`${rs.forwarder_id}:${rs.reader_ip}`] = rs;
         }
         readerStatesStore.set(next);
+      }
+      replaceUpsState(
+        forwarderUpsResp.status === "fulfilled"
+          ? forwarderUpsResp.value.forwarder_ups
+          : {},
+      );
+      if (streamsResp.status === "fulfilled") {
+        pruneUpsStateForOnlineForwarders(streamsResp.value.streams);
       }
       if (!resyncQueued) break;
     }

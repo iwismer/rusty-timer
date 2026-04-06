@@ -27,6 +27,11 @@ function renderSetupEnv(config: SbcSetupFormData): string {
     `RT_SETUP_STATUS_BIND=${shellQuote(config.statusBind)}`,
     `RT_SETUP_DONE_MARKER=${shellQuote("/var/lib/rusty-timer/.first-boot-setup-done")}`,
   ];
+  if (config.upsEnabled) {
+    lines.push("RT_SETUP_UPS_ENABLED=1");
+    lines.push(`RT_SETUP_UPS_SHUTDOWN_LEVEL=${config.upsShutdownLevel}`);
+    lines.push(`RT_SETUP_UPS_SHUTDOWN_DELAY=${config.upsShutdownDelay}`);
+  }
   return lines.join("\n") + "\n";
 }
 
@@ -39,6 +44,9 @@ export function generateUserData(config: SbcSetupFormData): string {
     "tar",
     "coreutils",
   ];
+  if (config.upsEnabled) {
+    packages.push("i2c-tools");
+  }
   const packageLines = packages.map((p) => `  - ${p}`).join("\n");
 
   const setupEnv = renderSetupEnv(config);

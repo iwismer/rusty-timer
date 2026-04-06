@@ -1,6 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { AlertBanner, ReaderControlPanel } from "@rusty-timer/shared-ui";
+  import {
+    AlertBanner,
+    ReaderControlPanel,
+    BatteryIndicator,
+  } from "@rusty-timer/shared-ui";
   import { resizeWidth } from "$lib/actions/resizeWidth";
   import {
     store,
@@ -249,6 +253,16 @@
                   <span class="text-text-primary">
                     {stream.display_alias ?? stream.forwarder_id}
                   </span>
+                  {#if store.upsState.get(stream.forwarder_id)}
+                    {@const upsEntry = store.upsState.get(stream.forwarder_id)}
+                    <BatteryIndicator
+                      percent={upsEntry?.status?.battery_percent ?? null}
+                      charging={upsEntry?.status?.charging ?? false}
+                      available={upsEntry?.available ?? true}
+                      configured
+                      compact
+                    />
+                  {/if}
                 </div>
               </td>
               {#if showLastReadCol()}

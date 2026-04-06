@@ -60,6 +60,14 @@ pub struct CachedReaderState {
 
 pub type ReaderStateCache = Arc<RwLock<HashMap<String, CachedReaderState>>>;
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CachedUpsState {
+    pub available: bool,
+    pub status: Option<rt_protocol::UpsStatus>,
+}
+
+pub type ForwarderUpsCache = Arc<RwLock<HashMap<String, CachedUpsState>>>;
+
 pub type StreamBroadcast = broadcast::Sender<rt_protocol::ReadEvent>;
 pub type BroadcastRegistry = Arc<RwLock<HashMap<Uuid, StreamBroadcast>>>;
 pub type ForwarderCommandSenders =
@@ -99,6 +107,7 @@ pub struct AppState {
     pub dashboard_tx: broadcast::Sender<DashboardEvent>,
     pub announcer_tx: broadcast::Sender<AnnouncerEvent>,
     pub reader_states: ReaderStateCache,
+    pub forwarder_ups_cache: ForwarderUpsCache,
     pub logger: Arc<rt_ui_log::UiLogger<DashboardEvent>>,
 }
 
@@ -119,6 +128,7 @@ impl AppState {
             active_receiver_sessions: Arc::new(RwLock::new(HashMap::new())),
             announcer_runtime: Arc::new(RwLock::new(AnnouncerRuntime::new())),
             reader_states: Arc::new(RwLock::new(HashMap::new())),
+            forwarder_ups_cache: Arc::new(RwLock::new(HashMap::new())),
             dashboard_tx,
             announcer_tx,
             logger,

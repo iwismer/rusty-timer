@@ -10,6 +10,8 @@ vi.mock("$lib/api", () => apiMocks);
 
 vi.mock("@rusty-timer/shared-ui", () => ({
   ForwarderConfig: () => null,
+  BatteryIndicator: () => null,
+  LowBatteryBanner: () => null,
 }));
 
 import ForwardersTab from "./ForwardersTab.svelte";

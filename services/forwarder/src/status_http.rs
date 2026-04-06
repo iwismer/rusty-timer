@@ -55,8 +55,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use rt_updater::UpdateStatus;
 use rt_updater::workflow::{RealChecker, WorkflowState, run_check, run_download};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -123,6 +123,13 @@ pub struct ReaderStatus {
     pub reader_info: Option<crate::reader_control::ReaderInfo>,
 }
 
+/// UPS daemon availability + latest readings snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpsStatusState {
+    pub available: bool,
+    pub status: Option<rt_protocol::UpsStatus>,
+}
+
 /// Tracks local subsystem readiness for the `/readyz` endpoint.
 ///
 /// Ready = config loaded + journal open + worker tasks started.
@@ -141,6 +148,8 @@ pub struct SubsystemStatus {
     pub update_mode: rt_updater::UpdateMode,
     /// Set to `true` when config is saved and the forwarder needs a restart to apply changes.
     restart_needed: bool,
+    /// UPS status snapshot (None if UPS monitoring is not configured).
+    ups_status: Option<UpsStatusState>,
 }
 
 impl SubsystemStatus {
@@ -157,6 +166,7 @@ impl SubsystemStatus {
             staged_update_path: None,
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
+            ups_status: None,
         }
     }
 
@@ -173,6 +183,7 @@ impl SubsystemStatus {
             staged_update_path: None,
             update_mode: rt_updater::UpdateMode::default(),
             restart_needed: false,
+            ups_status: None,
         }
     }
 
@@ -209,6 +220,16 @@ impl SubsystemStatus {
     /// Return a reference to the readers map.
     pub fn readers(&self) -> &HashMap<String, ReaderStatus> {
         &self.readers
+    }
+
+    /// Set the UPS status snapshot.
+    pub fn set_ups_status(&mut self, state: UpsStatusState) {
+        self.ups_status = Some(state);
+    }
+
+    /// Return the current UPS status snapshot, if any.
+    pub fn ups_status(&self) -> Option<&UpsStatusState> {
+        self.ups_status.as_ref()
     }
 }
 
@@ -367,6 +388,11 @@ impl StatusServer {
     /// Record the filesystem path of a downloaded update artifact ready to apply.
     pub async fn set_staged_update_path(&self, path: std::path::PathBuf) {
         self.subsystem.lock().await.staged_update_path = Some(path);
+    }
+
+    /// Update the UPS status snapshot in the subsystem state.
+    pub async fn set_ups_status(&self, state: UpsStatusState) {
+        self.subsystem.lock().await.set_ups_status(state);
     }
 
     pub fn control_clients(
@@ -894,7 +920,7 @@ async fn mark_restart_needed_and_emit(
 /// payload, and calls `update_config_file` to persist the change.
 ///
 /// Recognised sections: `"general"`, `"server"`, `"auth"`, `"journal"`,
-/// `"uplink"`, `"status_http"`, `"control"`, `"update"`, `"readers"`.
+/// `"uplink"`, `"status_http"`, `"control"`, `"update"`, `"ups"`, `"readers"`.
 pub async fn apply_section_update(
     section: &str,
     payload: &serde_json::Value,
@@ -1039,6 +1065,52 @@ pub async fn apply_section_update(
             .await?;
             subsystem.lock().await.update_mode = parsed_mode;
             Ok(())
+        }
+        "ups" => {
+            let enabled = optional_bool_field(payload, "enabled")?;
+            let daemon_addr = optional_string_field(payload, "daemon_addr")?.and_then(|addr| {
+                let trimmed = addr.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            });
+            let poll_interval_secs = optional_u64_field(payload, "poll_interval_secs")?;
+            let upstream_heartbeat_secs = optional_u64_field(payload, "upstream_heartbeat_secs")?;
+
+            if let Some(interval) = poll_interval_secs
+                && !(1..=60).contains(&interval)
+            {
+                return Err(bad_request_error(
+                    "poll_interval_secs must be between 1 and 60",
+                ));
+            }
+            if let Some(heartbeat) = upstream_heartbeat_secs
+                && !(10..=300).contains(&heartbeat)
+            {
+                return Err(bad_request_error(
+                    "upstream_heartbeat_secs must be between 10 and 300",
+                ));
+            }
+            if let Some(ref addr) = daemon_addr
+                && addr.parse::<std::net::SocketAddr>().is_err()
+            {
+                let parts: Vec<&str> = addr.rsplitn(2, ':').collect();
+                if parts.len() != 2 || parts[0].parse::<u16>().is_err() {
+                    return Err(bad_request_error(format!(
+                        "daemon_addr must be a valid host:port, got '{}'",
+                        addr
+                    )));
+                }
+            }
+
+            update_config_file(config_state, subsystem, ui_tx, |raw| {
+                raw.ups = Some(crate::config::RawUpsConfig {
+                    enabled,
+                    daemon_addr,
+                    poll_interval_secs,
+                    upstream_heartbeat_secs,
+                });
+                Ok(())
+            })
+            .await
         }
         "readers" => {
             let readers_val = payload.get("readers").ok_or_else(|| {
@@ -1720,6 +1792,7 @@ struct StatusJsonResponse {
     ready_reason: Option<String>,
     uplink_connected: bool,
     restart_needed: bool,
+    ups_status: Option<UpsStatusState>,
     readers: Vec<ReaderStatusJson>,
 }
 
@@ -1769,6 +1842,7 @@ async fn status_json_handler<J: JournalAccess + Send + 'static>(
         ready_reason: ss.reason.clone(),
         uplink_connected: ss.uplink_connected(),
         restart_needed: ss.restart_needed(),
+        ups_status: ss.ups_status().cloned(),
         readers,
     };
 
@@ -1814,6 +1888,7 @@ async fn events_handler<J: JournalAccess + Send + 'static>(
                 crate::ui_events::ForwarderUiEvent::ReaderInfoUpdated { .. } => {
                     "reader_info_updated"
                 }
+                crate::ui_events::ForwarderUiEvent::UpsStatusChanged { .. } => "ups_status_changed",
             };
             match serde_json::to_string(&event) {
                 Ok(json) => Some(Ok(Event::default().event(event_type).data(json))),
@@ -2703,6 +2778,7 @@ fn build_router<J: JournalAccess + Send + 'static>(state: AppState<J>) -> Router
             "/api/v1/config/update",
             post(post_config_update_handler::<J>),
         )
+        .route("/api/v1/config/ups", post(post_config_ups_handler::<J>))
         .route(
             "/api/v1/config/readers",
             post(post_config_readers_handler::<J>),
@@ -3274,6 +3350,13 @@ async fn post_config_status_http_handler<J: JournalAccess + Send + 'static>(
     post_config_section_handler("status_http", state, body, None).await
 }
 
+async fn post_config_ups_handler<J: JournalAccess + Send + 'static>(
+    State(state): State<AppState<J>>,
+    body: Bytes,
+) -> Response {
+    post_config_section_handler("ups", state, body, None).await
+}
+
 async fn post_config_readers_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
     body: Bytes,
@@ -3461,6 +3544,19 @@ mod tests {
         server
             .update_reader_state("192.168.1.10", ReaderConnectionState::Connected)
             .await;
+        server
+            .set_ups_status(UpsStatusState {
+                available: false,
+                status: Some(rt_protocol::UpsStatus {
+                    battery_percent: 42,
+                    battery_voltage_mv: 3890,
+                    charging: false,
+                    power_plugged: false,
+                    temperature_cdeg: 3010,
+                    sampled_at: 1711929600000,
+                }),
+            })
+            .await;
 
         let addr = server.local_addr();
         let client = reqwest::Client::new();
@@ -3477,6 +3573,9 @@ mod tests {
         assert_eq!(body["ready"], true);
         assert_eq!(body["uplink_connected"], false);
         assert_eq!(body["restart_needed"], false);
+        assert_eq!(body["ups_status"]["available"], false);
+        assert_eq!(body["ups_status"]["status"]["battery_percent"], 42);
+        assert_eq!(body["ups_status"]["status"]["power_plugged"], false);
         assert_eq!(body["readers"][0]["ip"], "192.168.1.10");
         assert_eq!(body["readers"][0]["state"], "connected");
     }
@@ -6236,5 +6335,191 @@ target = "192.168.1.100:10000"
         let (target, _wait) = super::compute_sync_timing(wall_now, one_way, 500);
         assert_eq!(target.second(), 1);
         assert_eq!(target.nanosecond(), 0);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_accepts_valid_values() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "http://{}/api/v1/config/ups",
+                server.local_addr()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true,"daemon_addr":"127.0.0.1:8423","poll_interval_secs":5,"upstream_heartbeat_secs":30}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_rejects_invalid_poll_interval() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/ups", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"poll_interval_secs":0}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_rejects_invalid_daemon_addr() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/ups", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"daemon_addr":"not-valid"}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn config_ups_section_normalizes_blank_daemon_addr_to_default() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut config_file = NamedTempFile::new().expect("create temp config");
+        let token_file = NamedTempFile::new().expect("create temp token");
+        write!(
+            config_file,
+            r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "{}"
+[[readers]]
+target = "192.168.1.100:10000"
+ "#,
+            token_file.path().display()
+        )
+        .expect("write config");
+
+        let restart_signal = Arc::new(Notify::new());
+        let server = StatusServer::start_with_config(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+            Arc::new(Mutex::new(NoJournal)),
+            Arc::new(ConfigState::new(config_file.path().to_path_buf())),
+            restart_signal,
+        )
+        .await
+        .expect("start status server");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/v1/config/ups", server.local_addr()))
+            .header("content-type", "application/json")
+            .body(r#"{"enabled":true,"daemon_addr":""}"#)
+            .send()
+            .await
+            .expect("post config ups");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let saved = std::fs::read_to_string(config_file.path()).expect("read saved config");
+        let loaded =
+            crate::config::load_config_from_str(&saved, config_file.path()).expect("load config");
+        assert_eq!(loaded.ups.daemon_addr, "127.0.0.1:8423");
     }
 }

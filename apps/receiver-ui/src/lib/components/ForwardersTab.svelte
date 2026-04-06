@@ -6,7 +6,11 @@
     selectForwarder,
     setForwarderRace,
   } from "$lib/store.svelte";
-  import { ForwarderConfig } from "@rusty-timer/shared-ui";
+  import {
+    ForwarderConfig,
+    BatteryIndicator,
+    LowBatteryBanner,
+  } from "@rusty-timer/shared-ui";
   import type { ConfigApi } from "@rusty-timer/shared-ui";
   import { createForwarderConfigApi } from "$lib/forwarder-config-api";
   import type { ForwarderEntry } from "$lib/api";
@@ -66,9 +70,27 @@
       ? createForwarderConfigApi(store.selectedForwarderId)
       : null,
   );
+
+  let lowBatteryForwarders = $derived(
+    (store.forwarders ?? [])
+      .filter((f) => {
+        const ups = store.upsState.get(f.forwarder_id);
+        return (
+          ups?.status &&
+          ups.status.battery_percent <= 15 &&
+          !ups.status.power_plugged
+        );
+      })
+      .map((f) => ({
+        name: f.display_name ?? f.forwarder_id,
+        percent: store.upsState.get(f.forwarder_id)!.status!.battery_percent,
+      })),
+  );
 </script>
 
 <div class="h-full flex flex-col">
+  <LowBatteryBanner forwarders={lowBatteryForwarders} />
+
   {#if store.selectedForwarderId && selectedForwarder()}
     {@const fwd = selectedForwarder()!}
     <!-- Detail view -->
@@ -98,7 +120,7 @@
         </div>
 
         <!-- Stats cards -->
-        <div class="grid grid-cols-4 gap-3 mb-6">
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
           <div class="bg-surface-0 border border-border rounded-lg px-4 py-3">
             <div class="text-[11px] text-text-muted uppercase tracking-wide">
               Unique Chips
@@ -148,6 +170,40 @@
               {formatLastRead(fwd.last_read_at, now)}
             </div>
           </div>
+          {#if store.upsState.get(fwd.forwarder_id)}
+            {@const upsEntry = store.upsState.get(fwd.forwarder_id)!}
+            <div class="bg-surface-0 border border-border rounded-lg px-4 py-3">
+              <div class="text-[11px] text-text-muted uppercase tracking-wide">
+                Battery
+              </div>
+              <div class="flex items-center gap-2 mt-1">
+                <BatteryIndicator
+                  percent={upsEntry.status?.battery_percent ?? null}
+                  charging={upsEntry.status?.charging ?? false}
+                  available={upsEntry.available}
+                  configured
+                />
+              </div>
+              {#if upsEntry.status}
+                <div class="text-xs text-text-muted mt-1">
+                  {(upsEntry.status.battery_voltage_mv / 1000).toFixed(2)}V / {(
+                    upsEntry.status.temperature_cdeg / 100
+                  ).toFixed(1)}&deg;C
+                </div>
+                <div class="text-xs mt-1">
+                  {#if upsEntry.status.charging}
+                    Charging
+                  {:else if upsEntry.status.power_plugged}
+                    Plugged In
+                  {:else}
+                    On Battery
+                  {/if}
+                </div>
+              {:else if !upsEntry.available}
+                <div class="text-xs text-text-muted mt-1">UPS unavailable</div>
+              {/if}
+            </div>
+          {/if}
         </div>
 
         <!-- Race assignment -->
@@ -264,6 +320,7 @@
               class="sticky top-0 z-10 bg-surface-0 border-b border-border text-left text-text-muted text-[11px] uppercase tracking-wide"
             >
               <th class="px-3 py-2">Forwarder</th>
+              <th class="px-3 py-2">Battery</th>
               <th class="px-3 py-2">Readers</th>
               <th class="px-3 py-2 text-right">Unique Chips</th>
               <th class="px-3 py-2 text-right">Total Reads</th>
@@ -304,6 +361,19 @@
                       {/if}
                     </div>
                   </div>
+                </td>
+                <td>
+                  <BatteryIndicator
+                    percent={store.upsState.get(fwd.forwarder_id)?.status
+                      ?.battery_percent ?? null}
+                    charging={store.upsState.get(fwd.forwarder_id)?.status
+                      ?.charging ?? false}
+                    available={store.upsState.get(fwd.forwarder_id)
+                      ?.available ?? true}
+                    configured={store.upsState.get(fwd.forwarder_id) !==
+                      undefined}
+                    compact
+                  />
                 </td>
                 <td class="px-3 py-2.5">
                   <div class="flex flex-col gap-0.5">

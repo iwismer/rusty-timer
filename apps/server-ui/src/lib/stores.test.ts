@@ -20,6 +20,9 @@ import {
   replaceStreams,
   readerStatesStore,
   removeReaderStatesForForwarder,
+  setUpsState,
+  upsStateStore,
+  pruneUpsStateForOnlineForwarders,
 } from "./stores";
 import type { StreamEntry, StreamMetrics, RaceEntry } from "./api";
 
@@ -228,5 +231,50 @@ describe("stores", () => {
 
     const result = get(readerStatesStore);
     expect(Object.keys(result)).toEqual(["fwd-1:10.0.0.1:10000"]);
+  });
+
+  it("retains configured-but-unavailable UPS entries with no sampled status", () => {
+    setUpsState("fwd-1", false, null);
+
+    expect(get(upsStateStore)).toEqual({
+      "fwd-1": { available: false, status: null },
+    });
+  });
+
+  it("prunes UPS entries for forwarders without any online streams", () => {
+    setUpsState("fwd-1", true, {
+      battery_percent: 70,
+      battery_voltage_mv: 4000,
+      charging: false,
+      power_plugged: true,
+      temperature_cdeg: 2200,
+      sampled_at: 1711929600000,
+    });
+    setUpsState("fwd-2", false, null);
+
+    pruneUpsStateForOnlineForwarders([
+      STREAM_A,
+      {
+        ...STREAM_A,
+        stream_id: "bbb",
+        forwarder_id: "fwd-2",
+        reader_ip: "10.0.0.2:10000",
+        online: false,
+      },
+    ]);
+
+    expect(get(upsStateStore)).toEqual({
+      "fwd-1": {
+        available: true,
+        status: {
+          battery_percent: 70,
+          battery_voltage_mv: 4000,
+          charging: false,
+          power_plugged: true,
+          temperature_cdeg: 2200,
+          sampled_at: 1711929600000,
+        },
+      },
+    });
   });
 });

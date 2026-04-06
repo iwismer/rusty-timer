@@ -21,11 +21,13 @@ DATA_DIR="/var/lib/rusty-timer"
 SERVICE_USER="rt-forwarder"
 STATUS_BIND="0.0.0.0:80"
 VERIFY_POLICY="run_verify"
+UPS_SETUP_ENABLED="0"
 FORWARDER_BIN_PATH="${INSTALL_DIR}/rt-forwarder"
 STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
 POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules"
+PISUGAR_SERVER_VERSION="1.7.8"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -382,6 +384,17 @@ install_verify_policy() {
     printf 'skip_verify\n'
   else
     printf 'run_verify\n'
+  fi
+}
+
+should_restart_after_ups_setup() {
+  local ups_enabled="$1"
+  local verify_policy="$2"
+
+  if [[ "${ups_enabled}" == "1" && "${verify_policy}" == "run_verify" ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
   fi
 }
 
@@ -797,6 +810,121 @@ verify() {
   fi
 }
 
+setup_ups() {
+  local ups_enabled="0"
+  if is_noninteractive_mode; then
+    ups_enabled="$(bool_env_is_true "${RT_SETUP_UPS_ENABLED:-0}")"
+  else
+    read -rp "Do you have a PiSugar UPS HAT installed? [y/N] " answer
+    if [[ "${answer}" =~ ^[Yy]$ ]]; then
+      ups_enabled="1"
+    fi
+  fi
+
+  if [[ "${ups_enabled}" != "1" ]]; then
+    UPS_SETUP_ENABLED="0"
+    log "Skipping PiSugar UPS setup"
+    return
+  fi
+
+  UPS_SETUP_ENABLED="1"
+
+  # In interactive mode, prompt for shutdown settings (with defaults)
+  if ! is_noninteractive_mode; then
+    read -rp "Battery shutdown level % [5]: " input_level
+    [[ -n "${input_level}" ]] && RT_SETUP_UPS_SHUTDOWN_LEVEL="${input_level}"
+    read -rp "Shutdown delay in seconds [30]: " input_delay
+    [[ -n "${input_delay}" ]] && RT_SETUP_UPS_SHUTDOWN_DELAY="${input_delay}"
+  fi
+
+  log "Setting up PiSugar UPS support..."
+
+  # 1. Enable I2C
+  if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt 2>/dev/null; then
+    echo "dtparam=i2c_arm=on" >> /boot/config.txt
+    log "Enabled I2C in /boot/config.txt"
+  else
+    log "I2C already enabled"
+  fi
+
+  # 2. Install pisugar-server
+  local arch
+  arch="$(detect_arch)"
+  local deb_arch
+  case "${arch}" in
+    aarch64-unknown-linux-gnu) deb_arch="arm64" ;;
+    armv7-unknown-linux-gnueabihf) deb_arch="armhf" ;;
+    *) log "ERROR: unsupported architecture for pisugar-server: ${arch}"; return 1 ;;
+  esac
+
+  local deb_url="https://github.com/PiSugar/PiSugar/releases/download/v${PISUGAR_SERVER_VERSION}/pisugar-server_${PISUGAR_SERVER_VERSION}_${deb_arch}.deb"
+  local deb_file="/tmp/pisugar-server_${PISUGAR_SERVER_VERSION}_${deb_arch}.deb"
+
+  log "Downloading pisugar-server v${PISUGAR_SERVER_VERSION}..."
+  curl -fsSL -o "${deb_file}" "${deb_url}"
+
+  # Pre-seed debconf to avoid interactive prompts during dpkg install
+  if command -v debconf-set-selections &>/dev/null; then
+    debconf-set-selections <<DEBCONF_EOF
+pisugar-server pisugar-server/model select PiSugar 3
+pisugar-server pisugar-server/auth-username string admin
+pisugar-server pisugar-server/auth-password password admin
+DEBCONF_EOF
+    log "Pre-seeded debconf selections for pisugar-server"
+  fi
+
+  DEBIAN_FRONTEND=noninteractive dpkg -i "${deb_file}" || apt-get install -f -y
+  rm -f "${deb_file}"
+
+  # 3. Configure pisugar-server
+  local shutdown_level="${RT_SETUP_UPS_SHUTDOWN_LEVEL:-5}"
+  local shutdown_delay="${RT_SETUP_UPS_SHUTDOWN_DELAY:-30}"
+  mkdir -p /etc/pisugar-server
+  cat > /etc/pisugar-server/config.json <<PISUGAR_EOF
+{
+  "model": "PiSugar 3",
+  "safe_shutdown_level": ${shutdown_level},
+  "safe_shutdown_delay": ${shutdown_delay},
+  "auto_power_on": true,
+  "soft_poweroff": true,
+  "soft_poweroff_shell": "shutdown --poweroff 0",
+  "long_tap_enable": true,
+  "long_tap_shell": "sudo shutdown now"
+}
+PISUGAR_EOF
+  log "Wrote pisugar-server config (shutdown at ${shutdown_level}%, delay ${shutdown_delay}s)"
+
+  # 4. Enable and start pisugar-server
+  systemctl enable pisugar-server.service
+  systemctl start pisugar-server.service || true
+  log "pisugar-server service enabled and started"
+
+  # 5. Add systemd ordering
+  local service_file="/etc/systemd/system/rt-forwarder.service"
+  if [[ -f "${service_file}" ]]; then
+    if ! grep -q "After=pisugar-server.service" "${service_file}"; then
+      sed -i '/^\[Unit\]/a After=pisugar-server.service' "${service_file}"
+      systemctl daemon-reload
+      log "Added After=pisugar-server.service to rt-forwarder.service"
+    fi
+  fi
+
+  # 6. Update forwarder.toml
+  local config_file="${CONFIG_DIR}/forwarder.toml"
+  if [[ -f "${config_file}" ]]; then
+    if ! grep -q '^\[ups\]' "${config_file}"; then
+      cat >> "${config_file}" <<'UPS_EOF'
+
+[ups]
+enabled = true
+UPS_EOF
+      log "Added [ups] section to forwarder.toml"
+    fi
+  fi
+
+  log "PiSugar UPS setup complete"
+}
+
 main() {
   echo "=== rt-forwarder Setup ==="
   echo ""
@@ -814,6 +942,12 @@ main() {
   download_binary
   configure
   install_service
+  setup_ups
+
+  if [[ "$(should_restart_after_ups_setup "${UPS_SETUP_ENABLED}" "${VERIFY_POLICY}")" == "1" ]]; then
+    echo "Restarting rt-forwarder to apply UPS configuration."
+    systemctl restart rt-forwarder
+  fi
 
   if [[ "${VERIFY_POLICY}" == "run_verify" ]]; then
     verify

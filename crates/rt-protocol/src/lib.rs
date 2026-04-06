@@ -5,6 +5,9 @@
 // tracking, reader-control extensions, receiver proxy commands, and race
 // management.
 
+pub mod ups;
+pub use ups::UpsStatus;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
@@ -135,6 +138,11 @@ pub const READER_INFO_UPDATED_READ_TYPE: &str = "__reader_info_updated";
 /// When a `ReadEvent` carries this type, its `raw_frame` contains the
 /// JSON-serialized `WsMessage::ReceiverReaderDownloadProgress` payload.
 pub const READER_DOWNLOAD_PROGRESS_READ_TYPE: &str = "__reader_download_progress";
+
+/// Sentinel `read_type` for forwarder UPS status control messages.
+/// When a `ReadEvent` carries this type, its `raw_frame` contains the
+/// JSON-serialized `WsMessage::ForwarderUpsStatus` payload.
+pub const FORWARDER_UPS_STATUS_READ_TYPE: &str = "__forwarder_ups_status";
 
 /// A batch of read events from a forwarder.
 ///
@@ -890,6 +898,14 @@ pub struct ReceiverReaderDownloadProgress {
     pub error: Option<String>,
 }
 
+/// Forwarder UPS status report, tunneled via sentinel read type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwarderUpsStatus {
+    pub forwarder_id: String,
+    pub available: bool,
+    pub status: Option<UpsStatus>,
+}
+
 // ---------------------------------------------------------------------------
 // Top-level discriminated union
 // ---------------------------------------------------------------------------
@@ -963,6 +979,7 @@ pub enum WsMessage {
     ReceiverProxyReaderControlResponse(ReceiverProxyReaderControlResponse),
     ReceiverReaderInfoUpdate(ReceiverReaderInfoUpdate),
     ReceiverReaderDownloadProgress(ReceiverReaderDownloadProgress),
+    ForwarderUpsStatus(ForwarderUpsStatus),
 }
 
 // ---------------------------------------------------------------------------
@@ -1833,5 +1850,41 @@ mod tests {
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
         assert!(json.contains("\"kind\":\"receiver_reader_download_progress\""));
+    }
+
+    #[test]
+    fn forwarder_ups_status_available_round_trip() {
+        let msg = WsMessage::ForwarderUpsStatus(ForwarderUpsStatus {
+            forwarder_id: "fwd-1".into(),
+            available: true,
+            status: Some(UpsStatus {
+                battery_percent: 75,
+                battery_voltage_mv: 4050,
+                charging: true,
+                power_plugged: true,
+                temperature_cdeg: 2500,
+                sampled_at: 1700000000,
+            }),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"forwarder_ups_status\""));
+        assert!(json.contains("\"battery_percent\":75"));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn forwarder_ups_status_unavailable_round_trip() {
+        let msg = WsMessage::ForwarderUpsStatus(ForwarderUpsStatus {
+            forwarder_id: "fwd-2".into(),
+            available: false,
+            status: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"kind\":\"forwarder_ups_status\""));
+        assert!(json.contains("\"available\":false"));
+        assert!(json.contains("\"status\":null"));
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, msg);
     }
 }

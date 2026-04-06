@@ -13,6 +13,7 @@
 //! Raw token string on a single line; trimmed on read.
 
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,7 @@ pub struct ForwarderConfig {
     pub uplink: UplinkConfig,
     pub control: ControlConfig,
     pub update: UpdateConfig,
+    pub ups: UpsConfig,
     pub readers: Vec<ReaderConfig>,
 }
 
@@ -72,6 +74,14 @@ pub struct UpdateConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpsConfig {
+    pub enabled: bool,
+    pub daemon_addr: String,
+    pub poll_interval_secs: u64,
+    pub upstream_heartbeat_secs: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReaderConfig {
     pub target: String,
     pub enabled: bool,
@@ -94,6 +104,7 @@ pub struct RawConfig {
     pub uplink: Option<RawUplinkConfig>,
     pub control: Option<RawControlConfig>,
     pub update: Option<RawUpdateConfig>,
+    pub ups: Option<RawUpsConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
 }
 
@@ -141,6 +152,14 @@ pub struct RawReaderConfig {
     pub target: Option<String>,
     pub enabled: Option<bool>,
     pub local_fallback_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawUpsConfig {
+    pub enabled: Option<bool>,
+    pub daemon_addr: Option<String>,
+    pub poll_interval_secs: Option<u64>,
+    pub upstream_heartbeat_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +290,51 @@ pub fn load_config_from_str(
         },
     };
 
+    // UPS defaults
+    let ups = match raw.ups {
+        Some(u) => {
+            let enabled = u.enabled.unwrap_or(false);
+            let daemon_addr = u.daemon_addr.unwrap_or_else(|| "127.0.0.1:8423".to_owned());
+            // Validate daemon_addr: must be host:port
+            if daemon_addr.parse::<SocketAddr>().is_err() {
+                // Try hostname:port via rsplitn
+                let parts: Vec<&str> = daemon_addr.rsplitn(2, ':').collect();
+                if parts.len() != 2 || parts[0].parse::<u16>().is_err() || parts[1].is_empty() {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "ups.daemon_addr must be a valid host:port, got '{}'",
+                        daemon_addr
+                    )));
+                }
+            }
+            let poll_interval_secs = u.poll_interval_secs.unwrap_or(5);
+            if !(1..=60).contains(&poll_interval_secs) {
+                return Err(ConfigError::InvalidValue(format!(
+                    "ups.poll_interval_secs must be 1-60, got {}",
+                    poll_interval_secs
+                )));
+            }
+            let upstream_heartbeat_secs = u.upstream_heartbeat_secs.unwrap_or(60);
+            if !(10..=300).contains(&upstream_heartbeat_secs) {
+                return Err(ConfigError::InvalidValue(format!(
+                    "ups.upstream_heartbeat_secs must be 10-300, got {}",
+                    upstream_heartbeat_secs
+                )));
+            }
+            UpsConfig {
+                enabled,
+                daemon_addr,
+                poll_interval_secs,
+                upstream_heartbeat_secs,
+            }
+        }
+        None => UpsConfig {
+            enabled: false,
+            daemon_addr: "127.0.0.1:8423".to_owned(),
+            poll_interval_secs: 5,
+            upstream_heartbeat_secs: 60,
+        },
+    };
+
     // Validate readers
     let raw_readers = raw
         .readers
@@ -305,6 +369,7 @@ pub fn load_config_from_str(
         uplink,
         control,
         update,
+        ups,
         readers,
     })
 }
@@ -414,5 +479,66 @@ target = "192.168.1.100"
         let (toml, _dir) = minimal_toml("[update]");
         let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         assert_eq!(cfg.update.mode, rt_updater::UpdateMode::CheckAndDownload);
+    }
+
+    #[test]
+    fn ups_section_absent_defaults_to_disabled() {
+        let (toml, _dir) = minimal_toml("");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(!cfg.ups.enabled);
+        assert_eq!(cfg.ups.daemon_addr, "127.0.0.1:8423");
+        assert_eq!(cfg.ups.poll_interval_secs, 5);
+        assert_eq!(cfg.ups.upstream_heartbeat_secs, 60);
+    }
+
+    #[test]
+    fn ups_section_enabled_with_defaults() {
+        let (toml, _dir) = minimal_toml("[ups]\nenabled = true");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(cfg.ups.enabled);
+        assert_eq!(cfg.ups.daemon_addr, "127.0.0.1:8423");
+        assert_eq!(cfg.ups.poll_interval_secs, 5);
+        assert_eq!(cfg.ups.upstream_heartbeat_secs, 60);
+    }
+
+    #[test]
+    fn ups_section_custom_addr() {
+        let (toml, _dir) = minimal_toml("[ups]\ndaemon_addr = \"myhost:9999\"");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.ups.daemon_addr, "myhost:9999");
+    }
+
+    #[test]
+    fn ups_poll_interval_out_of_range_rejected() {
+        let (toml, _dir) = minimal_toml("[ups]\npoll_interval_secs = 0");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("ups.poll_interval_secs"),
+            "error: {err}"
+        );
+
+        let (toml, _dir) = minimal_toml("[ups]\npoll_interval_secs = 61");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("ups.poll_interval_secs"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn ups_heartbeat_out_of_range_rejected() {
+        let (toml, _dir) = minimal_toml("[ups]\nupstream_heartbeat_secs = 9");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("ups.upstream_heartbeat_secs"),
+            "error: {err}"
+        );
+
+        let (toml, _dir) = minimal_toml("[ups]\nupstream_heartbeat_secs = 301");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("ups.upstream_heartbeat_secs"),
+            "error: {err}"
+        );
     }
 }

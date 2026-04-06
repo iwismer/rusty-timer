@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub mod config;
 pub mod discovery;
 pub mod local_fanout;
+pub mod pisugar_client;
 pub mod reader_control;
 pub mod replay;
 pub mod status_http;
@@ -14,6 +15,7 @@ pub mod ui_events;
 pub mod ui_server;
 pub mod uplink;
 pub mod uplink_replay;
+pub mod ups_task;
 
 pub const DEFAULT_UPDATER_STAGE_DIR: &str = "/var/lib/rusty-timer";
 
