@@ -367,6 +367,18 @@ async fn main() {
                                     },
                                 )
                                 .await;
+                                // Show "Powered Off" on the display before sleeping.
+                                {
+                                    use embedded_graphics::pixelcolor::BinaryColor;
+                                    use embedded_graphics::prelude::*;
+                                    let mut display = driver.display_mut().color_converted();
+                                    display.clear(BinaryColor::Off).ok();
+                                    if let Err(e) = rt_eink::render::render_shutdown(&mut display) {
+                                        tracing::warn!(error = %e, "eink: failed to render shutdown screen");
+                                    } else if let Err(e) = driver.full_refresh() {
+                                        tracing::warn!(error = %e, "eink: failed to refresh shutdown screen");
+                                    }
+                                }
                                 if let Err(e) = driver.sleep() {
                                     tracing::warn!(error = %e, "eink: failed to sleep display on shutdown");
                                 }
