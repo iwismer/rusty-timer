@@ -27,7 +27,7 @@ STAGED_FORWARDER_PATH="${DATA_DIR}/.forwarder-staged"
 APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
 POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules"
-PISUGAR_SERVER_VERSION="1.7.8"
+PISUGAR_INSTALL_SCRIPT_URL="https://cdn.pisugar.com/release/pisugar-power-manager.sh"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -876,34 +876,12 @@ setup_ups() {
     log "I2C already enabled"
   fi
 
-  # 2. Install pisugar-server
-  local arch
-  arch="$(detect_arch)"
-  local deb_arch
-  case "${arch}" in
-    aarch64-unknown-linux-gnu) deb_arch="arm64" ;;
-    armv7-unknown-linux-gnueabihf) deb_arch="armhf" ;;
-    *) log "ERROR: unsupported architecture for pisugar-server: ${arch}"; return 1 ;;
-  esac
-
-  local deb_url="https://github.com/PiSugar/PiSugar/releases/download/v${PISUGAR_SERVER_VERSION}/pisugar-server_${PISUGAR_SERVER_VERSION}_${deb_arch}.deb"
-  local deb_file="/tmp/pisugar-server_${PISUGAR_SERVER_VERSION}_${deb_arch}.deb"
-
-  log "Downloading pisugar-server v${PISUGAR_SERVER_VERSION}..."
-  curl -fsSL -o "${deb_file}" "${deb_url}"
-
-  # Pre-seed debconf to avoid interactive prompts during dpkg install
-  if command -v debconf-set-selections &>/dev/null; then
-    debconf-set-selections <<DEBCONF_EOF
-pisugar-server pisugar-server/model select PiSugar 3
-pisugar-server pisugar-server/auth-username string admin
-pisugar-server pisugar-server/auth-password password admin
-DEBCONF_EOF
-    log "Pre-seeded debconf selections for pisugar-server"
-  fi
-
-  DEBIAN_FRONTEND=noninteractive dpkg -i "${deb_file}" || apt-get install -f -y
-  rm -f "${deb_file}"
+  # 2. Install pisugar-server via official installer (always gets latest release)
+  log "Installing pisugar-server via official PiSugar installer..."
+  local installer="/tmp/pisugar-power-manager.sh"
+  curl -fsSL -o "${installer}" "${PISUGAR_INSTALL_SCRIPT_URL}"
+  bash "${installer}" -c release
+  rm -f "${installer}"
 
   # 3. Configure pisugar-server
   local shutdown_level="${RT_SETUP_UPS_SHUTDOWN_LEVEL:-5}"
