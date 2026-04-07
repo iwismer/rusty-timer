@@ -278,6 +278,13 @@ async fn main() {
     {
         if let Some(ref eink_config) = cfg.eink {
             if eink_config.enabled {
+                info!(
+                    refresh_mode = ?eink_config.refresh_mode,
+                    full_refresh_interval = eink_config.full_refresh_interval,
+                    min_refresh_interval_ms = eink_config.min_refresh_interval_ms,
+                    telemetry_interval_secs = eink_config.telemetry_interval_secs,
+                    "e-ink display enabled, initializing"
+                );
                 let (display_tx, display_rx) =
                     tokio::sync::watch::channel(rt_eink::state::DisplayState::initial());
 
@@ -307,6 +314,8 @@ async fn main() {
                     tokio::spawn(async move {
                         match rt_eink::driver::EinkDriver::new() {
                             Ok(mut driver) => {
+                                tracing::info!("e-ink driver initialized, starting display task");
+                                let mut consecutive_errors: u32 = 0;
                                 rt_eink::task::run_eink_task(
                                     display_rx,
                                     eink_shutdown_rx,
@@ -314,12 +323,20 @@ async fn main() {
                                     |state, full| {
                                         use embedded_graphics::pixelcolor::BinaryColor;
                                         use embedded_graphics::prelude::*;
+                                        let refresh_type = if full { "full" } else { "partial" };
                                         let mut display = driver.display_mut().color_converted();
                                         display.clear(BinaryColor::Off).ok();
                                         if let Err(e) =
                                             rt_eink::render::render_display(&mut display, state)
                                         {
-                                            tracing::warn!("eink render error: {e}");
+                                            consecutive_errors += 1;
+                                            tracing::warn!(
+                                                error = %e,
+                                                refresh_type,
+                                                consecutive_errors,
+                                                total_reads = state.total_reads,
+                                                "eink: render failed, skipping refresh"
+                                            );
                                             return;
                                         }
                                         let result = if full {
@@ -327,19 +344,38 @@ async fn main() {
                                         } else {
                                             driver.partial_refresh()
                                         };
-                                        if let Err(e) = result {
-                                            tracing::warn!("eink refresh error: {e}");
+                                        match result {
+                                            Ok(()) => {
+                                                if consecutive_errors > 0 {
+                                                    tracing::info!(
+                                                        previous_errors = consecutive_errors,
+                                                        "eink: refresh succeeded after previous errors"
+                                                    );
+                                                }
+                                                consecutive_errors = 0;
+                                            }
+                                            Err(e) => {
+                                                consecutive_errors += 1;
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    refresh_type,
+                                                    consecutive_errors,
+                                                    "eink: refresh failed"
+                                                );
+                                            }
                                         }
                                     },
                                 )
                                 .await;
                                 if let Err(e) = driver.sleep() {
-                                    tracing::warn!("eink sleep error on shutdown: {e}");
+                                    tracing::warn!(error = %e, "eink: failed to sleep display on shutdown");
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    "e-ink display init failed (continuing without display): {e}"
+                                    error = %e,
+                                    "e-ink display init failed (continuing without display) — \
+                                     check SPI enabled, HAT seated, and pin wiring"
                                 );
                             }
                         }
