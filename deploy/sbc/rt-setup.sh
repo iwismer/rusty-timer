@@ -28,6 +28,7 @@ APPLY_STAGED_HELPER="${HELPER_DIR}/rt-forwarder-apply-staged.sh"
 POWER_ACTIONS_SUDOERS_PATH="/etc/sudoers.d/90-rt-forwarder-power-actions"
 POWER_ACTIONS_POLKIT_RULES_PATH="/etc/polkit-1/rules.d/90-rt-forwarder-power-actions.rules"
 PISUGAR_INSTALL_SCRIPT_URL="https://cdn.pisugar.com/release/pisugar-power-manager.sh"
+SPI_REBOOT_NEEDED="0"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -412,6 +413,29 @@ require_root() {
   fi
 }
 
+enable_spi() {
+  local boot_config="/boot/config.txt"
+  if [[ ! -f "${boot_config}" ]]; then
+    boot_config="/boot/firmware/config.txt"
+  fi
+  if [[ ! -f "${boot_config}" ]]; then
+    log "Warning: could not find boot config.txt; SPI must be enabled manually for e-ink display"
+    return
+  fi
+
+  if grep -q "^dtparam=spi=on" "${boot_config}" 2>/dev/null; then
+    log "SPI already enabled in ${boot_config}"
+    return
+  fi
+
+  echo "dtparam=spi=on" >> "${boot_config}"
+  log "Enabled SPI in ${boot_config}"
+  if [[ ! -e /dev/spidev0.0 ]]; then
+    SPI_REBOOT_NEEDED="1"
+    log "Reboot required for SPI device to appear"
+  fi
+}
+
 ensure_prerequisites() {
   echo "── Prerequisites ──"
 
@@ -435,6 +459,9 @@ ensure_prerequisites() {
   # Create service user if it doesn't exist
   id -u "${SERVICE_USER}" &>/dev/null || \
     useradd -r -s /bin/false -m -d "${DATA_DIR}" "${SERVICE_USER}"
+
+  # Enable SPI interface for e-ink display (requires reboot to take effect).
+  enable_spi
 
   # Grant SPI and GPIO access for e-ink display (if groups exist).
   if getent group spi &>/dev/null; then
@@ -733,8 +760,8 @@ enabled = true
 EOF
   done
 
-  # Append e-ink display config if SPI is enabled and the binary supports it.
-  if [[ -e /dev/spidev0.0 ]]; then
+  # Append e-ink display config if SPI is available or was just enabled (pending reboot).
+  if [[ -e /dev/spidev0.0 ]] || [[ "${SPI_REBOOT_NEEDED}" == "1" ]]; then
     cat >> "${CONFIG_DIR}/forwarder.toml" <<EOF
 
 [eink]
@@ -744,7 +771,11 @@ full_refresh_interval = 10
 min_refresh_interval_ms = 1000
 telemetry_interval_secs = 30
 EOF
-    echo "E-ink display config added (SPI detected)"
+    if [[ "${SPI_REBOOT_NEEDED}" == "1" ]]; then
+      echo "E-ink display config added (SPI enabled, reboot needed)"
+    else
+      echo "E-ink display config added (SPI detected)"
+    fi
   fi
 
   chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}/forwarder.toml"
@@ -971,6 +1002,12 @@ main() {
   fi
 
   write_done_marker_if_requested
+
+  if [[ "${SPI_REBOOT_NEEDED}" == "1" ]]; then
+    echo ""
+    echo "** IMPORTANT: SPI was enabled but requires a reboot before the e-ink display will work. **"
+    echo "   Run: sudo reboot"
+  fi
 
   echo ""
   echo "Setup complete."
