@@ -80,6 +80,14 @@ export function generateUserData(config: SbcSetupFormData): string {
     `packages:\n` +
     `${packageLines}\n` +
     `\n` +
+    `bootcmd:\n` +
+    `  - >-\n` +
+    `    if [ -f /boot/firmware/config.txt ]; then BOOT_CFG=/boot/firmware/config.txt;\n` +
+    `    elif [ -f /boot/config.txt ]; then BOOT_CFG=/boot/config.txt;\n` +
+    `    else exit 0; fi;\n` +
+    `    grep -q "^dtparam=spi=on" "$BOOT_CFG" || echo "dtparam=spi=on" >> "$BOOT_CFG";\n` +
+    `    grep -q "^dtparam=i2c_arm=on" "$BOOT_CFG" || echo "dtparam=i2c_arm=on" >> "$BOOT_CFG"\n` +
+    `\n` +
     `write_files:\n` +
     `  - path: /etc/rusty-timer/rt-setup.env\n` +
     `    owner: root:root\n` +

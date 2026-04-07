@@ -53,6 +53,16 @@ packages:
   - ca-certificates
   - jq
 
+# Enable SPI and I2C interfaces in boot config so they are available
+# after first reboot (for e-ink display and PiSugar UPS HAT).
+bootcmd:
+  - >-
+    if [ -f /boot/firmware/config.txt ]; then BOOT_CFG=/boot/firmware/config.txt;
+    elif [ -f /boot/config.txt ]; then BOOT_CFG=/boot/config.txt;
+    else exit 0; fi;
+    grep -q "^dtparam=spi=on" "$BOOT_CFG" || echo "dtparam=spi=on" >> "$BOOT_CFG";
+    grep -q "^dtparam=i2c_arm=on" "$BOOT_CFG" || echo "dtparam=i2c_arm=on" >> "$BOOT_CFG"
+
 # Create required directories and set ownership.
 runcmd:
   - mkdir -p /etc/rusty-timer
