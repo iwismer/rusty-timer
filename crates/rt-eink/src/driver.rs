@@ -5,6 +5,7 @@
 // The upstream crate exposes the 2.13" V3/V4 controller under the
 // `epd2in13_v2` module name, selected via crate features.
 use epd_waveshare::epd2in13_v2::{Display2in13, Epd2in13};
+use epd_waveshare::graphics::DisplayRotation;
 use epd_waveshare::prelude::*;
 use rppal::gpio::{Gpio, InputPin, OutputPin};
 use rppal::hal::Delay;
@@ -106,7 +107,8 @@ impl EinkDriver {
                 DriverError::Display(format!("EPD init: {e:?}"))
             })?;
 
-        let display = Display2in13::default();
+        let mut display = Display2in13::default();
+        display.set_rotation(DisplayRotation::Rotate270);
 
         info!("e-ink display driver initialized successfully");
 
