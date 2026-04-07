@@ -236,6 +236,7 @@ impl SubsystemStatus {
 #[cfg(feature = "eink")]
 fn subsystem_to_display_state(
     ss: &SubsystemStatus,
+    forwarder_name: Option<String>,
     cpu_temp: Option<f32>,
 ) -> rt_eink::state::DisplayState {
     let readers = ss
@@ -273,7 +274,7 @@ fn subsystem_to_display_state(
     let total_reads: u64 = ss.readers().values().map(|r| r.reads_since_restart).sum();
 
     rt_eink::state::DisplayState {
-        forwarder_name: None, // Set separately via display_name field
+        forwarder_name,
         local_ip: ss.local_ip.clone(),
         server_connected: ss.uplink_connected(),
         readers,
@@ -346,6 +347,10 @@ struct AppState<J: JournalAccess + Send + 'static> {
         >,
     >,
     reconnect_notifies: Arc<std::sync::RwLock<HashMap<String, Arc<Notify>>>>,
+    #[cfg(feature = "eink")]
+    display_name: Arc<Mutex<Option<String>>>,
+    #[cfg(feature = "eink")]
+    cpu_temp: Arc<Mutex<Option<f32>>>,
 }
 
 impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
@@ -361,6 +366,10 @@ impl<J: JournalAccess + Send + 'static> Clone for AppState<J> {
             control_clients: self.control_clients.clone(),
             download_trackers: self.download_trackers.clone(),
             reconnect_notifies: self.reconnect_notifies.clone(),
+            #[cfg(feature = "eink")]
+            display_name: self.display_name.clone(),
+            #[cfg(feature = "eink")]
+            cpu_temp: self.cpu_temp.clone(),
         }
     }
 }
@@ -525,9 +534,9 @@ impl StatusServer {
     async fn publish_display_state(&self) {
         if let Some(ref tx) = self.display_tx {
             let ss = self.subsystem.lock().await;
+            let forwarder_name = self.display_name.lock().await.clone();
             let cpu_temp = *self.cpu_temp.lock().await;
-            let mut state = subsystem_to_display_state(&ss, cpu_temp);
-            state.forwarder_name = self.display_name.lock().await.clone();
+            let state = subsystem_to_display_state(&ss, forwarder_name, cpu_temp);
             tx.send_replace(state);
         }
     }
@@ -776,6 +785,10 @@ impl StatusServer {
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        #[cfg(feature = "eink")]
+        let display_name = Arc::new(Mutex::new(None));
+        #[cfg(feature = "eink")]
+        let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -787,6 +800,10 @@ impl StatusServer {
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
             reconnect_notifies: reconnect_notifies.clone(),
+            #[cfg(feature = "eink")]
+            display_name: display_name.clone(),
+            #[cfg(feature = "eink")]
+            cpu_temp: cpu_temp.clone(),
         };
 
         let app = build_router(state);
@@ -807,9 +824,9 @@ impl StatusServer {
             #[cfg(feature = "eink")]
             display_tx: None,
             #[cfg(feature = "eink")]
-            display_name: Arc::new(Mutex::new(None)),
+            display_name,
             #[cfg(feature = "eink")]
-            cpu_temp: Arc::new(Mutex::new(None)),
+            cpu_temp,
         })
     }
 
@@ -834,6 +851,10 @@ impl StatusServer {
         let control_clients = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let download_trackers = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let reconnect_notifies = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        #[cfg(feature = "eink")]
+        let display_name = Arc::new(Mutex::new(None));
+        #[cfg(feature = "eink")]
+        let cpu_temp = Arc::new(Mutex::new(None));
         let state = AppState {
             subsystem: subsystem.clone(),
             journal,
@@ -845,6 +866,10 @@ impl StatusServer {
             control_clients: control_clients.clone(),
             download_trackers: download_trackers.clone(),
             reconnect_notifies: reconnect_notifies.clone(),
+            #[cfg(feature = "eink")]
+            display_name: display_name.clone(),
+            #[cfg(feature = "eink")]
+            cpu_temp: cpu_temp.clone(),
         };
 
         let app = build_router(state);
@@ -865,9 +890,9 @@ impl StatusServer {
             #[cfg(feature = "eink")]
             display_tx: None,
             #[cfg(feature = "eink")]
-            display_name: Arc::new(Mutex::new(None)),
+            display_name,
             #[cfg(feature = "eink")]
-            cpu_temp: Arc::new(Mutex::new(None)),
+            cpu_temp,
         })
     }
 }
@@ -2008,41 +2033,54 @@ async fn display_state_handler<J: JournalAccess + Send + 'static>(
     State(state): State<AppState<J>>,
 ) -> axum::Json<serde_json::Value> {
     let ss = state.subsystem.lock().await;
-    let readers: Vec<serde_json::Value> = ss
-        .readers
-        .iter()
-        .map(|(addr, r)| {
-            let ip = addr.rsplit_once(':').map_or(addr.as_str(), |(ip, _)| ip);
-            let state_str = match r.state {
-                ReaderConnectionState::Connected => "connected",
-                ReaderConnectionState::Connecting => "connecting",
-                ReaderConnectionState::Disconnected => "disconnected",
-            };
-            let drift_ms = r
-                .reader_info
-                .as_ref()
-                .and_then(|info| info.clock.as_ref())
-                .map(|c| c.drift_ms);
-            serde_json::json!({
-                "ip": ip,
-                "state": state_str,
-                "drift_ms": drift_ms,
-                "session_reads": r.reads_since_restart,
+    #[cfg(feature = "eink")]
+    {
+        let forwarder_name = state.display_name.lock().await.clone();
+        let cpu_temp = *state.cpu_temp.lock().await;
+        return axum::Json(
+            serde_json::to_value(subsystem_to_display_state(&ss, forwarder_name, cpu_temp))
+                .expect("display state serializes"),
+        );
+    }
+
+    #[cfg(not(feature = "eink"))]
+    {
+        let readers: Vec<serde_json::Value> = ss
+            .readers
+            .iter()
+            .map(|(addr, r)| {
+                let ip = addr.rsplit_once(':').map_or(addr.as_str(), |(ip, _)| ip);
+                let state_str = match r.state {
+                    ReaderConnectionState::Connected => "connected",
+                    ReaderConnectionState::Connecting => "connecting",
+                    ReaderConnectionState::Disconnected => "disconnected",
+                };
+                let drift_ms = r
+                    .reader_info
+                    .as_ref()
+                    .and_then(|info| info.clock.as_ref())
+                    .map(|c| c.drift_ms);
+                serde_json::json!({
+                    "ip": ip,
+                    "state": state_str,
+                    "drift_ms": drift_ms,
+                    "session_reads": r.reads_since_restart,
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    let total_reads: u64 = ss.readers.values().map(|r| r.reads_since_restart).sum();
+        let total_reads: u64 = ss.readers.values().map(|r| r.reads_since_restart).sum();
 
-    axum::Json(serde_json::json!({
-        "forwarder_name": null,
-        "local_ip": ss.local_ip,
-        "server_connected": ss.uplink_connected(),
-        "readers": readers,
-        "total_reads": total_reads,
-        "cpu_temp_celsius": null,
-        "battery": null,
-    }))
+        axum::Json(serde_json::json!({
+            "forwarder_name": null,
+            "local_ip": ss.local_ip,
+            "server_connected": ss.uplink_connected(),
+            "readers": readers,
+            "total_reads": total_reads,
+            "cpu_temp_celsius": null,
+            "battery": null,
+        }))
+    }
 }
 
 async fn logs_handler<J: JournalAccess + Send + 'static>(
@@ -4081,6 +4119,10 @@ mod tests {
             control_clients: server.control_clients.clone(),
             download_trackers: server.download_trackers.clone(),
             reconnect_notifies: server.reconnect_notifies.clone(),
+            #[cfg(feature = "eink")]
+            display_name: server.display_name.clone(),
+            #[cfg(feature = "eink")]
+            cpu_temp: server.cpu_temp.clone(),
         };
         update_cached_reader_info(
             &state,
@@ -5872,6 +5914,36 @@ target = "192.168.1.100:10000"
 
         let body: serde_json::Value = resp.json().await.expect("json body");
         assert_eq!(body["readers"][0]["current_epoch_name"], "Race Day");
+    }
+
+    #[cfg(feature = "eink")]
+    #[tokio::test]
+    async fn display_state_includes_forwarder_name_and_cpu_temp() {
+        let server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        server.set_display_name(Some("Start Line".to_owned())).await;
+        server.set_cpu_temp(Some(48.5)).await;
+
+        let addr = server.local_addr();
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/v1/display-state", addr))
+            .send()
+            .await
+            .expect("GET /api/v1/display-state");
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["forwarder_name"], "Start Line");
+        assert_eq!(body["cpu_temp_celsius"], 48.5);
     }
 
     #[cfg(feature = "eink")]

@@ -735,7 +735,6 @@ EOF
 
 [eink]
 enabled = true
-model = "2in13_v4"
 refresh_mode = "hybrid"
 full_refresh_interval = 10
 min_refresh_interval_ms = 1000

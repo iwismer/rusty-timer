@@ -303,9 +303,8 @@ async fn main() {
                 let eink_cfg = eink_config.clone();
                 #[cfg(target_os = "linux")]
                 {
-                    let eink_model = eink_config.model;
                     tokio::spawn(async move {
-                        match rt_eink::driver::EinkDriver::new(eink_model) {
+                        match rt_eink::driver::EinkDriver::new() {
                             Ok(mut driver) => {
                                 rt_eink::task::run_eink_task(
                                     display_rx,

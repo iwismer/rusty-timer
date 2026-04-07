@@ -2,7 +2,8 @@
 //!
 //! Only compiled when the `hardware` feature is enabled.
 
-use crate::state::DisplayModel;
+// The upstream crate exposes the 2.13" V3/V4 controller under the
+// `epd2in13_v2` module name, selected via crate features.
 use epd_waveshare::epd2in13_v2::{Display2in13, Epd2in13};
 use epd_waveshare::prelude::*;
 use rppal::gpio::{Gpio, InputPin, OutputPin};
@@ -47,8 +48,8 @@ pub struct EinkDriver {
 }
 
 impl EinkDriver {
-    /// Initialize the SPI bus, GPIO pins, and e-ink display controller.
-    pub fn new(model: DisplayModel) -> Result<Self, DriverError> {
+    /// Initialize the SPI bus, GPIO pins, and the fixed v4-targeted e-ink controller.
+    pub fn new() -> Result<Self, DriverError> {
         let mut spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
             .map_err(|e| DriverError::Spi(e.to_string()))?;
 
@@ -74,7 +75,7 @@ impl EinkDriver {
 
         let display = Display2in13::default();
 
-        info!(?model, "e-ink display driver initialized");
+        info!("e-ink display driver initialized");
 
         Ok(Self {
             spi,
