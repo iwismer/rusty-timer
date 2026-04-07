@@ -6479,17 +6479,19 @@ target = "192.168.1.100:10000"
 
         let mut config_file = NamedTempFile::new().expect("create temp config");
         let token_file = NamedTempFile::new().expect("create temp token");
+        // Use forward slashes so the path is valid in TOML basic strings on all
+        // platforms (backslashes are escape characters in TOML).
+        let token_path = token_file.path().display().to_string().replace('\\', "/");
         write!(
             config_file,
             r#"schema_version = 1
 [server]
 base_url = "https://timing.example.com"
 [auth]
-token_file = "{}"
+token_file = "{token_path}"
 [[readers]]
 target = "192.168.1.100:10000"
- "#,
-            token_file.path().display()
+"#
         )
         .expect("write config");
 
