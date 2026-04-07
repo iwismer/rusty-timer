@@ -44,6 +44,9 @@ users:
     homedir: /var/lib/rusty-timer
     no_create_home: false
 
+package_update: true
+package_upgrade: true
+
 # Ensure required packages are present.
 packages:
   - avahi-daemon
