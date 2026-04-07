@@ -915,6 +915,7 @@ DEBCONF_EOF
   "auto_shutdown_level": ${shutdown_level},
   "auto_shutdown_delay": ${shutdown_delay},
   "auto_power_on": true,
+  "auto_rtc_sync": true,
   "soft_poweroff_shell": "shutdown --poweroff 0",
   "long_tap_enable": true,
   "long_tap_shell": "sudo shutdown now"
