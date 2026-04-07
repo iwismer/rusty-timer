@@ -372,6 +372,14 @@ def render_user_data(config: SbcCloudInitConfig) -> str:
         "packages:\n"
         f"{package_lines}\n"
         "\n"
+        "bootcmd:\n"
+        "  - >-\n"
+        "    if [ -f /boot/firmware/config.txt ]; then BOOT_CFG=/boot/firmware/config.txt;\n"
+        "    elif [ -f /boot/config.txt ]; then BOOT_CFG=/boot/config.txt;\n"
+        "    else exit 0; fi;\n"
+        '    grep -q "^dtparam=spi=on" "$BOOT_CFG" || echo "dtparam=spi=on" >> "$BOOT_CFG";\n'
+        '    grep -q "^dtparam=i2c_arm=on" "$BOOT_CFG" || echo "dtparam=i2c_arm=on" >> "$BOOT_CFG"\n'
+        "\n"
     )
 
     if config.auto_first_boot:

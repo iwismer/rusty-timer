@@ -901,11 +901,17 @@ setup_ups() {
   log "Setting up PiSugar UPS support..."
 
   # 1. Enable I2C
-  if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt 2>/dev/null; then
-    echo "dtparam=i2c_arm=on" >> /boot/config.txt
-    log "Enabled I2C in /boot/config.txt"
+  local boot_config="/boot/config.txt"
+  if [[ ! -f "${boot_config}" ]]; then
+    boot_config="/boot/firmware/config.txt"
+  fi
+  if [[ ! -f "${boot_config}" ]]; then
+    log "Warning: could not find boot config.txt; I2C must be enabled manually for PiSugar UPS"
+  elif grep -q "^dtparam=i2c_arm=on" "${boot_config}" 2>/dev/null; then
+    log "I2C already enabled in ${boot_config}"
   else
-    log "I2C already enabled"
+    echo "dtparam=i2c_arm=on" >> "${boot_config}"
+    log "Enabled I2C in ${boot_config}"
   fi
 
   # 2. Determine PiSugar model for debconf pre-seeding
