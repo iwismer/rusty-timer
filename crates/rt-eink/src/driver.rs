@@ -62,7 +62,7 @@ impl EinkDriver {
 
         let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
             .map_err(|e| {
-                warn!(error = %e, "e-ink driver: SPI bus init failed — is SPI enabled in /boot/config.txt?");
+                warn!(error = %e, "e-ink driver: SPI bus init failed — is SPI enabled? Check dtparam=spi=on in /boot/firmware/config.txt (or /boot/config.txt on older OS)");
                 DriverError::Spi(e.to_string())
             })?;
         let mut spi = SimpleHalSpiDevice::new(spi);
