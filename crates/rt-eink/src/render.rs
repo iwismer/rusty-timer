@@ -143,7 +143,7 @@ where
     let char_w = 10_i32; // FONT_10X20
     let text_w = msg.len() as i32 * char_w;
     let x = (DISPLAY_WIDTH as i32 - text_w) / 2;
-    let y = (DISPLAY_HEIGHT as i32 + LARGE_CHAR_H as i32) / 2;
+    let y = i32::midpoint(DISPLAY_HEIGHT as i32, LARGE_CHAR_H as i32);
     Text::new(msg, Point::new(x, y), style).draw(target)?;
 
     Ok(())
