@@ -126,6 +126,30 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Shutdown screen
+// ---------------------------------------------------------------------------
+
+/// Draw a centered "Powered Off" message on a cleared display.
+pub fn render_shutdown<D>(target: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    use crate::layout::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
+
+    target.clear(BinaryColor::Off)?;
+
+    let style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    let msg = "Powered Off";
+    let char_w = 10_i32; // FONT_10X20
+    let text_w = msg.len() as i32 * char_w;
+    let x = (DISPLAY_WIDTH as i32 - text_w) / 2;
+    let y = (DISPLAY_HEIGHT as i32 + LARGE_CHAR_H as i32) / 2;
+    Text::new(msg, Point::new(x, y), style).draw(target)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helper: draw one reader block (two lines)
 // ---------------------------------------------------------------------------
 
@@ -371,6 +395,12 @@ mod tests {
         };
         let mut display = NoopDisplay;
         render_display(&mut display, &state).unwrap();
+    }
+
+    #[test]
+    fn render_shutdown_does_not_panic() {
+        let mut display = NoopDisplay;
+        render_shutdown(&mut display).unwrap();
     }
 
     #[test]
