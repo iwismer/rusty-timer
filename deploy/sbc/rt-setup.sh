@@ -907,14 +907,42 @@ setup_ups() {
     log "I2C already enabled"
   fi
 
-  # 2. Install pisugar-server via official installer (always gets latest release)
+  # 2. Determine PiSugar model for debconf pre-seeding
+  local pisugar_model="${RT_SETUP_UPS_MODEL:-PiSugar 3}"
+  if ! is_noninteractive_mode; then
+    echo "Select PiSugar model:"
+    echo "  1) PiSugar 3"
+    echo "  2) PiSugar 2 Pro"
+    echo "  3) PiSugar 2 (4-LEDs)"
+    echo "  4) PiSugar 2 (2-LEDs)"
+    read -rp "Choice [1]: " model_choice
+    case "${model_choice}" in
+      2) pisugar_model="PiSugar 2 Pro" ;;
+      3) pisugar_model="PiSugar 2 (4-LEDs)" ;;
+      4) pisugar_model="PiSugar 2 (2-LEDs)" ;;
+      *) pisugar_model="PiSugar 3" ;;
+    esac
+  fi
+  log "Using PiSugar model: ${pisugar_model}"
+
+  # 3. Pre-seed debconf so the .deb install is non-interactive
+  apt-get install -y debconf-utils >/dev/null 2>&1 || true
+  debconf-set-selections <<DEBCONF_EOF
+pisugar-server pisugar-server/model select ${pisugar_model}
+pisugar-server pisugar-server/auth-username string admin
+pisugar-server pisugar-server/auth-password password admin
+pisugar-poweroff pisugar-poweroff/model select ${pisugar_model}
+DEBCONF_EOF
+  log "Pre-seeded debconf for non-interactive PiSugar package install"
+
+  # 4. Install pisugar-server via official installer (always gets latest release)
   log "Installing pisugar-server via official PiSugar installer..."
   local installer="/tmp/pisugar-power-manager.sh"
   curl -fsSL -o "${installer}" "${PISUGAR_INSTALL_SCRIPT_URL}"
-  bash "${installer}" -c release
+  DEBIAN_FRONTEND=noninteractive bash "${installer}" -c release
   rm -f "${installer}"
 
-  # 3. Configure pisugar-server
+  # 5. Configure pisugar-server
   local shutdown_level="${RT_SETUP_UPS_SHUTDOWN_LEVEL:-5}"
   local shutdown_delay="${RT_SETUP_UPS_SHUTDOWN_DELAY:-30}"
   mkdir -p /etc/pisugar-server
@@ -932,12 +960,12 @@ setup_ups() {
 PISUGAR_EOF
   log "Wrote pisugar-server config (shutdown at ${shutdown_level}%, delay ${shutdown_delay}s)"
 
-  # 4. Enable and start pisugar-server
+  # 6. Enable and start pisugar-server
   systemctl enable pisugar-server.service
   systemctl start pisugar-server.service || true
   log "pisugar-server service enabled and started"
 
-  # 5. Add systemd ordering
+  # 7. Add systemd ordering
   local service_file="/etc/systemd/system/rt-forwarder.service"
   if [[ -f "${service_file}" ]]; then
     if ! grep -q "After=pisugar-server.service" "${service_file}"; then
@@ -947,7 +975,7 @@ PISUGAR_EOF
     fi
   fi
 
-  # 6. Update forwarder.toml — add [ups] section if missing, or ensure enabled = true
+  # 8. Update forwarder.toml — add [ups] section if missing, or ensure enabled = true
   local config_file="${CONFIG_DIR}/forwarder.toml"
   if [[ -f "${config_file}" ]]; then
     if ! grep -q '^\[ups\]' "${config_file}"; then
