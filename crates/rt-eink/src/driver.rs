@@ -8,7 +8,7 @@ use epd_waveshare::epd2in13_v2::{Display2in13, Epd2in13};
 use epd_waveshare::prelude::*;
 use rppal::gpio::{Gpio, InputPin, OutputPin};
 use rppal::hal::Delay;
-use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
+use rppal::spi::{Bus, Mode, SimpleHalSpiDevice, SlaveSelect, Spi};
 use tracing::{debug, info};
 
 /// GPIO pin assignments for the Waveshare 2.13" E-Ink HAT.
@@ -41,8 +41,8 @@ impl std::error::Error for DriverError {}
 
 /// Wraps the initialized SPI, GPIO pins, and e-ink display driver.
 pub struct EinkDriver {
-    spi: Spi,
-    epd: Epd2in13<Spi, InputPin, OutputPin, OutputPin, Delay>,
+    spi: SimpleHalSpiDevice,
+    epd: Epd2in13<SimpleHalSpiDevice, InputPin, OutputPin, OutputPin, Delay>,
     delay: Delay,
     display: Display2in13,
 }
@@ -50,8 +50,9 @@ pub struct EinkDriver {
 impl EinkDriver {
     /// Initialize the SPI bus, GPIO pins, and the fixed v4-targeted e-ink controller.
     pub fn new() -> Result<Self, DriverError> {
-        let mut spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
+        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
             .map_err(|e| DriverError::Spi(e.to_string()))?;
+        let mut spi = SimpleHalSpiDevice::new(spi);
 
         let gpio = Gpio::new().map_err(|e| DriverError::Gpio(e.to_string()))?;
 
