@@ -9,7 +9,7 @@ use epd_waveshare::prelude::*;
 use rppal::gpio::{Gpio, InputPin, OutputPin};
 use rppal::hal::Delay;
 use rppal::spi::{Bus, Mode, SimpleHalSpiDevice, SlaveSelect, Spi};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// GPIO pin assignments for the Waveshare 2.13" E-Ink HAT.
 const PIN_DC: u8 = 25;
@@ -50,33 +50,65 @@ pub struct EinkDriver {
 impl EinkDriver {
     /// Initialize the SPI bus, GPIO pins, and the fixed v4-targeted e-ink controller.
     pub fn new() -> Result<Self, DriverError> {
-        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
-            .map_err(|e| DriverError::Spi(e.to_string()))?;
-        let mut spi = SimpleHalSpiDevice::new(spi);
+        info!(
+            spi_bus = "SPI0",
+            spi_slave = "SS0",
+            spi_clock_hz = SPI_CLOCK_HZ,
+            pin_dc = PIN_DC,
+            pin_rst = PIN_RST,
+            pin_busy = PIN_BUSY,
+            "e-ink driver: starting initialization"
+        );
 
-        let gpio = Gpio::new().map_err(|e| DriverError::Gpio(e.to_string()))?;
+        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_CLOCK_HZ, Mode::Mode0)
+            .map_err(|e| {
+                warn!(error = %e, "e-ink driver: SPI bus init failed — is SPI enabled in /boot/config.txt?");
+                DriverError::Spi(e.to_string())
+            })?;
+        let mut spi = SimpleHalSpiDevice::new(spi);
+        debug!("e-ink driver: SPI bus opened");
+
+        let gpio = Gpio::new().map_err(|e| {
+            warn!(error = %e, "e-ink driver: GPIO init failed — check /dev/gpiomem permissions");
+            DriverError::Gpio(e.to_string())
+        })?;
+        debug!("e-ink driver: GPIO controller opened");
 
         let busy = gpio
             .get(PIN_BUSY)
-            .map_err(|e| DriverError::Gpio(format!("BUSY pin {PIN_BUSY}: {e}")))?
+            .map_err(|e| {
+                warn!(pin = PIN_BUSY, error = %e, "e-ink driver: failed to acquire BUSY pin");
+                DriverError::Gpio(format!("BUSY pin {PIN_BUSY}: {e}"))
+            })?
             .into_input();
         let dc = gpio
             .get(PIN_DC)
-            .map_err(|e| DriverError::Gpio(format!("DC pin {PIN_DC}: {e}")))?
+            .map_err(|e| {
+                warn!(pin = PIN_DC, error = %e, "e-ink driver: failed to acquire DC pin");
+                DriverError::Gpio(format!("DC pin {PIN_DC}: {e}"))
+            })?
             .into_output();
         let rst = gpio
             .get(PIN_RST)
-            .map_err(|e| DriverError::Gpio(format!("RST pin {PIN_RST}: {e}")))?
+            .map_err(|e| {
+                warn!(pin = PIN_RST, error = %e, "e-ink driver: failed to acquire RST pin");
+                DriverError::Gpio(format!("RST pin {PIN_RST}: {e}"))
+            })?
             .into_output();
+        debug!("e-ink driver: GPIO pins acquired (BUSY={PIN_BUSY}, DC={PIN_DC}, RST={PIN_RST})");
 
         let mut delay = Delay::new();
 
+        info!("e-ink driver: sending EPD init sequence (this talks to the display over SPI)");
         let epd = Epd2in13::new(&mut spi, busy, dc, rst, &mut delay, None)
-            .map_err(|e| DriverError::Display(format!("EPD init: {e:?}")))?;
+            .map_err(|e| {
+                warn!(error = ?e, "e-ink driver: EPD controller init failed — check wiring and HAT seating");
+                DriverError::Display(format!("EPD init: {e:?}"))
+            })?;
 
         let display = Display2in13::default();
 
-        info!("e-ink display driver initialized");
+        info!("e-ink display driver initialized successfully");
 
         Ok(Self {
             spi,
@@ -95,11 +127,17 @@ impl EinkDriver {
     pub fn full_refresh(&mut self) -> Result<(), DriverError> {
         self.epd
             .set_refresh(&mut self.spi, &mut self.delay, RefreshLut::Full)
-            .map_err(|e| DriverError::Display(format!("set full LUT: {e:?}")))?;
+            .map_err(|e| {
+                warn!(error = ?e, "e-ink driver: failed to set full refresh LUT");
+                DriverError::Display(format!("set full LUT: {e:?}"))
+            })?;
         self.epd
             .update_and_display_frame(&mut self.spi, self.display.buffer(), &mut self.delay)
-            .map_err(|e| DriverError::Display(format!("full refresh: {e:?}")))?;
-        debug!("full refresh complete");
+            .map_err(|e| {
+                warn!(error = ?e, "e-ink driver: full refresh frame update failed");
+                DriverError::Display(format!("full refresh: {e:?}"))
+            })?;
+        debug!("e-ink driver: full refresh complete");
         Ok(())
     }
 
@@ -107,11 +145,17 @@ impl EinkDriver {
     pub fn partial_refresh(&mut self) -> Result<(), DriverError> {
         self.epd
             .set_refresh(&mut self.spi, &mut self.delay, RefreshLut::Quick)
-            .map_err(|e| DriverError::Display(format!("set partial LUT: {e:?}")))?;
+            .map_err(|e| {
+                warn!(error = ?e, "e-ink driver: failed to set partial refresh LUT");
+                DriverError::Display(format!("set partial LUT: {e:?}"))
+            })?;
         self.epd
             .update_and_display_frame(&mut self.spi, self.display.buffer(), &mut self.delay)
-            .map_err(|e| DriverError::Display(format!("partial refresh: {e:?}")))?;
-        debug!("partial refresh complete");
+            .map_err(|e| {
+                warn!(error = ?e, "e-ink driver: partial refresh frame update failed");
+                DriverError::Display(format!("partial refresh: {e:?}"))
+            })?;
+        debug!("e-ink driver: partial refresh complete");
         Ok(())
     }
 
@@ -119,7 +163,10 @@ impl EinkDriver {
     pub fn sleep(&mut self) -> Result<(), DriverError> {
         self.epd
             .sleep(&mut self.spi, &mut self.delay)
-            .map_err(|e| DriverError::Display(format!("sleep: {e:?}")))?;
+            .map_err(|e| {
+                warn!(error = ?e, "e-ink driver: failed to put display to sleep");
+                DriverError::Display(format!("sleep: {e:?}"))
+            })?;
         info!("e-ink display sleeping");
         Ok(())
     }

@@ -18,10 +18,17 @@ pub async fn run_eink_task<F>(
 ) where
     F: FnMut(&DisplayState, bool),
 {
-    info!("eink task started");
+    info!(
+        refresh_mode = ?config.refresh_mode,
+        full_refresh_interval = config.full_refresh_interval,
+        min_refresh_interval_ms = config.min_refresh_interval_ms,
+        telemetry_interval_secs = config.telemetry_interval_secs,
+        "eink task started"
+    );
 
     let min_refresh = Duration::from_millis(config.min_refresh_interval_ms);
     let mut partial_count: u32 = 0;
+    let mut refresh_count: u64 = 0;
     let mut telemetry_tick = interval(Duration::from_secs(config.telemetry_interval_secs));
     // Consume the first (immediate) tick so the interval fires after the full period.
     telemetry_tick.tick().await;
@@ -29,8 +36,14 @@ pub async fn run_eink_task<F>(
     // --- Initial full refresh ---
     let mut last_refresh = {
         let state = state_rx.borrow_and_update().clone();
-        debug!("eink initial full refresh");
+        info!(
+            total_reads = state.total_reads,
+            readers = state.readers.len(),
+            server_connected = state.server_connected,
+            "eink: performing initial full refresh"
+        );
         draw_fn(&state, true);
+        refresh_count += 1;
         Instant::now()
         // partial_count stays 0; initial draw does not count toward the partial tally
     };
@@ -67,8 +80,16 @@ pub async fn run_eink_task<F>(
 
                 let state = state_rx.borrow_and_update().clone();
                 let full = decide_full(&config, partial_count);
-                debug!(full, "eink refresh on state change");
+                debug!(
+                    full,
+                    partial_count,
+                    refresh_count,
+                    total_reads = state.total_reads,
+                    readers = state.readers.len(),
+                    "eink: refresh on state change"
+                );
                 draw_fn(&state, full);
+                refresh_count += 1;
                 last_refresh = Instant::now();
                 if full {
                     partial_count = 0;
@@ -94,8 +115,15 @@ pub async fn run_eink_task<F>(
                 }
                 let state = state_rx.borrow_and_update().clone();
                 let full = decide_full(&config, partial_count);
-                debug!(full, "eink refresh on telemetry tick");
+                debug!(
+                    full,
+                    partial_count,
+                    refresh_count,
+                    total_reads = state.total_reads,
+                    "eink: refresh on telemetry tick"
+                );
                 draw_fn(&state, full);
+                refresh_count += 1;
                 last_refresh = Instant::now();
                 if full {
                     partial_count = 0;
@@ -106,7 +134,7 @@ pub async fn run_eink_task<F>(
         }
     }
 
-    info!("eink task stopped");
+    info!(refresh_count, "eink task stopped");
 }
 
 /// Determine whether the next refresh should be full or partial.
