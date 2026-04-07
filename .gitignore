@@ -50,3 +50,4 @@ deploy/sbc/generated/
 
 # Tauri sidecar binaries (copied during build)
 apps/receiver-ui/src-tauri/binaries/
+.superpowers/

@@ -19,6 +19,7 @@ def make_args(**overrides: object) -> argparse.Namespace:
         "bibchip": None,
         "ppl": None,
         "log_level": "info",
+        "eink_sim": False,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -160,6 +161,7 @@ class MainValidationTests(unittest.TestCase):
             bibchip_path=None,
             ppl_path=None,
             log_level="info",
+            eink_sim=False,
         )
 
     @patch("scripts.dev.console.input")
@@ -555,13 +557,17 @@ class SetupOrderingTests(unittest.TestCase):
         build_dashboard_mock.side_effect = lambda skip_build: call_order.append(
             f"build_dashboard({skip_build})"
         )
-        build_rust_mock.side_effect = lambda skip_build: call_order.append(f"build_rust({skip_build})")
+        build_rust_mock.side_effect = (
+            lambda skip_build, eink_sim=False: call_order.append(
+                f"build_rust({skip_build}, eink_sim={eink_sim})"
+            )
+        )
 
         dev.setup(skip_build=False, emulators=[dev.EmulatorSpec(port=10001)])
 
         self.assertEqual(call_order[0], "npm_install")
         self.assertEqual(call_order[1], "build_dashboard(False)")
-        self.assertEqual(call_order[2], "build_rust(False)")
+        self.assertEqual(call_order[2], "build_rust(False, eink_sim=False)")
 
 
 class NpmInstallTests(unittest.TestCase):
@@ -618,7 +624,7 @@ class BuildDashboardTests(unittest.TestCase):
 class BuildRustTests(unittest.TestCase):
     @patch("scripts.dev.subprocess.run")
     def test_build_rust_builds_receiver_tauri_shell(self, run_mock) -> None:
-        dev.build_rust(skip_build=False)
+        dev.build_rust(skip_build=False, eink_sim=False)
 
         self.assertEqual(len(run_mock.call_args_list), 2)
 
@@ -644,6 +650,14 @@ class BuildRustTests(unittest.TestCase):
             tauri_build,
             ["cargo", "build", "-p", "receiver-tauri", "--no-default-features"],
         )
+
+    @patch("scripts.dev.subprocess.run")
+    def test_build_rust_enables_eink_for_forwarder_when_sim_requested(self, run_mock) -> None:
+        dev.build_rust(skip_build=False, eink_sim=True)
+
+        workspace_build = run_mock.call_args_list[0].args[0]
+        features = workspace_build[workspace_build.index("--features") + 1]
+        self.assertEqual(features, "forwarder/embed-ui,forwarder/eink")
 
 
 class BuildPanesTests(unittest.TestCase):

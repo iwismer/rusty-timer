@@ -36,6 +36,8 @@ pub struct ForwarderConfig {
     pub update: UpdateConfig,
     pub ups: UpsConfig,
     pub readers: Vec<ReaderConfig>,
+    #[cfg(feature = "eink")]
+    pub eink: Option<rt_eink::state::EinkConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +108,8 @@ pub struct RawConfig {
     pub update: Option<RawUpdateConfig>,
     pub ups: Option<RawUpsConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
+    #[cfg(feature = "eink")]
+    pub eink: Option<rt_eink::state::EinkConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,6 +360,19 @@ pub fn load_config_from_str(
         });
     }
 
+    #[cfg(feature = "eink")]
+    let eink = raw
+        .eink
+        .map(|config| {
+            if config.telemetry_interval_secs == 0 {
+                return Err(ConfigError::InvalidValue(
+                    "eink.telemetry_interval_secs must be at least 1".to_owned(),
+                ));
+            }
+            Ok(config)
+        })
+        .transpose()?;
+
     Ok(ForwarderConfig {
         schema_version,
         token,
@@ -371,6 +388,8 @@ pub fn load_config_from_str(
         update,
         ups,
         readers,
+        #[cfg(feature = "eink")]
+        eink,
     })
 }
 
@@ -538,6 +557,25 @@ target = "192.168.1.100"
         let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
         assert!(
             err.to_string().contains("ups.upstream_heartbeat_secs"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn eink_section_absent_parses_ok() {
+        let (toml, _dir) = minimal_toml("");
+        let _cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        #[cfg(feature = "eink")]
+        assert!(_cfg.eink.is_none());
+    }
+
+    #[cfg(feature = "eink")]
+    #[test]
+    fn eink_telemetry_interval_zero_rejected() {
+        let (toml, _dir) = minimal_toml("[eink]\ntelemetry_interval_secs = 0");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("eink.telemetry_interval_secs"),
             "error: {err}"
         );
     }
