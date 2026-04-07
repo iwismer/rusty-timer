@@ -31,6 +31,10 @@ PISUGAR_SERVER_VERSION="1.7.8"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+log() {
+  echo "[rt-setup] $*"
+}
+
 bool_env_is_true() {
   local raw="${1:-}"
   local lower
@@ -882,11 +886,10 @@ DEBCONF_EOF
   mkdir -p /etc/pisugar-server
   cat > /etc/pisugar-server/config.json <<PISUGAR_EOF
 {
-  "model": "PiSugar 3",
-  "safe_shutdown_level": ${shutdown_level},
-  "safe_shutdown_delay": ${shutdown_delay},
+  "digest_auth": ["admin", "admin"],
+  "auto_shutdown_level": ${shutdown_level},
+  "auto_shutdown_delay": ${shutdown_delay},
   "auto_power_on": true,
-  "soft_poweroff": true,
   "soft_poweroff_shell": "shutdown --poweroff 0",
   "long_tap_enable": true,
   "long_tap_shell": "sudo shutdown now"
@@ -909,7 +912,7 @@ PISUGAR_EOF
     fi
   fi
 
-  # 6. Update forwarder.toml
+  # 6. Update forwarder.toml — add [ups] section if missing, or ensure enabled = true
   local config_file="${CONFIG_DIR}/forwarder.toml"
   if [[ -f "${config_file}" ]]; then
     if ! grep -q '^\[ups\]' "${config_file}"; then
@@ -919,6 +922,9 @@ PISUGAR_EOF
 enabled = true
 UPS_EOF
       log "Added [ups] section to forwarder.toml"
+    elif grep -q '^enabled\s*=\s*false' <(sed -n '/^\[ups\]/,/^\[/p' "${config_file}"); then
+      sed -i '/^\[ups\]/,/^\[/{s/^enabled\s*=\s*false/enabled = true/}' "${config_file}"
+      log "Set ups.enabled = true in forwarder.toml"
     fi
   fi
 
