@@ -314,11 +314,11 @@ async fn main() {
                                     |state, full| {
                                         use embedded_graphics::pixelcolor::BinaryColor;
                                         use embedded_graphics::prelude::*;
-                                        driver.display_mut().clear(BinaryColor::Off).ok();
-                                        if let Err(e) = rt_eink::render::render_display(
-                                            driver.display_mut(),
-                                            state,
-                                        ) {
+                                        let mut display = driver.display_mut().color_converted();
+                                        display.clear(BinaryColor::Off).ok();
+                                        if let Err(e) =
+                                            rt_eink::render::render_display(&mut display, state)
+                                        {
                                             tracing::warn!("eink render error: {e}");
                                             return;
                                         }
