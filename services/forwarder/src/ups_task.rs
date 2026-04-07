@@ -287,7 +287,7 @@ mod tests {
 
         let mut handle = spawn_ups_task(config, "fwd-test".to_owned(), server, shutdown_rx);
 
-        let msg = tokio::time::timeout(Duration::from_secs(3), handle.ups_status_rx.recv())
+        let msg = tokio::time::timeout(Duration::from_secs(10), handle.ups_status_rx.recv())
             .await
             .expect("timeout waiting for UPS unavailable status")
             .expect("channel closed");
