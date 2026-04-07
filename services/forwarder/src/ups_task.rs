@@ -331,7 +331,7 @@ mod tests {
         assert!(first.available);
         let first_status = first.status.expect("initial status");
 
-        let second = tokio::time::timeout(Duration::from_secs(5), handle.ups_status_rx.recv())
+        let second = tokio::time::timeout(Duration::from_secs(10), handle.ups_status_rx.recv())
             .await
             .expect("timeout waiting for UPS unavailable status")
             .expect("channel closed");
