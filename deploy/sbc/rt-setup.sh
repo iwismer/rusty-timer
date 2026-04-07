@@ -253,6 +253,7 @@ ReadWritePaths=/var/lib/rusty-timer
 ReadWritePaths=/etc/rusty-timer
 DeviceAllow=/dev/spidev0.0 rw
 DeviceAllow=/dev/gpiomem rw
+DeviceAllow=/dev/gpiochip0 rw
 TimeoutStopSec=30s
 
 [Install]

@@ -60,9 +60,10 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/rusty-timer
 ReadWritePaths=/etc/rusty-timer
-# Allow access to SPI device for e-ink display.
+# Allow access to SPI device and GPIO for e-ink display.
 DeviceAllow=/dev/spidev0.0 rw
 DeviceAllow=/dev/gpiomem rw
+DeviceAllow=/dev/gpiochip0 rw
 
 # Give the forwarder time to flush the SQLite WAL before SIGKILL.
 TimeoutStopSec=30s
