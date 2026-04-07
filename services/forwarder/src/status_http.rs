@@ -279,7 +279,12 @@ fn subsystem_to_display_state(
         readers,
         total_reads,
         cpu_temp_celsius: cpu_temp,
-        battery: None, // Future PiSugar integration
+        battery: ss.ups_status().and_then(|u| {
+            u.status.as_ref().map(|s| rt_eink::state::BatteryState {
+                percent: s.battery_percent,
+                charging: s.charging,
+            })
+        }),
     }
 }
 
@@ -459,6 +464,8 @@ impl StatusServer {
     /// Update the UPS status snapshot in the subsystem state.
     pub async fn set_ups_status(&self, state: UpsStatusState) {
         self.subsystem.lock().await.set_ups_status(state);
+        #[cfg(feature = "eink")]
+        self.publish_display_state().await;
     }
 
     pub fn control_clients(
