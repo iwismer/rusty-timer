@@ -557,8 +557,13 @@ impl StatusServer {
 
     #[cfg(feature = "eink")]
     pub async fn set_cpu_temp(&self, temp: Option<f32>) {
-        *self.cpu_temp.lock().await = temp;
+        self.set_cpu_temp_cached(temp).await;
         self.publish_display_state().await;
+    }
+
+    #[cfg(feature = "eink")]
+    pub async fn set_cpu_temp_cached(&self, temp: Option<f32>) {
+        *self.cpu_temp.lock().await = temp;
     }
 
     /// Retrieve a clone of the cached reader info for a given reader IP.
@@ -5970,6 +5975,30 @@ target = "192.168.1.100:10000"
             .await
             .expect("display state publish timed out")
             .expect("display state sender dropped");
+    }
+
+    #[cfg(feature = "eink")]
+    #[tokio::test]
+    async fn cpu_temp_cache_update_does_not_publish_display_state() {
+        let mut server = StatusServer::start(
+            StatusConfig {
+                bind: "127.0.0.1:0".to_owned(),
+                forwarder_version: "0.2.0".to_owned(),
+            },
+            SubsystemStatus::ready(),
+        )
+        .await
+        .expect("start status server");
+
+        let (display_tx, mut display_rx) =
+            tokio::sync::watch::channel(rt_eink::state::DisplayState::initial());
+        server.set_display_sender(display_tx);
+
+        server.set_cpu_temp_cached(Some(41.0)).await;
+
+        tokio::time::timeout(Duration::from_millis(100), display_rx.changed())
+            .await
+            .expect_err("cpu temp cache update should not publish display state");
     }
 
     #[tokio::test]

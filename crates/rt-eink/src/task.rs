@@ -12,6 +12,7 @@ use crate::state::{DisplayState, EinkConfig, RefreshMode};
 ///   refresh and `false` for a partial refresh.
 pub async fn run_eink_task<F>(
     mut state_rx: watch::Receiver<DisplayState>,
+    mut shutdown_rx: watch::Receiver<bool>,
     config: EinkConfig,
     mut draw_fn: F,
 ) where
@@ -36,6 +37,12 @@ pub async fn run_eink_task<F>(
 
     loop {
         tokio::select! {
+            result = shutdown_rx.changed() => {
+                if result.is_err() || *shutdown_rx.borrow() {
+                    info!("eink task: shutdown requested, stopping");
+                    break;
+                }
+            }
             result = state_rx.changed() => {
                 if result.is_err() {
                     info!("eink task: watch sender dropped, stopping");
@@ -45,7 +52,17 @@ pub async fn run_eink_task<F>(
                 // Debounce: if last refresh was too recent, sleep the remainder.
                 let elapsed = last_refresh.elapsed();
                 if elapsed < min_refresh {
-                    tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap()).await;
+                    let sleep = tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap());
+                    tokio::pin!(sleep);
+                    tokio::select! {
+                        _ = &mut sleep => {}
+                        result = shutdown_rx.changed() => {
+                            if result.is_err() || *shutdown_rx.borrow() {
+                                info!("eink task: shutdown requested during debounce, stopping");
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 let state = state_rx.borrow_and_update().clone();
@@ -63,7 +80,17 @@ pub async fn run_eink_task<F>(
                 // Periodic redraw (e.g., to update clock / telemetry even when state unchanged).
                 let elapsed = last_refresh.elapsed();
                 if elapsed < min_refresh {
-                    tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap()).await;
+                    let sleep = tokio::time::sleep(min_refresh.checked_sub(elapsed).unwrap());
+                    tokio::pin!(sleep);
+                    tokio::select! {
+                        _ = &mut sleep => {}
+                        result = shutdown_rx.changed() => {
+                            if result.is_err() || *shutdown_rx.borrow() {
+                                info!("eink task: shutdown requested during debounce, stopping");
+                                break;
+                            }
+                        }
+                    }
                 }
                 let state = state_rx.borrow_and_update().clone();
                 let full = decide_full(&config, partial_count);
@@ -133,13 +160,20 @@ mod tests {
     #[tokio::test]
     async fn task_performs_initial_full_refresh() {
         let (tx, rx) = watch::channel(DisplayState::initial());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
         let log_clone = log.clone();
 
-        let handle = tokio::spawn(run_eink_task(rx, test_config(), make_draw_fn(log_clone)));
+        let handle = tokio::spawn(run_eink_task(
+            rx,
+            shutdown_rx,
+            test_config(),
+            make_draw_fn(log_clone),
+        ));
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         drop(tx);
+        drop(shutdown_tx);
         let _ = handle.await;
 
         let calls = log.lock().unwrap();
@@ -150,10 +184,16 @@ mod tests {
     #[tokio::test]
     async fn task_redraws_on_state_change() {
         let (tx, rx) = watch::channel(DisplayState::initial());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
         let log_clone = log.clone();
 
-        let handle = tokio::spawn(run_eink_task(rx, test_config(), make_draw_fn(log_clone)));
+        let handle = tokio::spawn(run_eink_task(
+            rx,
+            shutdown_rx,
+            test_config(),
+            make_draw_fn(log_clone),
+        ));
 
         // Give the task time to perform the initial draw.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -162,6 +202,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         drop(tx);
+        drop(shutdown_tx);
         let _ = handle.await;
 
         let calls = log.lock().unwrap();
@@ -181,12 +222,19 @@ mod tests {
     #[tokio::test]
     async fn task_stops_when_sender_dropped() {
         let (tx, rx) = watch::channel(DisplayState::initial());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
 
-        let handle = tokio::spawn(run_eink_task(rx, test_config(), make_draw_fn(log)));
+        let handle = tokio::spawn(run_eink_task(
+            rx,
+            shutdown_rx,
+            test_config(),
+            make_draw_fn(log),
+        ));
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         drop(tx);
+        drop(shutdown_tx);
 
         // Task should complete well within 2 seconds after the sender is dropped.
         tokio::time::timeout(Duration::from_secs(2), handle)
@@ -194,6 +242,30 @@ mod tests {
             .expect("task did not stop within 2 seconds")
             .expect("task panicked");
         // (return type is () so no value to assert)
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_stops_task_even_with_live_state_sender() {
+        let (state_tx, state_rx) = watch::channel(DisplayState::initial());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let log: DrawLog = Arc::new(Mutex::new(vec![]));
+
+        let handle = tokio::spawn(run_eink_task(
+            state_rx,
+            shutdown_rx,
+            test_config(),
+            make_draw_fn(log),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        shutdown_tx.send(true).expect("send shutdown");
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("task did not stop within 2 seconds")
+            .expect("task panicked");
+
+        drop(state_tx);
     }
 
     #[tokio::test]
@@ -206,10 +278,16 @@ mod tests {
         };
 
         let (tx, rx) = watch::channel(DisplayState::initial());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let log: DrawLog = Arc::new(Mutex::new(vec![]));
         let log_clone = log.clone();
 
-        let handle = tokio::spawn(run_eink_task(rx, config, make_draw_fn(log_clone)));
+        let handle = tokio::spawn(run_eink_task(
+            rx,
+            shutdown_rx,
+            config,
+            make_draw_fn(log_clone),
+        ));
 
         // Wait for initial draw.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -221,6 +299,7 @@ mod tests {
         }
 
         drop(tx);
+        drop(shutdown_tx);
         let _ = handle.await;
 
         let calls = log.lock().unwrap();

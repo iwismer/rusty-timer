@@ -295,12 +295,13 @@ async fn main() {
                     loop {
                         tick.tick().await;
                         let temp = read_cpu_temp();
-                        ss_temp.set_cpu_temp(temp).await;
+                        ss_temp.set_cpu_temp_cached(temp).await;
                     }
                 });
 
                 // Spawn the e-ink display task.
                 let eink_cfg = eink_config.clone();
+                let eink_shutdown_rx = shutdown_rx.clone();
                 #[cfg(target_os = "linux")]
                 {
                     tokio::spawn(async move {
@@ -308,6 +309,7 @@ async fn main() {
                             Ok(mut driver) => {
                                 rt_eink::task::run_eink_task(
                                     display_rx,
+                                    eink_shutdown_rx,
                                     eink_cfg,
                                     |state, full| {
                                         use embedded_graphics::pixelcolor::BinaryColor;
@@ -347,8 +349,13 @@ async fn main() {
                 #[cfg(not(target_os = "linux"))]
                 {
                     tokio::spawn(async move {
-                        rt_eink::task::run_eink_task(display_rx, eink_cfg, |_state, _full| {})
-                            .await;
+                        rt_eink::task::run_eink_task(
+                            display_rx,
+                            eink_shutdown_rx,
+                            eink_cfg,
+                            |_state, _full| {},
+                        )
+                        .await;
                     });
                     warn!(
                         "e-ink hardware updates are only supported on Linux; using no-op renderer"
