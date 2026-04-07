@@ -666,17 +666,21 @@ def seed_tokens() -> None:
         console.print(f"  [green]Seeded[/green] {device_type} token (sha256={hex_hash[:16]}… device_id={device_id})")
 
 
-def build_rust(skip_build: bool) -> None:
+def build_rust(skip_build: bool, *, eink_sim: bool = False) -> None:
     if skip_build:
         console.print("[dim]Skipping Rust build (--no-build)[/dim]")
         return
     console.print("[bold]Building Rust binaries…[/bold]")
     # Build server, forwarder, and emulator with default features.
+    forwarder_features = ["forwarder/embed-ui"]
+    if eink_sim:
+        forwarder_features.append("forwarder/eink")
+
     subprocess.run(
         [
             "cargo", "build",
             "-p", "server",
-            "-p", "forwarder", "--features", "forwarder/embed-ui",
+            "-p", "forwarder", "--features", ",".join(forwarder_features),
             "-p", "emulator",
         ],
         check=True,
@@ -717,7 +721,12 @@ def build_dashboard(skip_build: bool = False) -> None:
     console.print("  [green]Dashboard build complete.[/green]")
 
 
-def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None) -> None:
+def setup(
+    skip_build: bool = False,
+    emulators: list[EmulatorSpec] | None = None,
+    *,
+    eink_sim: bool = False,
+) -> None:
     check_prereqs()
     start_postgres()
     wait_for_postgres()
@@ -726,7 +735,7 @@ def setup(skip_build: bool = False, emulators: list[EmulatorSpec] | None = None)
     seed_tokens()
     npm_install()
     build_dashboard(skip_build=skip_build)
-    build_rust(skip_build=skip_build)
+    build_rust(skip_build=skip_build, eink_sim=eink_sim)
 
 
 # ---------------------------------------------------------------------------
@@ -1172,7 +1181,7 @@ def main() -> None:
         "Setting up local dev environment…",
         border_style="cyan",
     ))
-    setup(skip_build=args.no_build, emulators=emulators)
+    setup(skip_build=args.no_build, emulators=emulators, eink_sim=args.eink_sim)
     console.print("\n[bold green]Setup complete — launching services…[/bold green]\n")
     detect_and_launch(emulators, bibchip_path=bibchip_path, ppl_path=ppl_path, log_level=args.log_level, eink_sim=args.eink_sim)
 

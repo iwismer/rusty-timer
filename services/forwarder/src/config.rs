@@ -360,6 +360,19 @@ pub fn load_config_from_str(
         });
     }
 
+    #[cfg(feature = "eink")]
+    let eink = raw
+        .eink
+        .map(|config| {
+            if config.telemetry_interval_secs == 0 {
+                return Err(ConfigError::InvalidValue(
+                    "eink.telemetry_interval_secs must be at least 1".to_owned(),
+                ));
+            }
+            Ok(config)
+        })
+        .transpose()?;
+
     Ok(ForwarderConfig {
         schema_version,
         token,
@@ -376,7 +389,7 @@ pub fn load_config_from_str(
         ups,
         readers,
         #[cfg(feature = "eink")]
-        eink: raw.eink,
+        eink,
     })
 }
 
@@ -554,5 +567,16 @@ target = "192.168.1.100"
         let _cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         #[cfg(feature = "eink")]
         assert!(_cfg.eink.is_none());
+    }
+
+    #[cfg(feature = "eink")]
+    #[test]
+    fn eink_telemetry_interval_zero_rejected() {
+        let (toml, _dir) = minimal_toml("[eink]\ntelemetry_interval_secs = 0");
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("eink.telemetry_interval_secs"),
+            "error: {err}"
+        );
     }
 }
