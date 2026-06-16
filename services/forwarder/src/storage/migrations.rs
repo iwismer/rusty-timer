@@ -67,6 +67,7 @@ fn apply_pragmas(conn: &Connection) -> Result<(), JournalError> {
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=FULL;
          PRAGMA wal_autocheckpoint=1000;
+         PRAGMA busy_timeout=5000;
          PRAGMA foreign_keys=ON;",
     )?;
     Ok(())

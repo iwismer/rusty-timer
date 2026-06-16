@@ -1054,8 +1054,8 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(JournalAppendError::StreamState(_))),
-            "missing stream state should return StreamState error, got: {:?}",
+            matches!(result, Err(JournalAppendError::Append(_))),
+            "missing stream state should return an append error, got: {:?}",
             result
         );
     }
