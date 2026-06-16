@@ -1,0 +1,18 @@
+[package]
+name = "rt-iroh"
+version = "0.1.0"
+edition = "2024"
+description = "Thin shared iroh endpoint wrapper for Rusty Timer P2P transport"
+
+[lints]
+workspace = true
+
+[dependencies]
+iroh = "=0.92.0"
+quinn = { package = "iroh-quinn", version = "=0.14.0" }
+rand = "0.8"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
