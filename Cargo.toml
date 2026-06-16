@@ -15,6 +15,7 @@ members = [
     "services/forwarder",
     "services/server",
     "services/receiver",
+    "services/thin-node",
     "services/streamer",
     "services/emulator",
     "apps/receiver-ui/src-tauri",

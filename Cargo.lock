@@ -8005,6 +8005,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "thin-node"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
