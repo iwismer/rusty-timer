@@ -68,7 +68,7 @@ pub async fn register(
 }
 
 /// Authorize a request against the provisioning bearer token.
-fn authorized(headers: &HeaderMap, expected_hash: &[u8]) -> bool {
+pub(super) fn authorized(headers: &HeaderMap, expected_hash: &[u8]) -> bool {
     let Some(value) = headers.get(AUTHORIZATION) else {
         return false;
     };

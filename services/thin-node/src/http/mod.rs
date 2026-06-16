@@ -1,11 +1,14 @@
 //! HTTP surface for the thin node.
 
+pub mod announcer;
 pub mod register;
 
 use std::sync::{Arc, Mutex};
 
 use axum::{Router, routing::post};
 use rusqlite::Connection;
+
+use crate::announcer::AnnouncerRuntime;
 
 /// Shared application state for HTTP handlers.
 ///
@@ -16,6 +19,7 @@ use rusqlite::Connection;
 pub struct AppState {
     pub conn: Arc<Mutex<Connection>>,
     pub provisioning_token_hash: Arc<Vec<u8>>,
+    pub announcer_runtime: Arc<Mutex<AnnouncerRuntime>>,
 }
 
 impl AppState {
@@ -24,13 +28,16 @@ impl AppState {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             provisioning_token_hash: Arc::new(crate::registry::hash_token(provisioning_token)),
+            announcer_runtime: Arc::new(Mutex::new(AnnouncerRuntime::new())),
         }
     }
 }
 
-/// Build the registration router.
+/// Build the thin-node HTTP router.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/register", post(register::register))
+        .route("/announcer/rows", post(announcer::push_row))
+        .route("/announcer/takeover", post(announcer::takeover))
         .with_state(state)
 }

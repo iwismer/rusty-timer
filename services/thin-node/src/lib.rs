@@ -74,7 +74,7 @@ mod tests {
         let user_version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, 1);
+        assert_eq!(user_version, 2);
 
         let create_sql: String = conn
             .query_row(
@@ -85,6 +85,7 @@ mod tests {
             .unwrap();
         assert!(create_sql.contains("stream_id TEXT NOT NULL"));
         assert!(create_sql.contains("seq INTEGER NOT NULL"));
+        assert!(create_sql.contains("source_generation INTEGER NOT NULL"));
         assert!(create_sql.contains("PRIMARY KEY(stream_id, seq)"));
     }
 }

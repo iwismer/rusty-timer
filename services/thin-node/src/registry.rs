@@ -10,6 +10,7 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::num::TryFromIntError;
 
 /// Kind of device that can register with the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -72,6 +73,31 @@ pub struct DeviceRecord {
     pub device_kind: DeviceKind,
     pub display_name: Option<String>,
     pub approval_state: ApprovalState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnouncerRowRecord {
+    pub announcer_source_generation: u64,
+    pub stream_id: String,
+    pub seq: u64,
+    pub chip_id: String,
+    pub bib: Option<i32>,
+    pub display_name: String,
+    pub reader_timestamp: Option<String>,
+    pub received_unix_ms: i64,
+}
+
+#[derive(Debug)]
+pub enum AnnouncerStorageError {
+    Sqlite(rusqlite::Error),
+    StaleGeneration { current_generation: u64 },
+    ValueOutOfRange(&'static str),
+}
+
+impl From<rusqlite::Error> for AnnouncerStorageError {
+    fn from(err: rusqlite::Error) -> Self {
+        Self::Sqlite(err)
+    }
 }
 
 /// Hash a raw bearer token for storage/comparison. Tokens are never persisted
@@ -190,6 +216,104 @@ pub fn get_device(conn: &Connection, endpoint_id: &str) -> rusqlite::Result<Opti
         },
     )
     .optional()
+}
+
+pub fn current_announcer_source_generation(
+    conn: &Connection,
+) -> Result<u64, AnnouncerStorageError> {
+    let generation = conn.query_row(
+        "SELECT generation FROM announcer_source_state WHERE id = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    u64::try_from(generation).map_err(|_| AnnouncerStorageError::ValueOutOfRange("generation"))
+}
+
+pub fn takeover_announcer_source(conn: &Connection) -> Result<u64, AnnouncerStorageError> {
+    conn.execute(
+        "UPDATE announcer_source_state SET generation = generation + 1 WHERE id = 1",
+        [],
+    )?;
+    current_announcer_source_generation(conn)
+}
+
+pub fn upsert_announcer_row(
+    conn: &Connection,
+    row: &AnnouncerRowRecord,
+) -> Result<(), AnnouncerStorageError> {
+    let current_generation = current_announcer_source_generation(conn)?;
+    if row.announcer_source_generation < current_generation {
+        return Err(AnnouncerStorageError::StaleGeneration { current_generation });
+    }
+
+    conn.execute(
+        "INSERT INTO announcer_rows (
+             stream_id, seq, source_generation, chip_id, bib, display_name,
+             reader_timestamp, received_unix_ms
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(stream_id, seq) DO UPDATE SET
+             source_generation = excluded.source_generation,
+             chip_id = excluded.chip_id,
+             bib = excluded.bib,
+             display_name = excluded.display_name,
+             reader_timestamp = excluded.reader_timestamp,
+             received_unix_ms = excluded.received_unix_ms",
+        params![
+            &row.stream_id,
+            u64_to_i64(row.seq, "seq")?,
+            u64_to_i64(
+                row.announcer_source_generation,
+                "announcer_source_generation"
+            )?,
+            &row.chip_id,
+            row.bib,
+            &row.display_name,
+            &row.reader_timestamp,
+            row.received_unix_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_announcer_rows_ordered(
+    conn: &Connection,
+) -> Result<Vec<AnnouncerRowRecord>, AnnouncerStorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT source_generation, stream_id, seq, chip_id, bib, display_name,
+                reader_timestamp, received_unix_ms
+         FROM announcer_rows
+         ORDER BY received_unix_ms, stream_id, seq",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AnnouncerRowRecord {
+            announcer_source_generation: sql_i64_to_u64(row.get(0)?, 0)?,
+            stream_id: row.get(1)?,
+            seq: sql_i64_to_u64(row.get(2)?, 2)?,
+            chip_id: row.get(3)?,
+            bib: row.get(4)?,
+            display_name: row.get(5)?,
+            reader_timestamp: row.get(6)?,
+            received_unix_ms: row.get(7)?,
+        })
+    })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(AnnouncerStorageError::Sqlite)
+}
+
+fn u64_to_i64(value: u64, field: &'static str) -> Result<i64, AnnouncerStorageError> {
+    i64::try_from(value).map_err(|_| AnnouncerStorageError::ValueOutOfRange(field))
+}
+
+fn sql_i64_to_u64(value: i64, index: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|err: TryFromIntError| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(err),
+        )
+    })
 }
 
 #[cfg(test)]
