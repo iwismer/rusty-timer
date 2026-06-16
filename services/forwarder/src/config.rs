@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 
+const DEFAULT_MIN_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+const DEFAULT_MAX_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+const DEFAULT_EMERGENCY_FREE_DISK_BYTES: u64 = 1_000_000_000;
+const DEFAULT_EMERGENCY_MAX_ROWS: i64 = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // Config types (deserialized from TOML)
 // ---------------------------------------------------------------------------
@@ -50,6 +55,21 @@ pub struct ServerConfig {
 pub struct JournalConfig {
     pub sqlite_path: String,
     pub prune_watermark_pct: u8,
+    pub min_retention_secs: u64,
+    pub max_retention_secs: u64,
+    pub emergency_free_disk_bytes: u64,
+    pub emergency_max_rows: i64,
+}
+
+impl JournalConfig {
+    pub fn retention_policy(&self) -> crate::storage::journal::RetentionPolicy {
+        crate::storage::journal::RetentionPolicy {
+            min_retention_ms: secs_to_ms_i64(self.min_retention_secs),
+            max_retention_ms: secs_to_ms_i64(self.max_retention_secs),
+            emergency_free_disk_bytes: self.emergency_free_disk_bytes,
+            emergency_max_rows: self.emergency_max_rows,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +147,10 @@ pub struct RawAuthConfig {
 pub struct RawJournalConfig {
     pub sqlite_path: Option<String>,
     pub prune_watermark_pct: Option<u8>,
+    pub min_retention: Option<String>,
+    pub max_retention: Option<String>,
+    pub emergency_free_disk_bytes: Option<u64>,
+    pub emergency_max_rows: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,12 +255,41 @@ pub fn load_config_from_str(
                 .sqlite_path
                 .unwrap_or_else(|| "/var/lib/rusty-timer/forwarder.sqlite3".to_owned()),
             prune_watermark_pct: j.prune_watermark_pct.unwrap_or(80),
+            min_retention_secs: parse_retention_duration_secs(
+                j.min_retention.as_deref(),
+                DEFAULT_MIN_RETENTION_SECS,
+                "journal.min_retention",
+            )?,
+            max_retention_secs: parse_retention_duration_secs(
+                j.max_retention.as_deref(),
+                DEFAULT_MAX_RETENTION_SECS,
+                "journal.max_retention",
+            )?,
+            emergency_free_disk_bytes: j
+                .emergency_free_disk_bytes
+                .unwrap_or(DEFAULT_EMERGENCY_FREE_DISK_BYTES),
+            emergency_max_rows: j.emergency_max_rows.unwrap_or(DEFAULT_EMERGENCY_MAX_ROWS),
         },
         None => JournalConfig {
             sqlite_path: "/var/lib/rusty-timer/forwarder.sqlite3".to_owned(),
             prune_watermark_pct: 80,
+            min_retention_secs: DEFAULT_MIN_RETENTION_SECS,
+            max_retention_secs: DEFAULT_MAX_RETENTION_SECS,
+            emergency_free_disk_bytes: DEFAULT_EMERGENCY_FREE_DISK_BYTES,
+            emergency_max_rows: DEFAULT_EMERGENCY_MAX_ROWS,
         },
     };
+    if journal.max_retention_secs < journal.min_retention_secs {
+        return Err(ConfigError::InvalidValue(
+            "journal.max_retention must be greater than or equal to journal.min_retention"
+                .to_owned(),
+        ));
+    }
+    if journal.emergency_max_rows < 1 {
+        return Err(ConfigError::InvalidValue(
+            "journal.emergency_max_rows must be at least 1".to_owned(),
+        ));
+    }
 
     // Status HTTP defaults
     let status_http = match raw.status_http {
@@ -417,6 +470,86 @@ impl std::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+/// Validate journal retention settings as they would be parsed from config.
+///
+/// Shared by both the TOML load path and the HTTP config-update path so the
+/// update endpoint cannot persist values that would later fail to load (invalid
+/// duration suffix, min/max inversion, or a zero/negative emergency row cap).
+/// `min_retention`/`max_retention` are the raw duration strings (e.g. `"7d"`);
+/// `None` means "use the built-in default", matching load behavior. Returns a
+/// human-readable error message on the first validation failure.
+pub fn validate_retention_settings(
+    min_retention: Option<&str>,
+    max_retention: Option<&str>,
+    emergency_max_rows: Option<i64>,
+) -> Result<(), String> {
+    let min =
+        parse_retention_duration_secs(min_retention, DEFAULT_MIN_RETENTION_SECS, "min_retention")
+            .map_err(|e| e.to_string())?;
+    let max =
+        parse_retention_duration_secs(max_retention, DEFAULT_MAX_RETENTION_SECS, "max_retention")
+            .map_err(|e| e.to_string())?;
+    if max < min {
+        return Err("max_retention must be greater than or equal to min_retention".to_owned());
+    }
+    if let Some(rows) = emergency_max_rows
+        && rows < 1
+    {
+        return Err("emergency_max_rows must be at least 1".to_owned());
+    }
+    Ok(())
+}
+
+fn secs_to_ms_i64(secs: u64) -> i64 {
+    secs.checked_mul(1000)
+        .and_then(|ms| i64::try_from(ms).ok())
+        .unwrap_or(i64::MAX)
+}
+
+fn parse_retention_duration_secs(
+    value: Option<&str>,
+    default_secs: u64,
+    field: &str,
+) -> Result<u64, ConfigError> {
+    let Some(raw) = value else {
+        return Ok(default_secs);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(ConfigError::InvalidValue(format!(
+            "{field} must not be empty"
+        )));
+    }
+
+    let (number, multiplier) = if let Some(days) = raw.strip_suffix('d') {
+        (days, 24 * 60 * 60)
+    } else if let Some(hours) = raw.strip_suffix('h') {
+        (hours, 60 * 60)
+    } else if let Some(minutes) = raw.strip_suffix('m') {
+        (minutes, 60)
+    } else if let Some(seconds) = raw.strip_suffix('s') {
+        (seconds, 1)
+    } else {
+        return Err(ConfigError::InvalidValue(format!(
+            "{field} must use a duration suffix like '7d', '12h', '30m', or '60s'"
+        )));
+    };
+
+    let amount = number.parse::<u64>().map_err(|_| {
+        ConfigError::InvalidValue(format!(
+            "{field} must use a positive integer duration, got '{raw}'"
+        ))
+    })?;
+    if amount == 0 {
+        return Err(ConfigError::InvalidValue(format!(
+            "{field} must be greater than zero"
+        )));
+    }
+    amount.checked_mul(multiplier).ok_or_else(|| {
+        ConfigError::InvalidValue(format!("{field} is too large to represent in seconds"))
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Token file reader

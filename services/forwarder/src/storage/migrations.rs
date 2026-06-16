@@ -1,7 +1,7 @@
 use crate::storage::journal::JournalError;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub fn migrate(conn: &Connection) -> Result<(), JournalError> {
     apply_pragmas(conn)?;
@@ -23,6 +23,13 @@ pub fn migrate(conn: &Connection) -> Result<(), JournalError> {
                 SCHEMA_VERSION
             ))?;
         }
+        1 => {
+            conn.execute_batch(&format!(
+                "BEGIN IMMEDIATE;\n{}\nPRAGMA user_version = {};\nCOMMIT;",
+                retention_index_sql(),
+                SCHEMA_VERSION
+            ))?;
+        }
         version if version == SCHEMA_VERSION => {}
         version => {
             return Err(JournalError::InvalidData(format!(
@@ -40,6 +47,13 @@ pub fn integrity_check(conn: &Connection) -> Result<(), JournalError> {
         return Err(JournalError::IntegrityCheckFailed(result));
     }
     Ok(())
+}
+
+fn retention_index_sql() -> &'static str {
+    "CREATE INDEX IF NOT EXISTS idx_events_received_stream_seq
+         ON events(received_unix_ms, stream_id, seq);
+     CREATE INDEX IF NOT EXISTS idx_cursors_stream_acked
+         ON receiver_stream_cursors(stream_id, acked_through_seq);"
 }
 
 fn user_version(conn: &Connection) -> Result<u32, JournalError> {

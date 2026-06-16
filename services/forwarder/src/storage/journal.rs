@@ -11,6 +11,48 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const COMPAT_RECEIVER_ID: &str = "__forwarder_server__";
 
+/// Maximum number of candidate rows collected (and deleted) in a single
+/// `prune_retention` transaction, per prune category.
+///
+/// Bounds per-transaction work so a single pruning pass cannot collect an
+/// unbounded candidate set or hold a long write transaction on large journals.
+/// Remaining rows are handled on subsequent pruning passes.
+pub const MAX_PRUNE_BATCH: i64 = 10_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionPolicy {
+    pub min_retention_ms: i64,
+    pub max_retention_ms: i64,
+    pub emergency_free_disk_bytes: u64,
+    pub emergency_max_rows: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionContext {
+    pub now_unix_ms: i64,
+    pub free_disk_bytes: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPruneStats {
+    pub acked_deleted: i64,
+    pub hard_cap_deleted: i64,
+    pub emergency_deleted: i64,
+    pub forced_gap_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionState {
+    pub earliest_available_seq: i64,
+    pub forced_gap_count: i64,
+}
+
+struct PruneCandidate {
+    stream_id: String,
+    seq: i64,
+    forced: bool,
+}
+
 /// A read event retrieved from the journal.
 #[derive(Debug, Clone)]
 pub struct JournalEvent {
@@ -384,6 +426,118 @@ impl Journal {
         Ok(deleted as i64)
     }
 
+    pub fn prune_retention(
+        &mut self,
+        policy: &RetentionPolicy,
+        context: RetentionContext,
+    ) -> Result<RetentionPruneStats, JournalError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut stats = RetentionPruneStats::default();
+        let min_cutoff = context.now_unix_ms.saturating_sub(policy.min_retention_ms);
+        let max_cutoff = context.now_unix_ms.saturating_sub(policy.max_retention_ms);
+
+        let acked = retention_candidates(
+            &tx,
+            "e.received_unix_ms < ?1 AND e.seq <= COALESCE((SELECT MIN(c.acked_through_seq) FROM receiver_stream_cursors c WHERE c.stream_id = e.stream_id), 0)",
+            &[&min_cutoff],
+            Some(MAX_PRUNE_BATCH),
+            false,
+        )?;
+        let (deleted, forced) = delete_candidates(&tx, &acked)?;
+        stats.acked_deleted = deleted;
+        stats.forced_gap_count += forced;
+
+        let hard_cap = retention_candidates(
+            &tx,
+            "e.received_unix_ms < ?1 AND e.seq > COALESCE((SELECT MIN(c.acked_through_seq) FROM receiver_stream_cursors c WHERE c.stream_id = e.stream_id), 0)",
+            &[&max_cutoff],
+            Some(MAX_PRUNE_BATCH),
+            true,
+        )?;
+        let (deleted, forced) = delete_candidates(&tx, &hard_cap)?;
+        stats.hard_cap_deleted = deleted;
+        stats.forced_gap_count += forced;
+
+        let total_rows = tx.query_row("SELECT COUNT(*) FROM events", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let emergency_triggered = context.free_disk_bytes < policy.emergency_free_disk_bytes
+            || total_rows > policy.emergency_max_rows;
+        if emergency_triggered {
+            let delete_limit = if total_rows > policy.emergency_max_rows {
+                total_rows - policy.emergency_max_rows
+            } else {
+                1
+            };
+            let emergency = retention_candidates(
+                &tx,
+                "e.received_unix_ms < ?1",
+                &[&min_cutoff],
+                Some(delete_limit.min(MAX_PRUNE_BATCH)),
+                true,
+            )?;
+            let (deleted, forced) = delete_candidates(&tx, &emergency)?;
+            stats.emergency_deleted = deleted;
+            stats.forced_gap_count += forced;
+        }
+
+        tx.commit()?;
+        Ok(stats)
+    }
+
+    pub fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError> {
+        self.conn
+            .query_row(
+                "SELECT earliest_available_seq, forced_gap_count
+                 FROM stream_retention
+                 WHERE stream_id = ?1",
+                params![stream_key],
+                |row| {
+                    Ok(RetentionState {
+                        earliest_available_seq: row.get(0)?,
+                        forced_gap_count: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn clear_stream(&mut self, stream_key: &str) -> Result<(), JournalError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_epoch = current_epoch(&tx, stream_key)?;
+        let next_seq = next_seq(&tx, stream_key)?;
+        let next_epoch = current_epoch + 1;
+
+        tx.execute(
+            "DELETE FROM events WHERE stream_id = ?1",
+            params![stream_key],
+        )?;
+        tx.execute(
+            "UPDATE stream_epochs
+             SET end_seq = COALESCE(end_seq, ?2 - 1)
+             WHERE stream_id = ?1 AND end_seq IS NULL",
+            params![stream_key, next_seq],
+        )?;
+        tx.execute(
+            "INSERT INTO stream_epochs
+                 (stream_id, epoch, start_seq, end_seq, reason)
+             VALUES (?1, ?2, ?3, NULL, 'manual_clear')",
+            params![stream_key, next_epoch, next_seq],
+        )?;
+        tx.execute(
+            "UPDATE stream_retention
+             SET earliest_available_seq = MAX(earliest_available_seq, ?2)
+             WHERE stream_id = ?1",
+            params![stream_key, next_seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn current_epoch(&self, stream_key: &str) -> Result<i64, JournalError> {
         current_epoch(&self.conn, stream_key)
     }
@@ -396,6 +550,132 @@ impl Journal {
         )?;
         Ok(())
     }
+}
+
+fn retention_candidates(
+    conn: &Connection,
+    predicate: &str,
+    predicate_params: &[&dyn rusqlite::ToSql],
+    limit: Option<i64>,
+    forced: bool,
+) -> Result<Vec<PruneCandidate>, JournalError> {
+    let sql = if limit.is_some() {
+        format!(
+            "SELECT e.stream_id, e.seq
+             FROM events e
+             WHERE {predicate}
+             ORDER BY e.seq ASC
+             LIMIT ?{}",
+            predicate_params.len() + 1
+        )
+    } else {
+        format!(
+            "SELECT e.stream_id, e.seq
+             FROM events e
+             WHERE {predicate}
+             ORDER BY e.seq ASC"
+        )
+    };
+
+    let mut params: Vec<&dyn rusqlite::ToSql> = predicate_params.to_vec();
+    if let Some(ref limit) = limit {
+        params.push(limit);
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok(PruneCandidate {
+            stream_id: row.get(0)?,
+            seq: row.get(1)?,
+            forced,
+        })
+    })?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates.push(row?);
+    }
+    Ok(candidates)
+}
+
+/// Delete candidate rows, but only as a contiguous prefix from each stream's
+/// current `earliest_available_seq`.
+///
+/// Pruning is restricted to a contiguous prefix per stream so the seq
+/// high-water is never lost. If we deleted a non-prefix row (a higher seq while
+/// a lower seq remained), `MIN(seq)` — and therefore `earliest_available_seq` —
+/// would stay low while `MAX(seq)` of the live rows dropped below an
+/// already-issued seq, letting `next_seq` reuse it. By only deleting from the
+/// bottom upward, the remaining live rows always retain the true maximum seq,
+/// so `next_seq` stays monotonic. Non-prefix candidates are left in place and
+/// become eligible on a later pass once the floor has advanced.
+fn delete_candidates(
+    conn: &Connection,
+    candidates: &[PruneCandidate],
+) -> Result<(i64, i64), JournalError> {
+    use std::collections::BTreeMap;
+
+    // Group candidate (seq, forced) pairs by stream so we can evaluate each
+    // stream's contiguous prefix independently.
+    let mut by_stream: BTreeMap<&str, Vec<(i64, bool)>> = BTreeMap::new();
+    for candidate in candidates {
+        by_stream
+            .entry(candidate.stream_id.as_str())
+            .or_default()
+            .push((candidate.seq, candidate.forced));
+    }
+
+    let mut deleted = 0;
+    let mut forced = 0;
+    for (stream_id, mut seqs) in by_stream {
+        seqs.sort_unstable_by_key(|(seq, _)| *seq);
+
+        let floor: i64 = conn.query_row(
+            "SELECT earliest_available_seq FROM stream_retention WHERE stream_id = ?1",
+            params![stream_id],
+            |row| row.get(0),
+        )?;
+
+        let mut deleted_here = 0_i64;
+        let mut forced_here = 0_i64;
+        let mut last_deleted = floor - 1;
+        for (seq, is_forced) in seqs {
+            // Stop at the first non-contiguous candidate: deleting beyond a gap
+            // would leave a lower seq behind and drop the live high-water.
+            let expected = floor + deleted_here;
+            if seq != expected {
+                break;
+            }
+            let changed = conn.execute(
+                "DELETE FROM events WHERE stream_id = ?1 AND seq = ?2",
+                params![stream_id, seq],
+            )?;
+            if changed == 0 {
+                break;
+            }
+            deleted_here += 1;
+            if is_forced {
+                forced_here += 1;
+            }
+            last_deleted = seq;
+        }
+
+        if deleted_here > 0 {
+            conn.execute(
+                "UPDATE stream_retention
+                 SET earliest_available_seq = COALESCE(
+                         (SELECT MIN(seq) FROM events WHERE stream_id = ?1),
+                         MAX(earliest_available_seq, ?2 + 1)
+                     ),
+                     forced_gap_count = forced_gap_count + ?3
+                 WHERE stream_id = ?1",
+                params![stream_id, last_deleted, forced_here],
+            )?;
+        }
+        deleted += deleted_here;
+        forced += forced_here;
+    }
+    Ok((deleted, forced))
 }
 
 /// Return the next stream-wide sequence number.

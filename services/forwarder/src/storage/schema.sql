@@ -53,3 +53,13 @@ CREATE TABLE IF NOT EXISTS stream_retention (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_stream_epoch_seq ON events(stream_id, epoch, seq);
+
+-- Supports retention pruning predicates that scan by age then narrow to a
+-- stream's sequence range (received_unix_ms < cutoff, ordered by seq).
+CREATE INDEX IF NOT EXISTS idx_events_received_stream_seq
+    ON events(received_unix_ms, stream_id, seq);
+
+-- Supports the per-stream MIN(acked_through_seq) lookups used to classify
+-- acked vs. unacked events during pruning.
+CREATE INDEX IF NOT EXISTS idx_cursors_stream_acked
+    ON receiver_stream_cursors(stream_id, acked_through_seq);
