@@ -11,3 +11,7 @@ workspace = true
 bytes = "1"
 prost = "0.14"
 thiserror = "2"
+
+[dev-dependencies]
+rt-iroh = { path = "../rt-iroh" }
+tokio = { version = "1", features = ["full"] }
