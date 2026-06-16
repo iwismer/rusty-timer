@@ -75,6 +75,15 @@ pub struct DeviceRecord {
     pub approval_state: ApprovalState,
 }
 
+/// A backup row from the forwarder stream catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ForwarderStreamRecord {
+    pub stream_id: String,
+    pub endpoint_id: String,
+    pub epoch: u64,
+    pub next_seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnouncerRowRecord {
     pub announcer_source_generation: u64,
@@ -181,6 +190,60 @@ pub fn approve_device(
     }
 
     get_device(conn, endpoint_id)
+}
+
+/// List all registered devices, ordered by endpoint id.
+pub fn list_devices(conn: &Connection) -> rusqlite::Result<Vec<DeviceRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT endpoint_id, device_kind, display_name, approval_state
+         FROM devices
+         ORDER BY endpoint_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let kind_str: String = row.get(1)?;
+        let approval_str: String = row.get(3)?;
+        let device_kind = DeviceKind::parse(&kind_str).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                format!("invalid device_kind: {kind_str}").into(),
+            )
+        })?;
+        let approval_state = ApprovalState::parse(&approval_str).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                format!("invalid approval_state: {approval_str}").into(),
+            )
+        })?;
+        Ok(DeviceRecord {
+            endpoint_id: row.get(0)?,
+            device_kind,
+            display_name: row.get(2)?,
+            approval_state,
+        })
+    })?;
+
+    rows.collect()
+}
+
+/// List the backup forwarder stream catalog rows, ordered by stream id.
+pub fn list_forwarder_streams(conn: &Connection) -> rusqlite::Result<Vec<ForwarderStreamRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT stream_id, endpoint_id, epoch, next_seq
+         FROM forwarder_streams
+         ORDER BY stream_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ForwarderStreamRecord {
+            stream_id: row.get(0)?,
+            endpoint_id: row.get(1)?,
+            epoch: sql_i64_to_u64(row.get(2)?, 2)?,
+            next_seq: sql_i64_to_u64(row.get(3)?, 3)?,
+        })
+    })?;
+
+    rows.collect()
 }
 
 /// Fetch a device record by endpoint id.
@@ -359,6 +422,40 @@ mod tests {
     fn approve_missing_device_returns_none() {
         let conn = test_conn();
         assert!(approve_device(&conn, "missing", "name").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_devices_returns_all_sorted() {
+        let conn = test_conn();
+        register_device(&conn, "ep-b", DeviceKind::Receiver, "tok-b").unwrap();
+        register_device(&conn, "ep-a", DeviceKind::Forwarder, "tok-a").unwrap();
+        approve_device(&conn, "ep-a", "Start").unwrap();
+
+        let devices = list_devices(&conn).unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].endpoint_id, "ep-a");
+        assert_eq!(devices[0].approval_state, ApprovalState::Active);
+        assert_eq!(devices[1].endpoint_id, "ep-b");
+        assert_eq!(devices[1].approval_state, ApprovalState::Pending);
+    }
+
+    #[test]
+    fn list_forwarder_streams_returns_backup_rows() {
+        let conn = test_conn();
+        register_device(&conn, "ep-fwd", DeviceKind::Forwarder, "tok").unwrap();
+        conn.execute(
+            "INSERT INTO forwarder_streams (stream_id, endpoint_id, epoch, next_seq)
+             VALUES ('finish-line', 'ep-fwd', 3, 42)",
+            [],
+        )
+        .unwrap();
+
+        let streams = list_forwarder_streams(&conn).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].stream_id, "finish-line");
+        assert_eq!(streams[0].endpoint_id, "ep-fwd");
+        assert_eq!(streams[0].epoch, 3);
+        assert_eq!(streams[0].next_seq, 42);
     }
 
     #[test]
