@@ -464,6 +464,58 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Load every durable event for `stream_id` that has not yet been written to
+    /// the DBF file (`dbf_delivered_unix_ms IS NULL`), ordered by `seq`.
+    ///
+    /// This is the source for the idempotent DBF feed: once an event is marked
+    /// delivered via [`Db::mark_dbf_delivered`], it is no longer returned here, so
+    /// replay/re-run never re-emits an already-written `(stream_id, seq)`.
+    pub fn load_undelivered_received_events(
+        &self,
+        stream_id: Uuid,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND dbf_delivered_unix_ms IS NULL
+             ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string()],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a single durable event as written to the DBF file. Only updates rows
+    /// whose marker is still NULL, so this is safe to call repeatedly without
+    /// overwriting an earlier delivery timestamp. Returns whether a row changed.
+    pub fn mark_dbf_delivered(
+        &self,
+        stream_id: Uuid,
+        seq: i64,
+        delivered_unix_ms: i64,
+    ) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "UPDATE received_events
+             SET dbf_delivered_unix_ms = ?3
+             WHERE stream_id = ?1 AND seq = ?2 AND dbf_delivered_unix_ms IS NULL",
+            rusqlite::params![stream_id.to_string(), seq, delivered_unix_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Clear the DBF delivery markers for every event of `stream_id`, returning
+    /// the number of rows reset. Used when regenerating the DBF file from the
+    /// durable store so all events are re-delivered on the next feed run.
+    pub fn reset_dbf_delivered(&self, stream_id: Uuid) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "UPDATE received_events SET dbf_delivered_unix_ms = NULL WHERE stream_id = ?1",
+            rusqlite::params![stream_id.to_string()],
+        )?;
+        Ok(count)
+    }
+
     pub fn load_received_event(
         &self,
         stream_id: Uuid,
