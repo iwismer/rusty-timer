@@ -27,6 +27,10 @@
 //! `src/generated/rusty_timer.p2p.v1.rs`. The build script never performs this
 //! step.
 
+pub mod codec;
+pub mod error;
+pub mod negotiate;
+
 // The generated module mirrors `protoc`/`prost-build` output and intentionally
 // does not follow this workspace's stricter lints.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
@@ -34,4 +38,18 @@ mod generated {
     include!("generated/rusty_timer.p2p.v1.rs");
 }
 
-pub use generated::*;
+/// Generated protobuf messages and oneof modules.
+pub mod proto {
+    pub use crate::generated::*;
+}
+
+pub use codec::{Frame, MAX_FRAME_BYTES, decode_frame, decode_message_frame, encode_frame};
+pub use error::{ProtocolError, ProtocolErrorCode};
+pub use generated::{
+    Ack, CaughtUp, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, DownloadProgress,
+    EventBatch, GapNotice, Hello, HelloOk, Ping, Pong, ProtocolError as WireProtocolError,
+    ReadRecord, ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus,
+    StreamCatalog, StreamEntry, StreamEpochStarted, SubscribeMode, SubscribeOk, SyncClock,
+    UpsStatus, control_c2f, control_f2c, data_c2f, data_f2c,
+};
+pub use negotiate::negotiate;

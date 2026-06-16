@@ -1,7 +1,7 @@
 //! Prost round-trip tests: `encode` -> `decode` must equal the original.
 
 use prost::Message;
-use rt_p2p_protocol::{Hello, ProtocolError, ReadRecord};
+use rt_p2p_protocol::{Hello, ReadRecord, WireProtocolError};
 
 // A stream_id is a UUID represented as 16 bytes on the wire.
 const STREAM_ID: [u8; 16] = [
@@ -48,7 +48,7 @@ fn hello_round_trips() {
 
 #[test]
 fn protocol_error_round_trips() {
-    let original = ProtocolError {
+    let original = WireProtocolError {
         code: 42,
         message: "stream closed".to_string(),
         retryable: true,
@@ -58,7 +58,7 @@ fn protocol_error_round_trips() {
     let mut buf = Vec::new();
     original.encode(&mut buf).expect("encode ProtocolError");
 
-    let decoded = ProtocolError::decode(buf.as_slice()).expect("decode ProtocolError");
+    let decoded = WireProtocolError::decode(buf.as_slice()).expect("decode ProtocolError");
 
     assert_eq!(decoded, original);
 }

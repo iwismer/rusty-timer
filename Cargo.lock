@@ -4776,7 +4776,9 @@ dependencies = [
 name = "rt-p2p-protocol"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "prost",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

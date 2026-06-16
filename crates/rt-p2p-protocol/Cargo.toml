@@ -8,4 +8,6 @@ description = "Clean-slate P2P wire protocol (protobuf/prost) for forwarder/rece
 workspace = true
 
 [dependencies]
+bytes = "1"
 prost = "0.14"
+thiserror = "2"
