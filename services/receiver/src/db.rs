@@ -439,21 +439,46 @@ impl Db {
              WHERE stream_id = ?1
              ORDER BY seq",
         )?;
-        let rows = stmt.query_map(rusqlite::params![stream_id.to_string()], |r| {
-            let raw_stream_id = r.get::<_, String>(0)?;
-            let parsed_stream_id = parse_uuid_column(raw_stream_id, 0)?;
-            Ok(ReceivedEvent {
-                stream_id: parsed_stream_id,
-                seq: r.get(1)?,
-                epoch: r.get(2)?,
-                raw_frame: r.get(3)?,
-                read_kind: r.get(4)?,
-                reader_timestamp: r.get(5)?,
-                received_unix_ms: r.get(6)?,
-                dbf_delivered_unix_ms: r.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string()],
+            received_event_from_row,
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_received_events_after(
+        &self,
+        stream_id: Uuid,
+        after_seq: i64,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND seq > ?2
+             ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string(), after_seq],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_received_event(
+        &self,
+        stream_id: Uuid,
+        seq: i64,
+    ) -> DbResult<Option<ReceivedEvent>> {
+        self.conn
+            .query_row(
+                "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+                 FROM received_events
+                 WHERE stream_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id.to_string(), seq],
+                received_event_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn advance_cursor_contiguous_prefix(&self, stream_id: Uuid) -> DbResult<i64> {
@@ -822,6 +847,21 @@ fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<Uuid> {
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
         )
+    })
+}
+
+fn received_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceivedEvent> {
+    let raw_stream_id = row.get::<_, String>(0)?;
+    let parsed_stream_id = parse_uuid_column(raw_stream_id, 0)?;
+    Ok(ReceivedEvent {
+        stream_id: parsed_stream_id,
+        seq: row.get(1)?,
+        epoch: row.get(2)?,
+        raw_frame: row.get(3)?,
+        read_kind: row.get(4)?,
+        reader_timestamp: row.get(5)?,
+        received_unix_ms: row.get(6)?,
+        dbf_delivered_unix_ms: row.get(7)?,
     })
 }
 
