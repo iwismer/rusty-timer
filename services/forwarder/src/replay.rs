@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(replay[1].events.len(), 1);
         assert_eq!(replay[0].events[0].seq, 1);
         assert_eq!(replay[0].events[1].seq, 2);
-        assert_eq!(replay[1].events[0].seq, 1);
+        assert_eq!(replay[1].events[0].seq, 3);
     }
 
     #[test]
@@ -168,8 +168,8 @@ mod tests {
         assert_eq!(replay[0].events[1].seq, 3);
         assert_eq!(replay[1].stream_epoch, 2);
         assert_eq!(replay[1].events.len(), 2);
-        assert_eq!(replay[1].events[0].seq, 1);
-        assert_eq!(replay[1].events[1].seq, 2);
+        assert_eq!(replay[1].events[0].seq, 4);
+        assert_eq!(replay[1].events[1].seq, 5);
     }
 
     #[test]

@@ -145,22 +145,24 @@ fn prune_acked_removes_older_epoch_events() {
         .ensure_stream_state(stream_key, 1)
         .expect("ensure stream state");
 
-    // Insert 3 events in epoch 1
+    // Insert 3 events in epoch 1 (stream-wide seq 1-3)
     for seq in 1..=3 {
         insert_event(&mut journal, stream_key, 1, seq);
     }
 
-    // Bump to epoch 2 and insert 2 more events
+    // Bump to epoch 2 and insert 2 more events. Seq is stream-wide and does
+    // not reset, so epoch 2 events are seq 4 and 5.
     journal.bump_epoch(stream_key, 2).expect("bump epoch");
-    for seq in 1..=2 {
+    for seq in 4..=5 {
         insert_event(&mut journal, stream_key, 2, seq);
     }
 
     assert_eq!(journal.event_count(stream_key).unwrap(), 5);
 
-    // Ack through epoch 2, seq 1 — this covers all of epoch 1 and seq 1 of epoch 2
+    // Ack through seq 4 — this covers all of epoch 1 (seq 1-3) and seq 4 of
+    // epoch 2.
     journal
-        .update_ack_cursor(stream_key, 2, 1)
+        .update_ack_cursor(stream_key, 2, 4)
         .expect("update ack cursor");
 
     let deleted = journal.prune_acked(stream_key, 500).expect("prune acked");
@@ -169,13 +171,13 @@ fn prune_acked_removes_older_epoch_events() {
         "should have pruned 3 epoch-1 events + 1 epoch-2 event"
     );
 
-    // Only epoch 2, seq 2 should remain
+    // Only epoch 2, seq 5 should remain
     assert_eq!(journal.event_count(stream_key).unwrap(), 1);
     let remaining = journal
         .unacked_events(stream_key, 2, 0)
         .expect("unacked events");
     assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].seq, 2);
+    assert_eq!(remaining[0].seq, 5);
     assert_eq!(remaining[0].stream_epoch, 2);
 }
 
@@ -208,5 +210,54 @@ fn ack_then_prune_cycle_clears_journal() {
         journal.total_event_count().unwrap(),
         0,
         "journal should be empty after full ack-prune cycle"
+    );
+}
+
+/// Regression test: after a full ack + prune empties the journal, `next_seq`
+/// must continue above the pruned range instead of restarting at 1 and
+/// reusing already-acked seqs.
+#[test]
+fn next_seq_continues_above_pruned_range() {
+    let (mut journal, _dir) = open_temp_journal();
+    let stream_key = "192.168.1.105";
+    let epoch = 1i64;
+
+    journal
+        .ensure_stream_state(stream_key, epoch)
+        .expect("ensure stream state");
+
+    // Insert and fully ack/prune events seq 1-5.
+    for _ in 0..5 {
+        let seq = journal.next_seq(stream_key).expect("next seq");
+        insert_event(&mut journal, stream_key, epoch, seq);
+    }
+    journal
+        .update_ack_cursor(stream_key, epoch, 5)
+        .expect("update ack cursor");
+    let deleted = journal.prune_acked(stream_key, 500).expect("prune acked");
+    assert_eq!(deleted, 5, "all 5 events pruned");
+    assert_eq!(
+        journal.event_count(stream_key).unwrap(),
+        0,
+        "journal empty after prune"
+    );
+
+    // next_seq must NOT restart at 1 — it must continue above the pruned range.
+    let next = journal.next_seq(stream_key).expect("next seq after prune");
+    assert_eq!(
+        next, 6,
+        "next_seq must continue above the pruned/acked high-water, not reuse seqs"
+    );
+
+    // Insert at seq 6, ack/prune again, and confirm it keeps climbing.
+    insert_event(&mut journal, stream_key, epoch, next);
+    journal
+        .update_ack_cursor(stream_key, epoch, next)
+        .expect("update ack cursor");
+    journal.prune_acked(stream_key, 500).expect("prune acked");
+    assert_eq!(
+        journal.next_seq(stream_key).expect("next seq"),
+        7,
+        "next_seq continues climbing after repeated ack/prune cycles"
     );
 }

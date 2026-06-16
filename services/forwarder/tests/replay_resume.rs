@@ -137,18 +137,36 @@ fn replay_cursor_advances_after_ack() {
     assert_eq!(total2, 0, "nothing pending after full ack");
 }
 
-/// Test: ack cursor never regresses to an older epoch/seq tuple.
+/// Test: ack cursor ignores stale (lower) seq updates.
+///
+/// Under the stream-wide sequence contract, staleness is determined purely by
+/// seq — a lower-seq ack must never roll the durable cursor backwards. The
+/// reported epoch is derived from the event carrying the acked seq.
 #[test]
-fn ack_cursor_does_not_regress() {
+fn ack_cursor_ignores_stale_lower_seq() {
     let (mut j, _f) = make_journal();
     j.ensure_stream_state("192.168.2.50", 1).unwrap();
 
-    // Advance to epoch 2 and ack through seq 5.
-    j.update_ack_cursor("192.168.2.50", 2, 5).unwrap();
+    // Write seq 1-5 in epoch 1, bump to epoch 2, write seq 6-10.
+    for _ in 1..=5 {
+        let seq = j.next_seq("192.168.2.50").unwrap();
+        j.insert_event("192.168.2.50", 1, seq, None, b"line", "RAW")
+            .unwrap();
+    }
+    j.bump_epoch("192.168.2.50", 2).unwrap();
+    for _ in 6..=10 {
+        let seq = j.next_seq("192.168.2.50").unwrap();
+        j.insert_event("192.168.2.50", 2, seq, None, b"line", "RAW")
+            .unwrap();
+    }
 
-    // Apply an older cursor update; this must be ignored.
-    j.update_ack_cursor("192.168.2.50", 1, 999).unwrap();
+    // Ack through seq 8 (which lands in epoch 2).
+    j.update_ack_cursor("192.168.2.50", 2, 8).unwrap();
+    assert_eq!(j.ack_cursor("192.168.2.50").unwrap(), (2, 8));
+
+    // Apply a stale, lower-seq cursor update; this must be ignored.
+    j.update_ack_cursor("192.168.2.50", 1, 3).unwrap();
 
     let (epoch, seq) = j.ack_cursor("192.168.2.50").unwrap();
-    assert_eq!((epoch, seq), (2, 5));
+    assert_eq!((epoch, seq), (2, 8), "stale lower-seq ack must be ignored");
 }

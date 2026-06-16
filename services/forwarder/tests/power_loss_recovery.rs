@@ -172,7 +172,11 @@ fn multiple_streams_have_independent_sequences() {
     j.ensure_stream_state("10.0.0.11", 1).unwrap();
 
     let s1a = j.next_seq("10.0.0.10").unwrap();
+    j.insert_event("10.0.0.10", 1, s1a, None, b"line", "RAW")
+        .unwrap();
     let s2a = j.next_seq("10.0.0.11").unwrap();
+    j.insert_event("10.0.0.11", 1, s2a, None, b"line", "RAW")
+        .unwrap();
     let s1b = j.next_seq("10.0.0.10").unwrap();
 
     assert_eq!(s1a, 1);
