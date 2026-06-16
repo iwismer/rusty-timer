@@ -7,6 +7,7 @@ const CURRENT_USER_VERSION: i64 = 1;
 pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     migrate(&conn)?;
+    crate::registry::migrate(&conn)?;
     Ok(conn)
 }
 

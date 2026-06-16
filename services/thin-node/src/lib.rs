@@ -1,5 +1,7 @@
 pub mod announcer;
 pub mod db;
+pub mod http;
+pub mod registry;
 
 #[cfg(test)]
 mod tests {
