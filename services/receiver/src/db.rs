@@ -148,6 +148,12 @@ pub struct GapMarker {
     pub created_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnouncerGenerationAcceptance {
+    Current { generation: i64 },
+    Stale { current: i64, attempted: i64 },
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -516,6 +522,88 @@ impl Db {
         Ok(count)
     }
 
+    /// Load every durable event for `stream_id` that has not yet been pushed to
+    /// the announcer (`announcer_pushed_unix_ms IS NULL`), ordered by the
+    /// announcer ordering key `received_unix_ms` (with `seq` as a stable
+    /// tie-breaker).
+    ///
+    /// This is the source for the idempotent announcer push: once an event is
+    /// marked pushed via [`Db::mark_announcer_pushed`], it is no longer returned
+    /// here, so a repush never re-emits an already-sent `(stream_id, seq)`.
+    pub fn load_unpushed_announcer_events(&self, stream_id: Uuid) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND announcer_pushed_unix_ms IS NULL
+             ORDER BY received_unix_ms, seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string()],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a single durable event as pushed to the announcer. Only updates rows
+    /// whose marker is still NULL, so this is safe to call repeatedly without
+    /// overwriting an earlier push timestamp. Returns whether a row changed.
+    pub fn mark_announcer_pushed(
+        &self,
+        stream_id: Uuid,
+        seq: i64,
+        pushed_unix_ms: i64,
+    ) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "UPDATE received_events
+             SET announcer_pushed_unix_ms = ?3
+             WHERE stream_id = ?1 AND seq = ?2 AND announcer_pushed_unix_ms IS NULL",
+            rusqlite::params![stream_id.to_string(), seq, pushed_unix_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Return the highest announcer source generation accepted for `stream_id`,
+    /// or `None` if no generation has been fenced yet.
+    pub fn load_announcer_fence(&self, stream_id: Uuid) -> DbResult<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT generation FROM announcer_source_fence WHERE stream_id = ?1",
+                rusqlite::params![stream_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Atomically accept `generation` as current for `stream_id`, or report it
+    /// stale when a higher generation has already been accepted.
+    ///
+    /// The stored value only ever moves forward. Equal generations are current
+    /// and accepted for idempotent retries; lower generations are observable as
+    /// stale so callers can avoid sending rows for an outdated source.
+    pub fn accept_announcer_generation(
+        &self,
+        stream_id: Uuid,
+        generation: i64,
+    ) -> DbResult<AnnouncerGenerationAcceptance> {
+        let changed = self.conn.execute(
+            "INSERT INTO announcer_source_fence (stream_id, generation)
+             VALUES (?1, ?2)
+             ON CONFLICT (stream_id) DO UPDATE SET generation = excluded.generation
+             WHERE excluded.generation >= announcer_source_fence.generation",
+            rusqlite::params![stream_id.to_string(), generation],
+        )?;
+        if changed > 0 {
+            return Ok(AnnouncerGenerationAcceptance::Current { generation });
+        }
+
+        let current = self.load_announcer_fence(stream_id)?.unwrap_or(generation);
+        Ok(AnnouncerGenerationAcceptance::Stale {
+            current,
+            attempted: generation,
+        })
+    }
+
     pub fn load_received_event(
         &self,
         stream_id: Uuid,
@@ -699,6 +787,11 @@ impl Db {
             "ALTER TABLE cursors ADD COLUMN stream_epoch BIGINT;",
             "stream_epoch",
         )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE received_events ADD COLUMN announcer_pushed_unix_ms BIGINT;",
+            "announcer_pushed_unix_ms",
+        )?;
         migrate_subscriptions_to_endpoint_stream_shape(&self.conn)?;
         migrate_cursors_to_stream_id_shape(&self.conn)?;
         Ok(())
@@ -748,6 +841,7 @@ impl Db {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
         tx.execute_batch("DELETE FROM received_events")?;
+        tx.execute_batch("DELETE FROM announcer_source_fence")?;
         tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
@@ -763,6 +857,7 @@ impl Db {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
         tx.execute_batch("DELETE FROM received_events")?;
+        tx.execute_batch("DELETE FROM announcer_source_fence")?;
         tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
@@ -1432,6 +1527,33 @@ mod tests {
             "cursor must advance to higher epoch"
         );
         assert_eq!(rows[0].last_seq, 1);
+    }
+
+    #[test]
+    fn announcer_generation_acceptance_reports_current_and_stale() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 3).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 3 }
+        );
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 5).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 5 }
+        );
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 5).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 5 }
+        );
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 4).unwrap(),
+            AnnouncerGenerationAcceptance::Stale {
+                current: 5,
+                attempted: 4
+            }
+        );
+        assert_eq!(db.load_announcer_fence(stream_id).unwrap(), Some(5));
     }
 
     #[test]

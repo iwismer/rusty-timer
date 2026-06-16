@@ -41,7 +41,16 @@ CREATE TABLE IF NOT EXISTS received_events (
     reader_timestamp          TEXT,
     received_unix_ms          BIGINT NOT NULL,
     dbf_delivered_unix_ms     BIGINT,
+    announcer_pushed_unix_ms  BIGINT,
     PRIMARY KEY (stream_id, seq)
+);
+
+-- Fences the announcer push source. Holds the highest accepted
+-- announcer_source_generation per stream so a delayed or out-of-order push
+-- carrying an older generation can be rejected without sending stale rows.
+CREATE TABLE IF NOT EXISTS announcer_source_fence (
+    stream_id  TEXT PRIMARY KEY,
+    generation BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS cursors (
