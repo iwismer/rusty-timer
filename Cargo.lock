@@ -4773,6 +4773,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rt-p2p-protocol"
+version = "0.1.0"
+dependencies = [
+ "prost",
+]
+
+[[package]]
 name = "rt-protocol"
 version = "0.1.0"
 dependencies = [

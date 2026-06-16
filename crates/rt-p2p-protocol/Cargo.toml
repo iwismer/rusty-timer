@@ -1,0 +1,11 @@
+[package]
+name = "rt-p2p-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Clean-slate P2P wire protocol (protobuf/prost) for forwarder/receiver iroh transport"
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = "0.14"

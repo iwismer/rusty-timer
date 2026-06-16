@@ -6,6 +6,7 @@ members = [
     "crates/rt-eink",
     "crates/rt-ui-http",
     "crates/rt-protocol",
+    "crates/rt-p2p-protocol",
     "crates/rt-test-utils",
     "crates/timer-core",
     "crates/rt-updater",
