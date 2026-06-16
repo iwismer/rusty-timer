@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-pub use iroh::endpoint::Connection;
+pub use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint as IrohEndpoint, Watcher};
 pub use iroh::{NodeAddr, RelayMode, SecretKey};
 
