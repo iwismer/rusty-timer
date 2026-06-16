@@ -49,6 +49,27 @@ pub struct RetentionState {
     pub forced_gap_count: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryStreamRestore<'a> {
+    pub stream_id: &'a str,
+    pub epoch: i64,
+    pub next_seq: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamStartupStatus {
+    Existing,
+    Created,
+    RestoredFromRegistry,
+    ReplacedLostJournal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamStartup {
+    pub stream_id: String,
+    pub status: StreamStartupStatus,
+}
+
 struct PruneCandidate {
     stream_id: String,
     seq: i64,
@@ -120,6 +141,82 @@ impl Journal {
     #[must_use]
     pub fn wake_registry(&self) -> Arc<WakeRegistry> {
         Arc::clone(&self.wake)
+    }
+
+    /// Resolve stream metadata after process startup.
+    ///
+    /// Returns `Existing` when the prior stream still has local journal state,
+    /// `RestoredFromRegistry` when server registry high-water restores the
+    /// stream epoch and next seq, `ReplacedLostJournal` when missing local state
+    /// requires a new stream id, and `Created` for first startup with no prior
+    /// stream. Registry restore takes precedence over the missing-prior-state
+    /// new-stream guard because it supplies the durable epoch and next-seq
+    /// high-water needed to avoid sequence reuse after journal loss.
+    pub fn ensure_stream_after_startup(
+        &mut self,
+        hardware_reader_id: &str,
+        prior_stream_id: Option<&str>,
+        new_stream_id: &str,
+        initial_epoch: i64,
+        registry_restore: Option<RegistryStreamRestore<'_>>,
+    ) -> Result<StreamStartup, JournalError> {
+        if let Some(stream_id) = prior_stream_id
+            && self.stream_exists(stream_id)?
+        {
+            return Ok(StreamStartup {
+                stream_id: stream_id.to_owned(),
+                status: StreamStartupStatus::Existing,
+            });
+        }
+
+        if let Some(restore) = registry_restore {
+            validate_stream_seed(restore.stream_id, restore.epoch, restore.next_seq)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            insert_stream_seed(
+                &tx,
+                restore.stream_id,
+                hardware_reader_id,
+                restore.epoch,
+                restore.next_seq,
+                "registry_restore",
+            )?;
+            tx.commit()?;
+            return Ok(StreamStartup {
+                stream_id: restore.stream_id.to_owned(),
+                status: StreamStartupStatus::RestoredFromRegistry,
+            });
+        }
+
+        if prior_stream_id == Some(new_stream_id) {
+            return Err(JournalError::InvalidData(
+                "journal state for prior stream is missing; a new stream_id is required".to_owned(),
+            ));
+        }
+
+        validate_stream_seed(new_stream_id, initial_epoch, 1)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        insert_stream_seed(
+            &tx,
+            new_stream_id,
+            hardware_reader_id,
+            initial_epoch,
+            1,
+            "initial",
+        )?;
+        tx.commit()?;
+
+        Ok(StreamStartup {
+            stream_id: new_stream_id.to_owned(),
+            status: if prior_stream_id.is_some() {
+                StreamStartupStatus::ReplacedLostJournal
+            } else {
+                StreamStartupStatus::Created
+            },
+        })
     }
 
     /// Initialize stream metadata if it does not exist yet.
@@ -351,6 +448,29 @@ impl Journal {
         Ok((acked_epoch, acked_seq))
     }
 
+    pub fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
+        Ok(next_seq(&self.conn, stream_key)?.saturating_sub(1))
+    }
+
+    pub fn read_events_after(
+        &self,
+        stream_key: &str,
+        after_seq: i64,
+        max: usize,
+    ) -> Result<Vec<JournalEvent>, JournalError> {
+        let limit = i64::try_from(max).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
+                    CAST(received_unix_ms AS TEXT)
+             FROM events
+             WHERE stream_id = ?1 AND seq > ?2
+             ORDER BY seq ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![stream_key, after_seq, limit], map_event)?;
+        collect_events(rows)
+    }
+
     /// Return all unacked events for a stream epoch after `after_seq`.
     pub fn unacked_events(
         &self,
@@ -562,6 +682,16 @@ impl Journal {
         current_epoch(&self.conn, stream_key)
     }
 
+    fn stream_exists(&self, stream_id: &str) -> Result<bool, JournalError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM streams WHERE stream_id = ?1)",
+                params![stream_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     fn ensure_compat_receiver(&mut self) -> Result<(), JournalError> {
         self.conn.execute(
             "INSERT OR IGNORE INTO receivers (endpoint_id, display_name, approved_unix_ms)
@@ -570,6 +700,55 @@ impl Journal {
         )?;
         Ok(())
     }
+}
+
+fn validate_stream_seed(stream_id: &str, epoch: i64, next_seq: i64) -> Result<(), JournalError> {
+    if stream_id.is_empty() {
+        return Err(JournalError::InvalidData(
+            "stream_id must not be empty".to_owned(),
+        ));
+    }
+    if epoch < 1 {
+        return Err(JournalError::InvalidData(format!(
+            "epoch {epoch} must be at least 1"
+        )));
+    }
+    if next_seq < 1 {
+        return Err(JournalError::InvalidData(format!(
+            "next_seq {next_seq} must be at least 1"
+        )));
+    }
+    Ok(())
+}
+
+fn insert_stream_seed(
+    conn: &Connection,
+    stream_id: &str,
+    hardware_reader_id: &str,
+    epoch: i64,
+    next_seq: i64,
+    reason: &str,
+) -> Result<(), JournalError> {
+    let now_ms = unix_ms();
+    conn.execute(
+        "INSERT OR IGNORE INTO streams
+             (stream_id, hardware_reader_id, network_addr, display_name, reader_connected, created_unix_ms)
+         VALUES (?1, ?2, ?2, ?2, 0, ?3)",
+        params![stream_id, hardware_reader_id, now_ms],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO stream_epochs
+             (stream_id, epoch, start_seq, end_seq, reason)
+         VALUES (?1, ?2, ?3, NULL, ?4)",
+        params![stream_id, epoch, next_seq, reason],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO stream_retention
+             (stream_id, earliest_available_seq, forced_gap_count)
+         VALUES (?1, ?2, 0)",
+        params![stream_id, next_seq],
+    )?;
+    Ok(())
 }
 
 fn retention_candidates(

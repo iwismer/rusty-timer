@@ -17,6 +17,21 @@ pub struct ReplayResult {
     pub events: Vec<JournalEvent>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapNotice {
+    pub requested_cursor: i64,
+    pub earliest: i64,
+    pub latest: i64,
+}
+
+#[derive(Debug)]
+pub struct CursorReplayBatch {
+    pub records: Vec<JournalEvent>,
+    pub earliest: i64,
+    pub latest: i64,
+    pub gap: Option<GapNotice>,
+}
+
 // ---------------------------------------------------------------------------
 // ReplayEngine
 // ---------------------------------------------------------------------------
@@ -30,6 +45,43 @@ pub struct ReplayEngine;
 impl ReplayEngine {
     pub fn new() -> Self {
         ReplayEngine
+    }
+
+    /// Return durable records strictly after `cursor`, capped by `max`.
+    ///
+    /// The journal is the source for both replay and live catch-up: callers keep
+    /// advancing the cursor and call this again after append wake-ups. If the
+    /// cursor is older than the retained prefix, the batch carries a gap notice
+    /// and no records so the caller can jump to `earliest - 1` explicitly.
+    pub fn read_after(
+        &self,
+        journal: &Journal,
+        stream_id: &str,
+        cursor: i64,
+        max: usize,
+    ) -> Result<CursorReplayBatch, JournalError> {
+        let earliest = journal.retention_state(stream_id)?.earliest_available_seq;
+        let latest = journal.latest_committed_seq(stream_id)?;
+
+        if cursor < earliest - 1 {
+            return Ok(CursorReplayBatch {
+                records: Vec::new(),
+                earliest,
+                latest,
+                gap: Some(GapNotice {
+                    requested_cursor: cursor,
+                    earliest,
+                    latest,
+                }),
+            });
+        }
+
+        Ok(CursorReplayBatch {
+            records: journal.read_events_after(stream_id, cursor, max)?,
+            earliest,
+            latest,
+            gap: None,
+        })
     }
 
     /// Return all pending events for a stream, grouped by epoch.
@@ -93,13 +145,150 @@ impl Default for ReplayEngine {
 #[cfg(test)]
 mod tests {
     use super::ReplayEngine;
-    use crate::storage::journal::Journal;
+    use crate::storage::journal::{Journal, RegistryStreamRestore, StreamStartupStatus};
     use tempfile::NamedTempFile;
 
     fn make_journal() -> (Journal, NamedTempFile) {
         let file = NamedTempFile::new().expect("temp file");
         let journal = Journal::open(file.path()).expect("open journal");
         (journal, file)
+    }
+
+    #[test]
+    fn replay_returns_after_cursor() {
+        let (mut journal, _file) = make_journal();
+        journal.ensure_stream_state("stream-a", 1).unwrap();
+
+        for frame in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
+            journal.append_read("stream-a", None, frame, "RAW").unwrap();
+        }
+
+        let batch = ReplayEngine::new()
+            .read_after(&journal, "stream-a", 1, 10)
+            .unwrap();
+
+        assert_eq!(batch.earliest, 1);
+        assert_eq!(batch.latest, 3);
+        assert!(batch.gap.is_none());
+        assert_eq!(batch.records.len(), 2);
+        assert_eq!(batch.records[0].seq, 2);
+        assert_eq!(batch.records[1].seq, 3);
+    }
+
+    #[test]
+    fn cursor_below_earliest_yields_gap() {
+        let (mut journal, _file) = make_journal();
+        journal.ensure_stream_state("stream-gap", 1).unwrap();
+
+        for frame in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
+            journal
+                .append_read("stream-gap", None, frame, "RAW")
+                .unwrap();
+        }
+        journal.update_ack_cursor("stream-gap", 1, 2).unwrap();
+        journal.prune_acked("stream-gap", 10).unwrap();
+
+        let batch = ReplayEngine::new()
+            .read_after(&journal, "stream-gap", 0, 10)
+            .unwrap();
+
+        assert_eq!(batch.earliest, 3);
+        assert_eq!(batch.latest, 3);
+        assert!(batch.records.is_empty());
+        let gap = batch.gap.expect("cursor below retention floor should gap");
+        assert_eq!(gap.requested_cursor, 0);
+        assert_eq!(gap.earliest, 3);
+        assert_eq!(gap.latest, 3);
+    }
+
+    #[test]
+    fn journal_loss_forces_new_stream_id() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let first_path = first_dir.path().join("journal.db");
+        let mut journal = Journal::open(&first_path).unwrap();
+        let startup = journal
+            .ensure_stream_after_startup("reader-a", None, "stream-old", 1, None)
+            .unwrap();
+        assert_eq!(startup.stream_id, "stream-old");
+        journal
+            .append_read(&startup.stream_id, None, b"old-one", "RAW")
+            .unwrap();
+        journal
+            .append_read(&startup.stream_id, None, b"old-two", "RAW")
+            .unwrap();
+
+        let lost_dir = tempfile::tempdir().unwrap();
+        let lost_path = lost_dir.path().join("journal.db");
+        let mut lost_journal = Journal::open(&lost_path).unwrap();
+        assert!(
+            lost_journal
+                .ensure_stream_after_startup("reader-a", Some("stream-old"), "stream-old", 1, None)
+                .is_err(),
+            "missing local state must not restart the prior stream at seq 1"
+        );
+
+        let recovered = lost_journal
+            .ensure_stream_after_startup("reader-a", Some("stream-old"), "stream-new", 1, None)
+            .unwrap();
+
+        assert_eq!(recovered.stream_id, "stream-new");
+        assert_eq!(recovered.status, StreamStartupStatus::ReplacedLostJournal);
+        let (_epoch, seq) = lost_journal
+            .append_read(&recovered.stream_id, None, b"new-one", "RAW")
+            .unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(lost_journal.event_count("stream-old").unwrap(), 0);
+    }
+
+    #[test]
+    fn registry_restore_seeds_high_water_on_fresh_journal() {
+        let (mut journal, _file) = make_journal();
+
+        let startup = journal
+            .ensure_stream_after_startup(
+                "reader-a",
+                Some("stream-old"),
+                "stream-old",
+                1,
+                Some(RegistryStreamRestore {
+                    stream_id: "stream-old",
+                    epoch: 7,
+                    next_seq: 42,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(startup.stream_id, "stream-old");
+        assert_eq!(startup.status, StreamStartupStatus::RestoredFromRegistry);
+        let (epoch, seq) = journal
+            .append_read(&startup.stream_id, None, b"restored-one", "RAW")
+            .unwrap();
+        assert_eq!(epoch, 7);
+        assert_eq!(seq, 42);
+    }
+
+    #[test]
+    fn latest_tracks_appends() {
+        let (mut journal, _file) = make_journal();
+        journal.ensure_stream_state("stream-latest", 1).unwrap();
+        let engine = ReplayEngine::new();
+
+        let empty = engine.read_after(&journal, "stream-latest", 0, 10).unwrap();
+        assert_eq!(empty.latest, 0);
+
+        journal
+            .append_read("stream-latest", None, b"first", "RAW")
+            .unwrap();
+        let after_first = engine.read_after(&journal, "stream-latest", 0, 10).unwrap();
+        assert_eq!(after_first.latest, 1);
+
+        journal
+            .append_read("stream-latest", None, b"second", "RAW")
+            .unwrap();
+        let after_second = engine.read_after(&journal, "stream-latest", 1, 10).unwrap();
+        assert_eq!(after_second.latest, 2);
+        assert_eq!(after_second.records.len(), 1);
+        assert_eq!(after_second.records[0].seq, 2);
     }
 
     #[test]
