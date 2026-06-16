@@ -5,8 +5,10 @@
 //! existing forwarder code keeps compiling until journal allocation is rewritten.
 
 use crate::storage::migrations;
+use crate::storage::wake::WakeRegistry;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const COMPAT_RECEIVER_ID: &str = "__forwarder_server__";
@@ -95,6 +97,7 @@ impl From<rusqlite::Error> for JournalError {
 /// The durable SQLite journal for a single forwarder instance.
 pub struct Journal {
     conn: Connection,
+    wake: Arc<WakeRegistry>,
 }
 
 impl Journal {
@@ -102,7 +105,21 @@ impl Journal {
     pub fn open(path: &Path) -> Result<Self, JournalError> {
         let conn = Connection::open(path)?;
         migrations::migrate(&conn)?;
-        Ok(Journal { conn })
+        Ok(Journal {
+            conn,
+            wake: Arc::new(WakeRegistry::new()),
+        })
+    }
+
+    /// Return a shareable handle to this journal's per-stream wake registry.
+    ///
+    /// Subscribers clone the `Arc` and call
+    /// [`WakeRegistry::subscribe`](crate::storage::wake::WakeRegistry::subscribe)
+    /// to receive a `watch` of the latest committed seq for a stream. The watch
+    /// value advances only after [`append_read`](Self::append_read) commits.
+    #[must_use]
+    pub fn wake_registry(&self) -> Arc<WakeRegistry> {
+        Arc::clone(&self.wake)
     }
 
     /// Initialize stream metadata if it does not exist yet.
@@ -194,6 +211,9 @@ impl Journal {
             ],
         )?;
         tx.commit()?;
+        // Publish the wake-up only after the transaction has committed so a
+        // subscriber can never observe a seq that later rolled back.
+        self.wake.notify_committed(stream_key, seq as u64);
         Ok((epoch, seq))
     }
 
