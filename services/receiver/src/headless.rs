@@ -98,25 +98,23 @@ impl HeadlessHost {
 pub(crate) fn control_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/api/v1/status", get(get_status))
-        .with_state(state);
-    install_test_bridge_routes(router)
+        .with_state(Arc::clone(&state));
+    install_test_bridge_routes(router, state)
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<control_api::StatusResponse> {
     Json(control_api::get_status(state.as_ref()).await)
 }
 
+/// Mount the headless test bridge (`/bridge/*`) when the `test-bridge` feature
+/// is enabled. The bridge is a loopback-only agent surface compiled out of
+/// release/default builds entirely.
 #[cfg(feature = "test-bridge")]
-fn install_test_bridge_routes(router: Router) -> Router {
-    router.route("/api/v1/test-bridge", get(test_bridge_status))
+fn install_test_bridge_routes(router: Router, state: Arc<AppState>) -> Router {
+    router.merge(crate::control_bridge::router(state))
 }
 
 #[cfg(not(feature = "test-bridge"))]
-fn install_test_bridge_routes(router: Router) -> Router {
+fn install_test_bridge_routes(router: Router, _state: Arc<AppState>) -> Router {
     router
-}
-
-#[cfg(feature = "test-bridge")]
-async fn test_bridge_status() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "enabled": true }))
 }

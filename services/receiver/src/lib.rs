@@ -1,6 +1,8 @@
 pub mod announcer_push;
 pub mod cache;
 pub mod control_api;
+#[cfg(feature = "test-bridge")]
+pub mod control_bridge;
 pub mod db;
 pub mod dbf_writer;
 pub mod error;

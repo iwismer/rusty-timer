@@ -60,6 +60,67 @@ async fn serves_get_status() {
     host.shutdown().await.expect("shutdown headless host");
 }
 
+/// In the default (no-feature) build the test bridge must not exist: the
+/// headless host serves no `/bridge/*` routes.
+#[cfg(not(feature = "test-bridge"))]
+#[tokio::test]
+async fn bridge_absent_without_feature() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let host = HeadlessHost::start(loopback_ephemeral_config(dir.path()))
+        .await
+        .expect("start headless host");
+
+    let base = format!("http://{}", host.local_addr());
+    let client = reqwest::Client::new();
+
+    let state = client
+        .get(format!("{base}/bridge/state"))
+        .send()
+        .await
+        .expect("GET /bridge/state");
+    assert_eq!(
+        state.status().as_u16(),
+        404,
+        "/bridge/state must be absent without the test-bridge feature"
+    );
+
+    let invoke = client
+        .post(format!("{base}/bridge/invoke/get_status"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("POST /bridge/invoke/get_status");
+    assert_eq!(
+        invoke.status().as_u16(),
+        404,
+        "/bridge/invoke must be absent without the test-bridge feature"
+    );
+
+    host.shutdown().await.expect("shutdown headless host");
+}
+
+/// With the `test-bridge` feature enabled the headless host serves the bridge
+/// surface over its loopback control API.
+#[cfg(feature = "test-bridge")]
+#[tokio::test]
+async fn bridge_present_with_feature() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let host = HeadlessHost::start(loopback_ephemeral_config(dir.path()))
+        .await
+        .expect("start headless host");
+
+    let base = format!("http://{}", host.local_addr());
+    let resp = reqwest::get(format!("{base}/bridge/state"))
+        .await
+        .expect("GET /bridge/state");
+    assert!(resp.status().is_success(), "status: {}", resp.status());
+    let body: serde_json::Value = resp.json().await.expect("state json");
+    assert_eq!(body["status"]["connection_state"], "disconnected");
+    assert!(body["streams"]["streams"].is_array());
+
+    host.shutdown().await.expect("shutdown headless host");
+}
+
 #[tokio::test]
 async fn rejects_non_loopback_bind_addr() {
     let dir = tempfile::tempdir().expect("temp dir");
