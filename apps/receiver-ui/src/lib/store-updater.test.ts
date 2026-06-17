@@ -272,6 +272,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -286,6 +288,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -329,6 +333,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -343,6 +349,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -433,6 +441,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -448,6 +458,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -492,6 +504,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -506,6 +520,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -522,6 +538,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -565,6 +583,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -608,6 +628,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -650,6 +672,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -762,6 +786,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -769,6 +795,8 @@ describe("receiver updater store", () => {
           stream_epoch: 1,
         },
         {
+          forwarder_endpoint_id: "fwd-2",
+          stream_id: "stream-10.0.0.2:10000",
           forwarder_id: "fwd-2",
           reader_ip: "10.0.0.2:10000",
           subscribed: true,
@@ -784,6 +812,8 @@ describe("receiver updater store", () => {
     callbacks?.onStreamsSnapshot({
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -791,6 +821,8 @@ describe("receiver updater store", () => {
           stream_epoch: 2,
         },
         {
+          forwarder_endpoint_id: "fwd-2",
+          stream_id: "stream-10.0.0.2:10000",
           forwarder_id: "fwd-2",
           reader_ip: "10.0.0.2:10000",
           subscribed: true,
@@ -846,6 +878,8 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -860,12 +894,68 @@ describe("receiver updater store", () => {
 
     expect(apiMocks.updateSubscriptionEventType).toHaveBeenCalledWith(
       {
-        forwarder_id: "fwd-1",
-        reader_ip: "10.0.0.1:10000",
+        forwarder_endpoint_id: "fwd-1",
+        stream_id: "stream-10.0.0.1:10000",
       },
       "start",
     );
     expect(store.streams.streams[0]?.event_type).toBe("start");
+  });
+
+  it("does not block one canonical-only stream event-type update with another", async () => {
+    const { store, updateStreamEventType } = await import("./store.svelte");
+
+    store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-1",
+          subscribed: true,
+          local_port: 10100,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-2",
+          stream_id: "stream-2",
+          subscribed: true,
+          local_port: 10200,
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    let resolveFirst!: () => void;
+    apiMocks.updateSubscriptionEventType
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(undefined);
+
+    const firstUpdate = updateStreamEventType(
+      store.streams.streams[0],
+      "start",
+    );
+    await flushAsyncWork();
+
+    await updateStreamEventType(store.streams.streams[1], "finish");
+
+    expect(apiMocks.updateSubscriptionEventType).toHaveBeenCalledTimes(2);
+    expect(apiMocks.updateSubscriptionEventType).toHaveBeenNthCalledWith(
+      1,
+      { forwarder_endpoint_id: "endpoint-1", stream_id: "stream-1" },
+      "start",
+    );
+    expect(apiMocks.updateSubscriptionEventType).toHaveBeenNthCalledWith(
+      2,
+      { forwarder_endpoint_id: "endpoint-2", stream_id: "stream-2" },
+      "finish",
+    );
+
+    resolveFirst();
+    await firstUpdate;
   });
 
   it("maps reader control events from stream_id back to the stream key", async () => {
@@ -881,6 +971,7 @@ describe("receiver updater store", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
           stream_id: "stream-1",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
@@ -1010,5 +1101,92 @@ describe("receiver updater store", () => {
     await loadAll();
 
     expect(Array.from(store.upsState.keys())).toEqual(["fwd-1"]);
+  });
+});
+
+describe("canonical-only stream identity", () => {
+  it("gives two canonical-only streams distinct identities and per-stream epoch state", async () => {
+    const { store, streamIdentity, selectedEarliestEpochValue } =
+      await import("./store.svelte");
+
+    const streamA = {
+      forwarder_endpoint_id: "endpoint-1",
+      stream_id: "11111111-1111-1111-1111-111111111111",
+      subscribed: true,
+      local_port: null,
+      stream_epoch: 5,
+    };
+    const streamB = {
+      forwarder_endpoint_id: "endpoint-2",
+      stream_id: "22222222-2222-2222-2222-222222222222",
+      subscribed: true,
+      local_port: null,
+      stream_epoch: 9,
+    };
+    store.streams = {
+      streams: [streamA, streamB],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    // Distinct canonical identities even though both lack legacy metadata
+    // (legacy streamKey would collapse both to "/").
+    expect(streamIdentity(streamA)).not.toBe(streamIdentity(streamB));
+
+    store.earliestEpochOptions = {
+      [streamIdentity(streamA)]: [
+        { stream_epoch: 5, name: null, first_seen_at: null, race_names: [] },
+      ],
+      [streamIdentity(streamB)]: [
+        { stream_epoch: 9, name: null, first_seen_at: null, race_names: [] },
+      ],
+    };
+    store.earliestEpochInputs = {
+      [streamIdentity(streamA)]: "5",
+      [streamIdentity(streamB)]: "9",
+    };
+
+    expect(selectedEarliestEpochValue(streamA)).toBe("5");
+    expect(selectedEarliestEpochValue(streamB)).toBe("9");
+  });
+
+  it("excludes canonical-only streams from the legacy live mode payload but keeps legacy ones", async () => {
+    const { store, streamIdentity, modePayload } =
+      await import("./store.svelte");
+
+    const legacyStream = {
+      forwarder_endpoint_id: "fwd-1",
+      stream_id: "stream-10.0.0.1:10000",
+      forwarder_id: "fwd-1",
+      reader_ip: "10.0.0.1:10000",
+      subscribed: true,
+      local_port: 10100,
+      stream_epoch: 3,
+    };
+    const canonicalOnly = {
+      forwarder_endpoint_id: "endpoint-2",
+      stream_id: "22222222-2222-2222-2222-222222222222",
+      subscribed: true,
+      local_port: null,
+      stream_epoch: 7,
+    };
+    store.modeDraft = "live";
+    store.streams = {
+      streams: [legacyStream, canonicalOnly],
+      degraded: false,
+      upstream_error: null,
+    };
+    store.earliestEpochInputs = {
+      [streamIdentity(legacyStream)]: "3",
+      [streamIdentity(canonicalOnly)]: "7",
+    };
+
+    const payload = modePayload();
+    expect(payload.mode).toBe("live");
+    if (payload.mode !== "live") throw new Error("unreachable");
+    // Only the legacy stream is representable in the legacy WS payload.
+    expect(payload.earliest_epochs).toEqual([
+      { forwarder_id: "fwd-1", reader_ip: "10.0.0.1:10000", earliest_epoch: 3 },
+    ]);
   });
 });

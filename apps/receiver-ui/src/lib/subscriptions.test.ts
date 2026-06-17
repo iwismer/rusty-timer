@@ -62,27 +62,27 @@ describe("buildUpdatedSubscriptions", () => {
     const result = buildUpdatedSubscriptions({
       allStreams: [
         {
-          forwarder_id: "f1",
-          reader_ip: "10.0.0.1",
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-1",
           subscribed: true,
           local_port: 10001,
         },
         {
-          forwarder_id: "f2",
-          reader_ip: "10.0.0.2",
+          forwarder_endpoint_id: "endpoint-2",
+          stream_id: "stream-2",
           subscribed: true,
           local_port: null,
         },
         {
-          forwarder_id: "f3",
-          reader_ip: "10.0.0.3",
+          forwarder_endpoint_id: "endpoint-3",
+          stream_id: "stream-3",
           subscribed: false,
           local_port: null,
         },
       ],
       target: {
-        forwarder_id: "f1",
-        reader_ip: "10.0.0.1",
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-1",
         currentlySubscribed: true,
       },
     });
@@ -90,8 +90,8 @@ describe("buildUpdatedSubscriptions", () => {
     expect(result.error).toBeNull();
     expect(result.subscriptions).toEqual([
       {
-        forwarder_id: "f2",
-        reader_ip: "10.0.0.2",
+        forwarder_endpoint_id: "endpoint-2",
+        stream_id: "stream-2",
         local_port_override: null,
         event_type: "finish",
       },
@@ -102,22 +102,32 @@ describe("buildUpdatedSubscriptions", () => {
     const result = buildUpdatedSubscriptions({
       allStreams: [
         {
-          forwarder_id: "f1",
-          reader_ip: "10.0.0.1",
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-1",
+          forwarder_id: "legacy-fwd-1",
+          reader_ip: "10.0.0.1:10000",
           subscribed: true,
           local_port: 10001,
           event_type: "start",
         },
         {
-          forwarder_id: "f2",
-          reader_ip: "10.0.0.2",
+          forwarder_endpoint_id: "endpoint-2",
+          stream_id: "stream-2",
+          forwarder_id: "legacy-fwd-2",
+          reader_ip: "10.0.0.2:10000",
+          subscribed: false,
+          local_port: null,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-3",
+          stream_id: "stream-3",
           subscribed: false,
           local_port: null,
         },
       ],
       target: {
-        forwarder_id: "f2",
-        reader_ip: "10.0.0.2",
+        forwarder_endpoint_id: "endpoint-2",
+        stream_id: "stream-2",
         currentlySubscribed: false,
       },
       rawPortOverride: "9002",
@@ -126,15 +136,59 @@ describe("buildUpdatedSubscriptions", () => {
     expect(result.error).toBeNull();
     expect(result.subscriptions).toEqual([
       {
-        forwarder_id: "f1",
-        reader_ip: "10.0.0.1",
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-1",
+        forwarder_id: "legacy-fwd-1",
+        reader_ip: "10.0.0.1:10000",
         local_port_override: 10001,
         event_type: "start",
       },
       {
-        forwarder_id: "f2",
-        reader_ip: "10.0.0.2",
+        forwarder_endpoint_id: "endpoint-2",
+        stream_id: "stream-2",
+        forwarder_id: "legacy-fwd-2",
+        reader_ip: "10.0.0.2:10000",
         local_port_override: 9002,
+        event_type: "finish",
+      },
+    ]);
+  });
+
+  it("does not fabricate legacy metadata for canonical-only subscriptions", () => {
+    const result = buildUpdatedSubscriptions({
+      allStreams: [
+        {
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-1",
+          subscribed: true,
+          local_port: null,
+        },
+        {
+          forwarder_endpoint_id: "endpoint-2",
+          stream_id: "stream-2",
+          subscribed: false,
+          local_port: null,
+        },
+      ],
+      target: {
+        forwarder_endpoint_id: "endpoint-2",
+        stream_id: "stream-2",
+        currentlySubscribed: false,
+      },
+    });
+
+    expect(result.error).toBeNull();
+    expect(result.subscriptions).toEqual([
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-1",
+        local_port_override: null,
+        event_type: "finish",
+      },
+      {
+        forwarder_endpoint_id: "endpoint-2",
+        stream_id: "stream-2",
+        local_port_override: null,
         event_type: "finish",
       },
     ]);
@@ -144,23 +198,23 @@ describe("buildUpdatedSubscriptions", () => {
     const result = buildUpdatedSubscriptions({
       allStreams: [
         {
-          forwarder_id: "f1",
-          reader_ip: "10.0.0.1",
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-1",
           subscribed: true,
           local_port: 10001,
           event_type: "start",
         },
         {
-          forwarder_id: "f2",
-          reader_ip: "10.0.0.2",
+          forwarder_endpoint_id: "endpoint-2",
+          stream_id: "stream-2",
           subscribed: true,
           local_port: null,
           event_type: "finish",
         },
       ],
       target: {
-        forwarder_id: "f2",
-        reader_ip: "10.0.0.2",
+        forwarder_endpoint_id: "endpoint-2",
+        stream_id: "stream-2",
         currentlySubscribed: true,
       },
     });
@@ -168,8 +222,8 @@ describe("buildUpdatedSubscriptions", () => {
     expect(result.error).toBeNull();
     expect(result.subscriptions).toEqual([
       {
-        forwarder_id: "f1",
-        reader_ip: "10.0.0.1",
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-1",
         local_port_override: 10001,
         event_type: "start",
       },
@@ -180,15 +234,15 @@ describe("buildUpdatedSubscriptions", () => {
     const result = buildUpdatedSubscriptions({
       allStreams: [
         {
-          forwarder_id: "f1",
-          reader_ip: "10.0.0.1",
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-1",
           subscribed: false,
           local_port: null,
         },
       ],
       target: {
-        forwarder_id: "f1",
-        reader_ip: "10.0.0.1",
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-1",
         currentlySubscribed: false,
       },
       rawPortOverride: "70000",

@@ -94,8 +94,8 @@ describe("api client", () => {
     mockInvoke.mockResolvedValue(undefined);
     await putSubscriptions([
       {
-        forwarder_id: "f",
-        reader_ip: "192.168.1.100:10000",
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "11111111-1111-1111-1111-111111111111",
         local_port_override: null,
       },
     ]);
@@ -103,8 +103,8 @@ describe("api client", () => {
       body: {
         subscriptions: [
           {
-            forwarder_id: "f",
-            reader_ip: "192.168.1.100:10000",
+            forwarder_endpoint_id: "endpoint-1",
+            stream_id: "11111111-1111-1111-1111-111111111111",
             local_port_override: null,
           },
         ],
@@ -148,13 +148,32 @@ describe("api client", () => {
     const { putEarliestEpoch } = await import("./api");
     mockInvoke.mockResolvedValue(undefined);
     const payload = {
-      forwarder_id: "fwd-1",
-      reader_ip: "10.0.0.1:10000",
+      forwarder_endpoint_id: "endpoint-1",
+      stream_id: "11111111-1111-1111-1111-111111111111",
       earliest_epoch: 7,
     };
     await putEarliestEpoch(payload);
     expect(mockInvoke).toHaveBeenCalledWith("put_earliest_epoch", {
       body: payload,
+    });
+  });
+
+  it("updateSubscriptionEventType sends camelCase top-level Tauri args", async () => {
+    const { updateSubscriptionEventType } = await import("./api");
+    mockInvoke.mockResolvedValue(undefined);
+
+    await updateSubscriptionEventType(
+      {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "11111111-1111-1111-1111-111111111111",
+      },
+      "start",
+    );
+
+    expect(mockInvoke).toHaveBeenCalledWith("update_subscription_event_type", {
+      forwarderEndpointId: "endpoint-1",
+      streamId: "11111111-1111-1111-1111-111111111111",
+      body: { event_type: "start" },
     });
   });
 
@@ -205,14 +224,12 @@ describe("api client", () => {
     mockInvoke.mockResolvedValue(undefined);
 
     await resetStreamCursor({
-      forwarder_id: "f1",
-      reader_ip: "10.0.0.1:10000",
+      stream_id: "11111111-1111-1111-1111-111111111111",
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("admin_reset_cursor", {
       body: {
-        forwarder_id: "f1",
-        reader_ip: "10.0.0.1:10000",
+        stream_id: "11111111-1111-1111-1111-111111111111",
       },
     });
   });

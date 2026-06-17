@@ -9,6 +9,7 @@
   import {
     store,
     streamKey,
+    streamIdentity,
     toggleSubscription,
     updateStreamEventType,
     changeEarliestEpoch,
@@ -62,16 +63,17 @@
 
   let readerFetchError = $state<string | null>(null);
 
-  function toggleExpand(key: string) {
+  function toggleExpand(stream: api.StreamEntry) {
+    const key = streamIdentity(stream);
     const wasExpanded = expandedKey === key;
     expandedKey = wasExpanded ? null : key;
     readerFetchError = null;
     if (!wasExpanded) {
-      // Fetch reader info when expanding
-      const parts = key.split("/");
-      if (parts.length >= 2) {
-        const forwarderId = parts[0];
-        const readerIp = parts.slice(1).join("/");
+      // Reader info is a legacy (forwarder_id, reader_ip) lookup; only fetch it
+      // when the stream exposes that metadata.
+      const forwarderId = stream.forwarder_id;
+      const readerIp = stream.reader_ip;
+      if (forwarderId != null && readerIp != null) {
         void api.readerGetInfo(forwarderId, readerIp).catch((err) => {
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(
@@ -117,7 +119,16 @@
     if (!expandedKey) return;
 
     const key = expandedKey;
-    const metrics = store.streamMetrics.get(key);
+    // streamMetrics is legacy (forwarder_id, reader_ip)-keyed; resolve the
+    // expanded stream's legacy key for the lookup while keying timeSinceLastRead
+    // by the canonical identity used everywhere else in this component.
+    const expandedStream = store.streams?.streams.find(
+      (s) => streamIdentity(s) === key,
+    );
+    const metricsKey = expandedStream
+      ? streamKey(expandedStream.forwarder_id, expandedStream.reader_ip)
+      : key;
+    const metrics = store.streamMetrics.get(metricsKey);
 
     if (!metrics?.epoch_last_received_at) {
       timeSinceLastRead = {
@@ -228,17 +239,21 @@
           </tr>
         </thead>
         <tbody>
-          {#each store.streams.streams as stream (streamKey(stream.forwarder_id, stream.reader_ip))}
-            {@const key = streamKey(stream.forwarder_id, stream.reader_ip)}
+          {#each store.streams.streams as stream (streamIdentity(stream))}
+            {@const key = streamIdentity(stream)}
+            {@const legacyKey = streamKey(
+              stream.forwarder_id,
+              stream.reader_ip,
+            )}
             <tr
               class="border-b border-border/50 hover:bg-surface-1/50 cursor-pointer"
               role="button"
               tabindex="0"
-              onclick={() => toggleExpand(key)}
+              onclick={() => toggleExpand(stream)}
               onkeydown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  toggleExpand(key);
+                  toggleExpand(stream);
                 }
               }}
             >
@@ -253,7 +268,7 @@
                   <span class="text-text-primary">
                     {stream.display_alias ?? stream.forwarder_id}
                   </span>
-                  {#if store.upsState.get(stream.forwarder_id)}
+                  {#if stream.forwarder_id && store.upsState.get(stream.forwarder_id)}
                     {@const upsEntry = store.upsState.get(stream.forwarder_id)}
                     <BatteryIndicator
                       percent={upsEntry?.status?.battery_percent ?? null}
@@ -269,7 +284,7 @@
                 <td
                   class="w-full max-w-0 py-2 px-2 text-left text-text-muted font-mono truncate"
                 >
-                  {formatLastRead(key)}
+                  {formatLastRead(legacyKey)}
                 </td>
               {/if}
               <td
@@ -287,9 +302,7 @@
             </tr>
 
             {#if expandedKey === key}
-              {@const metrics = store.streamMetrics.get(
-                streamKey(stream.forwarder_id, stream.reader_ip),
-              )}
+              {@const metrics = store.streamMetrics.get(legacyKey)}
               <tr>
                 <td colspan={showLastReadCol() ? 4 : 3} class="p-0">
                   <div class="bg-surface-1 px-4 py-3 border-b border-border">
@@ -409,12 +422,7 @@
                                 >Time since last read:</span
                               >
                               <span class="font-mono text-text-primary ml-1"
-                                >{timeSinceLastRead[
-                                  streamKey(
-                                    stream.forwarder_id,
-                                    stream.reader_ip,
-                                  )
-                                ] ?? "—"}</span
+                                >{timeSinceLastRead[key] ?? "—"}</span
                               >
                             </div>
                           </div>
@@ -550,73 +558,67 @@
                       </div>
                     {/if}
 
-                    <ReaderControlPanel
-                      readerIp={stream.reader_ip}
-                      readerInfo={store.readerInfos.get(key) ?? null}
-                      readerState={store.readerStates.get(key) ??
-                        "disconnected"}
-                      downloadProgress={store.downloadProgress.get(key) ?? null}
-                      disabled={false}
-                      helpContext="forwarder"
-                      onSyncClock={async () => {
-                        await api.readerSyncClock(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                        );
-                      }}
-                      onSetReadMode={async (mode: string, timeout: number) => {
-                        await api.readerSetReadMode(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                          mode,
-                          timeout,
-                        );
-                      }}
-                      onSetTto={async (enabled: boolean) => {
-                        await api.readerSetTto(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                          enabled,
-                        );
-                      }}
-                      onSetRecording={async (enabled: boolean) => {
-                        await api.readerSetRecording(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                          enabled,
-                        );
-                      }}
-                      onClearRecords={async () => {
-                        await api.readerClearRecords(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                        );
-                      }}
-                      onStartDownload={async () => {
-                        await api.readerStartDownload(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                        );
-                      }}
-                      onStopDownload={async () => {
-                        await api.readerStopDownload(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                        );
-                      }}
-                      onRefresh={async () => {
-                        await api.readerRefresh(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                        );
-                      }}
-                      onReconnect={async () => {
-                        await api.readerReconnect(
-                          stream.forwarder_id,
-                          stream.reader_ip,
-                        );
-                      }}
-                    />
+                    {#if stream.forwarder_id != null && stream.reader_ip != null}
+                      {@const readerFwd = stream.forwarder_id}
+                      {@const readerIpAddr = stream.reader_ip}
+                      <ReaderControlPanel
+                        readerIp={readerIpAddr}
+                        readerInfo={store.readerInfos.get(legacyKey) ?? null}
+                        readerState={store.readerStates.get(legacyKey) ??
+                          "disconnected"}
+                        downloadProgress={store.downloadProgress.get(
+                          legacyKey,
+                        ) ?? null}
+                        disabled={false}
+                        helpContext="forwarder"
+                        onSyncClock={async () => {
+                          await api.readerSyncClock(readerFwd, readerIpAddr);
+                        }}
+                        onSetReadMode={async (
+                          mode: string,
+                          timeout: number,
+                        ) => {
+                          await api.readerSetReadMode(
+                            readerFwd,
+                            readerIpAddr,
+                            mode,
+                            timeout,
+                          );
+                        }}
+                        onSetTto={async (enabled: boolean) => {
+                          await api.readerSetTto(
+                            readerFwd,
+                            readerIpAddr,
+                            enabled,
+                          );
+                        }}
+                        onSetRecording={async (enabled: boolean) => {
+                          await api.readerSetRecording(
+                            readerFwd,
+                            readerIpAddr,
+                            enabled,
+                          );
+                        }}
+                        onClearRecords={async () => {
+                          await api.readerClearRecords(readerFwd, readerIpAddr);
+                        }}
+                        onStartDownload={async () => {
+                          await api.readerStartDownload(
+                            readerFwd,
+                            readerIpAddr,
+                          );
+                        }}
+                        onStopDownload={async () => {
+                          await api.readerStopDownload(readerFwd, readerIpAddr);
+                        }}
+                        onRefresh={async () => {
+                          await api.readerRefresh(readerFwd, readerIpAddr);
+                        }}
+                        onReconnect={async () => {
+                          await api.readerReconnect(readerFwd, readerIpAddr);
+                        }}
+                      />
+                    {/if}
                   </div>
                 </td>
               </tr>

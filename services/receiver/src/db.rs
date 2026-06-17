@@ -77,6 +77,33 @@ pub struct Subscription {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamSubscription {
+    pub forwarder_endpoint_id: String,
+    pub stream_id: String,
+    pub local_port_override: Option<u16>,
+    pub event_type: EventType,
+    pub forwarder_id: Option<String>,
+    pub reader_ip: Option<String>,
+}
+
+/// Canonical earliest-epoch override keyed by `stream_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamEarliestEpoch {
+    pub stream_id: String,
+    pub forwarder_endpoint_id: String,
+    pub earliest_epoch: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamCursorRecord {
+    pub stream_id: String,
+    pub stream_epoch: Option<i64>,
+    pub last_seq: i64,
+    pub forwarder_id: Option<String>,
+    pub reader_ip: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbfConfig {
     pub enabled: bool,
     /// Filesystem path for DBF output. Uses `String` rather than `PathBuf`
@@ -254,9 +281,59 @@ impl Db {
         Ok(())
     }
 
+    /// Canonical loader for earliest-epoch overrides keyed by `stream_id`.
+    pub fn load_stream_earliest_epochs(&self) -> DbResult<Vec<StreamEarliestEpoch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, forwarder_endpoint_id, earliest_epoch
+             FROM earliest_epochs
+             ORDER BY stream_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StreamEarliestEpoch {
+                stream_id: r.get(0)?,
+                forwarder_endpoint_id: r.get(1)?,
+                earliest_epoch: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Canonical writer for earliest-epoch overrides. Legacy `forwarder_id`/
+    /// `reader_ip` columns are left NULL so the legacy WS runtime never reads a
+    /// canonical row as if `stream_id` were a `reader_ip`.
+    pub fn save_stream_earliest_epoch(
+        &self,
+        forwarder_endpoint_id: &str,
+        stream_id: &str,
+        epoch: i64,
+    ) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO earliest_epochs
+             (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
+             VALUES (?1, ?2, ?3, NULL, NULL)",
+            rusqlite::params![stream_id, forwarder_endpoint_id, epoch],
+        )?;
+        Ok(())
+    }
+
+    /// Canonical delete keyed by `stream_id`.
+    pub fn delete_stream_earliest_epoch(&self, stream_id: &str) -> DbResult<()> {
+        self.conn.execute(
+            "DELETE FROM earliest_epochs WHERE stream_id = ?1",
+            rusqlite::params![stream_id],
+        )?;
+        Ok(())
+    }
+
+    /// Legacy loader returning `(forwarder_id, reader_ip, earliest_epoch)` for
+    /// the old WS runtime. Only rows that carry real legacy metadata are
+    /// returned; canonical-only rows (`forwarder_id`/`reader_ip` NULL) are
+    /// skipped rather than fabricating keys from `stream_id`.
     pub fn load_earliest_epochs(&self) -> DbResult<Vec<(String, String, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT forwarder_id, reader_ip, earliest_epoch FROM earliest_epochs ORDER BY forwarder_id, reader_ip",
+            "SELECT forwarder_id, reader_ip, earliest_epoch FROM earliest_epochs
+             WHERE forwarder_id IS NOT NULL AND reader_ip IS NOT NULL
+             ORDER BY forwarder_id, reader_ip",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -268,10 +345,17 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Legacy writer keyed by `(forwarder_id, reader_ip)`. Stores a
+    /// deterministic synthetic `stream_id` (the same scheme used for legacy
+    /// cursor rows) so the canonical-keyed table can hold legacy rows, and
+    /// records the real legacy metadata in the compatibility columns.
     pub fn save_earliest_epoch(&self, fwd: &str, ip: &str, epoch: i64) -> DbResult<()> {
+        let stream_id = legacy_cursor_stream_id(fwd, ip);
         self.conn.execute(
-            "INSERT OR REPLACE INTO earliest_epochs (forwarder_id, reader_ip, earliest_epoch) VALUES (?1, ?2, ?3)",
-            rusqlite::params![fwd, ip, epoch],
+            "INSERT OR REPLACE INTO earliest_epochs
+             (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
+             VALUES (?1, ?2, ?3, ?2, ?4)",
+            rusqlite::params![stream_id, fwd, epoch, ip],
         )?;
         Ok(())
     }
@@ -283,34 +367,50 @@ impl Db {
         )?;
         Ok(())
     }
+    /// Legacy loader returning `(forwarder_id, reader_ip)`-keyed subscriptions
+    /// for the old WS runtime. Canonical-only rows (`forwarder_id`/`reader_ip`
+    /// NULL) are filtered out rather than substituting `forwarder_endpoint_id`/
+    /// `stream_id`, so legacy callers never receive fabricated legacy keys.
     pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
         let mut s = self.conn.prepare(
-            "SELECT COALESCE(forwarder_id, forwarder_endpoint_id),
-                    COALESCE(reader_ip, stream_id),
+            "SELECT forwarder_id,
+                    reader_ip,
                     local_port_override,
                     event_type
              FROM subscriptions
-             ORDER BY COALESCE(forwarder_id, forwarder_endpoint_id), COALESCE(reader_ip, stream_id)",
+             WHERE forwarder_id IS NOT NULL AND reader_ip IS NOT NULL
+             ORDER BY forwarder_id, reader_ip",
         )?;
         let rows = s.query_map([], |r| {
             Ok(Subscription {
                 forwarder_id: r.get(0)?,
                 reader_ip: r.get(1)?,
                 local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
-                event_type: {
-                    let raw = r.get::<_, String>(3)?;
-                    match raw.parse::<EventType>() {
-                        Ok(et) => et,
-                        Err(e) => {
-                            tracing::error!(error = %e, value = %raw, "corrupt event_type in database");
-                            return Err(rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Text,
-                                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-                            ));
-                        }
-                    }
-                },
+                event_type: parse_event_type_column(r.get::<_, String>(3)?, 3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_stream_subscriptions(&self) -> DbResult<Vec<StreamSubscription>> {
+        let mut s = self.conn.prepare(
+            "SELECT forwarder_endpoint_id,
+                    stream_id,
+                    local_port_override,
+                    event_type,
+                    forwarder_id,
+                    reader_ip
+             FROM subscriptions
+             ORDER BY forwarder_endpoint_id, stream_id",
+        )?;
+        let rows = s.query_map([], |r| {
+            Ok(StreamSubscription {
+                forwarder_endpoint_id: r.get(0)?,
+                stream_id: r.get(1)?,
+                local_port_override: r.get::<_, Option<i64>>(2)?.map(|p| p as u16),
+                event_type: parse_event_type_column(r.get::<_, String>(3)?, 3)?,
+                forwarder_id: r.get(4)?,
+                reader_ip: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -344,6 +444,28 @@ impl Db {
         tx.commit()?;
         Ok(())
     }
+
+    pub fn replace_stream_subscriptions(&mut self, subs: &[StreamSubscription]) -> DbResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("DELETE FROM subscriptions")?;
+        for s in subs {
+            tx.execute(
+                "INSERT INTO subscriptions
+                 (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    &s.forwarder_endpoint_id,
+                    &s.stream_id,
+                    s.local_port_override.map(|p| p as i64),
+                    s.event_type.as_str(),
+                    s.forwarder_id.as_deref(),
+                    s.reader_ip.as_deref(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn load_resume_cursors(&self) -> DbResult<Vec<ResumeCursor>> {
         Ok(self
             .load_cursors()?
@@ -369,6 +491,24 @@ impl Db {
                 reader_ip: r.get(1)?,
                 stream_epoch: r.get::<_, i64>(2)?,
                 last_seq: r.get::<_, i64>(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_stream_cursors(&self) -> DbResult<Vec<StreamCursorRecord>> {
+        let mut s = self.conn.prepare(
+            "SELECT stream_id, stream_epoch, last_seq, forwarder_id, reader_ip
+             FROM cursors
+             ORDER BY stream_id",
+        )?;
+        let rows = s.query_map([], |r| {
+            Ok(StreamCursorRecord {
+                stream_id: r.get(0)?,
+                stream_epoch: r.get(1)?,
+                last_seq: r.get(2)?,
+                forwarder_id: r.get(3)?,
+                reader_ip: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -414,6 +554,14 @@ impl Db {
         self.conn.execute(
             "DELETE FROM cursors WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)",
             rusqlite::params![stream_id, fwd, ip],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_stream_cursor(&self, stream_id: &str) -> DbResult<()> {
+        self.conn.execute(
+            "DELETE FROM cursors WHERE stream_id = ?1",
+            rusqlite::params![stream_id],
         )?;
         Ok(())
     }
@@ -823,8 +971,29 @@ impl Db {
             "ALTER TABLE received_events ADD COLUMN announcer_pushed_unix_ms BIGINT;",
             "announcer_pushed_unix_ms",
         )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE earliest_epochs ADD COLUMN stream_id TEXT;",
+            "stream_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE earliest_epochs ADD COLUMN forwarder_endpoint_id TEXT;",
+            "forwarder_endpoint_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE earliest_epochs ADD COLUMN forwarder_id TEXT;",
+            "forwarder_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE earliest_epochs ADD COLUMN reader_ip TEXT;",
+            "reader_ip",
+        )?;
         migrate_subscriptions_to_endpoint_stream_shape(&self.conn)?;
         migrate_cursors_to_stream_id_shape(&self.conn)?;
+        migrate_earliest_epochs_to_stream_id_shape(&self.conn)?;
         Ok(())
     }
 
@@ -850,6 +1019,21 @@ impl Db {
              WHERE (forwarder_endpoint_id = ?2 AND stream_id = ?3)
                 OR (forwarder_id = ?2 AND reader_ip = ?3)",
             rusqlite::params![port.map(|p| p as i64), fwd, ip],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn update_stream_subscription_port(
+        &self,
+        forwarder_endpoint_id: &str,
+        stream_id: &str,
+        port: Option<u16>,
+    ) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "UPDATE subscriptions
+             SET local_port_override = ?1
+             WHERE forwarder_endpoint_id = ?2 AND stream_id = ?3",
+            rusqlite::params![port.map(|p| p as i64), forwarder_endpoint_id, stream_id],
         )?;
         Ok(count > 0)
     }
@@ -955,6 +1139,21 @@ impl Db {
         Ok(count > 0)
     }
 
+    pub fn update_stream_subscription_event_type(
+        &self,
+        forwarder_endpoint_id: &str,
+        stream_id: &str,
+        event_type: EventType,
+    ) -> DbResult<bool> {
+        let count = self.conn.execute(
+            "UPDATE subscriptions
+             SET event_type = ?1
+             WHERE forwarder_endpoint_id = ?2 AND stream_id = ?3",
+            rusqlite::params![event_type.as_str(), forwarder_endpoint_id, stream_id],
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn load_subscription_dbf_details(
         &self,
         fwd: &str,
@@ -1008,6 +1207,20 @@ impl Db {
                 Some(json)
             }
         }))
+    }
+}
+
+fn parse_event_type_column(raw: String, column: usize) -> rusqlite::Result<EventType> {
+    match raw.parse::<EventType>() {
+        Ok(et) => Ok(et),
+        Err(e) => {
+            tracing::error!(error = %e, value = %raw, "corrupt event_type in database");
+            Err(rusqlite::Error::FromSqlConversionFailure(
+                column,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            ))
+        }
     }
 }
 
@@ -1089,6 +1302,41 @@ fn migrate_subscriptions_to_endpoint_stream_shape(conn: &Connection) -> DbResult
          DROP TABLE subscriptions;
          ALTER TABLE subscriptions_v2 RENAME TO subscriptions;
          RELEASE migrate_subscriptions_to_v2;",
+    )?;
+    Ok(())
+}
+
+fn migrate_earliest_epochs_to_stream_id_shape(conn: &Connection) -> DbResult<()> {
+    let columns = load_table_columns(conn, "earliest_epochs")?;
+    if has_column_pk_notnull(&columns, "stream_id", 1, false)
+        && has_column_notnull(&columns, "forwarder_endpoint_id", true)
+        && !legacy_column_has_pk_or_notnull(&columns, "forwarder_id")
+        && !legacy_column_has_pk_or_notnull(&columns, "reader_ip")
+    {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "SAVEPOINT migrate_earliest_epochs_to_v2;
+         CREATE TABLE earliest_epochs_v2 (
+             stream_id             TEXT PRIMARY KEY,
+             forwarder_endpoint_id TEXT NOT NULL,
+             earliest_epoch        BIGINT NOT NULL,
+             forwarder_id          TEXT,
+             reader_ip             TEXT
+         );
+         INSERT OR REPLACE INTO earliest_epochs_v2
+             (stream_id, forwarder_endpoint_id, earliest_epoch, forwarder_id, reader_ip)
+         SELECT
+             COALESCE(NULLIF(stream_id, ''), 'legacy:' || forwarder_id || char(31) || reader_ip),
+             COALESCE(NULLIF(forwarder_endpoint_id, ''), forwarder_id),
+             earliest_epoch,
+             forwarder_id,
+             reader_ip
+         FROM earliest_epochs;
+         DROP TABLE earliest_epochs;
+         ALTER TABLE earliest_epochs_v2 RENAME TO earliest_epochs;
+         RELEASE migrate_earliest_epochs_to_v2;",
     )?;
     Ok(())
 }
@@ -1274,6 +1522,106 @@ mod tests {
     }
 
     #[test]
+    fn save_stream_earliest_epoch_does_not_fabricate_legacy_reader_ip() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "22222222-2222-2222-2222-222222222222", 7)
+            .unwrap();
+
+        // Canonical view round-trips by stream_id.
+        assert_eq!(
+            db.load_stream_earliest_epochs().unwrap(),
+            vec![StreamEarliestEpoch {
+                stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
+                earliest_epoch: 7,
+            }]
+        );
+
+        // The raw row must NOT store stream_id in reader_ip or
+        // forwarder_endpoint_id in forwarder_id.
+        let (stream_id, fwd_endpoint, forwarder_id, reader_ip): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = db
+            .conn
+            .query_row(
+                "SELECT stream_id, forwarder_endpoint_id, forwarder_id, reader_ip FROM earliest_epochs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(stream_id, "22222222-2222-2222-2222-222222222222");
+        assert_eq!(fwd_endpoint, "endpoint-1");
+        assert_eq!(forwarder_id, None);
+        assert_eq!(reader_ip, None);
+
+        // Legacy view must skip canonical-only rows (no fabricated keys).
+        assert!(db.load_earliest_epochs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_stream_earliest_epoch_removes_by_stream_id() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_stream_earliest_epoch("endpoint-1", "22222222-2222-2222-2222-222222222222", 7)
+            .unwrap();
+        db.save_stream_earliest_epoch("endpoint-2", "33333333-3333-3333-3333-333333333333", 9)
+            .unwrap();
+
+        db.delete_stream_earliest_epoch("22222222-2222-2222-2222-222222222222")
+            .unwrap();
+
+        assert_eq!(
+            db.load_stream_earliest_epochs().unwrap(),
+            vec![StreamEarliestEpoch {
+                stream_id: "33333333-3333-3333-3333-333333333333".to_owned(),
+                forwarder_endpoint_id: "endpoint-2".to_owned(),
+                earliest_epoch: 9,
+            }]
+        );
+    }
+
+    #[test]
+    fn load_subscriptions_excludes_canonical_only_rows() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[
+            // Canonical-only row: must NOT appear in the legacy view.
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
+                stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+                local_port_override: Some(9000),
+                event_type: EventType::Start,
+                forwarder_id: None,
+                reader_ip: None,
+            },
+            // Row carrying real legacy metadata: must appear with those values.
+            StreamSubscription {
+                forwarder_endpoint_id: "endpoint-2".to_owned(),
+                stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+                local_port_override: Some(9100),
+                event_type: EventType::Finish,
+                forwarder_id: Some("legacy-fwd".to_owned()),
+                reader_ip: Some("10.0.0.1:10000".to_owned()),
+            },
+        ])
+        .unwrap();
+
+        let legacy = db.load_subscriptions().unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].forwarder_id, "legacy-fwd");
+        assert_eq!(legacy[0].reader_ip, "10.0.0.1:10000");
+        assert_eq!(legacy[0].local_port_override, Some(9100));
+        assert_eq!(legacy[0].event_type, EventType::Finish);
+        // The canonical-only stream_id must never be surfaced as a reader_ip.
+        assert!(
+            !legacy
+                .iter()
+                .any(|s| s.reader_ip == "11111111-1111-1111-1111-111111111111")
+        );
+    }
+
+    #[test]
     fn delete_cursor_removes_only_matching_stream() {
         let db = Db::open_in_memory().unwrap();
         db.save_cursor("f1", "10.0.0.1:10000", 7, 42).unwrap();
@@ -1449,6 +1797,70 @@ mod tests {
         assert!(db.load_subscriptions().unwrap().is_empty());
         assert!(db.load_cursors().unwrap().is_empty());
         assert!(db.load_earliest_epochs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn replace_stream_subscriptions_persists_canonical_identity_without_fake_legacy_keys() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+            local_port_override: Some(9000),
+            event_type: EventType::Start,
+            forwarder_id: None,
+            reader_ip: None,
+        }])
+        .unwrap();
+
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].forwarder_endpoint_id, "endpoint-1");
+        assert_eq!(subs[0].stream_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(subs[0].local_port_override, Some(9000));
+        assert_eq!(subs[0].event_type, EventType::Start);
+        assert_eq!(subs[0].forwarder_id, None);
+        assert_eq!(subs[0].reader_ip, None);
+
+        let raw: (String, String, Option<String>, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT forwarder_endpoint_id, stream_id, forwarder_id, reader_ip FROM subscriptions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(raw.0, "endpoint-1");
+        assert_eq!(raw.1, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(raw.2, None);
+        assert_eq!(raw.3, None);
+    }
+
+    #[test]
+    fn update_stream_subscription_port_uses_canonical_identity() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+            local_port_override: None,
+            event_type: EventType::Finish,
+            forwarder_id: Some("legacy-fwd".to_owned()),
+            reader_ip: Some("10.0.0.1:10000".to_owned()),
+        }])
+        .unwrap();
+
+        let updated = db
+            .update_stream_subscription_port(
+                "endpoint-1",
+                "11111111-1111-1111-1111-111111111111",
+                Some(9100),
+            )
+            .unwrap();
+
+        assert!(updated);
+        assert_eq!(
+            db.load_stream_subscriptions().unwrap()[0].local_port_override,
+            Some(9100)
+        );
     }
 
     #[test]
@@ -1717,14 +2129,100 @@ mod tests {
             }]
         );
 
+        // A canonical-only row (no legacy forwarder_id/reader_ip metadata) must
+        // NOT surface in the legacy (forwarder_id, reader_ip) view: the legacy
+        // loader filters it out rather than fabricating legacy keys from
+        // forwarder_endpoint_id/stream_id.
         db.conn
             .execute(
                 "INSERT INTO subscriptions (forwarder_endpoint_id, stream_id, event_type)
                  VALUES (?1, ?2, ?3)",
-                rusqlite::params!["fwd-2", "10.0.0.2:10000", "finish"],
+                rusqlite::params![
+                    "endpoint-2",
+                    "22222222-2222-2222-2222-222222222222",
+                    "finish"
+                ],
             )
             .unwrap();
-        assert_eq!(db.load_subscriptions().unwrap().len(), 2);
+        assert_eq!(db.load_subscriptions().unwrap().len(), 1);
+        // It is, however, visible through the canonical loader.
+        assert_eq!(db.load_stream_subscriptions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn migrates_legacy_earliest_epochs_to_stream_id_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE earliest_epochs (
+                    forwarder_id TEXT NOT NULL,
+                    reader_ip TEXT NOT NULL,
+                    earliest_epoch BIGINT NOT NULL,
+                    PRIMARY KEY (forwarder_id, reader_ip)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO earliest_epochs (forwarder_id, reader_ip, earliest_epoch)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params!["fwd-1", "10.0.0.1:10000", 7i64],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+
+        // Canonical shape is in place after migration.
+        let columns = table_info(&db.conn, "earliest_epochs");
+        assert_eq!(columns.get("stream_id"), Some(&(1, 0)));
+        assert_eq!(columns.get("forwarder_endpoint_id"), Some(&(0, 1)));
+        assert_eq!(columns.get("forwarder_id"), Some(&(0, 0)));
+        assert_eq!(columns.get("reader_ip"), Some(&(0, 0)));
+
+        // Legacy view still returns the real legacy metadata row.
+        assert_eq!(
+            db.load_earliest_epochs().unwrap(),
+            vec![("fwd-1".to_owned(), "10.0.0.1:10000".to_owned(), 7)]
+        );
+
+        // Canonical view returns a synthetic stream_id + forwarder_endpoint_id
+        // without storing stream_id in reader_ip.
+        assert_eq!(
+            db.load_stream_earliest_epochs().unwrap(),
+            vec![StreamEarliestEpoch {
+                stream_id: "legacy:fwd-1\u{1f}10.0.0.1:10000".to_owned(),
+                forwarder_endpoint_id: "fwd-1".to_owned(),
+                earliest_epoch: 7,
+            }]
+        );
+
+        // Canonical saves work afterwards and stay canonical-only.
+        db.save_stream_earliest_epoch("endpoint-2", "22222222-2222-2222-2222-222222222222", 11)
+            .unwrap();
+        let mut stream_rows = db.load_stream_earliest_epochs().unwrap();
+        stream_rows.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
+        assert_eq!(
+            stream_rows,
+            vec![
+                StreamEarliestEpoch {
+                    stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+                    forwarder_endpoint_id: "endpoint-2".to_owned(),
+                    earliest_epoch: 11,
+                },
+                StreamEarliestEpoch {
+                    stream_id: "legacy:fwd-1\u{1f}10.0.0.1:10000".to_owned(),
+                    forwarder_endpoint_id: "fwd-1".to_owned(),
+                    earliest_epoch: 7,
+                },
+            ]
+        );
+        // The canonical row must not surface in the legacy view.
+        assert_eq!(
+            db.load_earliest_epochs().unwrap(),
+            vec![("fwd-1".to_owned(), "10.0.0.1:10000".to_owned(), 7)]
+        );
     }
 
     fn table_info(conn: &Connection, table: &str) -> std::collections::HashMap<String, (i64, i64)> {

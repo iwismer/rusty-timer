@@ -240,8 +240,30 @@ export function setTargetedEpochInputs(value: Record<string, string>): void {
 
 // --------------- Helpers ---------------
 
-export function streamKey(forwarder_id: string, reader_ip: string): string {
-  return `${forwarder_id}/${reader_ip}`;
+export function streamKey(
+  forwarder_id: string | undefined,
+  reader_ip: string | undefined,
+): string {
+  return `${forwarder_id ?? ""}/${reader_ip ?? ""}`;
+}
+
+/// Canonical, always-present per-stream identity. Unlike `streamKey`, this
+/// never collapses to `"/"` for canonical-only streams (those without legacy
+/// `forwarder_id`/`reader_ip` metadata), so it is safe to use for UI row keys,
+/// expand state, and per-stream input/saving maps.
+export function streamIdentity(stream: {
+  forwarder_endpoint_id: string;
+  stream_id: string;
+}): string {
+  return `${stream.forwarder_endpoint_id}/${stream.stream_id}`;
+}
+
+/// Build a lookup from canonical stream identity to the live `StreamEntry`,
+/// used to translate canonical-keyed input maps back to legacy WS refs.
+function streamsByIdentity(): Map<string, api.StreamEntry> {
+  return new Map(
+    (store.streams?.streams ?? []).map((s) => [streamIdentity(s), s]),
+  );
 }
 
 function captureConcreteEpochs(
@@ -340,7 +362,7 @@ export function formatEarliestEpochOption(
 }
 
 export function selectedEarliestEpochValue(stream: api.StreamEntry): string {
-  const key = streamKey(stream.forwarder_id, stream.reader_ip);
+  const key = streamIdentity(stream);
   const configured = store.earliestEpochInputs[key];
   const options = store.earliestEpochOptions[key] ?? [];
 
@@ -365,7 +387,7 @@ export function selectedEarliestEpochValue(stream: api.StreamEntry): string {
 }
 
 export function selectedTargetedEpochValue(stream: api.StreamEntry): string {
-  const key = streamKey(stream.forwarder_id, stream.reader_ip);
+  const key = streamIdentity(stream);
   const configured = parseApiReturnedEpoch(key, store.targetedEpochInputs[key]);
   const options = store.earliestEpochOptions[key] ?? [];
 
@@ -387,7 +409,7 @@ export function selectedTargetedEpochValue(stream: api.StreamEntry): string {
 export function resolveReplayTargetEpoch(
   stream: api.StreamEntry,
 ): number | null {
-  const key = streamKey(stream.forwarder_id, stream.reader_ip);
+  const key = streamIdentity(stream);
   const configured = parseApiReturnedEpoch(key, store.targetedEpochInputs[key]);
   if (configured !== null) return configured;
   const selected = parseApiReturnedEpoch(
@@ -410,12 +432,23 @@ export function modePayload(): ReceiverMode {
   if (store.modeDraft === "race") {
     return { mode: "race", race_id: store.raceIdDraft.trim() };
   }
+  // The input maps are keyed by canonical stream identity. The legacy WS
+  // `ReceiverMode` payload is keyed by (forwarder_id, reader_ip), so resolve
+  // each input back to its stream and only emit streams that still carry real
+  // legacy metadata (canonical-only streams are not representable here).
+  const byIdentity = streamsByIdentity();
   if (store.modeDraft === "targeted_replay") {
     const targets = Object.entries(store.targetedEpochInputs)
       .map(([key, value]) => {
-        const stream = parseStreamKey(key);
+        const stream = byIdentity.get(key);
         const stream_epoch = parseApiReturnedEpoch(key, value);
-        if (!stream || stream_epoch === null) return null;
+        if (
+          !stream ||
+          stream.forwarder_id == null ||
+          stream.reader_ip == null ||
+          stream_epoch === null
+        )
+          return null;
         return {
           forwarder_id: stream.forwarder_id,
           reader_ip: stream.reader_ip,
@@ -425,15 +458,29 @@ export function modePayload(): ReceiverMode {
       .filter((t): t is api.ReplayTarget => t !== null);
     return { mode: "targeted_replay", targets };
   }
-  const liveStreams = (store.streams?.streams ?? []).map((s) => ({
-    forwarder_id: s.forwarder_id,
-    reader_ip: s.reader_ip,
-  }));
+  // Legacy WS live mode is keyed by (forwarder_id, reader_ip); only include
+  // streams that expose real legacy metadata rather than fabricating refs from
+  // canonical identifiers.
+  const liveStreams: api.StreamRef[] = (store.streams?.streams ?? [])
+    .filter(
+      (s): s is api.StreamEntry & { forwarder_id: string; reader_ip: string } =>
+        s.forwarder_id != null && s.reader_ip != null,
+    )
+    .map((s) => ({
+      forwarder_id: s.forwarder_id,
+      reader_ip: s.reader_ip,
+    }));
   const earliest_epochs = Object.entries(store.earliestEpochInputs)
     .map(([key, value]) => {
-      const stream = parseStreamKey(key);
+      const stream = byIdentity.get(key);
       const earliest_epoch = parseNonNegativeInt(value);
-      if (!stream || earliest_epoch === null) return null;
+      if (
+        !stream ||
+        stream.forwarder_id == null ||
+        stream.reader_ip == null ||
+        earliest_epoch === null
+      )
+        return null;
       return {
         forwarder_id: stream.forwarder_id,
         reader_ip: stream.reader_ip,
@@ -516,13 +563,18 @@ export async function prefetchEarliestEpochOptions(
   forceRefreshKeys: Set<string> = new Set(),
 ): Promise<void> {
   const tasks = streamList.map(async (stream) => {
-    const key = streamKey(stream.forwarder_id, stream.reader_ip);
+    const key = streamIdentity(stream);
     const forceRefresh = forceRefreshKeys.has(key);
     if (
       (!forceRefresh && store.earliestEpochOptions[key]) ||
       store.earliestEpochLoading[key]
     )
       return;
+
+    // Replay-target epochs are a legacy (forwarder_id, reader_ip)-keyed lookup;
+    // skip canonical-only streams that lack legacy metadata.
+    const { forwarder_id, reader_ip } = stream;
+    if (forwarder_id == null || reader_ip == null) return;
 
     store.earliestEpochLoading = { ...store.earliestEpochLoading, [key]: true };
     store.earliestEpochLoadErrors = {
@@ -532,8 +584,8 @@ export async function prefetchEarliestEpochOptions(
 
     try {
       const response = await api.getReplayTargetEpochs({
-        forwarder_id: stream.forwarder_id,
-        reader_ip: stream.reader_ip,
+        forwarder_id,
+        reader_ip,
       });
       store.earliestEpochOptions = {
         ...store.earliestEpochOptions,
@@ -558,13 +610,26 @@ export async function prefetchEarliestEpochOptions(
 
 function hydrateMode(mode: ReceiverMode): void {
   store.modeDraft = mode.mode;
+  // Saved modes are keyed by legacy (forwarder_id, reader_ip); translate to
+  // canonical stream identity using the current stream list so the input maps
+  // stay canonical-keyed. When the matching stream is not currently known we
+  // fall back to the legacy streamKey rather than dropping the override.
+  const identityForLegacyRef = (
+    forwarder_id: string,
+    reader_ip: string,
+  ): string => {
+    const stream = (store.streams?.streams ?? []).find(
+      (s) => s.forwarder_id === forwarder_id && s.reader_ip === reader_ip,
+    );
+    return stream ? streamIdentity(stream) : streamKey(forwarder_id, reader_ip);
+  };
   if (mode.mode === "live") {
     const rows = Array.isArray(mode.earliest_epochs)
       ? mode.earliest_epochs
       : [];
     store.earliestEpochInputs = Object.fromEntries(
       rows.map((r) => [
-        streamKey(r.forwarder_id, r.reader_ip),
+        identityForLegacyRef(r.forwarder_id, r.reader_ip),
         String(r.earliest_epoch),
       ]),
     );
@@ -579,7 +644,7 @@ function hydrateMode(mode: ReceiverMode): void {
   }
   store.targetedEpochInputs = Object.fromEntries(
     mode.targets.map((t) => [
-      streamKey(t.forwarder_id, t.reader_ip),
+      identityForLegacyRef(t.forwarder_id, t.reader_ip),
       String(t.stream_epoch),
     ]),
   );
@@ -895,7 +960,7 @@ export async function changeEarliestEpoch(
   rawValue: string,
 ): Promise<void> {
   if (store.modeDraft === "race") return;
-  const key = streamKey(stream.forwarder_id, stream.reader_ip);
+  const key = streamIdentity(stream);
   if (store.earliestEpochSaving[key]) return;
 
   const parsed = parseNonNegativeInt(rawValue);
@@ -908,8 +973,8 @@ export async function changeEarliestEpoch(
   try {
     store.error = null;
     await api.putEarliestEpoch({
-      forwarder_id: stream.forwarder_id,
-      reader_ip: stream.reader_ip,
+      forwarder_endpoint_id: stream.forwarder_endpoint_id,
+      stream_id: stream.stream_id,
       earliest_epoch: parsed,
     });
     store.earliestEpochInputs = {
@@ -935,8 +1000,8 @@ export async function toggleSubscription(
     const result = buildUpdatedSubscriptions({
       allStreams: store.streams.streams,
       target: {
-        forwarder_id: stream.forwarder_id,
-        reader_ip: stream.reader_ip,
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
+        stream_id: stream.stream_id,
         currentlySubscribed: stream.subscribed,
       },
     });
@@ -963,7 +1028,7 @@ export async function updateStreamEventType(
 ): Promise<void> {
   if (!store.streams || !stream.subscribed) return;
 
-  const key = streamKey(stream.forwarder_id, stream.reader_ip);
+  const key = streamIdentity(stream);
   if (store.streamEventTypeBusy[key]) return;
 
   store.streamEventTypeBusy = { ...store.streamEventTypeBusy, [key]: true };
@@ -971,16 +1036,16 @@ export async function updateStreamEventType(
     store.error = null;
     await api.updateSubscriptionEventType(
       {
-        forwarder_id: stream.forwarder_id,
-        reader_ip: stream.reader_ip,
+        forwarder_endpoint_id: stream.forwarder_endpoint_id,
+        stream_id: stream.stream_id,
       },
       eventType,
     );
     store.streams = {
       ...store.streams,
       streams: store.streams.streams.map((candidate) =>
-        candidate.forwarder_id === stream.forwarder_id &&
-        candidate.reader_ip === stream.reader_ip
+        candidate.forwarder_endpoint_id === stream.forwarder_endpoint_id &&
+        candidate.stream_id === stream.stream_id
           ? { ...candidate, event_type: eventType }
           : candidate,
       ),
@@ -998,14 +1063,20 @@ export async function replayStream(stream: api.StreamEntry): Promise<void> {
     store.error = "Select a valid target epoch before replaying.";
     return;
   }
+  // Targeted replay is a legacy (forwarder_id, reader_ip)-keyed WS mode.
+  const { forwarder_id, reader_ip } = stream;
+  if (forwarder_id == null || reader_ip == null) {
+    store.error = "Stream is missing legacy metadata required for replay.";
+    return;
+  }
   try {
     store.error = null;
     const payload: ReceiverMode = {
       mode: "targeted_replay",
       targets: [
         {
-          forwarder_id: stream.forwarder_id,
-          reader_ip: stream.reader_ip,
+          forwarder_id,
+          reader_ip,
           stream_epoch: parsed,
         },
       ],
@@ -1025,9 +1096,11 @@ export async function replayAll(): Promise<void> {
     .map((s) => {
       const epoch = resolveReplayTargetEpoch(s);
       if (epoch === null) return null;
+      const { forwarder_id, reader_ip } = s;
+      if (forwarder_id == null || reader_ip == null) return null;
       return {
-        forwarder_id: s.forwarder_id,
-        reader_ip: s.reader_ip,
+        forwarder_id,
+        reader_ip,
         stream_epoch: epoch,
       };
     })
@@ -1282,9 +1355,7 @@ export function initStore(): void {
         lastConcreteEpochByKey,
         store.streams?.streams ?? [],
       );
-      const refreshAllKeys = new Set(
-        s.streams.map((st) => streamKey(st.forwarder_id, st.reader_ip)),
-      );
+      const refreshAllKeys = new Set(s.streams.map((st) => streamIdentity(st)));
       streamRefreshVersion += 1;
       store.streams = s;
       void prefetchEarliestEpochOptions(s.streams, refreshAllKeys);

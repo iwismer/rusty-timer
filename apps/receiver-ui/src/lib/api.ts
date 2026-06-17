@@ -11,9 +11,13 @@ export interface Profile {
 }
 
 export interface StreamEntry {
-  stream_id?: string;
-  forwarder_id: string;
-  reader_ip: string;
+  // Canonical P2P stream identity (always present).
+  forwarder_endpoint_id: string;
+  stream_id: string;
+  // Legacy display metadata, populated only when the backend exposes it
+  // (e.g. the stream is present in the server catalog).
+  forwarder_id?: string;
+  reader_ip?: string;
   subscribed: boolean;
   local_port: number | null;
   event_type?: "start" | "finish";
@@ -66,10 +70,26 @@ export interface StreamsResponse {
 }
 
 export interface SubscriptionItem {
-  forwarder_id: string;
-  reader_ip: string;
+  forwarder_endpoint_id: string;
+  stream_id: string;
   local_port_override: number | null;
   event_type?: "start" | "finish";
+  // Optional legacy display metadata; the backend may echo it back.
+  forwarder_id?: string;
+  reader_ip?: string;
+}
+
+/** Canonical control-API stream identity. */
+export interface StreamIdentity {
+  forwarder_endpoint_id: string;
+  stream_id: string;
+}
+
+/** Canonical earliest-epoch override request (control API). */
+export interface EarliestEpochRequest {
+  forwarder_endpoint_id: string;
+  stream_id: string;
+  earliest_epoch: number;
 }
 
 export type ConnectionState =
@@ -270,9 +290,9 @@ export async function putMode(mode: ReceiverMode): Promise<void> {
 }
 
 export async function putEarliestEpoch(
-  epochOverride: EarliestEpochOverride,
+  body: EarliestEpochRequest,
 ): Promise<void> {
-  await invoke("put_earliest_epoch", { body: epochOverride });
+  await invoke("put_earliest_epoch", { body });
 }
 
 export async function getRaces(): Promise<RacesResponse> {
@@ -324,16 +344,22 @@ export async function disconnect(): Promise<void> {
   await invoke("disconnect");
 }
 
-export async function resetStreamCursor(stream: StreamRef): Promise<void> {
-  await invoke("admin_reset_cursor", { body: stream });
+export async function resetStreamCursor(stream: {
+  stream_id: string;
+}): Promise<void> {
+  await invoke("admin_reset_cursor", { body: { stream_id: stream.stream_id } });
 }
 
 export async function resetAllCursors(): Promise<{ deleted: number }> {
   return invoke("admin_reset_all_cursors");
 }
 
-export async function resetEarliestEpoch(stream: StreamRef): Promise<void> {
-  await invoke("admin_reset_earliest_epoch", { body: stream });
+export async function resetEarliestEpoch(stream: {
+  stream_id: string;
+}): Promise<void> {
+  await invoke("admin_reset_earliest_epoch", {
+    body: { stream_id: stream.stream_id },
+  });
 }
 
 export async function resetAllEarliestEpochs(): Promise<{ deleted: number }> {
@@ -357,13 +383,13 @@ export async function factoryReset(): Promise<void> {
 }
 
 export async function updateLocalPort(
-  stream: StreamRef,
+  stream: StreamIdentity,
   localPortOverride: number | null,
 ): Promise<void> {
   await invoke("admin_update_port", {
     body: {
-      forwarder_id: stream.forwarder_id,
-      reader_ip: stream.reader_ip,
+      forwarder_endpoint_id: stream.forwarder_endpoint_id,
+      stream_id: stream.stream_id,
       local_port_override: localPortOverride,
     },
   });
@@ -464,12 +490,12 @@ export async function clearDbf(): Promise<void> {
 }
 
 export async function updateSubscriptionEventType(
-  stream: StreamRef,
+  stream: StreamIdentity,
   eventType: "start" | "finish",
 ): Promise<void> {
   await invoke("update_subscription_event_type", {
-    forwarder_id: stream.forwarder_id,
-    reader_ip: stream.reader_ip,
+    forwarderEndpointId: stream.forwarder_endpoint_id,
+    streamId: stream.stream_id,
     body: { event_type: eventType },
   });
 }

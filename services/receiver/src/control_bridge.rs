@@ -155,7 +155,7 @@ async fn state_snapshot(State(state): State<Arc<AppState>>) -> Json<Value> {
 async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsResponse {
     let counts_snapshot = state.stream_counts.snapshot();
     let db = state.db.lock().await;
-    let subs = match db.load_subscriptions() {
+    let subs = match db.load_stream_subscriptions() {
         Ok(subs) => subs,
         Err(e) => {
             return control_api::StreamsResponse {
@@ -165,31 +165,38 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
             };
         }
     };
-    let (cursors, cursors_error) = match db.load_cursors() {
+    let (cursors, cursors_error) = match db.load_stream_cursors() {
         Ok(cursors) => (cursors, None),
         Err(e) => (vec![], Some(format!("failed to load cursors: {e}"))),
     };
     drop(db);
 
-    let cursor_map: HashMap<(&str, &str), &crate::db::CursorRecord> = cursors
-        .iter()
-        .map(|c| ((c.forwarder_id.as_str(), c.reader_ip.as_str()), c))
-        .collect();
+    let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
+        cursors.iter().map(|c| (c.stream_id.as_str(), c)).collect();
 
     let streams = subs
         .iter()
         .map(|sub| {
-            let cursor = cursor_map.get(&(sub.forwarder_id.as_str(), sub.reader_ip.as_str()));
-            let sk = crate::cache::StreamKey::new(&sub.forwarder_id, &sub.reader_ip);
-            let counts = counts_snapshot.get(&sk);
+            let cursor = cursor_map.get(sub.stream_id.as_str());
+            let counts = sub
+                .forwarder_id
+                .as_deref()
+                .zip(sub.reader_ip.as_deref())
+                .and_then(|(forwarder_id, reader_ip)| {
+                    let sk = crate::cache::StreamKey::new(forwarder_id, reader_ip);
+                    counts_snapshot.get(&sk)
+                });
             control_api::StreamEntry {
+                forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
+                stream_id: sub.stream_id.clone(),
                 forwarder_id: sub.forwarder_id.clone(),
                 reader_ip: sub.reader_ip.clone(),
                 subscribed: true,
-                local_port: sub
-                    .local_port_override
-                    .or_else(|| crate::ports::default_port(&sub.reader_ip)),
-                stream_id: None,
+                local_port: sub.local_port_override.or_else(|| {
+                    sub.reader_ip
+                        .as_deref()
+                        .and_then(crate::ports::default_port)
+                }),
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
@@ -198,7 +205,7 @@ async fn local_streams_snapshot(state: &AppState) -> control_api::StreamsRespons
                 current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
-                cursor_epoch: cursor.map(|c| c.stream_epoch),
+                cursor_epoch: cursor.and_then(|c| c.stream_epoch),
                 cursor_seq: cursor.map(|c| c.last_seq),
             }
         })
@@ -344,12 +351,12 @@ async fn dispatch(state: &AppState, cmd: &str, args: &Value) -> Result<Value, Br
         "put_dbf_config" => ok(control_api::put_dbf_config(state, arg(args, "body")?).await?),
         "clear_dbf" => ok(control_api::clear_dbf(state).await?),
         "update_subscription_event_type" => {
-            let forwarder_id: String = arg(args, "forwarder_id")?;
-            let reader_ip: String = arg(args, "reader_ip")?;
+            let forwarder_endpoint_id: String = arg(args, "forwarder_endpoint_id")?;
+            let stream_id: String = arg(args, "stream_id")?;
             ok(control_api::update_subscription_event_type(
                 state,
-                &forwarder_id,
-                &reader_ip,
+                &forwarder_endpoint_id,
+                &stream_id,
                 arg(args, "body")?,
             )
             .await?)
@@ -501,6 +508,36 @@ mod tests {
                 panic!("registry command `{cmd}` is not wired into the bridge dispatch table");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn invoke_update_subscription_event_type_uses_stream_identity_args() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "55555555-5555-5555-5555-555555555555".to_owned(),
+            local_port_override: None,
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: Some("legacy-fwd".to_owned()),
+            reader_ip: Some("10.0.0.1:10000".to_owned()),
+        }])
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+        let args = serde_json::json!({
+            "forwarder_endpoint_id": "endpoint-1",
+            "stream_id": "55555555-5555-5555-5555-555555555555",
+            "body": { "event_type": "start" }
+        });
+
+        let result = dispatch(state.as_ref(), "update_subscription_event_type", &args).await;
+        assert!(
+            result.is_ok(),
+            "update_subscription_event_type dispatch should accept stream identity args"
+        );
+
+        let db = state.db.lock().await;
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs[0].event_type, crate::db::EventType::Start);
     }
 
     #[tokio::test]

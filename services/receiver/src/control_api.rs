@@ -4,7 +4,7 @@
 //! and return `Result<T, ReceiverError>`.  The Tauri app wraps these as
 //! IPC commands.
 
-use crate::db::{DEFAULT_UPDATE_MODE, Db, Subscription};
+use crate::db::{DEFAULT_UPDATE_MODE, Db, StreamSubscription};
 use crate::error::ReceiverError;
 use crate::ui_events::ReceiverUiEvent;
 use rt_protocol::ReceiverMode;
@@ -199,7 +199,7 @@ impl AppState {
     async fn emit_connection_state_side_effects(&self, new_state: ConnectionState) {
         let streams_count = {
             let db = self.db.lock().await;
-            match db.load_subscriptions() {
+            match db.load_stream_subscriptions() {
                 Ok(s) => s.len(),
                 Err(e) => {
                     warn!(error = %e, "failed to load subscriptions for status event");
@@ -232,7 +232,7 @@ impl AppState {
     pub async fn build_streams_response(&self) -> StreamsResponse {
         let counts_snapshot = self.stream_counts.snapshot();
         let db = self.db.lock().await;
-        let subs = match db.load_subscriptions() {
+        let subs = match db.load_stream_subscriptions() {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "failed to load subscriptions for streams response");
@@ -243,7 +243,7 @@ impl AppState {
                 };
             }
         };
-        let (cursors, cursors_degraded) = match db.load_cursors() {
+        let (cursors, cursors_degraded) = match db.load_stream_cursors() {
             Ok(c) => (c, false),
             Err(e) => {
                 warn!(error = %e, "failed to load cursors");
@@ -252,14 +252,12 @@ impl AppState {
         };
         drop(db);
 
-        let cursor_map: HashMap<(&str, &str), &crate::db::CursorRecord> = cursors
-            .iter()
-            .map(|c| ((c.forwarder_id.as_str(), c.reader_ip.as_str()), c))
-            .collect();
+        let cursor_map: HashMap<&str, &crate::db::StreamCursorRecord> =
+            cursors.iter().map(|c| (c.stream_id.as_str(), c)).collect();
 
-        let sub_map: HashMap<(&str, &str), &Subscription> = subs
+        let sub_map: HashMap<(&str, &str), &StreamSubscription> = subs
             .iter()
-            .map(|s| ((s.forwarder_id.as_str(), s.reader_ip.as_str()), s))
+            .map(|s| ((s.forwarder_endpoint_id.as_str(), s.stream_id.as_str()), s))
             .collect();
 
         let upstream_url = self.upstream_url.read().await.clone();
@@ -284,12 +282,12 @@ impl AppState {
 
         if let Some(ref server_streams) = server_streams {
             for si in server_streams {
-                let key = (si.forwarder_id.clone(), si.reader_ip.clone());
-                let local = sub_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
-                let port = local.and_then(|s| {
-                    s.local_port_override
-                        .or_else(|| crate::ports::default_port(&s.reader_ip))
-                });
+                let forwarder_endpoint_id = si.forwarder_id.clone();
+                let key = (forwarder_endpoint_id.clone(), si.stream_id.clone());
+                let local = sub_map.get(&(forwarder_endpoint_id.as_str(), si.stream_id.as_str()));
+                let port = local
+                    .and_then(|s| s.local_port_override)
+                    .or_else(|| crate::ports::default_port(&si.reader_ip));
                 let sk =
                     crate::cache::StreamKey::new(si.forwarder_id.as_str(), si.reader_ip.as_str());
                 let counts = if local.is_some() {
@@ -297,13 +295,14 @@ impl AppState {
                 } else {
                     None
                 };
-                let cursor = cursor_map.get(&(si.forwarder_id.as_str(), si.reader_ip.as_str()));
+                let cursor = cursor_map.get(si.stream_id.as_str());
                 streams.push(StreamEntry {
-                    forwarder_id: si.forwarder_id.clone(),
-                    reader_ip: si.reader_ip.clone(),
+                    forwarder_endpoint_id: forwarder_endpoint_id.clone(),
+                    stream_id: si.stream_id.clone(),
+                    forwarder_id: Some(si.forwarder_id.clone()),
+                    reader_ip: Some(si.reader_ip.clone()),
                     subscribed: local.is_some(),
                     local_port: port,
-                    stream_id: Some(si.stream_id.clone()),
                     event_type: local.map(|s| s.event_type),
                     online: Some(si.online),
                     reader_connected: Some(si.reader_connected),
@@ -312,7 +311,7 @@ impl AppState {
                     current_epoch_name: si.current_epoch_name.clone(),
                     reads_total: counts.as_ref().map(|c| c.total),
                     reads_epoch: counts.as_ref().map(|c| c.epoch),
-                    cursor_epoch: cursor.map(|c| c.stream_epoch),
+                    cursor_epoch: cursor.and_then(|c| c.stream_epoch),
                     cursor_seq: cursor.map(|c| c.last_seq),
                 });
                 seen.insert(key);
@@ -320,22 +319,30 @@ impl AppState {
         }
 
         for sub in &subs {
-            if seen.contains(&(sub.forwarder_id.clone(), sub.reader_ip.clone())) {
+            if seen.contains(&(sub.forwarder_endpoint_id.clone(), sub.stream_id.clone())) {
                 continue;
             }
-            let port = sub
-                .local_port_override
-                .or_else(|| crate::ports::default_port(&sub.reader_ip));
-            let sk =
-                crate::cache::StreamKey::new(sub.forwarder_id.as_str(), sub.reader_ip.as_str());
-            let counts = counts_snapshot.get(&sk);
-            let cursor = cursor_map.get(&(sub.forwarder_id.as_str(), sub.reader_ip.as_str()));
+            let port = sub.local_port_override.or_else(|| {
+                sub.reader_ip
+                    .as_deref()
+                    .and_then(crate::ports::default_port)
+            });
+            let counts = sub
+                .forwarder_id
+                .as_deref()
+                .zip(sub.reader_ip.as_deref())
+                .and_then(|(forwarder_id, reader_ip)| {
+                    let sk = crate::cache::StreamKey::new(forwarder_id, reader_ip);
+                    counts_snapshot.get(&sk)
+                });
+            let cursor = cursor_map.get(sub.stream_id.as_str());
             streams.push(StreamEntry {
+                forwarder_endpoint_id: sub.forwarder_endpoint_id.clone(),
+                stream_id: sub.stream_id.clone(),
                 forwarder_id: sub.forwarder_id.clone(),
                 reader_ip: sub.reader_ip.clone(),
                 subscribed: true,
                 local_port: port,
-                stream_id: None,
                 event_type: Some(sub.event_type),
                 online: None,
                 reader_connected: None,
@@ -344,7 +351,7 @@ impl AppState {
                 current_epoch_name: None,
                 reads_total: counts.as_ref().map(|c| c.total),
                 reads_epoch: counts.as_ref().map(|c| c.epoch),
-                cursor_epoch: cursor.map(|c| c.stream_epoch),
+                cursor_epoch: cursor.and_then(|c| c.stream_epoch),
                 cursor_seq: cursor.map(|c| c.last_seq),
             });
         }
@@ -418,10 +425,14 @@ pub struct ProfileResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscriptionRequest {
-    pub forwarder_id: String,
-    pub reader_ip: String,
+    pub forwarder_endpoint_id: String,
+    pub stream_id: String,
     pub local_port_override: Option<u16>,
     pub event_type: Option<crate::db::EventType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarder_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_ip: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -431,25 +442,26 @@ pub struct SubscriptionsBody {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CursorResetRequest {
-    pub forwarder_id: String,
-    pub reader_ip: String,
+    pub stream_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdatePortRequest {
-    pub forwarder_id: String,
-    pub reader_ip: String,
+    pub forwarder_endpoint_id: String,
+    pub stream_id: String,
     pub local_port_override: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StreamEntry {
-    pub forwarder_id: String,
-    pub reader_ip: String,
+    pub forwarder_endpoint_id: String,
+    pub stream_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forwarder_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reader_ip: Option<String>,
     pub subscribed: bool,
     pub local_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_type: Option<crate::db::EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -494,8 +506,8 @@ pub struct LogsResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EarliestEpochRequest {
-    pub forwarder_id: String,
-    pub reader_ip: String,
+    pub forwarder_endpoint_id: String,
+    pub stream_id: String,
     pub earliest_epoch: i64,
 }
 
@@ -942,7 +954,11 @@ pub async fn put_earliest_epoch(
     }
 
     let db = state.db.lock().await;
-    match db.save_earliest_epoch(&body.forwarder_id, &body.reader_ip, body.earliest_epoch) {
+    match db.save_stream_earliest_epoch(
+        &body.forwarder_endpoint_id,
+        &body.stream_id,
+        body.earliest_epoch,
+    ) {
         Ok(()) => {
             drop(db);
             let _ = state.request_reconnect_if_connected().await;
@@ -1683,30 +1699,32 @@ pub async fn put_subscriptions(
 ) -> Result<(), ReceiverError> {
     let mut seen = std::collections::HashSet::new();
     for s in &body.subscriptions {
-        if !seen.insert((s.forwarder_id.clone(), s.reader_ip.clone())) {
+        if !seen.insert((s.forwarder_endpoint_id.clone(), s.stream_id.clone())) {
             return Err(ReceiverError::BadRequest(
                 "duplicate subscriptions".to_owned(),
             ));
         }
     }
 
-    let subs: Vec<Subscription> = body
+    let subs: Vec<StreamSubscription> = body
         .subscriptions
         .into_iter()
-        .map(|s| Subscription {
-            forwarder_id: s.forwarder_id,
-            reader_ip: s.reader_ip,
+        .map(|s| StreamSubscription {
+            forwarder_endpoint_id: s.forwarder_endpoint_id,
+            stream_id: s.stream_id,
             local_port_override: s.local_port_override,
             event_type: s.event_type.unwrap_or(crate::db::EventType::Finish),
+            forwarder_id: s.forwarder_id,
+            reader_ip: s.reader_ip,
         })
         .collect();
     let mut db = state.db.lock().await;
-    match db.replace_subscriptions(&subs) {
+    match db.replace_stream_subscriptions(&subs) {
         Ok(()) => {
             drop(db);
             let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
-            let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
+            let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
             let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
                 connection_state: conn_for_status,
@@ -1732,15 +1750,17 @@ pub async fn put_subscriptions(
 
 pub async fn get_subscriptions(state: &AppState) -> Result<SubscriptionsBody, ReceiverError> {
     let db = state.db.lock().await;
-    match db.load_subscriptions() {
+    match db.load_stream_subscriptions() {
         Ok(subscriptions) => Ok(SubscriptionsBody {
             subscriptions: subscriptions
                 .into_iter()
                 .map(|s| SubscriptionRequest {
-                    forwarder_id: s.forwarder_id,
-                    reader_ip: s.reader_ip,
+                    forwarder_endpoint_id: s.forwarder_endpoint_id,
+                    stream_id: s.stream_id,
                     local_port_override: s.local_port_override,
                     event_type: Some(s.event_type),
+                    forwarder_id: s.forwarder_id,
+                    reader_ip: s.reader_ip,
                 })
                 .collect(),
         }),
@@ -1752,7 +1772,7 @@ pub async fn get_status(state: &AppState) -> StatusResponse {
     let receiver_id = state.receiver_id.read().await.clone();
     let conn = state.connection_state.borrow().clone();
     let db = state.db.lock().await;
-    let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
+    let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
     let local_ok = state.db_integrity_ok;
     StatusResponse {
         receiver_id,
@@ -1863,12 +1883,16 @@ pub async fn clear_dbf(state: &AppState) -> Result<(), ReceiverError> {
 
 pub async fn update_subscription_event_type(
     state: &AppState,
-    forwarder_id: &str,
-    reader_ip: &str,
+    forwarder_endpoint_id: &str,
+    stream_id: &str,
     body: EventTypeRequest,
 ) -> Result<(), ReceiverError> {
     let db = state.db.lock().await;
-    match db.update_subscription_event_type(forwarder_id, reader_ip, body.event_type) {
+    match db.update_stream_subscription_event_type(
+        forwarder_endpoint_id,
+        stream_id,
+        body.event_type,
+    ) {
         Ok(true) => Ok(()),
         Ok(false) => Err(ReceiverError::BadRequest(
             "subscription not found".to_owned(),
@@ -1882,7 +1906,7 @@ pub async fn admin_reset_cursor(
     body: CursorResetRequest,
 ) -> Result<(), ReceiverError> {
     let db = state.db.lock().await;
-    match db.delete_cursor(&body.forwarder_id, &body.reader_ip) {
+    match db.delete_stream_cursor(&body.stream_id) {
         Ok(()) => Ok(()),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
@@ -1911,7 +1935,7 @@ pub async fn admin_reset_earliest_epoch(
     body: CursorResetRequest,
 ) -> Result<(), ReceiverError> {
     let db = state.db.lock().await;
-    match db.delete_earliest_epoch(&body.forwarder_id, &body.reader_ip) {
+    match db.delete_stream_earliest_epoch(&body.stream_id) {
         Ok(()) => Ok(()),
         Err(e) => Err(ReceiverError::Internal(e.to_string())),
     }
@@ -1926,7 +1950,7 @@ pub async fn admin_purge_subscriptions(
             drop(db);
             let conn_for_status = state.connection_state.borrow().clone();
             let db = state.db.lock().await;
-            let streams_count = db.load_subscriptions().map(|s| s.len()).unwrap_or(0);
+            let streams_count = db.load_stream_subscriptions().map(|s| s.len()).unwrap_or(0);
             let receiver_id = state.receiver_id.read().await.clone();
             let _ = state.ui_tx.send(ReceiverUiEvent::StatusChanged {
                 connection_state: conn_for_status,
@@ -2021,9 +2045,9 @@ pub async fn admin_update_port(
         return Err(ReceiverError::BadRequest("port must be 1-65535".to_owned()));
     }
     let db = state.db.lock().await;
-    match db.update_subscription_port(
-        &body.forwarder_id,
-        &body.reader_ip,
+    match db.update_stream_subscription_port(
+        &body.forwarder_endpoint_id,
+        &body.stream_id,
         body.local_port_override,
     ) {
         Ok(true) => Ok(()),
@@ -2316,8 +2340,8 @@ macro_rules! receiver_command_list {
             put_dbf_config(body: "DbfConfig") -> "()",
             clear_dbf() -> "()",
             update_subscription_event_type(
-                forwarder_id: "String",
-                reader_ip: "String",
+                forwarder_endpoint_id: "String",
+                stream_id: "String",
                 body: "EventTypeRequest"
             ) -> "()",
             get_server_streams() -> "serde_json::Value",
@@ -2533,6 +2557,17 @@ mod tests {
     }
 
     #[test]
+    fn command_registry_uses_stream_identity_args_for_subscription_updates() {
+        let spec = command_spec("update_subscription_event_type").unwrap();
+        let arg_names: Vec<&str> = spec.args.iter().map(|arg| arg.name).collect();
+        assert_eq!(
+            arg_names,
+            vec!["forwarder_endpoint_id", "stream_id", "body"]
+        );
+        assert!(!arg_names.contains(&"reader_ip"));
+    }
+
+    #[test]
     fn event_name_maps_into_canonical_event_names() {
         // Every variant's event_name must be present in EVENT_NAMES; the match
         // in `event_name` is exhaustive so adding a variant forces a decision.
@@ -2589,6 +2624,165 @@ mod tests {
             normalize_server_url("127.0.0.1:4000/"),
             "ws://127.0.0.1:4000".to_owned()
         );
+    }
+
+    #[tokio::test]
+    async fn put_subscriptions_uses_stream_identity() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        put_subscriptions(
+            &state,
+            SubscriptionsBody {
+                subscriptions: vec![SubscriptionRequest {
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    stream_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+                    local_port_override: Some(9100),
+                    event_type: Some(crate::db::EventType::Start),
+                    forwarder_id: None,
+                    reader_ip: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.db.lock().await;
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].forwarder_endpoint_id, "endpoint-1");
+        assert_eq!(subs[0].stream_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(subs[0].forwarder_id, None);
+        assert_eq!(subs[0].reader_ip, None);
+        assert_eq!(subs[0].local_port_override, Some(9100));
+        assert_eq!(subs[0].event_type, crate::db::EventType::Start);
+    }
+
+    #[tokio::test]
+    async fn admin_reset_cursor_uses_stream_id() {
+        let stream_id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let db = Db::open_in_memory().unwrap();
+        db.jump_stream_cursor(stream_id, 42).unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        admin_reset_cursor(
+            &state,
+            CursorResetRequest {
+                stream_id: stream_id.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.db.lock().await;
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn earliest_epoch_uses_stream_identity() {
+        let db = Db::open_in_memory().unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        put_earliest_epoch(
+            &state,
+            EarliestEpochRequest {
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
+                stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+                earliest_epoch: 7,
+            },
+        )
+        .await
+        .unwrap();
+
+        {
+            let db = state.db.lock().await;
+            // Canonical row is keyed by stream_id with the forwarder endpoint id.
+            assert_eq!(
+                db.load_stream_earliest_epochs().unwrap(),
+                vec![crate::db::StreamEarliestEpoch {
+                    stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+                    forwarder_endpoint_id: "endpoint-1".to_owned(),
+                    earliest_epoch: 7,
+                }]
+            );
+            // The legacy (forwarder_id, reader_ip) view must NOT surface the
+            // canonical row: stream_id must never be persisted as reader_ip,
+            // nor forwarder_endpoint_id as forwarder_id.
+            assert!(db.load_earliest_epochs().unwrap().is_empty());
+        }
+
+        admin_reset_earliest_epoch(
+            &state,
+            CursorResetRequest {
+                stream_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.db.lock().await;
+        assert!(db.load_stream_earliest_epochs().unwrap().is_empty());
+        assert!(db.load_earliest_epochs().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_update_port_uses_stream_identity() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "33333333-3333-3333-3333-333333333333".to_owned(),
+            local_port_override: None,
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: Some("legacy-fwd".to_owned()),
+            reader_ip: Some("10.0.0.1:10000".to_owned()),
+        }])
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        admin_update_port(
+            &state,
+            UpdatePortRequest {
+                forwarder_endpoint_id: "endpoint-1".to_owned(),
+                stream_id: "33333333-3333-3333-3333-333333333333".to_owned(),
+                local_port_override: Some(9200),
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.db.lock().await;
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs[0].local_port_override, Some(9200));
+    }
+
+    #[tokio::test]
+    async fn update_subscription_event_type_uses_stream_identity() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.replace_stream_subscriptions(&[crate::db::StreamSubscription {
+            forwarder_endpoint_id: "endpoint-1".to_owned(),
+            stream_id: "44444444-4444-4444-4444-444444444444".to_owned(),
+            local_port_override: None,
+            event_type: crate::db::EventType::Finish,
+            forwarder_id: Some("legacy-fwd".to_owned()),
+            reader_ip: Some("10.0.0.1:10000".to_owned()),
+        }])
+        .unwrap();
+        let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
+
+        update_subscription_event_type(
+            &state,
+            "endpoint-1",
+            "44444444-4444-4444-4444-444444444444",
+            EventTypeRequest {
+                event_type: crate::db::EventType::Start,
+            },
+        )
+        .await
+        .unwrap();
+
+        let db = state.db.lock().await;
+        let subs = db.load_stream_subscriptions().unwrap();
+        assert_eq!(subs[0].event_type, crate::db::EventType::Start);
     }
 
     #[tokio::test]

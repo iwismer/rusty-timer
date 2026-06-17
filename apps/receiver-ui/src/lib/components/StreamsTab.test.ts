@@ -40,6 +40,8 @@ describe("StreamsTab", () => {
     store.streams = {
       streams: [
         {
+          forwarder_endpoint_id: "fwd-1",
+          stream_id: "stream-10.0.0.1:10000",
           forwarder_id: "fwd-1",
           reader_ip: "10.0.0.1:10000",
           subscribed: true,
@@ -146,6 +148,64 @@ describe("StreamsTab", () => {
     );
   });
 
+  it("renders canonical-only streams with distinct identity and expand state", async () => {
+    // Two streams with no legacy forwarder_id/reader_ip. Legacy streamKey would
+    // collapse both to "/", colliding their each-key and expand slot; canonical
+    // identity keeps them distinct.
+    store.streams = {
+      streams: [
+        {
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "11111111-1111-1111-1111-111111111111",
+          subscribed: true,
+          local_port: 10100,
+          display_alias: "Alpha",
+        },
+        {
+          forwarder_endpoint_id: "endpoint-2",
+          stream_id: "22222222-2222-2222-2222-222222222222",
+          subscribed: true,
+          local_port: 10200,
+          display_alias: "Beta",
+        },
+      ],
+      degraded: false,
+      upstream_error: null,
+    };
+
+    render(StreamsTab);
+
+    const alphaRow = screen.getByText("Alpha").closest("tr")!;
+    const betaRow = screen.getByText("Beta").closest("tr")!;
+    expect(alphaRow).not.toBe(betaRow);
+
+    // Expanding Alpha exposes only Alpha's canonical-keyed controls.
+    await fireEvent.click(alphaRow);
+    expect(
+      screen.getByTestId(
+        "subscribe-toggle-endpoint-1/11111111-1111-1111-1111-111111111111",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId(
+        "subscribe-toggle-endpoint-2/22222222-2222-2222-2222-222222222222",
+      ),
+    ).not.toBeInTheDocument();
+
+    // Expanding Beta swaps the expanded slot rather than sharing one.
+    await fireEvent.click(betaRow);
+    expect(
+      screen.getByTestId(
+        "subscribe-toggle-endpoint-2/22222222-2222-2222-2222-222222222222",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId(
+        "subscribe-toggle-endpoint-1/11111111-1111-1111-1111-111111111111",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows a DBF event type selector when DBF output is enabled", async () => {
     store.dbfEnabled = true;
 
@@ -153,7 +213,9 @@ describe("StreamsTab", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: /finish/i }));
 
-    const selector = screen.getByTestId("dbf-event-type-fwd-1/10.0.0.1:10000");
+    const selector = screen.getByTestId(
+      "dbf-event-type-fwd-1/stream-10.0.0.1:10000",
+    );
     expect(selector).toBeInTheDocument();
     expect(selector).toHaveValue("finish");
     expect(screen.getByRole("option", { name: "Finish" })).toBeInTheDocument();

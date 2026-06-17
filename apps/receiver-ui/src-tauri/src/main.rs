@@ -551,13 +551,18 @@ async fn clear_dbf(state: tauri::State<'_, Arc<AppState>>) -> CmdResult<()> {
 #[tauri::command]
 async fn update_subscription_event_type(
     state: tauri::State<'_, Arc<AppState>>,
-    forwarder_id: String,
-    reader_ip: String,
+    forwarder_endpoint_id: String,
+    stream_id: String,
     body: receiver::control_api::EventTypeRequest,
 ) -> CmdResult<()> {
-    receiver::control_api::update_subscription_event_type(&state, &forwarder_id, &reader_ip, body)
-        .await
-        .map_err(|e| e.to_string())
+    receiver::control_api::update_subscription_event_type(
+        &state,
+        &forwarder_endpoint_id,
+        &stream_id,
+        body,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

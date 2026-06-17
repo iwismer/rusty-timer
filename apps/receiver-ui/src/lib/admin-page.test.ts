@@ -7,6 +7,8 @@ const apiMocks = vi.hoisted(() => ({
   getStreams: vi.fn().mockResolvedValue({
     streams: [
       {
+        forwarder_endpoint_id: "endpoint-1",
+        stream_id: "stream-1",
         forwarder_id: "f1",
         reader_ip: "10.0.0.1:10000",
         subscribed: true,
@@ -14,6 +16,8 @@ const apiMocks = vi.hoisted(() => ({
         display_alias: "Finish",
       },
       {
+        forwarder_endpoint_id: "endpoint-2",
+        stream_id: "stream-2",
         forwarder_id: "f2",
         reader_ip: "10.0.0.2:10000",
         subscribed: true,
@@ -57,8 +61,7 @@ describe("receiver admin page", () => {
 
     await waitFor(() => {
       expect(apiMocks.resetStreamCursor).toHaveBeenCalledWith({
-        forwarder_id: "f1",
-        reader_ip: "10.0.0.1:10000",
+        stream_id: "stream-1",
       });
     });
 
@@ -101,6 +104,8 @@ describe("receiver admin page", () => {
     apiMocks.getStreams.mockResolvedValueOnce({
       streams: [
         {
+          forwarder_endpoint_id: "endpoint-3",
+          stream_id: "stream-3",
           forwarder_id: "f3",
           reader_ip: "10.0.0.3:10000",
           subscribed: true,
@@ -151,8 +156,7 @@ describe("receiver admin page", () => {
     await fireEvent.click(startButton);
     await waitFor(() => {
       expect(apiMocks.resetStreamCursor).toHaveBeenNthCalledWith(2, {
-        forwarder_id: "f2",
-        reader_ip: "10.0.0.2:10000",
+        stream_id: "stream-2",
       });
     });
 
@@ -167,6 +171,8 @@ describe("receiver admin page", () => {
     apiMocks.getSubscriptions.mockResolvedValueOnce({
       subscriptions: [
         {
+          forwarder_endpoint_id: "endpoint-1",
+          stream_id: "stream-1",
           forwarder_id: "f1",
           reader_ip: "10.0.0.1:10000",
           local_port_override: null,

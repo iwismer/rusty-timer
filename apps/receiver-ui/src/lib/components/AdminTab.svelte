@@ -15,12 +15,20 @@
   let confirmingFactoryReset = $state(false);
   let portEdits = $state<Map<string, string>>(new Map());
 
-  function streamKey(s: { forwarder_id: string; reader_ip: string }): string {
-    return `${s.forwarder_id}/${s.reader_ip}`;
+  function streamKey(s: {
+    forwarder_endpoint_id: string;
+    stream_id: string;
+  }): string {
+    return `${s.forwarder_endpoint_id}/${s.stream_id}`;
   }
 
   function streamLabel(s: api.StreamEntry): string {
-    return s.display_alias ?? `${s.forwarder_id} / ${s.reader_ip}`;
+    return (
+      s.display_alias ??
+      (s.forwarder_id && s.reader_ip
+        ? `${s.forwarder_id} / ${s.reader_ip}`
+        : s.stream_id)
+    );
   }
 
   function setFeedback(message: string, ok: boolean) {
@@ -52,8 +60,7 @@
     feedback = null;
     try {
       await api.resetStreamCursor({
-        forwarder_id: stream.forwarder_id,
-        reader_ip: stream.reader_ip,
+        stream_id: stream.stream_id,
       });
       setFeedback(`Cursor reset for ${streamLabel(stream)}.`, true);
     } catch {
@@ -96,8 +103,7 @@
     feedback = null;
     try {
       await api.resetEarliestEpoch({
-        forwarder_id: stream.forwarder_id,
-        reader_ip: stream.reader_ip,
+        stream_id: stream.stream_id,
       });
       setFeedback(
         `Earliest-epoch override reset for ${streamLabel(stream)}.`,
@@ -155,7 +161,10 @@
     feedback = null;
     try {
       await api.updateLocalPort(
-        { forwarder_id: sub.forwarder_id, reader_ip: sub.reader_ip },
+        {
+          forwarder_endpoint_id: sub.forwarder_endpoint_id,
+          stream_id: sub.stream_id,
+        },
         portValue,
       );
       setFeedback(

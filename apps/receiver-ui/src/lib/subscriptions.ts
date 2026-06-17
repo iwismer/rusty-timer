@@ -4,8 +4,10 @@ export interface ParsedPortOverride {
 }
 
 export interface SubscriptionBuildStream {
-  forwarder_id: string;
-  reader_ip: string;
+  forwarder_endpoint_id: string;
+  stream_id: string;
+  forwarder_id?: string;
+  reader_ip?: string;
   subscribed: boolean;
   local_port: number | null;
   event_type?: "start" | "finish";
@@ -14,8 +16,8 @@ export interface SubscriptionBuildStream {
 export interface BuildUpdatedSubscriptionsParams {
   allStreams: SubscriptionBuildStream[];
   target: {
-    forwarder_id: string;
-    reader_ip: string;
+    forwarder_endpoint_id: string;
+    stream_id: string;
     currentlySubscribed: boolean;
   };
   rawPortOverride?: string | number | null;
@@ -23,8 +25,10 @@ export interface BuildUpdatedSubscriptionsParams {
 
 export interface BuildUpdatedSubscriptionsResult {
   subscriptions: Array<{
-    forwarder_id: string;
-    reader_ip: string;
+    forwarder_endpoint_id: string;
+    stream_id: string;
+    forwarder_id?: string;
+    reader_ip?: string;
     local_port_override: number | null;
     event_type: "start" | "finish";
   }> | null;
@@ -54,6 +58,18 @@ export function parsePortOverrideInput(
   return { value: parsed, error: null };
 }
 
+function legacyMetadata(stream: SubscriptionBuildStream | undefined): {
+  forwarder_id?: string;
+  reader_ip?: string;
+} {
+  return {
+    ...(stream?.forwarder_id !== undefined
+      ? { forwarder_id: stream.forwarder_id }
+      : {}),
+    ...(stream?.reader_ip !== undefined ? { reader_ip: stream.reader_ip } : {}),
+  };
+}
+
 export function buildUpdatedSubscriptions(
   params: BuildUpdatedSubscriptionsParams,
 ): BuildUpdatedSubscriptionsResult {
@@ -61,8 +77,9 @@ export function buildUpdatedSubscriptions(
   const existingSubscribed = allStreams
     .filter((s) => s.subscribed)
     .map((s) => ({
-      forwarder_id: s.forwarder_id,
-      reader_ip: s.reader_ip,
+      forwarder_endpoint_id: s.forwarder_endpoint_id,
+      stream_id: s.stream_id,
+      ...legacyMetadata(s),
       local_port_override: s.local_port ?? null,
       event_type: s.event_type ?? "finish",
     }));
@@ -72,8 +89,8 @@ export function buildUpdatedSubscriptions(
       subscriptions: existingSubscribed.filter(
         (s) =>
           !(
-            s.forwarder_id === target.forwarder_id &&
-            s.reader_ip === target.reader_ip
+            s.forwarder_endpoint_id === target.forwarder_endpoint_id &&
+            s.stream_id === target.stream_id
           ),
       ),
       error: null,
@@ -85,12 +102,19 @@ export function buildUpdatedSubscriptions(
     return { subscriptions: null, error: parsed.error };
   }
 
+  const targetStream = allStreams.find(
+    (s) =>
+      s.forwarder_endpoint_id === target.forwarder_endpoint_id &&
+      s.stream_id === target.stream_id,
+  );
+
   return {
     subscriptions: [
       ...existingSubscribed,
       {
-        forwarder_id: target.forwarder_id,
-        reader_ip: target.reader_ip,
+        forwarder_endpoint_id: target.forwarder_endpoint_id,
+        stream_id: target.stream_id,
+        ...legacyMetadata(targetStream),
         local_port_override: parsed.value,
         event_type: "finish",
       },

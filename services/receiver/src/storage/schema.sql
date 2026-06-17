@@ -74,9 +74,15 @@ CREATE TABLE IF NOT EXISTS gap_markers (
 CREATE INDEX IF NOT EXISTS idx_gap_markers_stream_created
     ON gap_markers (stream_id, created_unix_ms);
 
+-- Earliest-epoch overrides keyed by canonical P2P stream_id. The optional
+-- forwarder_id/reader_ip columns hold real legacy metadata only when a legacy
+-- WS caller created the row; canonical P2P callers leave them NULL so the
+-- legacy runtime never fabricates a (forwarder_id, reader_ip) key from a
+-- stream_id.
 CREATE TABLE IF NOT EXISTS earliest_epochs (
-    forwarder_id   TEXT NOT NULL,
-    reader_ip      TEXT NOT NULL,
-    earliest_epoch BIGINT NOT NULL,
-    PRIMARY KEY (forwarder_id, reader_ip)
+    stream_id             TEXT PRIMARY KEY,
+    forwarder_endpoint_id TEXT NOT NULL,
+    earliest_epoch        BIGINT NOT NULL,
+    forwarder_id          TEXT,
+    reader_ip             TEXT
 );
