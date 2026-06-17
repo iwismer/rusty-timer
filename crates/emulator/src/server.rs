@@ -219,12 +219,13 @@ pub async fn run_with_control(
     let listener = TcpListener::bind(("0.0.0.0", config.bind_port))
         .await
         .expect("failed to bind TCP listener");
+    let actual_port = listener.local_addr().expect("local_addr").port();
+    eprintln!("[emulator] listening on 0.0.0.0:{actual_port}");
 
-    if let Some(tx) = port_tx {
-        let actual_port = listener.local_addr().expect("local_addr").port();
-        if tx.send(actual_port).is_err() {
-            eprintln!("[emulator] port notification dropped: receiver already gone");
-        }
+    if let Some(tx) = port_tx
+        && tx.send(actual_port).is_err()
+    {
+        eprintln!("[emulator] port notification dropped: receiver already gone");
     }
 
     // Accept loop — runs until the task is aborted externally (e.g. signal or

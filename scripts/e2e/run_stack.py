@@ -162,9 +162,20 @@ class Managed:
         )
 
     def sigkill(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait(timeout=10)
+        if self.proc is None:
+            raise RuntimeError(f"{self.name} was never started")
+        if self.proc.poll() is not None:
+            raise RuntimeError(
+                f"{self.name} exited before SIGKILL with code {self.proc.returncode}; "
+                f"see {self.log_path}"
+            )
+        self.proc.kill()
+        self.proc.wait(timeout=10)
+        if self.proc.returncode != -signal.SIGKILL:
+            raise RuntimeError(
+                f"{self.name} did not terminate via SIGKILL; "
+                f"returncode={self.proc.returncode}; see {self.log_path}"
+            )
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
@@ -297,8 +308,10 @@ def load_received_events(db_path: Path) -> list[dict]:
             "FROM received_events ORDER BY seq"
         ).fetchall()
         return [dict(r) for r in rows]
-    except sqlite3.OperationalError:
-        return []
+    except sqlite3.OperationalError as exc:
+        if "no such table: received_events" in str(exc):
+            return []
+        raise
     finally:
         conn.close()
 
@@ -315,6 +328,31 @@ def dbf_record_count(dbf_path: Path) -> int:
     if len(data) < 32:
         raise AssertionError(f"DBF file too small ({len(data)} bytes)")
     return int.from_bytes(data[4:8], "little")
+
+
+def dbf_records(dbf_path: Path) -> list[dict[str, str]]:
+    data = dbf_path.read_bytes()
+    if len(data) < 32:
+        raise AssertionError(f"DBF file too small ({len(data)} bytes)")
+    record_count = int.from_bytes(data[4:8], "little")
+    header_size = int.from_bytes(data[8:10], "little")
+    record_size = int.from_bytes(data[10:12], "little")
+    if record_size < 41:
+        raise AssertionError(f"unexpected DBF record size {record_size}")
+    records = []
+    for i in range(record_count):
+        start = header_size + i * record_size
+        end = start + record_size
+        record = data[start:end]
+        if len(record) != record_size:
+            raise AssertionError(f"truncated DBF record {i}: {len(record)} bytes")
+        if record[0] != 0x20:
+            continue  # deleted/tombstoned row
+        records.append({
+            "event": record[1:2].decode("ascii").strip(),
+            "chip": record[4:16].decode("ascii").strip(),
+        })
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +418,7 @@ class Results:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
-def assert_received_events(results: Results, db_path: Path, label: str):
+def assert_received_events(results: Results, db_path: Path, label: str, expected_stream_id: str):
     events = load_received_events(db_path)
     results.expect_eq(f"{label}: received_events count == {NUM_READS}",
                       len(events), NUM_READS)
@@ -396,12 +434,29 @@ def assert_received_events(results: Results, db_path: Path, label: str):
     kinds = {e["read_kind"] for e in events}
     results.expect_eq(f"{label}: read_kind is 'raw'", kinds, {"raw"})
     stream_ids = {e["stream_id"] for e in events}
-    results.check(f"{label}: single canonical stream_id",
-                  len(stream_ids) == 1, f"stream_ids={stream_ids}")
+    results.expect_eq(f"{label}: canonical stream_id", stream_ids, {expected_stream_id})
 
 
-def run(tmp: Path, results: Results, keep: bool):
-    stack = Stack()
+def partial_received_count(db_path: Path):
+    count = received_count(db_path)
+    return count if 0 < count < NUM_READS else False
+
+
+def dbf_ready(dbf_path: Path) -> bool:
+    return dbf_record_count(dbf_path) == NUM_READS
+
+
+def thin_node_announcer_ready(base_url: str):
+    status = thin_node_status(base_url)
+    pushed_chips = {row.get("chip_id") for row in status.get("announcer_rows", [])}
+    if (status.get("announcer_source_generation", 0) >= 1
+            and status.get("finisher_count") == NUM_READS
+            and set(EXPECTED_TAGS).issubset(pushed_chips)):
+        return status
+    return False
+
+
+def run(tmp: Path, results: Results, stack: Stack):
 
     # --- Ports (loopback only) ---
     emulator_port = free_tcp_port()
@@ -498,7 +553,9 @@ static_allowed_receivers = ["{receiver_node_id}"]
         env={"RUST_LOG": "info"},
     ))
     emulator.start()
-    wait_until(lambda: _port_open(emulator_port), timeout=20, what="emulator TCP port")
+    wait_for_log(emulator.log_path, "[emulator] listening on", timeout=20,
+                 what="emulator TCP listener")
+    emulator.assert_alive()
     print("[up] emulator listening")
 
     # --- 3. forwarder (P2P, seeded, relay/discovery off, static allow-list) ---
@@ -544,9 +601,8 @@ static_allowed_receivers = ["{receiver_node_id}"]
 
     # --- Power-loss lane: SIGKILL the receiver mid-stream, then restart ---
     print("[power-loss] waiting for first received event, then SIGKILL receiver")
-    wait_until(lambda: received_count(receiver_db_path) >= 1, timeout=30,
-               what="receiver to persist its first event")
-    count_at_kill = received_count(receiver_db_path)
+    count_at_kill = wait_until(lambda: partial_received_count(receiver_db_path), timeout=30,
+                               what="receiver to persist a partial event set")
     receiver.sigkill()
     print(f"[power-loss] SIGKILLed receiver with {count_at_kill}/{NUM_READS} events persisted")
 
@@ -556,23 +612,30 @@ static_allowed_receivers = ["{receiver_node_id}"]
                  what="receiver restart p2p startup")
     print("[up] receiver-headless restarted")
 
-    # --- Wait for the full deterministic set to arrive ---
+    # --- Wait for the full deterministic set and async output workers. ---
     wait_until(lambda: received_count(receiver_db_path) >= NUM_READS, timeout=45,
                what=f"receiver to persist all {NUM_READS} events")
-    # Give DBF + announcer workers a moment to drain after the last durable hint.
-    time.sleep(2.0)
+    wait_until(lambda: dbf_ready(dbf_path), timeout=20,
+               what=f"DBF to contain all {NUM_READS} rows")
+    status = wait_until(lambda: thin_node_announcer_ready(thin_node_url), timeout=20,
+                        what="thin-node announcer to receive all rows")
 
     print("\n=== Assertions ===")
 
     # 1 + 5. Receiver received_events exact + lossless / no-dup after resume.
-    assert_received_events(results, receiver_db_path, "received_events (post-resume)")
-    results.check("power-loss: receiver was killed before completion",
-                  count_at_kill < NUM_READS or count_at_kill == NUM_READS,
+    assert_received_events(results, receiver_db_path, "received_events (post-resume)", stream_id)
+    results.check("power-loss: receiver was killed mid-stream",
+                  0 < count_at_kill < NUM_READS,
                   f"killed at {count_at_kill}/{NUM_READS}")
 
-    # 2. DBF exact record count, no duplicates after resume.
-    dbf_count = dbf_record_count(dbf_path)
-    results.expect_eq(f"DBF record count == {NUM_READS}", dbf_count, NUM_READS)
+    # 2. DBF exact record content, no duplicates after resume.
+    dbf_rows = dbf_records(dbf_path)
+    dbf_chips = [row["chip"] for row in dbf_rows]
+    dbf_events = {row["event"] for row in dbf_rows}
+    results.expect_eq(f"DBF record count == {NUM_READS}", len(dbf_rows), NUM_READS)
+    results.expect_eq("DBF chip IDs match deterministic scenario", dbf_chips, EXPECTED_TAGS)
+    results.expect_eq("DBF event type is finish", dbf_events, {"F"})
+    results.expect_eq("DBF has no duplicate chip rows", len(set(dbf_chips)), len(dbf_chips))
 
     # 3. Durable TCP local proxy replays exact frames to a fresh client.
     replay = read_proxy_replay(proxy_port, NUM_READS * WIRE_FRAME)
@@ -581,7 +644,6 @@ static_allowed_receivers = ["{receiver_node_id}"]
                       replay, expected_replay)
 
     # 4. Thin-node announcer state.
-    status = thin_node_status(thin_node_url)
     results.check("thin-node announcer generation >= 1",
                   status.get("announcer_source_generation", 0) >= 1,
                   f"generation={status.get('announcer_source_generation')}")
@@ -599,12 +661,6 @@ static_allowed_receivers = ["{receiver_node_id}"]
     return stack
 
 
-def _port_open(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.5)
-        return s.connect_ex(("127.0.0.1", port)) == 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-build", action="store_true", help="skip cargo build")
@@ -618,15 +674,16 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="rt-e2e-"))
     print(f"[tmp] working dir: {tmp}")
     results = Results()
-    stack = None
+    stack = Stack()
     try:
-        stack = run(tmp, results, args.keep)
+        run(tmp, results, stack)
     except Exception as exc:  # noqa: BLE001
         print(f"\n[error] {type(exc).__name__}: {exc}", file=sys.stderr)
         results.check("orchestration completed", False, str(exc))
     finally:
-        if stack is not None:
+        try:
             _dump_logs_on_failure(stack, results)
+        finally:
             stack.shutdown()
 
     print("\n=== Summary ===")
