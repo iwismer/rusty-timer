@@ -7,7 +7,7 @@ use std::{
 
 pub use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint as IrohEndpoint, Watcher};
-pub use iroh::{NodeAddr, RelayMode, SecretKey};
+pub use iroh::{NodeAddr, NodeId, RelayMode, SecretKey};
 
 pub const ALPN: &[u8] = b"rusty-timer/fwd-rcv/1";
 
