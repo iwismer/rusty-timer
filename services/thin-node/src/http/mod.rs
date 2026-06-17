@@ -1,5 +1,6 @@
 //! HTTP surface for the thin node.
 
+pub mod allowlist;
 pub mod announcer;
 pub mod register;
 pub mod status;
@@ -53,9 +54,10 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(status::status))
         // Admin endpoints — must be protected by Caddy/Authelia.
         .route("/admin/devices/approve", post(status::approve_device))
-        // M2M/device write endpoints — in-process provisioning bearer auth.
+        // M2M/device endpoints — in-process provisioning bearer auth.
         .route("/register", post(register::register))
         .route("/announcer/rows", post(announcer::push_row))
         .route("/announcer/takeover", post(announcer::takeover))
+        .route("/allowlist/receivers", get(allowlist::receiver_allowlist))
         .with_state(state)
 }

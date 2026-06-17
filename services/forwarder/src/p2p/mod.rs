@@ -9,16 +9,21 @@
 //! open connections when an update revokes it.
 //!
 //! Scope: production startup currently wires the endpoint, accept loop, and
-//! allow-listed control-plane handshake. The data-stream subscriber handler is
-//! available for P2P wiring, while the thin-node source that distributes
-//! allow-list updates and the reader control/status mapping remain later tasks.
+//! allow-listed control-plane handshake. The data-stream subscriber handler and
+//! the thin-node allow-list distribution components ([`ThinNodeAllowListClient`]
+//! and [`run_allowlist_distribution`]) are available for P2P wiring, while the
+//! reader control/status mapping remains a later task.
 
 mod allowlist;
 mod control;
 mod data;
 mod endpoint;
 
-pub use allowlist::AllowList;
+pub use allowlist::{
+    AllowList, AllowListRefreshError, DEFAULT_ALLOWLIST_POLL_INTERVAL, ReceiverAllowListUpdate,
+    ThinNodeAllowListClient, apply_receiver_update, fetch_and_apply_once,
+    run_allowlist_distribution,
+};
 pub use control::{
     CatalogProvider, ControlEvent, ControlEventReceiver, ControlEventSender, HeartbeatConfig,
     NoopReaderControlHandler, ReaderControlFuture, ReaderControlHandler, RewriteClockFuture,

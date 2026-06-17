@@ -16,8 +16,11 @@
 //!    node id ([`AllowList::try_register_connection`]); when an update removes a
 //!    peer, its open connections are force-closed immediately.
 //!
-//! The thin-node source that produces updates and the reader control/status
-//! mapping are intentionally out of scope here.
+//! Updates are sourced from the thin node: [`ThinNodeAllowListClient`] fetches
+//! the active receiver set over bearer-authenticated HTTP, and
+//! [`run_allowlist_distribution`] keeps the list fresh from a startup fetch,
+//! pushed snapshots, and periodic polling. The reader control/status mapping
+//! remains out of scope here.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -25,12 +28,23 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use rt_iroh::{Connection, NodeId};
+use serde::Deserialize;
+use tokio::sync::mpsc;
 
 /// QUIC application error code used when force-closing a revoked peer's
 /// connection after it is removed from the allow-list.
 const REVOKED_ERROR_CODE: u32 = 3;
+
+/// Production poll cadence for refreshing receiver authorization from the thin node.
+pub const DEFAULT_ALLOWLIST_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Conservative bound on a single thin-node allow-list HTTP request. Without a
+/// timeout a hung thin node would stall the distribution loop's initial refresh
+/// and polling indefinitely; this caps how long any one fetch can block.
+pub const DEFAULT_ALLOWLIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shared, mutable allow-list state guarded by a single mutex.
 #[derive(Debug, Default)]
@@ -186,6 +200,235 @@ impl AllowList {
     }
 }
 
+/// HTTP client for fetching receiver allow-list snapshots from the thin node.
+#[derive(Clone)]
+pub struct ThinNodeAllowListClient {
+    http: reqwest::Client,
+    base_url: String,
+    bearer_token: Arc<str>,
+}
+
+// Manual `Debug` so the bearer token can never leak through formatting (e.g.
+// when a struct holding the client is logged or asserted on).
+impl std::fmt::Debug for ThinNodeAllowListClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThinNodeAllowListClient")
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ThinNodeAllowListClient {
+    /// Builds a client with the [`DEFAULT_ALLOWLIST_REQUEST_TIMEOUT`] applied to
+    /// every allow-list request.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> Self {
+        Self::with_timeout(base_url, bearer_token, DEFAULT_ALLOWLIST_REQUEST_TIMEOUT)
+    }
+
+    /// Builds a client that bounds every allow-list request to `request_timeout`.
+    #[must_use]
+    pub fn with_timeout(
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+        request_timeout: Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .build()
+            // A builder failure here only means the platform TLS/transport
+            // backend could not initialise. Never fall back to an untimed
+            // client: that would silently drop the request timeout and let a
+            // hung thin node stall the distribution loop indefinitely. Such a
+            // failure is a fatal environment problem, so surface it loudly.
+            .expect(
+                "reqwest client builder with request timeout must initialise; \
+                 a failure here indicates the platform TLS/transport backend is unavailable",
+            );
+        Self {
+            http,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            bearer_token: Arc::from(bearer_token.into()),
+        }
+    }
+
+    async fn fetch(&self) -> Result<ReceiverAllowListUpdate, AllowListRefreshError> {
+        let url = format!("{}/allowlist/receivers", self.base_url);
+        Ok(self
+            .http
+            .get(url)
+            .bearer_auth(self.bearer_token.as_ref())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+}
+
+/// Wire-format receiver allow-list snapshot distributed by the thin node.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReceiverAllowListUpdate {
+    pub receiver_endpoint_ids: Vec<String>,
+}
+
+impl ReceiverAllowListUpdate {
+    #[must_use]
+    pub fn replace(receiver_endpoint_ids: Vec<String>) -> Self {
+        Self {
+            receiver_endpoint_ids,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AllowListRefreshError {
+    // `reqwest::Error`'s `Display` covers the failing URL and transport cause
+    // but never request headers, so the bearer token cannot leak here.
+    #[error("thin-node allow-list request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("failed to apply receiver allow-list update: {0}")]
+    Apply(#[from] io::Error),
+}
+
+/// Fetches the current thin-node allow-list and applies it to `allow_list`.
+pub async fn fetch_and_apply_once(
+    client: &ThinNodeAllowListClient,
+    allow_list: &AllowList,
+) -> Result<Vec<NodeId>, AllowListRefreshError> {
+    let update = client.fetch().await?;
+    apply_receiver_update(allow_list, update)
+}
+
+/// Applies a pushed or fetched wire-format receiver allow-list update.
+pub fn apply_receiver_update(
+    allow_list: &AllowList,
+    update: ReceiverAllowListUpdate,
+) -> Result<Vec<NodeId>, AllowListRefreshError> {
+    let allowed = parse_update(update);
+    Ok(allow_list.apply_update(allowed)?)
+}
+
+/// In-flight poll-fetch future held across `select!` iterations so pushed
+/// updates stay responsive while a slow poll request is outstanding.
+///
+/// The poll *fetches only*; it does not apply. Applying is deferred to the
+/// distribution loop so a snapshot captured before a newer pushed update can be
+/// discarded instead of clobbering the newer state (see the generation guard in
+/// [`run_allowlist_distribution`]).
+type PollFetch = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<ReceiverAllowListUpdate, AllowListRefreshError>>
+            + Send,
+    >,
+>;
+
+/// Keeps `allow_list` fresh from startup fetches, pushed snapshots, and polling.
+pub async fn run_allowlist_distribution(
+    allow_list: AllowList,
+    client: ThinNodeAllowListClient,
+    mut pushed_updates: mpsc::Receiver<ReceiverAllowListUpdate>,
+    poll_interval: Duration,
+) {
+    if let Err(err) = fetch_and_apply_once(&client, &allow_list).await {
+        tracing::warn!(error = %err, "initial receiver allow-list refresh failed");
+    }
+
+    let poll_interval = if poll_interval.is_zero() {
+        DEFAULT_ALLOWLIST_POLL_INTERVAL
+    } else {
+        poll_interval
+    };
+    let mut ticker = tokio::time::interval(poll_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    let mut push_closed = false;
+    // An in-flight poll fetch is held here rather than awaited inline so pushed
+    // updates stay responsive even while a slow (or timing-out) poll request is
+    // outstanding. At most one poll fetch runs at a time; a tick that lands
+    // while one is still in flight is dropped (the next tick re-polls).
+    let mut poll_fetch: Option<PollFetch> = None;
+    // Monotonic count of applied updates. Bumped on every successful apply
+    // (pushed or polled). A poll captures this when it begins fetching; if the
+    // count has moved by the time the fetch completes, a newer update applied
+    // while the poll was in flight, so the (now stale) poll snapshot is
+    // discarded rather than overwriting the newer state. Without this guard a
+    // slow poll holding a pre-revocation snapshot could re-authorize a receiver
+    // that a pushed revocation had already removed.
+    let mut generation: u64 = 0;
+    let mut poll_generation: u64 = 0;
+
+    loop {
+        tokio::select! {
+            update = pushed_updates.recv(), if !push_closed => {
+                match update {
+                    Some(update) => {
+                        match apply_receiver_update(&allow_list, update) {
+                            Ok(_) => generation = generation.wrapping_add(1),
+                            Err(err) => tracing::warn!(
+                                error = %err,
+                                "pushed receiver allow-list update failed",
+                            ),
+                        }
+                    }
+                    None => push_closed = true,
+                }
+            }
+            _ = ticker.tick() => {
+                if poll_fetch.is_none() {
+                    let client = client.clone();
+                    poll_generation = generation;
+                    poll_fetch = Some(Box::pin(async move { client.fetch().await }));
+                }
+            }
+            result = async { poll_fetch.as_mut().expect("poll fetch present").await }, if poll_fetch.is_some() => {
+                poll_fetch = None;
+                match result {
+                    Ok(update) => {
+                        if generation == poll_generation {
+                            match apply_receiver_update(&allow_list, update) {
+                                Ok(_) => generation = generation.wrapping_add(1),
+                                Err(err) => tracing::warn!(
+                                    error = %err,
+                                    "polled receiver allow-list refresh failed",
+                                ),
+                            }
+                        } else {
+                            tracing::debug!(
+                                "discarding stale polled receiver allow-list snapshot \
+                                 superseded by a newer update",
+                            );
+                        }
+                    }
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        "polled receiver allow-list refresh failed",
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn parse_update(update: ReceiverAllowListUpdate) -> Vec<NodeId> {
+    update
+        .receiver_endpoint_ids
+        .into_iter()
+        .filter_map(|endpoint_id| match NodeId::from_str(&endpoint_id) {
+            Ok(node_id) => Some(node_id),
+            Err(error) => {
+                tracing::warn!(
+                    endpoint_id = %endpoint_id,
+                    error = %error,
+                    "skipping malformed receiver endpoint id in allow-list update",
+                );
+                None
+            }
+        })
+        .collect()
+}
+
 /// Deregisters a tracked connection when dropped, keeping the connection
 /// registry bounded to currently-open admitted connections.
 #[must_use = "dropping the guard immediately deregisters the tracked connection"]
@@ -247,9 +490,18 @@ fn persist(path: &Path, allowed: &HashSet<NodeId>) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+        response::{IntoResponse, Response},
+        routing::get,
+    };
     use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr};
+    use tokio::sync::{Mutex as TokioMutex, mpsc, watch};
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), BoxError>;
@@ -306,6 +558,56 @@ mod tests {
         let mut buf = [0u8; SUBSCRIBE_OK.len()];
         recv.read_exact(&mut buf).await?;
         Ok((connection, buf))
+    }
+
+    #[derive(Clone)]
+    struct TestAllowListServerState {
+        bearer_token: &'static str,
+        receiver_endpoint_ids: Arc<TokioMutex<Vec<String>>>,
+        // Retained count of completed authorized fetches. Unlike a `Notify`,
+        // a `watch` holds its latest value, so a fetch that completes before a
+        // waiter starts observing is not lost — letting tests deterministically
+        // sequence "initial fetch happened" against later poll fetches.
+        fetches: watch::Sender<u64>,
+    }
+
+    async fn test_allowlist_handler(
+        State(state): State<TestAllowListServerState>,
+        headers: HeaderMap,
+    ) -> Response {
+        let authorized = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == format!("Bearer {}", state.bearer_token));
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+
+        let receiver_endpoint_ids = state.receiver_endpoint_ids.lock().await.clone();
+        // Count the fetch only after the current id set has been read, so an
+        // observed count of N guarantees N fetches each saw the id set in force
+        // at their read.
+        state.fetches.send_modify(|count| *count += 1);
+        Json(serde_json::json!({ "receiver_endpoint_ids": receiver_endpoint_ids })).into_response()
+    }
+
+    async fn spawn_test_allowlist_server(
+        receiver_endpoint_ids: Arc<TokioMutex<Vec<String>>>,
+    ) -> Result<(String, watch::Receiver<u64>, tokio::task::JoinHandle<()>), BoxError> {
+        let (fetches, fetches_rx) = watch::channel(0u64);
+        let app = Router::new()
+            .route("/allowlist/receivers", get(test_allowlist_handler))
+            .with_state(TestAllowListServerState {
+                bearer_token: "thin-secret",
+                receiver_endpoint_ids,
+                fetches,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((url, fetches_rx, server))
     }
 
     #[tokio::test]
@@ -426,6 +728,292 @@ mod tests {
         server.abort();
         receiver.close().await;
         forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approved_receiver_appears_in_forwarder_list() -> TestResult {
+        let receiver = EndpointBuilder::test([50; 32]).bind().await?;
+        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.node_id().to_string()]));
+        let (base_url, _fetches, server) =
+            spawn_test_allowlist_server(receiver_endpoint_ids).await?;
+        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let allow = AllowList::default();
+
+        fetch_and_apply_once(&client, &allow).await?;
+
+        assert!(allow.contains(&receiver.node_id()));
+        server.abort();
+        receiver.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revoke_propagates() -> TestResult {
+        let receiver = EndpointBuilder::test([51; 32]).bind().await?;
+        let allow = AllowList::new([receiver.node_id()]);
+        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![receiver.node_id().to_string()]));
+        let (base_url, _fetches, server) =
+            spawn_test_allowlist_server(receiver_endpoint_ids).await?;
+        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let (tx, rx) = mpsc::channel(1);
+        let sync = tokio::spawn(run_allowlist_distribution(
+            allow.clone(),
+            client,
+            rx,
+            Duration::from_secs(60),
+        ));
+
+        tx.send(ReceiverAllowListUpdate::replace(Vec::new()))
+            .await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while allow.contains(&receiver.node_id()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        assert!(!allow.contains(&receiver.node_id()));
+        sync.abort();
+        server.abort();
+        receiver.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn poll_backstop_refreshes() -> TestResult {
+        let receiver = EndpointBuilder::test([52; 32]).bind().await?;
+        let receiver_endpoint_ids = Arc::new(TokioMutex::new(Vec::new()));
+        let (base_url, mut fetches, server) =
+            spawn_test_allowlist_server(receiver_endpoint_ids.clone()).await?;
+        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let allow = AllowList::default();
+        let (_tx, rx) = mpsc::channel(1);
+        // Short poll interval with real time: the backstop must re-fetch on its
+        // own without any pushed update.
+        let sync = tokio::spawn(run_allowlist_distribution(
+            allow.clone(),
+            client,
+            rx,
+            Duration::from_millis(50),
+        ));
+
+        // Wait (on retained state) until the initial fetch has read the empty
+        // set, so the receiver can only be admitted by a later poll fetch.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            fetches.wait_for(|&count| count >= 1),
+        )
+        .await??;
+        assert!(!allow.contains(&receiver.node_id()));
+
+        // Publish the receiver; only the polling backstop can pick this up.
+        *receiver_endpoint_ids.lock().await = vec![receiver.node_id().to_string()];
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !allow.contains(&receiver.node_id()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        assert!(allow.contains(&receiver.node_id()));
+        sync.abort();
+        server.abort();
+        receiver.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_poll_does_not_override_newer_revocation() -> TestResult {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let receiver = EndpointBuilder::test([55; 32]).bind().await?;
+        // Start empty; the initial fetch admits the receiver from the old list.
+        let allow = AllowList::default();
+
+        #[derive(Clone)]
+        struct StallState {
+            // Old, pre-revocation list returned by every fetch: it still
+            // authorizes the receiver.
+            old_list: Vec<String>,
+            // 1-based count of requests received by the server.
+            requests: Arc<AtomicU64>,
+            // Broadcasts the latest request count so the test can sequence on it.
+            observed: watch::Sender<u64>,
+            // Releases exactly one gated (poll) request when notified once.
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        async fn stall_handler(State(state): State<StallState>) -> Response {
+            let n = state.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            state.observed.send_modify(|count| *count = (*count).max(n));
+            // The initial fetch (request 1) returns immediately so the receiver
+            // is admitted. Every later (poll) request blocks until explicitly
+            // released, so the test controls exactly when a poll completes.
+            if n >= 2 {
+                state.release.notified().await;
+            }
+            Json(serde_json::json!({ "receiver_endpoint_ids": state.old_list })).into_response()
+        }
+
+        let (observed_tx, mut observed_rx) = watch::channel(0u64);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new()
+            .route("/allowlist/receivers", get(stall_handler))
+            .with_state(StallState {
+                old_list: vec![receiver.node_id().to_string()],
+                requests: Arc::new(AtomicU64::new(0)),
+                observed: observed_tx,
+                release: release.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+        let (tx, rx) = mpsc::channel(1);
+        // Short poll interval so a poll fetch starts promptly after the initial
+        // fetch admits the receiver.
+        let sync = tokio::spawn(run_allowlist_distribution(
+            allow.clone(),
+            client,
+            rx,
+            Duration::from_millis(50),
+        ));
+
+        // Initial fetch (request 1) admits the receiver from the old list.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !allow.contains(&receiver.node_id()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        // A poll (request 2) is now in flight and blocked on the release gate.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            observed_rx.wait_for(|&count| count >= 2),
+        )
+        .await??;
+
+        // Apply a pushed revocation while the poll fetch is still in flight.
+        tx.send(ReceiverAllowListUpdate::replace(Vec::new()))
+            .await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while allow.contains(&receiver.node_id()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+
+        // Let the stale poll (request 2) complete with the old, pre-revocation
+        // list. notify_one releases exactly one waiter, so request 3 stays
+        // blocked and cannot itself re-admit the receiver.
+        release.notify_one();
+
+        // Request 3 starting proves the stale poll result has been fully
+        // processed by the distribution loop (the poll slot freed, a new tick
+        // fired). Request 3 then blocks on the gate without responding.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            observed_rx.wait_for(|&count| count >= 3),
+        )
+        .await??;
+
+        assert!(
+            !allow.contains(&receiver.node_id()),
+            "a stale in-flight poll must not re-authorize a receiver revoked while it was outstanding"
+        );
+
+        sync.abort();
+        server.abort();
+        receiver.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_redacts_bearer_token() {
+        let client = ThinNodeAllowListClient::new("http://thin.example", "super-secret-token");
+        let rendered = format!("{client:?}");
+        assert!(
+            !rendered.contains("super-secret-token"),
+            "bearer token must never appear in Debug output: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn hung_thinnode_request_times_out() -> TestResult {
+        // A handler that never responds: only the client request timeout can
+        // unblock the fetch.
+        async fn hang() -> Response {
+            std::future::pending::<()>().await;
+            StatusCode::OK.into_response()
+        }
+        let app = Router::new().route("/allowlist/receivers", get(hang));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base_url = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = ThinNodeAllowListClient::with_timeout(
+            base_url,
+            "thin-secret",
+            Duration::from_millis(200),
+        );
+        let allow = AllowList::default();
+
+        // Outer guard far exceeds the request timeout: if the request timeout
+        // works, the fetch returns an error well before this elapses.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_and_apply_once(&client, &allow),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(AllowListRefreshError::Http(_))),
+            "hung request must surface as a bounded HTTP error, got {result:?}"
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_active_id_does_not_block_valid_revocation() -> TestResult {
+        let retained = EndpointBuilder::test([53; 32]).bind().await?;
+        let revoked = EndpointBuilder::test([54; 32]).bind().await?;
+        let allow = AllowList::new([retained.node_id(), revoked.node_id()]);
+
+        // The thin node can contain arbitrary endpoint_id text from receiver
+        // registration. An invalid active id must be ignored, while the valid
+        // omission of `revoked` still removes its authorization.
+        let receiver_endpoint_ids = Arc::new(TokioMutex::new(vec![
+            retained.node_id().to_string(),
+            "not-a-valid-endpoint-id".to_owned(),
+        ]));
+        let (base_url, _fetches, server) =
+            spawn_test_allowlist_server(receiver_endpoint_ids).await?;
+        let client = ThinNodeAllowListClient::new(base_url, "thin-secret");
+
+        let result = fetch_and_apply_once(&client, &allow).await?;
+        assert_eq!(result, vec![revoked.node_id()]);
+        assert!(
+            allow.contains(&retained.node_id()),
+            "valid active receiver must remain authorized"
+        );
+        assert!(
+            !allow.contains(&revoked.node_id()),
+            "valid revocation must apply even when the response also contains a malformed id"
+        );
+
+        server.abort();
+        retained.close().await;
+        revoked.close().await;
         Ok(())
     }
 }
