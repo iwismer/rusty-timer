@@ -34,7 +34,7 @@ use rt_p2p_protocol::{
     HelloOk, MAX_FRAME_BYTES, StreamCatalog, SubscribeMode, control_c2f, control_f2c, data_c2f,
     data_f2c, encode_frame,
 };
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
 
@@ -170,6 +170,13 @@ pub struct SessionParams {
     pub mode: SubscribeMode,
     /// Reconnect backoff bounds.
     pub backoff: BackoffConfig,
+    /// Optional post-commit durable hint sink. After every durable insert /
+    /// cursor advance (and on gap-jump), the contiguous durable cursor is
+    /// broadcast on this channel so downstream workers — the durable local
+    /// proxy, the DBF feed, and the announcer push — can drain freshly
+    /// persisted rows. The hint is sent *after* the durable write, preserving
+    /// the insert-before-ack contract.
+    pub durable_hint_tx: Option<broadcast::Sender<i64>>,
 }
 
 /// An established control-plane session with a forwarder peer.
@@ -417,6 +424,21 @@ pub async fn run_data_subscription(
     stream_id: &str,
     mode: SubscribeMode,
 ) -> Result<SessionOutcome, P2pSessionError> {
+    run_data_subscription_with_hint(connection, db, stream_id, mode, None).await
+}
+
+/// Like [`run_data_subscription`], but broadcasts the durable contiguous cursor
+/// on `durable_hint_tx` after each durable insert / cursor advance (and after a
+/// gap-jump). The hint is sent strictly *after* the durable write so the
+/// insert-before-ack contract is preserved; downstream workers (durable proxy,
+/// DBF, announcer) use it to drain freshly persisted rows.
+pub async fn run_data_subscription_with_hint(
+    connection: &Connection,
+    db: &Arc<Mutex<Db>>,
+    stream_id: &str,
+    mode: SubscribeMode,
+    durable_hint_tx: Option<&broadcast::Sender<i64>>,
+) -> Result<SessionOutcome, P2pSessionError> {
     let after_seq = { db.lock().await.load_stream_cursor(stream_id)? };
 
     let (mut send, mut recv) = connection
@@ -465,6 +487,10 @@ pub async fn run_data_subscription(
                     let db = db.lock().await;
                     persist_batch(&db, stream_id, &batch)
                 }?;
+                // Post-commit durable hint: rows are durable before the ack.
+                if let Some(tx) = durable_hint_tx {
+                    let _ = tx.send(through_seq);
+                }
                 send_ack(&mut send, stream_id, through_seq).await?;
             }
             Some(data_f2c::Msg::GapNotice(gap)) => {
@@ -475,6 +501,9 @@ pub async fn run_data_subscription(
                     let db = db.lock().await;
                     persist_gap(&db, stream_id, &gap)
                 }?;
+                if let Some(tx) = durable_hint_tx {
+                    let _ = tx.send(through_seq);
+                }
                 send_ack(&mut send, stream_id, through_seq).await?;
             }
             // CaughtUp / StreamEpochStarted carry no durable state to persist
@@ -504,7 +533,14 @@ async fn run_once(
     params: &SessionParams,
 ) -> Result<SessionOutcome, P2pSessionError> {
     let session = connect_and_hello(endpoint, forwarder_addr, params.client_hello.clone()).await?;
-    run_data_subscription(&session.connection, db, &params.stream_id, params.mode).await
+    run_data_subscription_with_hint(
+        &session.connection,
+        db,
+        &params.stream_id,
+        params.mode,
+        params.durable_hint_tx.as_ref(),
+    )
+    .await
 }
 
 /// Run a reconnecting single-stream session: dial + hello + data subscription,
@@ -863,6 +899,42 @@ mod tests {
         .expect("duplicate_seq_deduped timed out");
     }
 
+    #[tokio::test]
+    async fn durable_hint_broadcast_after_persist() {
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            let stream_id = stream_id();
+            let mut script = base_script();
+            script.batches = vec![batch(&[1, 2])];
+            script.caught_up_through = Some(2);
+
+            let forwarder = MockForwarderPeer::start([60; 32], script).await.unwrap();
+            let endpoint = test_endpoint(61).await;
+            let db = test_db();
+            let (hint_tx, mut hint_rx) = broadcast::channel(16);
+
+            let session = connect_and_hello(&endpoint, forwarder.node_addr(), test_hello(0))
+                .await
+                .unwrap();
+            run_data_subscription_with_hint(
+                &session.connection,
+                &db,
+                stream_id,
+                SubscribeMode::Replay,
+                Some(&hint_tx),
+            )
+            .await
+            .unwrap();
+
+            // The contiguous durable cursor (2) is broadcast as a post-commit hint.
+            let hint = hint_rx.recv().await.unwrap();
+            assert_eq!(hint, 2);
+
+            forwarder.shutdown().await;
+        })
+        .await
+        .expect("durable_hint_broadcast_after_persist timed out");
+    }
+
     #[test]
     fn backoff_doubles_and_caps_at_max() {
         let config = BackoffConfig::default();
@@ -895,6 +967,7 @@ mod tests {
             client_hello: test_hello(0),
             mode: SubscribeMode::Replay,
             backoff: BackoffConfig::default(),
+            durable_hint_tx: None,
         };
 
         let result =
@@ -1260,6 +1333,7 @@ mod tests {
                 initial: Duration::from_millis(10),
                 max: Duration::from_millis(10),
             },
+            durable_hint_tx: None,
         };
 
         let result = tokio::time::timeout(
@@ -1332,6 +1406,7 @@ mod tests {
                     initial: Duration::from_millis(10),
                     max: Duration::from_millis(50),
                 },
+                durable_hint_tx: None,
             };
 
             let result = run_session_with_reconnect(

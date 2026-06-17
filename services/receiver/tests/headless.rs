@@ -13,6 +13,7 @@ fn loopback_ephemeral_config(data_dir: &std::path::Path) -> HeadlessConfig {
         data_dir: data_dir.to_path_buf(),
         bind_addr: "127.0.0.1:0".parse().expect("parse bind addr"),
         receiver_id: None,
+        p2p: None,
     }
 }
 
@@ -128,6 +129,7 @@ async fn rejects_non_loopback_bind_addr() {
         data_dir: dir.path().to_path_buf(),
         bind_addr: "0.0.0.0:0".parse().expect("parse bind addr"),
         receiver_id: None,
+        p2p: None,
     };
 
     let err = match HeadlessHost::start(config).await {
@@ -144,6 +146,59 @@ async fn rejects_non_loopback_bind_addr() {
         !db_path.exists(),
         "rejection must happen before DB initialization"
     );
+}
+
+/// A P2P startup failure must not leave the control server bound or its tasks
+/// running. `HeadlessHost::start` must return Err and release the control bind
+/// address promptly so it can be rebound immediately.
+#[tokio::test]
+async fn p2p_startup_failure_does_not_leak_control_server() {
+    use receiver::p2p_runtime::{ForwarderPeerConfig, P2pReceiverConfig};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // Reserve a fixed loopback port so we can prove it is rebindable after the
+    // failed start.
+    let bind_addr = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve port");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        addr
+    };
+
+    // An invalid forwarder node id forces start_receiver_p2p to fail after the
+    // control listener has been bound (interval passes the minimum check).
+    let config = HeadlessConfig {
+        data_dir: dir.path().to_path_buf(),
+        bind_addr,
+        receiver_id: None,
+        p2p: Some(P2pReceiverConfig {
+            secret_key_seed: [9u8; 32],
+            forwarder: ForwarderPeerConfig {
+                node_id: "not-a-valid-node-id".to_owned(),
+                direct_addr: "127.0.0.1:5000".parse().expect("parse addr"),
+            },
+            thin_node: None,
+            reconcile_interval: Duration::from_millis(100),
+        }),
+    };
+
+    let err = match HeadlessHost::start(config).await {
+        Ok(_) => panic!("invalid forwarder node id must fail P2P startup"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("forwarder node id"),
+        "error should describe the invalid forwarder node id, got: {err}"
+    );
+
+    // The control bind address must be free: no leaked bound server/task.
+    let rebound = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .expect("control API port must be released after a failed P2P start");
+    drop(rebound);
 }
 
 #[tokio::test]

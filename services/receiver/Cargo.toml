@@ -28,7 +28,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 thiserror = "2"
 dirs = "6"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 getrandom = "0.4"
 ipico-core = { path = "../../crates/ipico-core" }

@@ -1,4 +1,5 @@
 use crate::control_api::{self, AppState};
+use crate::p2p_runtime::{P2pReceiverConfig, P2pReceiverRuntime, start_receiver_p2p};
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -14,6 +15,10 @@ pub struct HeadlessConfig {
     pub data_dir: PathBuf,
     pub bind_addr: SocketAddr,
     pub receiver_id: Option<String>,
+    /// Optional P2P receiver runtime. When present, the headless host runs the
+    /// real loopback P2P lane alongside the legacy WebSocket runtime. When
+    /// `None`, behavior is identical to before this lane existed.
+    pub p2p: Option<P2pReceiverConfig>,
 }
 
 pub struct HeadlessHost {
@@ -23,6 +28,7 @@ pub struct HeadlessHost {
     server_shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: JoinHandle<Result<(), String>>,
     runtime_task: JoinHandle<()>,
+    p2p_runtime: Option<P2pReceiverRuntime>,
 }
 
 impl HeadlessHost {
@@ -44,6 +50,16 @@ impl HeadlessHost {
         let router = control_router(Arc::clone(&state));
         let (server_shutdown_tx, server_shutdown_rx) = oneshot::channel();
 
+        // Start the fallible P2P lane *before* spawning the long-lived control
+        // server and legacy runtime tasks. If P2P startup fails, returning here
+        // drops the (still-unmoved) listener and channels without leaving a
+        // bound control server or orphaned tasks running; the bind address is
+        // released promptly so a caller can retry.
+        let p2p_runtime = match config.p2p {
+            Some(p2p_config) => Some(start_receiver_p2p(Arc::clone(&state), p2p_config).await?),
+            None => None,
+        };
+
         let server_task = tokio::spawn(async move {
             axum::serve(listener, router)
                 .with_graceful_shutdown(async {
@@ -61,6 +77,7 @@ impl HeadlessHost {
             server_shutdown_tx: Some(server_shutdown_tx),
             server_task,
             runtime_task,
+            p2p_runtime,
         })
     }
 
@@ -74,6 +91,9 @@ impl HeadlessHost {
 
     pub async fn shutdown(mut self) -> Result<(), String> {
         self.state.request_process_shutdown();
+        if let Some(p2p_runtime) = self.p2p_runtime.take() {
+            p2p_runtime.shutdown().await;
+        }
         if let Some(tx) = self.server_shutdown_tx.take() {
             let _ = tx.send(());
         }

@@ -24,7 +24,12 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError};
+use std::time::Duration;
 use thiserror::Error;
+
+/// Connect/request timeout for all blocking thin-node HTTP calls. Bounds each
+/// call so a hung thin-node cannot wedge the runtime (including shutdown).
+const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 
 use crate::db::{AnnouncerGenerationAcceptance, Db, DbError};
 use crate::ui_events::chip_id_from_raw_frame;
@@ -75,6 +80,148 @@ pub struct AnnouncerRow {
 /// Transport abstraction for delivering announcer rows downstream.
 pub trait AnnouncerPushClient {
     fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError>;
+}
+
+/// Real HTTP transport for the thin-node `/announcer/rows` endpoint.
+///
+/// Thin-node accepts **one row per POST** with bearer auth, so [`push`] posts
+/// each row individually. A blocking reqwest client is built lazily inside
+/// [`push`] (never held across calls) because [`push_announcer_rows`] is
+/// synchronous and is driven from a blocking task in the headless P2P runtime;
+/// constructing or dropping a blocking client inside an async context panics, so
+/// the client must live entirely on the blocking thread. The bearer token is
+/// held privately and never logged.
+///
+/// [`push`]: AnnouncerPushClient::push
+pub struct ThinNodeAnnouncerClient {
+    rows_url: String,
+    token: String,
+}
+
+impl ThinNodeAnnouncerClient {
+    /// Build a client targeting `base_url` (e.g. `http://127.0.0.1:8080`).
+    pub fn new(base_url: &str, token: impl Into<String>) -> Result<Self, AnnouncerPushError> {
+        Ok(Self {
+            rows_url: format!("{}/announcer/rows", base_url.trim_end_matches('/')),
+            token: token.into(),
+        })
+    }
+}
+
+impl AnnouncerPushClient for ThinNodeAnnouncerClient {
+    fn push(&self, rows: &[AnnouncerRow]) -> Result<(), AnnouncerPushError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .connect_timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+        for row in rows {
+            // Thin-node `bib` is an optional integer; a non-numeric bib is sent
+            // as null rather than failing the whole push.
+            let bib = row.bib.as_deref().and_then(|b| b.parse::<i32>().ok());
+            let body = serde_json::json!({
+                "announcer_source_generation": row.announcer_source_generation,
+                "stream_id": row.stream_id,
+                "seq": row.seq,
+                "chip_id": row.chip_id,
+                "bib": bib,
+                "display_name": row.name.clone().unwrap_or_default(),
+                "reader_timestamp": serde_json::Value::Null,
+                "received_unix_ms": row.received_unix_ms,
+            });
+            let response = client
+                .post(&self.rows_url)
+                .bearer_auth(&self.token)
+                .json(&body)
+                .send()
+                .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+            if !response.status().is_success() {
+                return Err(AnnouncerPushError::Transport(format!(
+                    "thin-node /announcer/rows returned {}",
+                    response.status()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Register this receiver endpoint with thin-node under the TOFU `/register`
+/// model (`device_kind = "receiver"`). Already-registered / active endpoints are
+/// tolerated: any `2xx` response is success. The bearer token is never logged.
+pub fn register_receiver_with_thin_node(
+    base_url: &str,
+    token: &str,
+    endpoint_id: &str,
+) -> Result<(), AnnouncerPushError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .connect_timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    let body = serde_json::json!({
+        "endpoint_id": endpoint_id,
+        "device_kind": "receiver",
+        "device_token": token,
+    });
+    let response = client
+        .post(format!("{}/register", base_url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(AnnouncerPushError::Transport(format!(
+            "thin-node /register returned {}",
+            response.status()
+        )))
+    }
+}
+
+/// Take over the announcer source generation via thin-node `/announcer/takeover`
+/// and return the freshly-fenced generation.
+pub fn takeover_announcer_generation(
+    base_url: &str,
+    token: &str,
+) -> Result<i64, AnnouncerPushError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .connect_timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    let response = client
+        .post(format!(
+            "{}/announcer/takeover",
+            base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({}))
+        .send()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    if !response.status().is_success() {
+        return Err(AnnouncerPushError::Transport(format!(
+            "thin-node /announcer/takeover returned {}",
+            response.status()
+        )));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .map_err(|e| AnnouncerPushError::Transport(e.to_string()))?;
+    let generation = value
+        .get("announcer_source_generation")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| {
+            AnnouncerPushError::Transport(
+                "thin-node /announcer/takeover response missing announcer_source_generation"
+                    .to_owned(),
+            )
+        })?;
+    Ok(generation)
 }
 
 type StreamPushLock = Arc<StdMutex<()>>;
