@@ -20,6 +20,16 @@ pub struct EmulatorConfig {
     pub delay: u64,
     pub file_path: Option<String>,
     pub read_type: ReadType,
+    /// When true, file-sourced reads are emitted byte-for-byte without
+    /// restamping their timestamp/checksum. This makes a file-driven scenario
+    /// fully deterministic (the exact frames on disk are what readers see),
+    /// which the E2E stack orchestrator relies on for exact assertions.
+    pub verbatim: bool,
+    /// When true, the read generator emits each file read once (or a single
+    /// generated read when no file is supplied) and then stops, instead of
+    /// looping forever. Combined with `verbatim` this yields a bounded,
+    /// deterministic scenario.
+    pub once: bool,
 }
 
 pub async fn send_reads(
@@ -27,15 +37,22 @@ pub async fn send_reads(
     file_reads: Vec<String>,
     bus_tx: Sender<Message>,
     read_type: ReadType,
+    verbatim: bool,
+    once: bool,
 ) {
     let mut index = 0;
     loop {
-        let mut chip_read = if file_reads.is_empty() {
-            generate_read(read_type)
+        let (mut chip_read, last) = if file_reads.is_empty() {
+            (generate_read(read_type), true)
         } else {
-            let read = restamp_read(&file_reads[index]);
+            let read = if verbatim {
+                file_reads[index].clone()
+            } else {
+                restamp_read(&file_reads[index])
+            };
+            let last = index + 1 == file_reads.len();
             index = (index + 1) % file_reads.len();
-            read
+            (read, last)
         };
         chip_read.push_str("\r\n");
         bus_tx
@@ -44,6 +61,9 @@ pub async fn send_reads(
             .unwrap_or_else(|_| {
                 println!("\r\x1b[2KError sending read to thread. Maybe no readers are conected?");
             });
+        if once && last {
+            return;
+        }
         sleep(Duration::from_millis(delay)).await;
     }
 }
@@ -85,7 +105,15 @@ pub async fn run(config: EmulatorConfig) {
     let fut_clients = client_pool.begin().fuse();
     let fut_conn = connector.begin().fuse();
     let fut_sig = signal_handler().fuse();
-    let fut_sender = send_reads(config.delay, file_reads, bus_tx.clone(), config.read_type).fuse();
+    let fut_sender = send_reads(
+        config.delay,
+        file_reads,
+        bus_tx.clone(),
+        config.read_type,
+        config.verbatim,
+        config.once,
+    )
+    .fuse();
 
     pin_mut!(fut_sender, fut_clients, fut_conn, fut_sig);
     let futures: Vec<Pin<&mut dyn Future<Output = ()>>> =
@@ -103,20 +131,40 @@ async fn broadcast_reads(
     file_reads: Vec<String>,
     tx: broadcast::Sender<String>,
     read_type: ReadType,
+    verbatim: bool,
+    once: bool,
 ) {
+    // In bounded (`once`) scenarios, reads emitted before any client connects are
+    // dropped by the broadcast channel and lost. Wait for the first consumer so
+    // the exact, finite read set is delivered deterministically. The infinite
+    // (looping) mode does not need this: a dropped early read is re-sent on the
+    // next loop.
+    if once {
+        while tx.receiver_count() == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
     let mut index = 0;
     loop {
-        let mut chip_read = if file_reads.is_empty() {
-            generate_read(read_type)
+        let (mut chip_read, last) = if file_reads.is_empty() {
+            (generate_read(read_type), true)
         } else {
-            let read = restamp_read(&file_reads[index]);
+            let read = if verbatim {
+                file_reads[index].clone()
+            } else {
+                restamp_read(&file_reads[index])
+            };
+            let last = index + 1 == file_reads.len();
             index = (index + 1) % file_reads.len();
-            read
+            (read, last)
         };
         chip_read.push_str("\r\n");
         // broadcast::send fails when no receivers are subscribed; safe to ignore
         // because reads are only relevant while a client is connected.
         let _ = tx.send(chip_read);
+        if once && last {
+            return;
+        }
         sleep(Duration::from_millis(delay)).await;
     }
 }
@@ -164,6 +212,8 @@ pub async fn run_with_control(
         file_reads,
         read_tx_clone,
         config.read_type,
+        config.verbatim,
+        config.once,
     ));
 
     let listener = TcpListener::bind(("0.0.0.0", config.bind_port))
@@ -341,7 +391,14 @@ mod tests {
     async fn send_reads_loops_file_with_restamped_timestamps() {
         let file_reads = vec!["aa400000000123450a2a01123018455927a7".to_owned()];
         let (bus_tx, mut bus_rx) = mpsc::channel(8);
-        let sender_task = tokio::spawn(send_reads(1, file_reads, bus_tx, ReadType::RAW));
+        let sender_task = tokio::spawn(send_reads(
+            1,
+            file_reads,
+            bus_tx,
+            ReadType::RAW,
+            false,
+            false,
+        ));
 
         let first = timeout(Duration::from_millis(100), bus_rx.recv())
             .await
@@ -369,11 +426,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broadcast_reads_verbatim_once_emits_exact_file_frames_then_stops() {
+        // Two distinct frames; verbatim means they must arrive byte-for-byte
+        // (only a trailing CRLF appended) and `once` means the generator stops
+        // after the last one.
+        let frames = vec![
+            "aa400000000000010a2a01123018455900e8".to_owned(),
+            "aa400000000000020a2a01123018455900e9".to_owned(),
+        ];
+        let (tx, mut rx) = broadcast::channel::<String>(8);
+        let gen_task = tokio::spawn(broadcast_reads(
+            1,
+            frames.clone(),
+            tx.clone(),
+            ReadType::RAW,
+            true,
+            true,
+        ));
+
+        let first = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, format!("{}\r\n", frames[0]));
+        assert_eq!(second, format!("{}\r\n", frames[1]));
+
+        // The generator must complete (no infinite loop) after the last read.
+        timeout(Duration::from_secs(1), gen_task)
+            .await
+            .expect("broadcast_reads should stop in once mode")
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn send_reads_stays_alive_when_bus_receiver_is_closed() {
         let (bus_tx, bus_rx) = mpsc::channel(1);
         drop(bus_rx);
 
-        let mut sender_task = tokio::spawn(send_reads(1, Vec::new(), bus_tx, ReadType::RAW));
+        let mut sender_task = tokio::spawn(send_reads(
+            1,
+            Vec::new(),
+            bus_tx,
+            ReadType::RAW,
+            false,
+            false,
+        ));
         tokio::time::sleep(Duration::from_millis(15)).await;
         let still_running = timeout(Duration::from_millis(10), &mut sender_task)
             .await

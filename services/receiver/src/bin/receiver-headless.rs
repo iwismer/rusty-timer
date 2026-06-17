@@ -1,7 +1,7 @@
 use receiver::headless::{HeadlessConfig, HeadlessHost};
 use receiver::p2p_runtime::{
     ForwarderPeerConfig, MIN_RECONCILE_INTERVAL, P2pReceiverConfig, ThinNodeClientConfig,
-    parse_secret_key_seed_hex,
+    node_id_for_seed, parse_secret_key_seed_hex,
 };
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -17,6 +17,19 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+
+    // `print-node-id` is a non-binding helper subcommand: it derives the
+    // deterministic loopback node id for a seed and exits without binding any
+    // endpoint or initializing logging (so stdout carries only the id). The
+    // forwarder and receiver share the same seed->id derivation, so the E2E
+    // stack orchestrator uses this to learn both peers' ids before startup.
+    if let Some(seed_hex) = node_id_subcommand(&args)? {
+        let seed = parse_secret_key_seed_hex(&seed_hex)?;
+        println!("{}", node_id_for_seed(seed));
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -24,7 +37,7 @@ async fn run() -> Result<(), String> {
         )
         .init();
 
-    let config = parse_args(std::env::args_os().skip(1))?;
+    let config = parse_args(args)?;
     let host = HeadlessHost::start(config).await?;
     println!(
         "receiver-headless listening on http://{}",
@@ -35,6 +48,33 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to listen for shutdown signal: {e}"))?;
     host.shutdown().await
+}
+
+/// If the first CLI argument is the `print-node-id` subcommand, returns the
+/// secret-key seed hex that followed `--p2p-secret-key-seed-hex`. Returns `None`
+/// for the normal (server) invocation so the caller falls through to
+/// [`parse_args`].
+fn node_id_subcommand(args: &[OsString]) -> Result<Option<String>, String> {
+    let mut iter = args.iter();
+    match iter.next() {
+        Some(first) if first == "print-node-id" => {}
+        _ => return Ok(None),
+    }
+    let mut seed_hex: Option<String> = None;
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--p2p-secret-key-seed-hex" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--p2p-secret-key-seed-hex requires a value".to_owned())?;
+                seed_hex = Some(value.to_string_lossy().into_owned());
+            }
+            other => return Err(format!("unknown argument for print-node-id: {other}")),
+        }
+    }
+    seed_hex
+        .map(Some)
+        .ok_or_else(|| "print-node-id requires --p2p-secret-key-seed-hex <64-hex>".to_owned())
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<HeadlessConfig, String> {
@@ -242,6 +282,29 @@ mod tests {
     // A valid deterministic loopback node id (public key for seed [0xcd; 32]).
     fn forwarder_node_id() -> String {
         receiver::p2p_runtime::node_id_for_seed([0xcd; 32])
+    }
+
+    #[test]
+    fn print_node_id_subcommand_returns_seed_hex() {
+        let got = node_id_subcommand(&args(&[
+            "print-node-id",
+            "--p2p-secret-key-seed-hex",
+            SEED_HEX,
+        ]))
+        .unwrap();
+        assert_eq!(got.as_deref(), Some(SEED_HEX));
+    }
+
+    #[test]
+    fn no_subcommand_returns_none() {
+        let got = node_id_subcommand(&args(&["--data-dir", "/tmp/x"])).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn print_node_id_subcommand_requires_seed() {
+        let err = node_id_subcommand(&args(&["print-node-id"])).unwrap_err();
+        assert!(err.contains("requires --p2p-secret-key-seed-hex"));
     }
 
     #[test]

@@ -74,6 +74,18 @@ async fn main() {
                 .value_parser(validate_read_type)
                 .default_value("raw"),
         )
+        .arg(
+            Arg::new("verbatim")
+                .help("Emit file reads byte-for-byte without restamping (deterministic)")
+                .long("verbatim")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("once")
+                .help("Emit each read once and then stop, instead of looping forever")
+                .long("once")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let config = EmulatorConfig {
@@ -85,6 +97,8 @@ async fn main() {
         read_type: *matches
             .get_one::<ReadType>("read_type")
             .expect("read_type has a default"),
+        verbatim: matches.get_flag("verbatim"),
+        once: matches.get_flag("once"),
     };
 
     let read_mode = match config.read_type {
