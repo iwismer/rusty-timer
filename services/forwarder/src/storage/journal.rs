@@ -398,7 +398,33 @@ impl Journal {
         acked_through_seq: i64,
     ) -> Result<(), JournalError> {
         self.ensure_compat_receiver()?;
-        let (_, current_seq) = self.ack_cursor(stream_key)?;
+        self.update_receiver_stream_cursor(COMPAT_RECEIVER_ID, stream_key, acked_through_seq)
+    }
+
+    /// Update a receiver's cumulative ack cursor for a stream.
+    pub fn update_receiver_stream_cursor(
+        &mut self,
+        endpoint_id: &str,
+        stream_key: &str,
+        acked_through_seq: i64,
+    ) -> Result<(), JournalError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO receivers (endpoint_id, display_name, approved_unix_ms)
+             VALUES (?1, ?1, ?2)",
+            params![endpoint_id, unix_ms()],
+        )?;
+
+        let current_seq = self
+            .conn
+            .query_row(
+                "SELECT acked_through_seq
+                 FROM receiver_stream_cursors
+                 WHERE endpoint_id = ?1 AND stream_id = ?2",
+                params![endpoint_id, stream_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
         if acked_through_seq < current_seq {
             return Ok(());
         }
@@ -408,7 +434,7 @@ impl Journal {
              VALUES (?1, ?2, ?3)
              ON CONFLICT(endpoint_id, stream_id) DO UPDATE SET
                  acked_through_seq = excluded.acked_through_seq",
-            params![COMPAT_RECEIVER_ID, stream_key, acked_through_seq],
+            params![endpoint_id, stream_key, acked_through_seq],
         )?;
         Ok(())
     }

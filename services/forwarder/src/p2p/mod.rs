@@ -6,13 +6,15 @@
 //! `EndpointId`): connections from peers that are not on the allow-list are
 //! closed before any control-plane work happens.
 //!
-//! Scope: this module is intentionally limited to the endpoint, the accept
-//! loop, and allow-listed handshake admission. The persistent allow-list,
-//! revocation, the full control-plane catalog/heartbeat, and data-plane
-//! delivery are implemented in later tasks.
+//! Scope: production startup currently wires the endpoint, accept loop, and
+//! allow-listed control-plane handshake. The data-stream subscriber handler is
+//! available for P2P wiring, while persistent allow-list/revocation and reader
+//! control/status mapping remain later tasks.
 
 mod control;
+mod data;
 mod endpoint;
 
 pub use control::{CatalogProvider, HeartbeatConfig, StaticCatalog};
+pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::{AllowList, P2pEndpoint};
