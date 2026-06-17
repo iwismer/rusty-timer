@@ -28,6 +28,9 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 getrandom = "0.4"
 ipico-core = { path = "../../crates/ipico-core" }
+rt-iroh = { path = "../../crates/rt-iroh" }
+rt-p2p-protocol = { path = "../../crates/rt-p2p-protocol" }
+prost = "0.14"
 dbase = { version = "0.7", features = ["serde", "yore"] }
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }

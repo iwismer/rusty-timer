@@ -66,6 +66,7 @@ async fn run_harness_self_test() {
         subscribe_ok,
         batches: vec![batch],
         caught_up_through: Some(1),
+        gap_notice: None,
         data_fault: ConnectivityFault::healthy(),
     };
 
@@ -187,6 +188,7 @@ async fn p2p_harness_data_fault_drop_outbound_suppresses_subscribe_response() {
             replay: false,
         }],
         caught_up_through: Some(1),
+        gap_notice: None,
         data_fault: ConnectivityFault::dropping(),
     };
 
@@ -261,6 +263,7 @@ async fn run_partition_ack_test() {
         },
         batches: Vec::new(),
         caught_up_through: None,
+        gap_notice: None,
         data_fault: ConnectivityFault::partitioned(),
     };
 

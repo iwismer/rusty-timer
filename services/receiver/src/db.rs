@@ -621,6 +621,37 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Read the current durable cursor (`last_seq`) for a P2P stream, or 0 when
+    /// no cursor row exists yet. The cursor is the highest contiguous seq that
+    /// has been durably stored and acknowledged for `stream_id`; it is the
+    /// `after_seq` a resuming `DataSubscribe` must request.
+    pub fn load_stream_cursor(&self, stream_id: Uuid) -> DbResult<i64> {
+        let last_seq: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT last_seq FROM cursors WHERE stream_id = ?1",
+                rusqlite::params![stream_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(last_seq.unwrap_or(0))
+    }
+
+    /// Jump the durable cursor for `stream_id` forward to `last_seq`, used when a
+    /// `GapNotice` makes earlier seqs permanently unavailable (jump target is
+    /// `earliest_available_seq - 1`). The cursor only ever moves forward: a jump
+    /// target at or below the current cursor is ignored so a late or duplicate
+    /// gap notice cannot regress progress.
+    pub fn jump_stream_cursor(&self, stream_id: Uuid, last_seq: i64) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)
+             ON CONFLICT (stream_id) DO UPDATE SET last_seq = excluded.last_seq
+             WHERE excluded.last_seq > cursors.last_seq",
+            rusqlite::params![stream_id.to_string(), last_seq],
+        )?;
+        Ok(())
+    }
+
     pub fn advance_cursor_contiguous_prefix(&self, stream_id: Uuid) -> DbResult<i64> {
         let stream_id = stream_id.to_string();
         let current: Option<i64> = self
@@ -1790,6 +1821,42 @@ mod tests {
         assert!(db.insert_received_event(&event).unwrap());
 
         assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 4);
+    }
+
+    #[test]
+    fn load_stream_cursor_defaults_to_zero_then_reflects_advance() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = uuid::Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
+        for seq in [1, 2, 3] {
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch: 1,
+                raw_frame: b"frame",
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: seq,
+                dbf_delivered_unix_ms: None,
+            })
+            .unwrap();
+        }
+        assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 3);
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 3);
+    }
+
+    #[test]
+    fn jump_stream_cursor_moves_forward_only() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = uuid::Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+        db.jump_stream_cursor(stream_id, 14).unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 14);
+        // A regressing jump target is ignored.
+        db.jump_stream_cursor(stream_id, 5).unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 14);
+        // A forward jump advances the cursor.
+        db.jump_stream_cursor(stream_id, 20).unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 20);
     }
 
     #[test]
