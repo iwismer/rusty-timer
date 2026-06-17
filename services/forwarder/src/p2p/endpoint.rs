@@ -8,13 +8,13 @@
 //! negotiation, serves the [`StreamCatalog`](rt_p2p_protocol::StreamCatalog),
 //! and runs the heartbeat until the peer disconnects or is declared dead.
 
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, NodeId, load_or_create_secret_key};
 
+use super::allowlist::AllowList;
 use super::control::{CatalogProvider, HeartbeatConfig, serve_control};
 
 /// QUIC application error code used when closing a rejected connection.
@@ -28,31 +28,6 @@ const CONTROL_ERROR_CODE: u32 = 2;
 /// `Hello` handshake before the connection is closed. Bounds the lifetime of
 /// broken or malicious allow-listed peers that connect but never make progress.
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// In-memory set of peer node ids allowed to connect.
-///
-/// This is deliberately minimal for the accept-loop task; the persistent
-/// allow-list and revocation are implemented separately.
-#[derive(Clone, Debug, Default)]
-pub struct AllowList {
-    allowed: Arc<HashSet<NodeId>>,
-}
-
-impl AllowList {
-    /// Builds an allow-list from the given peer node ids.
-    #[must_use]
-    pub fn new(allowed: impl IntoIterator<Item = NodeId>) -> Self {
-        Self {
-            allowed: Arc::new(allowed.into_iter().collect()),
-        }
-    }
-
-    /// Returns whether `node_id` is permitted to connect.
-    #[must_use]
-    pub fn contains(&self, node_id: &NodeId) -> bool {
-        self.allowed.contains(node_id)
-    }
-}
 
 /// The forwarder's P2P endpoint and accept loop.
 #[derive(Clone, Debug)]
@@ -150,11 +125,11 @@ async fn handle_connection(
         return;
     };
 
-    if !allow_list.contains(&node_id) {
+    let Some(_guard) = allow_list.try_register_connection(node_id, connection.clone()) else {
         tracing::warn!(%node_id, "p2p: rejecting peer not on allow-list");
         connection.close(REJECT_ERROR_CODE.into(), b"unauthorized peer");
         return;
-    }
+    };
 
     tracing::info!(%node_id, "p2p: admitted allow-listed peer");
     match serve_control(&connection, catalog.as_ref(), handshake_timeout, heartbeat).await {
