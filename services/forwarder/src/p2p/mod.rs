@@ -1,0 +1,28 @@
+//! Production forwarder peer-to-peer (P2P) transport.
+//!
+//! This module owns the forwarder's [`rt_iroh`] endpoint and the accept loop
+//! that admits inbound receiver connections. Admission is gated by a persistent
+//! [`AllowList`] keyed on the remote peer's iroh node id (the transport-layer
+//! `EndpointId`): connections from peers that are not on the allow-list are
+//! closed before any control-plane work happens. The allow-list caches its set
+//! on disk (fail-to-last-known on refresh failures) and force-closes a peer's
+//! open connections when an update revokes it.
+//!
+//! Scope: production startup currently wires the endpoint, accept loop, and
+//! allow-listed control-plane handshake. The data-stream subscriber handler is
+//! available for P2P wiring, while the thin-node source that distributes
+//! allow-list updates and the reader control/status mapping remain later tasks.
+
+mod allowlist;
+mod control;
+mod data;
+mod endpoint;
+
+pub use allowlist::AllowList;
+pub use control::{
+    CatalogProvider, ControlEvent, ControlEventReceiver, ControlEventSender, HeartbeatConfig,
+    NoopReaderControlHandler, ReaderControlFuture, ReaderControlHandler, RewriteClockFuture,
+    StaticCatalog, SyncClockDriftHandler, SyncClockFuture, SyncClockSource, control_event_channel,
+};
+pub use data::{DataConfig, serve_data_streams};
+pub use endpoint::P2pEndpoint;

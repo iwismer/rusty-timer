@@ -1153,6 +1153,16 @@ pub async fn apply_section_update(
         "journal" => {
             let sqlite_path = optional_string_field(payload, "sqlite_path")?;
             let prune_watermark_pct = optional_u8_field(payload, "prune_watermark_pct")?;
+            let min_retention = optional_string_field(payload, "min_retention")?;
+            let max_retention = optional_string_field(payload, "max_retention")?;
+            let emergency_free_disk_bytes =
+                optional_u64_field(payload, "emergency_free_disk_bytes")?;
+            let emergency_max_rows = optional_u64_field(payload, "emergency_max_rows")?
+                .map(|value| {
+                    i64::try_from(value)
+                        .map_err(|_| bad_request_error("emergency_max_rows must be <= i64::MAX"))
+                })
+                .transpose()?;
             if let Some(pct) = prune_watermark_pct
                 && pct > 100
             {
@@ -1160,10 +1170,20 @@ pub async fn apply_section_update(
                     "prune_watermark_pct must be between 0 and 100",
                 ));
             }
+            crate::config::validate_retention_settings(
+                min_retention.as_deref(),
+                max_retention.as_deref(),
+                emergency_max_rows,
+            )
+            .map_err(bad_request_error)?;
             update_config_file(config_state, subsystem, ui_tx, |raw| {
                 raw.journal = Some(crate::config::RawJournalConfig {
                     sqlite_path,
                     prune_watermark_pct,
+                    min_retention,
+                    max_retention,
+                    emergency_free_disk_bytes,
+                    emergency_max_rows,
                 });
                 Ok(())
             })

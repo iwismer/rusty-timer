@@ -44,9 +44,7 @@ async fn disconnect_and_notify(
 
 #[derive(Debug)]
 pub(crate) enum JournalAppendError {
-    StreamState(String),
-    NextSeq(String),
-    Insert(String),
+    Append(String),
 }
 
 pub(crate) fn append_read_to_journal(
@@ -56,23 +54,9 @@ pub(crate) fn append_read_to_journal(
     raw_frame: &[u8],
     read_type: &str,
 ) -> Result<(i64, i64), JournalAppendError> {
-    let (epoch, _) = journal
-        .current_epoch_and_next_seq(stream_key)
-        .map_err(|e| JournalAppendError::StreamState(e.to_string()))?;
-    let seq = journal
-        .next_seq(stream_key)
-        .map_err(|e| JournalAppendError::NextSeq(e.to_string()))?;
     journal
-        .insert_event(
-            stream_key,
-            epoch,
-            seq,
-            reader_timestamp,
-            raw_frame,
-            read_type,
-        )
-        .map_err(|e| JournalAppendError::Insert(e.to_string()))?;
-    Ok((epoch, seq))
+        .append_read(stream_key, reader_timestamp, raw_frame, read_type)
+        .map_err(|e| JournalAppendError::Append(e.to_string()))
 }
 
 pub(crate) fn download_progress_advanced_or_started(
@@ -538,22 +522,10 @@ pub(crate) async fn run_reader(
             let (epoch, seq) = match append_result {
                 Ok(v) => v,
                 Err(e) => {
-                    let context = match &e {
-                        JournalAppendError::StreamState(_) => "epoch",
-                        JournalAppendError::NextSeq(_) => "seq",
-                        JournalAppendError::Insert(_) => "insert",
-                    };
-                    let inner = match &e {
-                        JournalAppendError::StreamState(s)
-                        | JournalAppendError::NextSeq(s)
-                        | JournalAppendError::Insert(s) => s.as_str(),
-                    };
+                    let JournalAppendError::Append(inner) = &e;
                     logger.log_at(
                         UiLogLevel::Error,
-                        format!(
-                            "reader {} journal error ({}): {}",
-                            reader_ip, context, inner
-                        ),
+                        format!("reader {} journal error (append): {}", reader_ip, inner),
                     );
                     disconnect_and_notify(&status, &target_addr, &reader_status_tx).await;
                     break;

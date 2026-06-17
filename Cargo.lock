@@ -2166,8 +2166,11 @@ dependencies = [
  "embedded-graphics",
  "futures-util",
  "ipico-core",
+ "prost",
  "reqwest 0.13.2",
  "rt-eink",
+ "rt-iroh",
+ "rt-p2p-protocol",
  "rt-protocol",
  "rt-test-utils",
  "rt-ui-http",
@@ -6123,6 +6126,9 @@ name = "rt-test-utils"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "prost",
+ "rt-iroh",
+ "rt-p2p-protocol",
  "rt-protocol",
  "serde_json",
  "tokio",

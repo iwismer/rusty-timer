@@ -1,22 +1,80 @@
 //! Durable SQLite journal for forwarder events.
 //!
-//! # Schema
-//! - `journal`: stores read events with (stream_key, stream_epoch, seq) as unique key.
-//! - `stream_state`: tracks current epoch, next_seq, and ack cursor per stream.
-//!
-//! # SQLite durability settings
-//! Applied at open: WAL, synchronous=FULL, wal_autocheckpoint=1000, foreign_keys=ON.
-//! PRAGMA integrity_check runs at open; returns error if it fails.
-//!
-//! # stream_key
-//! `stream_key` = `reader_ip` (forwarder_id is implicit since one forwarder = one device).
+//! The on-disk schema is the clean-slate P2P schema managed by
+//! `storage::migrations`. A few methods retain the old `Journal` API so the
+//! existing forwarder code keeps compiling until journal allocation is rewritten.
 
-use rusqlite::{Connection, params};
+use crate::storage::migrations;
+use crate::storage::wake::WakeRegistry;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
+const COMPAT_RECEIVER_ID: &str = "__forwarder_server__";
+
+/// Maximum number of candidate rows collected (and deleted) in a single
+/// `prune_retention` transaction, per prune category.
+///
+/// Bounds per-transaction work so a single pruning pass cannot collect an
+/// unbounded candidate set or hold a long write transaction on large journals.
+/// Remaining rows are handled on subsequent pruning passes.
+pub const MAX_PRUNE_BATCH: i64 = 10_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionPolicy {
+    pub min_retention_ms: i64,
+    pub max_retention_ms: i64,
+    pub emergency_free_disk_bytes: u64,
+    pub emergency_max_rows: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionContext {
+    pub now_unix_ms: i64,
+    pub free_disk_bytes: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPruneStats {
+    pub acked_deleted: i64,
+    pub hard_cap_deleted: i64,
+    pub emergency_deleted: i64,
+    pub forced_gap_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionState {
+    pub earliest_available_seq: i64,
+    pub forced_gap_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryStreamRestore<'a> {
+    pub stream_id: &'a str,
+    pub epoch: i64,
+    pub next_seq: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamStartupStatus {
+    Existing,
+    Created,
+    RestoredFromRegistry,
+    ReplacedLostJournal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamStartup {
+    pub stream_id: String,
+    pub status: StreamStartupStatus,
+}
+
+struct PruneCandidate {
+    stream_id: String,
+    seq: i64,
+    forced: bool,
+}
 
 /// A read event retrieved from the journal.
 #[derive(Debug, Clone)]
@@ -42,9 +100,9 @@ pub enum JournalError {
 impl std::fmt::Display for JournalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JournalError::Sqlite(e) => write!(f, "SQLite error: {}", e),
-            JournalError::IntegrityCheckFailed(s) => write!(f, "Integrity check failed: {}", s),
-            JournalError::InvalidData(s) => write!(f, "Invalid data: {}", s),
+            JournalError::Sqlite(e) => write!(f, "SQLite error: {e}"),
+            JournalError::IntegrityCheckFailed(s) => write!(f, "Integrity check failed: {s}"),
+            JournalError::InvalidData(s) => write!(f, "Invalid data: {s}"),
         }
     }
 }
@@ -57,102 +115,249 @@ impl From<rusqlite::Error> for JournalError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Journal struct
-// ---------------------------------------------------------------------------
-
 /// The durable SQLite journal for a single forwarder instance.
 pub struct Journal {
     conn: Connection,
+    wake: Arc<WakeRegistry>,
 }
 
 impl Journal {
     /// Open (or create) the journal at the given path.
-    ///
-    /// Applies PRAGMAs, runs `PRAGMA integrity_check`, and creates tables if needed.
-    /// Returns `Err` if integrity_check fails.
     pub fn open(path: &Path) -> Result<Self, JournalError> {
         let conn = Connection::open(path)?;
-        apply_pragmas(&conn)?;
-        run_integrity_check(&conn)?;
-        apply_schema(&conn)?;
-        Ok(Journal { conn })
+        migrations::migrate(&conn)?;
+        Ok(Journal {
+            conn,
+            wake: Arc::new(WakeRegistry::new()),
+        })
     }
 
-    // -----------------------------------------------------------------------
-    // Stream state management
-    // -----------------------------------------------------------------------
-
-    /// Initialize stream state if it does not exist yet.
+    /// Return a shareable handle to this journal's per-stream wake registry.
     ///
-    /// Call this when a new reader is discovered.
-    /// If the stream already exists (from a previous run), does nothing.
+    /// Subscribers clone the `Arc` and call
+    /// [`WakeRegistry::subscribe`](crate::storage::wake::WakeRegistry::subscribe)
+    /// to receive a `watch` of the latest committed seq for a stream. The watch
+    /// value advances only after [`append_read`](Self::append_read) commits.
+    #[must_use]
+    pub fn wake_registry(&self) -> Arc<WakeRegistry> {
+        Arc::clone(&self.wake)
+    }
+
+    /// Resolve stream metadata after process startup.
+    ///
+    /// Returns `Existing` when the prior stream still has local journal state,
+    /// `RestoredFromRegistry` when server registry high-water restores the
+    /// stream epoch and next seq, `ReplacedLostJournal` when missing local state
+    /// requires a new stream id, and `Created` for first startup with no prior
+    /// stream. Registry restore takes precedence over the missing-prior-state
+    /// new-stream guard because it supplies the durable epoch and next-seq
+    /// high-water needed to avoid sequence reuse after journal loss.
+    pub fn ensure_stream_after_startup(
+        &mut self,
+        hardware_reader_id: &str,
+        prior_stream_id: Option<&str>,
+        new_stream_id: &str,
+        initial_epoch: i64,
+        registry_restore: Option<RegistryStreamRestore<'_>>,
+    ) -> Result<StreamStartup, JournalError> {
+        if let Some(stream_id) = prior_stream_id
+            && self.stream_exists(stream_id)?
+        {
+            return Ok(StreamStartup {
+                stream_id: stream_id.to_owned(),
+                status: StreamStartupStatus::Existing,
+            });
+        }
+
+        if let Some(restore) = registry_restore {
+            validate_stream_seed(restore.stream_id, restore.epoch, restore.next_seq)?;
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            insert_stream_seed(
+                &tx,
+                restore.stream_id,
+                hardware_reader_id,
+                restore.epoch,
+                restore.next_seq,
+                "registry_restore",
+            )?;
+            tx.commit()?;
+            return Ok(StreamStartup {
+                stream_id: restore.stream_id.to_owned(),
+                status: StreamStartupStatus::RestoredFromRegistry,
+            });
+        }
+
+        if prior_stream_id == Some(new_stream_id) {
+            return Err(JournalError::InvalidData(
+                "journal state for prior stream is missing; a new stream_id is required".to_owned(),
+            ));
+        }
+
+        validate_stream_seed(new_stream_id, initial_epoch, 1)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        insert_stream_seed(
+            &tx,
+            new_stream_id,
+            hardware_reader_id,
+            initial_epoch,
+            1,
+            "initial",
+        )?;
+        tx.commit()?;
+
+        Ok(StreamStartup {
+            stream_id: new_stream_id.to_owned(),
+            status: if prior_stream_id.is_some() {
+                StreamStartupStatus::ReplacedLostJournal
+            } else {
+                StreamStartupStatus::Created
+            },
+        })
+    }
+
+    /// Initialize stream metadata if it does not exist yet.
     pub fn ensure_stream_state(
         &mut self,
         stream_key: &str,
         initial_epoch: i64,
     ) -> Result<(), JournalError> {
+        let now_ms = unix_ms();
         self.conn.execute(
-            "INSERT OR IGNORE INTO stream_state
-                 (stream_key, stream_epoch, next_seq, acked_epoch, acked_through_seq)
-             VALUES (?1, ?2, 1, 0, 0)",
+            "INSERT OR IGNORE INTO streams
+                 (stream_id, hardware_reader_id, network_addr, display_name, reader_connected, created_unix_ms)
+             VALUES (?1, ?1, ?1, ?1, 0, ?2)",
+            params![stream_key, now_ms],
+        )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO stream_epochs
+                 (stream_id, epoch, start_seq, end_seq, reason)
+             VALUES (?1, ?2, 1, NULL, 'initial')",
             params![stream_key, initial_epoch],
         )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO stream_retention
+                 (stream_id, earliest_available_seq, forced_gap_count)
+             VALUES (?1, 1, 0)",
+            params![stream_key],
+        )?;
         Ok(())
     }
 
-    /// Allocate and return the next sequence number for a stream.
+    /// Return the next stream-wide sequence number.
     ///
-    /// Atomically increments `next_seq` in `stream_state` and returns the
-    /// value before the increment (i.e., the seq to use for the new event).
+    /// The seq is stream-wide and never resets across epochs. It is derived
+    /// from durable high-water evidence so that pruning acked events can never
+    /// cause a previously-issued seq to be reused: we take the maximum of the
+    /// highest live event seq, the highest pruned seq (recorded via
+    /// `stream_retention.earliest_available_seq`), and the highest acked seq.
     pub fn next_seq(&mut self, stream_key: &str) -> Result<i64, JournalError> {
-        // Read current next_seq
-        let current: i64 = self.conn.query_row(
-            "SELECT next_seq FROM stream_state WHERE stream_key = ?1",
-            params![stream_key],
-            |row| row.get(0),
-        )?;
-
-        // Increment
-        self.conn.execute(
-            "UPDATE stream_state SET next_seq = next_seq + 1 WHERE stream_key = ?1",
-            params![stream_key],
-        )?;
-
-        Ok(current)
+        next_seq(&self.conn, stream_key)
     }
 
-    /// Bump the stream epoch to `new_epoch` and reset `next_seq` to 1.
+    /// Atomically allocate the next stream-wide sequence number and insert a
+    /// read event in a single `BEGIN IMMEDIATE` transaction.
     ///
-    /// Does NOT delete old-epoch events; they remain replayable until acked.
-    pub fn bump_epoch(&mut self, stream_key: &str, new_epoch: i64) -> Result<(), JournalError> {
-        self.conn.execute(
-            "UPDATE stream_state SET stream_epoch = ?2, next_seq = 1 WHERE stream_key = ?1",
-            params![stream_key, new_epoch],
+    /// Allocating the seq and inserting the event in one transaction guarantees
+    /// there is no window between a separate `next_seq()` and `insert_event()`
+    /// where another writer (or a crash) could observe or claim the same seq.
+    /// The seq is stream-wide and never resets across epoch bumps; the epoch is
+    /// recorded on the event as metadata. Returns the `(epoch, seq)` assigned to
+    /// the event.
+    ///
+    /// If anything fails after the seq is computed (for example, an invalid
+    /// frame or a constraint violation), the transaction rolls back and nothing
+    /// is committed, so the allocated seq is reused by the next append and no
+    /// durable gap is left behind.
+    pub fn append_read(
+        &mut self,
+        stream_key: &str,
+        reader_timestamp: Option<&str>,
+        raw_frame: &[u8],
+        read_type: &str,
+    ) -> Result<(i64, i64), JournalError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let epoch = current_epoch(&tx, stream_key)?;
+        let seq = next_seq(&tx, stream_key)?;
+
+        // Validate inside the transaction (after seq allocation) so a rejected
+        // frame rolls back cleanly without committing the allocated seq.
+        if raw_frame.is_empty() {
+            return Err(JournalError::InvalidData(
+                "raw_frame must not be empty".to_owned(),
+            ));
+        }
+
+        tx.execute(
+            "INSERT INTO events
+                 (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                stream_key,
+                seq,
+                epoch,
+                raw_frame,
+                read_type,
+                reader_timestamp,
+                unix_ms(),
+            ],
         )?;
+        tx.commit()?;
+        // Publish the wake-up only after the transaction has committed so a
+        // subscriber can never observe a seq that later rolled back.
+        self.wake.notify_committed(stream_key, seq as u64);
+        Ok((epoch, seq))
+    }
+
+    /// Bump the stream epoch without deleting prior events.
+    ///
+    /// Closes the current open epoch and opens `new_epoch`. The new epoch must
+    /// be strictly greater than the current epoch; otherwise an error is
+    /// returned rather than silently ignoring the conflict. Both the close and
+    /// open run in a single transaction.
+    pub fn bump_epoch(&mut self, stream_key: &str, new_epoch: i64) -> Result<(), JournalError> {
+        let current = self.current_epoch(stream_key)?;
+        if new_epoch <= current {
+            return Err(JournalError::InvalidData(format!(
+                "new epoch {new_epoch} must be greater than current epoch {current}"
+            )));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let start_seq = next_seq(&tx, stream_key)?;
+        tx.execute(
+            "UPDATE stream_epochs
+             SET end_seq = COALESCE(end_seq, ?2 - 1)
+             WHERE stream_id = ?1 AND end_seq IS NULL",
+            params![stream_key, start_seq],
+        )?;
+        tx.execute(
+            "INSERT INTO stream_epochs
+                 (stream_id, epoch, start_seq, end_seq, reason)
+             VALUES (?1, ?2, ?3, NULL, 'reset')",
+            params![stream_key, new_epoch, start_seq],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// Return the current epoch and next_seq for a stream.
+    /// Return the current epoch and next sequence number for a stream.
     pub fn current_epoch_and_next_seq(
         &mut self,
         stream_key: &str,
     ) -> Result<(i64, i64), JournalError> {
-        let (epoch, next_seq) = self.conn.query_row(
-            "SELECT stream_epoch, next_seq FROM stream_state WHERE stream_key = ?1",
-            params![stream_key],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
+        let epoch = self.current_epoch(stream_key)?;
+        let next_seq = self.next_seq(stream_key)?;
         Ok((epoch, next_seq))
     }
 
-    // -----------------------------------------------------------------------
-    // Event persistence
-    // -----------------------------------------------------------------------
-
-    /// Insert a read event into the journal.
-    ///
-    /// `raw_frame` must be non-empty.
+    /// Insert a read event.
     pub fn insert_event(
         &mut self,
         stream_key: &str,
@@ -162,79 +367,137 @@ impl Journal {
         raw_frame: &[u8],
         read_type: &str,
     ) -> Result<(), JournalError> {
-        // Enforce non-empty raw_frame (guards against callers passing garbage)
         if raw_frame.is_empty() {
             return Err(JournalError::InvalidData(
                 "raw_frame must not be empty".to_owned(),
             ));
         }
 
-        let received_at = chrono_now_utc();
-
         self.conn.execute(
-            "INSERT INTO journal
-                 (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
+            "INSERT INTO events
+                 (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 stream_key,
-                stream_epoch,
                 seq,
-                reader_timestamp,
+                stream_epoch,
                 raw_frame,
                 read_type,
-                received_at,
+                reader_timestamp,
+                unix_ms(),
             ],
         )?;
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Ack cursor
-    // -----------------------------------------------------------------------
-
-    /// Update the ack cursor for a stream to `acked_through_seq` in `acked_epoch`.
-    ///
-    /// The ack cursor records the highest seq the server has acknowledged
-    /// for a given epoch. Used to compute the replay starting point after reconnect.
+    /// Update the compatibility ack cursor for the default server receiver.
     pub fn update_ack_cursor(
         &mut self,
         stream_key: &str,
-        acked_epoch: i64,
+        _acked_epoch: i64,
         acked_through_seq: i64,
     ) -> Result<(), JournalError> {
-        let (current_epoch, current_seq) = self.ack_cursor(stream_key)?;
-        let is_stale = acked_epoch < current_epoch
-            || (acked_epoch == current_epoch && acked_through_seq < current_seq);
-        if is_stale {
+        self.ensure_compat_receiver()?;
+        self.update_receiver_stream_cursor(COMPAT_RECEIVER_ID, stream_key, acked_through_seq)
+    }
+
+    /// Update a receiver's cumulative ack cursor for a stream.
+    pub fn update_receiver_stream_cursor(
+        &mut self,
+        endpoint_id: &str,
+        stream_key: &str,
+        acked_through_seq: i64,
+    ) -> Result<(), JournalError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO receivers (endpoint_id, display_name, approved_unix_ms)
+             VALUES (?1, ?1, ?2)",
+            params![endpoint_id, unix_ms()],
+        )?;
+
+        let current_seq = self
+            .conn
+            .query_row(
+                "SELECT acked_through_seq
+                 FROM receiver_stream_cursors
+                 WHERE endpoint_id = ?1 AND stream_id = ?2",
+                params![endpoint_id, stream_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if acked_through_seq < current_seq {
             return Ok(());
         }
 
         self.conn.execute(
-            "UPDATE stream_state
-             SET acked_epoch = ?2, acked_through_seq = ?3
-             WHERE stream_key = ?1",
-            params![stream_key, acked_epoch, acked_through_seq],
+            "INSERT INTO receiver_stream_cursors (endpoint_id, stream_id, acked_through_seq)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(endpoint_id, stream_id) DO UPDATE SET
+                 acked_through_seq = excluded.acked_through_seq",
+            params![endpoint_id, stream_key, acked_through_seq],
         )?;
         Ok(())
     }
 
-    /// Return the (acked_epoch, acked_through_seq) cursor for a stream.
+    /// Return the compatibility `(acked_epoch, acked_through_seq)` cursor.
     pub fn ack_cursor(&self, stream_key: &str) -> Result<(i64, i64), JournalError> {
-        let (epoch, seq) = self.conn.query_row(
-            "SELECT acked_epoch, acked_through_seq FROM stream_state WHERE stream_key = ?1",
-            params![stream_key],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-        Ok((epoch, seq))
+        let acked_seq = self
+            .conn
+            .query_row(
+                "SELECT acked_through_seq
+                 FROM receiver_stream_cursors
+                 WHERE endpoint_id = ?1 AND stream_id = ?2",
+                params![COMPAT_RECEIVER_ID, stream_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+
+        if acked_seq == 0 {
+            return Ok((0, 0));
+        }
+
+        let acked_epoch = self
+            .conn
+            .query_row(
+                "SELECT epoch
+                 FROM events
+                 WHERE stream_id = ?1 AND seq <= ?2
+                 ORDER BY seq DESC
+                 LIMIT 1",
+                params![stream_key, acked_seq],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+
+        Ok((acked_epoch, acked_seq))
     }
 
-    // -----------------------------------------------------------------------
-    // Query helpers
-    // -----------------------------------------------------------------------
+    pub fn latest_committed_seq(&self, stream_key: &str) -> Result<i64, JournalError> {
+        Ok(next_seq(&self.conn, stream_key)?.saturating_sub(1))
+    }
 
-    /// Return all unacked events for a stream epoch starting after `after_seq`.
-    ///
-    /// Used by the uplink replay loop to find events that need to be sent/resent.
+    pub fn read_events_after(
+        &self,
+        stream_key: &str,
+        after_seq: i64,
+        max: usize,
+    ) -> Result<Vec<JournalEvent>, JournalError> {
+        let limit = i64::try_from(max).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
+                    CAST(received_unix_ms AS TEXT)
+             FROM events
+             WHERE stream_id = ?1 AND seq > ?2
+             ORDER BY seq ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![stream_key, after_seq, limit], map_event)?;
+        collect_events(rows)
+    }
+
+    /// Return all unacked events for a stream epoch after `after_seq`.
     pub fn unacked_events(
         &self,
         stream_key: &str,
@@ -242,129 +505,456 @@ impl Journal {
         after_seq: i64,
     ) -> Result<Vec<JournalEvent>, JournalError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at
-             FROM journal
-             WHERE stream_key = ?1 AND stream_epoch = ?2 AND seq > ?3
+            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
+                    CAST(received_unix_ms AS TEXT)
+             FROM events
+             WHERE stream_id = ?1 AND epoch = ?2 AND seq > ?3
              ORDER BY seq ASC",
         )?;
         let rows = stmt.query_map(params![stream_key, stream_epoch, after_seq], map_event)?;
-        let mut events = Vec::new();
-        for r in rows {
-            events.push(r?);
-        }
-        Ok(events)
+        collect_events(rows)
     }
 
-    /// Count events for a (stream_key, stream_epoch) pair.
+    /// Count events for a `(stream_key, stream_epoch)` pair.
     pub fn count_events_for_epoch(
         &self,
         stream_key: &str,
         stream_epoch: i64,
     ) -> Result<i64, JournalError> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM journal WHERE stream_key = ?1 AND stream_epoch = ?2",
-            params![stream_key, stream_epoch],
-            |row| row.get(0),
-        )?;
-        Ok(count)
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE stream_id = ?1 AND epoch = ?2",
+                params![stream_key, stream_epoch],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
-    /// Count total events for a stream_key (across all epochs).
+    /// Count total events for a stream key.
     pub fn event_count(&self, stream_key: &str) -> Result<i64, JournalError> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM journal WHERE stream_key = ?1",
-            params![stream_key],
-            |row| row.get(0),
-        )?;
-        Ok(count)
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE stream_id = ?1",
+                params![stream_key],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
-    /// Count total events in the journal (across all streams and epochs).
+    /// Count total events across all streams.
     pub fn total_event_count(&self) -> Result<i64, JournalError> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM journal", [], |row| row.get(0))?;
-        Ok(count)
+        self.conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .map_err(Into::into)
     }
 
-    /// Return all events for stream_key with epoch strictly greater than `after_epoch`.
-    ///
-    /// Used by the replay engine to find events in newer epochs after the ack cursor epoch.
+    /// Return all events for stream key with epoch strictly greater than `after_epoch`.
     pub fn unacked_events_across_epochs(
         &self,
         stream_key: &str,
         after_epoch: i64,
     ) -> Result<Vec<JournalEvent>, JournalError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at
-             FROM journal
-             WHERE stream_key = ?1 AND stream_epoch > ?2
-             ORDER BY stream_epoch ASC, seq ASC",
+            "SELECT rowid, stream_id, epoch, seq, reader_timestamp, raw_frame, read_kind,
+                    CAST(received_unix_ms AS TEXT)
+             FROM events
+             WHERE stream_id = ?1 AND epoch > ?2
+             ORDER BY epoch ASC, seq ASC",
         )?;
         let rows = stmt.query_map(params![stream_key, after_epoch], map_event)?;
-        let mut events = Vec::new();
-        for r in rows {
-            events.push(r?);
-        }
-        Ok(events)
+        collect_events(rows)
     }
 
-    // -----------------------------------------------------------------------
-    // Pruning
-    // -----------------------------------------------------------------------
-
-    /// Delete up to `limit` acked events for `stream_key` (oldest first).
-    ///
-    /// Pruning priority: acked events first; unacked events are only pruned
-    /// when no acked events remain (handled by the caller with `prune_unacked`).
-    ///
-    /// Returns the number of rows deleted.
+    /// Delete up to `limit` acked events for `stream_key`.
     pub fn prune_acked(&mut self, stream_key: &str, limit: i64) -> Result<i64, JournalError> {
-        // Get acked_epoch and acked_through_seq from stream_state
-        let (acked_epoch, acked_seq) = self.ack_cursor(stream_key)?;
-
+        let (_, acked_seq) = self.ack_cursor(stream_key)?;
         let deleted = self.conn.execute(
-            "DELETE FROM journal
-             WHERE stream_key = ?1
-               AND id IN (
-                   SELECT id FROM journal
-                   WHERE stream_key = ?1
-                     AND (stream_epoch < ?2
-                          OR (stream_epoch = ?2 AND seq <= ?3))
-                   ORDER BY id ASC
-                   LIMIT ?4
-               )",
-            params![stream_key, acked_epoch, acked_seq, limit],
+            "DELETE FROM events
+             WHERE rowid IN (
+                 SELECT rowid FROM events
+                 WHERE stream_id = ?1 AND seq <= ?2
+                 ORDER BY seq ASC
+                 LIMIT ?3
+             )",
+            params![stream_key, acked_seq, limit],
         )?;
+        if deleted > 0 {
+            self.conn.execute(
+                "UPDATE stream_retention
+                 SET earliest_available_seq = COALESCE(
+                     (SELECT MIN(seq) FROM events WHERE stream_id = ?1),
+                     ?2 + 1
+                 )
+                 WHERE stream_id = ?1",
+                params![stream_key, acked_seq],
+            )?;
+        }
         Ok(deleted as i64)
+    }
+
+    pub fn prune_retention(
+        &mut self,
+        policy: &RetentionPolicy,
+        context: RetentionContext,
+    ) -> Result<RetentionPruneStats, JournalError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut stats = RetentionPruneStats::default();
+        let min_cutoff = context.now_unix_ms.saturating_sub(policy.min_retention_ms);
+        let max_cutoff = context.now_unix_ms.saturating_sub(policy.max_retention_ms);
+
+        let acked = retention_candidates(
+            &tx,
+            "e.received_unix_ms < ?1 AND e.seq <= COALESCE((SELECT MIN(c.acked_through_seq) FROM receiver_stream_cursors c WHERE c.stream_id = e.stream_id), 0)",
+            &[&min_cutoff],
+            Some(MAX_PRUNE_BATCH),
+            false,
+        )?;
+        let (deleted, forced) = delete_candidates(&tx, &acked)?;
+        stats.acked_deleted = deleted;
+        stats.forced_gap_count += forced;
+
+        let hard_cap = retention_candidates(
+            &tx,
+            "e.received_unix_ms < ?1 AND e.seq > COALESCE((SELECT MIN(c.acked_through_seq) FROM receiver_stream_cursors c WHERE c.stream_id = e.stream_id), 0)",
+            &[&max_cutoff],
+            Some(MAX_PRUNE_BATCH),
+            true,
+        )?;
+        let (deleted, forced) = delete_candidates(&tx, &hard_cap)?;
+        stats.hard_cap_deleted = deleted;
+        stats.forced_gap_count += forced;
+
+        let total_rows = tx.query_row("SELECT COUNT(*) FROM events", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let emergency_triggered = context.free_disk_bytes < policy.emergency_free_disk_bytes
+            || total_rows > policy.emergency_max_rows;
+        if emergency_triggered {
+            let delete_limit = if total_rows > policy.emergency_max_rows {
+                total_rows - policy.emergency_max_rows
+            } else {
+                1
+            };
+            let emergency = retention_candidates(
+                &tx,
+                "e.received_unix_ms < ?1",
+                &[&min_cutoff],
+                Some(delete_limit.min(MAX_PRUNE_BATCH)),
+                true,
+            )?;
+            let (deleted, forced) = delete_candidates(&tx, &emergency)?;
+            stats.emergency_deleted = deleted;
+            stats.forced_gap_count += forced;
+        }
+
+        tx.commit()?;
+        Ok(stats)
+    }
+
+    pub fn retention_state(&self, stream_key: &str) -> Result<RetentionState, JournalError> {
+        self.conn
+            .query_row(
+                "SELECT earliest_available_seq, forced_gap_count
+                 FROM stream_retention
+                 WHERE stream_id = ?1",
+                params![stream_key],
+                |row| {
+                    Ok(RetentionState {
+                        earliest_available_seq: row.get(0)?,
+                        forced_gap_count: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn clear_stream(&mut self, stream_key: &str) -> Result<(), JournalError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_epoch = current_epoch(&tx, stream_key)?;
+        let next_seq = next_seq(&tx, stream_key)?;
+        let next_epoch = current_epoch + 1;
+
+        tx.execute(
+            "DELETE FROM events WHERE stream_id = ?1",
+            params![stream_key],
+        )?;
+        tx.execute(
+            "UPDATE stream_epochs
+             SET end_seq = COALESCE(end_seq, ?2 - 1)
+             WHERE stream_id = ?1 AND end_seq IS NULL",
+            params![stream_key, next_seq],
+        )?;
+        tx.execute(
+            "INSERT INTO stream_epochs
+                 (stream_id, epoch, start_seq, end_seq, reason)
+             VALUES (?1, ?2, ?3, NULL, 'manual_clear')",
+            params![stream_key, next_epoch, next_seq],
+        )?;
+        tx.execute(
+            "UPDATE stream_retention
+             SET earliest_available_seq = MAX(earliest_available_seq, ?2)
+             WHERE stream_id = ?1",
+            params![stream_key, next_seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn current_epoch(&self, stream_key: &str) -> Result<i64, JournalError> {
+        current_epoch(&self.conn, stream_key)
+    }
+
+    fn stream_exists(&self, stream_id: &str) -> Result<bool, JournalError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM streams WHERE stream_id = ?1)",
+                params![stream_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn ensure_compat_receiver(&mut self) -> Result<(), JournalError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO receivers (endpoint_id, display_name, approved_unix_ms)
+             VALUES (?1, 'Forwarder server', ?2)",
+            params![COMPAT_RECEIVER_ID, unix_ms()],
+        )?;
+        Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
+fn validate_stream_seed(stream_id: &str, epoch: i64, next_seq: i64) -> Result<(), JournalError> {
+    if stream_id.is_empty() {
+        return Err(JournalError::InvalidData(
+            "stream_id must not be empty".to_owned(),
+        ));
+    }
+    if epoch < 1 {
+        return Err(JournalError::InvalidData(format!(
+            "epoch {epoch} must be at least 1"
+        )));
+    }
+    if next_seq < 1 {
+        return Err(JournalError::InvalidData(format!(
+            "next_seq {next_seq} must be at least 1"
+        )));
+    }
+    Ok(())
+}
 
-fn apply_pragmas(conn: &Connection) -> Result<(), JournalError> {
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=FULL;
-         PRAGMA wal_autocheckpoint=1000;
-         PRAGMA foreign_keys=ON;",
+fn insert_stream_seed(
+    conn: &Connection,
+    stream_id: &str,
+    hardware_reader_id: &str,
+    epoch: i64,
+    next_seq: i64,
+    reason: &str,
+) -> Result<(), JournalError> {
+    let now_ms = unix_ms();
+    conn.execute(
+        "INSERT OR IGNORE INTO streams
+             (stream_id, hardware_reader_id, network_addr, display_name, reader_connected, created_unix_ms)
+         VALUES (?1, ?2, ?2, ?2, 0, ?3)",
+        params![stream_id, hardware_reader_id, now_ms],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO stream_epochs
+             (stream_id, epoch, start_seq, end_seq, reason)
+         VALUES (?1, ?2, ?3, NULL, ?4)",
+        params![stream_id, epoch, next_seq, reason],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO stream_retention
+             (stream_id, earliest_available_seq, forced_gap_count)
+         VALUES (?1, ?2, 0)",
+        params![stream_id, next_seq],
     )?;
     Ok(())
 }
 
-fn run_integrity_check(conn: &Connection) -> Result<(), JournalError> {
-    let result: String = conn.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
-    if result != "ok" {
-        return Err(JournalError::IntegrityCheckFailed(result));
+fn retention_candidates(
+    conn: &Connection,
+    predicate: &str,
+    predicate_params: &[&dyn rusqlite::ToSql],
+    limit: Option<i64>,
+    forced: bool,
+) -> Result<Vec<PruneCandidate>, JournalError> {
+    let sql = if limit.is_some() {
+        format!(
+            "SELECT e.stream_id, e.seq
+             FROM events e
+             WHERE {predicate}
+             ORDER BY e.seq ASC
+             LIMIT ?{}",
+            predicate_params.len() + 1
+        )
+    } else {
+        format!(
+            "SELECT e.stream_id, e.seq
+             FROM events e
+             WHERE {predicate}
+             ORDER BY e.seq ASC"
+        )
+    };
+
+    let mut params: Vec<&dyn rusqlite::ToSql> = predicate_params.to_vec();
+    if let Some(ref limit) = limit {
+        params.push(limit);
     }
-    Ok(())
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok(PruneCandidate {
+            stream_id: row.get(0)?,
+            seq: row.get(1)?,
+            forced,
+        })
+    })?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates.push(row?);
+    }
+    Ok(candidates)
 }
 
-fn apply_schema(conn: &Connection) -> Result<(), JournalError> {
-    conn.execute_batch(include_str!("schema.sql"))?;
-    Ok(())
+/// Delete candidate rows, but only as a contiguous prefix from each stream's
+/// current `earliest_available_seq`.
+///
+/// Pruning is restricted to a contiguous prefix per stream so the seq
+/// high-water is never lost. If we deleted a non-prefix row (a higher seq while
+/// a lower seq remained), `MIN(seq)` — and therefore `earliest_available_seq` —
+/// would stay low while `MAX(seq)` of the live rows dropped below an
+/// already-issued seq, letting `next_seq` reuse it. By only deleting from the
+/// bottom upward, the remaining live rows always retain the true maximum seq,
+/// so `next_seq` stays monotonic. Non-prefix candidates are left in place and
+/// become eligible on a later pass once the floor has advanced.
+fn delete_candidates(
+    conn: &Connection,
+    candidates: &[PruneCandidate],
+) -> Result<(i64, i64), JournalError> {
+    use std::collections::BTreeMap;
+
+    // Group candidate (seq, forced) pairs by stream so we can evaluate each
+    // stream's contiguous prefix independently.
+    let mut by_stream: BTreeMap<&str, Vec<(i64, bool)>> = BTreeMap::new();
+    for candidate in candidates {
+        by_stream
+            .entry(candidate.stream_id.as_str())
+            .or_default()
+            .push((candidate.seq, candidate.forced));
+    }
+
+    let mut deleted = 0;
+    let mut forced = 0;
+    for (stream_id, mut seqs) in by_stream {
+        seqs.sort_unstable_by_key(|(seq, _)| *seq);
+
+        let floor: i64 = conn.query_row(
+            "SELECT earliest_available_seq FROM stream_retention WHERE stream_id = ?1",
+            params![stream_id],
+            |row| row.get(0),
+        )?;
+
+        let mut deleted_here = 0_i64;
+        let mut forced_here = 0_i64;
+        let mut last_deleted = floor - 1;
+        for (seq, is_forced) in seqs {
+            // Stop at the first non-contiguous candidate: deleting beyond a gap
+            // would leave a lower seq behind and drop the live high-water.
+            let expected = floor + deleted_here;
+            if seq != expected {
+                break;
+            }
+            let changed = conn.execute(
+                "DELETE FROM events WHERE stream_id = ?1 AND seq = ?2",
+                params![stream_id, seq],
+            )?;
+            if changed == 0 {
+                break;
+            }
+            deleted_here += 1;
+            if is_forced {
+                forced_here += 1;
+            }
+            last_deleted = seq;
+        }
+
+        if deleted_here > 0 {
+            conn.execute(
+                "UPDATE stream_retention
+                 SET earliest_available_seq = COALESCE(
+                         (SELECT MIN(seq) FROM events WHERE stream_id = ?1),
+                         MAX(earliest_available_seq, ?2 + 1)
+                     ),
+                     forced_gap_count = forced_gap_count + ?3
+                 WHERE stream_id = ?1",
+                params![stream_id, last_deleted, forced_here],
+            )?;
+        }
+        deleted += deleted_here;
+        forced += forced_here;
+    }
+    Ok((deleted, forced))
+}
+
+/// Return the next stream-wide sequence number.
+///
+/// The seq is stream-wide and never resets across epochs. It is derived from
+/// durable high-water evidence so that pruning acked events can never cause a
+/// previously-issued seq to be reused: we take the maximum of the highest live
+/// event seq, the highest pruned seq (recorded via
+/// `stream_retention.earliest_available_seq`), and the highest acked seq.
+fn next_seq(conn: &Connection, stream_key: &str) -> Result<i64, JournalError> {
+    conn.query_row(
+        "SELECT MAX(hw) + 1 FROM (
+             SELECT COALESCE(
+                 (SELECT MAX(seq) FROM events WHERE stream_id = ?1), 0
+             ) AS hw
+             UNION ALL
+             SELECT COALESCE(
+                 (SELECT earliest_available_seq - 1 FROM stream_retention WHERE stream_id = ?1),
+                 0
+             )
+             UNION ALL
+             SELECT COALESCE(
+                 (SELECT MAX(acked_through_seq) FROM receiver_stream_cursors WHERE stream_id = ?1),
+                 0
+             )
+         )",
+        params![stream_key],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn current_epoch(conn: &Connection, stream_key: &str) -> Result<i64, JournalError> {
+    conn.query_row(
+        "SELECT epoch
+         FROM stream_epochs
+         WHERE stream_id = ?1
+         ORDER BY epoch DESC
+         LIMIT 1",
+        params![stream_key],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn collect_events<F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<JournalEvent>, JournalError>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> Result<JournalEvent, rusqlite::Error>,
+{
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
+    Ok(events)
 }
 
 fn map_event(row: &rusqlite::Row<'_>) -> Result<JournalEvent, rusqlite::Error> {
@@ -380,41 +970,11 @@ fn map_event(row: &rusqlite::Row<'_>) -> Result<JournalEvent, rusqlite::Error> {
     })
 }
 
-/// Simple UTC timestamp string for `received_at` field.
-fn chrono_now_utc() -> String {
-    // Use std::time since we don't want to add chrono as a direct dep here.
-    // Format: ISO 8601 UTC without sub-second precision for simplicity.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
+fn unix_ms() -> i64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    // Convert to human-readable UTC string (year-month-day T hour:min:sec Z)
-    // Using a simple calculation:
-    let s = secs;
-    let (y, mo, d, h, mi, se) = epoch_to_ymdhms(s);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, se)
-}
-
-fn epoch_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
-    let se = (secs % 60) as u32;
-    let mins = secs / 60;
-    let mi = (mins % 60) as u32;
-    let hours = mins / 60;
-    let h = (hours % 24) as u32;
-    let days = hours / 24;
-
-    // Gregorian calendar conversion
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if mo <= 2 { y + 1 } else { y } as u32;
-
-    (y, mo, d, h, mi, se)
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }

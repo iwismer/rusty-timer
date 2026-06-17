@@ -3,3 +3,5 @@
 //! Task 6: Durable Journal and Event ID Generator.
 
 pub mod journal;
+pub mod migrations;
+pub mod wake;

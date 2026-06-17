@@ -1,67 +1,39 @@
-/// SQLite durability and schema tests for the forwarder journal.
-///
-/// Task 6 schema: uses `stream_key` (not `reader_ip`), `stream_state` table,
-/// no `acked` column, no `config` table.
-///
-/// Validates:
-/// - WAL journal mode is set correctly
-/// - synchronous=FULL is set
-/// - Write survives close/reopen cycle
-/// - UNIQUE constraint on (stream_key, stream_epoch, seq)
-/// - integrity_check passes on a fresh database
-/// - Duplicate inserts are rejected (not silently swallowed)
+use forwarder::storage::migrations::{integrity_check, migrate};
 use rusqlite::Connection;
 use std::path::Path;
 
 const SCHEMA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/storage/schema.sql");
 
-/// Helper: open an in-memory database and apply PRAGMAs + schema.
 fn open_memory_db() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory SQLite");
-    apply_pragmas(&conn);
-    apply_schema(&conn);
+    migrate(&conn).expect("migration should succeed");
     conn
 }
 
-/// Helper: open a file-backed database and apply PRAGMAs + schema.
 fn open_file_db(path: &Path) -> Connection {
     let conn = Connection::open(path).expect("open file-backed SQLite");
-    apply_pragmas(&conn);
-    apply_schema(&conn);
+    migrate(&conn).expect("migration should succeed");
     conn
 }
 
-/// Helper: reopen a file-backed database and apply PRAGMAs only (schema already exists).
-fn reopen_file_db(path: &Path) -> Connection {
-    let conn = Connection::open(path).expect("reopen file-backed SQLite");
-    apply_pragmas(&conn);
-    conn
-}
-
-fn apply_pragmas(conn: &Connection) {
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=FULL;
-         PRAGMA wal_autocheckpoint=1000;
-         PRAGMA foreign_keys=ON;",
+fn insert_stream(conn: &Connection, stream_id: &str, epoch: i64) {
+    conn.execute(
+        "INSERT INTO streams
+             (stream_id, hardware_reader_id, network_addr, display_name, reader_connected, created_unix_ms)
+         VALUES (?1, ?1, ?1, ?1, 1, 1760000000000)",
+        rusqlite::params![stream_id],
     )
-    .expect("PRAGMAs should succeed");
+    .expect("stream insert should succeed");
+    conn.execute(
+        "INSERT INTO stream_epochs (stream_id, epoch, start_seq, end_seq, reason)
+         VALUES (?1, ?2, 1, NULL, 'test')",
+        rusqlite::params![stream_id, epoch],
+    )
+    .expect("epoch insert should succeed");
 }
-
-fn apply_schema(conn: &Connection) {
-    let schema_sql = std::fs::read_to_string(SCHEMA_PATH)
-        .expect("Schema file should exist at services/forwarder/src/storage/schema.sql");
-    conn.execute_batch(&schema_sql)
-        .expect("Schema SQL should apply without errors");
-}
-
-// ---------------------------------------------------------------------------
-// PRAGMA tests
-// ---------------------------------------------------------------------------
 
 #[test]
 fn wal_mode_is_set() {
-    // WAL mode requires a file-backed database; in-memory DBs always report "memory".
     let dir = tempfile::tempdir().expect("create temp dir");
     let db_path = dir.path().join("wal_test.db");
     let conn = open_file_db(&db_path);
@@ -77,7 +49,6 @@ fn synchronous_full_is_set() {
     let sync_val: i64 = conn
         .pragma_query_value(None, "synchronous", |row| row.get(0))
         .expect("query synchronous");
-    // synchronous=FULL is value 2
     assert_eq!(sync_val, 2, "synchronous must be FULL (2)");
 }
 
@@ -90,10 +61,6 @@ fn foreign_keys_enabled() {
     assert_eq!(fk, 1, "foreign_keys must be ON (1)");
 }
 
-// ---------------------------------------------------------------------------
-// Schema validation (Task 6 schema)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn schema_file_exists_and_is_nonempty() {
     let sql = std::fs::read_to_string(SCHEMA_PATH).expect("Schema file should exist");
@@ -101,81 +68,76 @@ fn schema_file_exists_and_is_nonempty() {
 }
 
 #[test]
-fn schema_creates_journal_table_with_stream_key() {
-    let sql = std::fs::read_to_string(SCHEMA_PATH).unwrap();
-    assert!(
-        sql.contains("CREATE TABLE IF NOT EXISTS journal"),
-        "Schema must define journal table"
-    );
-    assert!(
-        sql.contains("stream_key"),
-        "Task 6 schema must use stream_key (not reader_ip)"
+fn schema_creates_contract_tables() {
+    let conn = open_memory_db();
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .expect("prepare table query");
+    let tables = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query tables")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect tables");
+
+    assert_eq!(
+        tables,
+        vec![
+            "events",
+            "receiver_stream_cursors",
+            "receivers",
+            "stream_epochs",
+            "stream_retention",
+            "streams",
+        ]
     );
 }
 
 #[test]
-fn schema_creates_stream_state_table() {
+fn schema_omits_legacy_journal_tables() {
     let sql = std::fs::read_to_string(SCHEMA_PATH).unwrap();
-    assert!(
-        sql.contains("CREATE TABLE IF NOT EXISTS stream_state"),
-        "Task 6 schema must define stream_state table"
-    );
+    assert!(!sql.contains("CREATE TABLE IF NOT EXISTS journal"));
+    assert!(!sql.contains("CREATE TABLE IF NOT EXISTS stream_state"));
 }
-
-// ---------------------------------------------------------------------------
-// Integrity check
-// ---------------------------------------------------------------------------
 
 #[test]
 fn integrity_check_passes_on_fresh_db() {
     let conn = open_memory_db();
-    let result: String = conn
-        .pragma_query_value(None, "integrity_check", |row| row.get(0))
-        .expect("run integrity_check");
-    assert_eq!(
-        result, "ok",
-        "integrity_check must return 'ok' on a fresh database"
-    );
+    integrity_check(&conn).expect("integrity_check must pass on a fresh database");
 }
-
-// ---------------------------------------------------------------------------
-// Write durability: write survives close/reopen
-// ---------------------------------------------------------------------------
 
 #[test]
 fn write_survives_reopen() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let db_path = dir.path().join("forwarder_test.db");
 
-    // Open, write, close
     {
         let conn = open_file_db(&db_path);
+        insert_stream(&conn, "stream-1", 1);
         conn.execute(
-            "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
+            "INSERT INTO events (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
-                "192.168.1.100",
+                "stream-1",
                 1,
                 1,
-                "2026-01-01T00:00:00Z",
                 b"aa01,00:01:23.456\r\n".to_vec(),
                 "RAW",
-                "2026-01-01T00:00:00Z"
+                "2026-01-01T00:00:00Z",
+                1760000000000_i64
             ],
         )
         .expect("insert should succeed");
     }
 
-    // Reopen and verify
     {
-        let conn = reopen_file_db(&db_path);
+        let conn = open_file_db(&db_path);
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM journal", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
             .expect("count query");
         assert_eq!(count, 1, "Inserted row must survive close/reopen");
 
         let raw_frame: Vec<u8> = conn
-            .query_row("SELECT raw_frame FROM journal WHERE seq = 1", [], |row| {
+            .query_row("SELECT raw_frame FROM events WHERE seq = 1", [], |row| {
                 row.get(0)
             })
             .expect("select row");
@@ -183,112 +145,94 @@ fn write_survives_reopen() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// UNIQUE constraint on (stream_key, stream_epoch, seq)
-// ---------------------------------------------------------------------------
-
 #[test]
-fn unique_constraint_rejects_duplicate() {
+fn primary_key_rejects_duplicate_stream_seq() {
     let conn = open_memory_db();
+    insert_stream(&conn, "stream-1", 1);
 
     conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW", "2026-01-01T00:00:00Z"],
+        "INSERT INTO events (stream_id, seq, epoch, raw_frame, read_kind, received_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params!["stream-1", 1, 1, b"aa01".to_vec(), "RAW", 1760000000000_i64],
     )
     .expect("first insert should succeed");
 
     let result = conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01,00:01:23.456", "RAW", "2026-01-01T00:00:00Z"],
+        "INSERT INTO events (stream_id, seq, epoch, raw_frame, read_kind, received_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params!["stream-1", 1, 1, b"aa01".to_vec(), "RAW", 1760000000001_i64],
     );
 
     assert!(
         result.is_err(),
-        "Duplicate (stream_key, stream_epoch, seq) must be rejected"
+        "Duplicate (stream_id, seq) must be rejected"
     );
 }
 
 #[test]
-fn unique_constraint_allows_different_seq() {
+fn primary_key_allows_different_seq() {
     let conn = open_memory_db();
+    insert_stream(&conn, "stream-1", 1);
 
     conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01", "RAW", "2026-01-01T00:00:00Z"],
+        "INSERT INTO events (stream_id, seq, epoch, raw_frame, read_kind, received_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params!["stream-1", 1, 1, b"aa01".to_vec(), "RAW", 1760000000000_i64],
     )
     .expect("first insert should succeed");
 
     conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.100", 1, 2, "2026-01-01T00:00:01Z", "aa02", "RAW", "2026-01-01T00:00:01Z"],
+        "INSERT INTO events (stream_id, seq, epoch, raw_frame, read_kind, received_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params!["stream-1", 2, 1, b"aa02".to_vec(), "RAW", 1760000000001_i64],
     )
     .expect("different seq should be allowed");
 }
 
 #[test]
-fn unique_constraint_allows_different_epoch() {
+fn primary_key_allows_different_stream() {
     let conn = open_memory_db();
+    insert_stream(&conn, "stream-1", 1);
+    insert_stream(&conn, "stream-2", 1);
 
     conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01", "RAW", "2026-01-01T00:00:00Z"],
+        "INSERT INTO events (stream_id, seq, epoch, raw_frame, read_kind, received_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params!["stream-1", 1, 1, b"aa01".to_vec(), "RAW", 1760000000000_i64],
     )
     .expect("first insert should succeed");
 
     conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.100", 2, 1, "2026-01-01T00:00:01Z", "aa02", "RAW", "2026-01-01T00:00:01Z"],
+        "INSERT INTO events (stream_id, seq, epoch, raw_frame, read_kind, received_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params!["stream-2", 1, 1, b"aa02".to_vec(), "RAW", 1760000000001_i64],
     )
-    .expect("same seq but different epoch should be allowed");
+    .expect("same seq on another stream should be allowed");
 }
 
 #[test]
-fn unique_constraint_allows_different_stream_key() {
+fn receiver_cursor_insert_and_read() {
     let conn = open_memory_db();
-
+    insert_stream(&conn, "stream-1", 1);
     conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.100", 1, 1, "2026-01-01T00:00:00Z", "aa01", "RAW", "2026-01-01T00:00:00Z"],
+        "INSERT INTO receivers (endpoint_id, display_name, approved_unix_ms)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params!["receiver-1", "Receiver 1", 1760000000000_i64],
     )
-    .expect("first insert should succeed");
-
+    .expect("receiver insert should succeed");
     conn.execute(
-        "INSERT INTO journal (stream_key, stream_epoch, seq, reader_timestamp, raw_frame, read_type, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params!["192.168.1.200", 1, 1, "2026-01-01T00:00:01Z", "aa02", "RAW", "2026-01-01T00:00:01Z"],
+        "INSERT INTO receiver_stream_cursors (endpoint_id, stream_id, acked_through_seq)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params!["receiver-1", "stream-1", 12_i64],
     )
-    .expect("same seq and epoch but different stream_key should be allowed");
-}
+    .expect("cursor insert should succeed");
 
-// ---------------------------------------------------------------------------
-// stream_state table basic operations
-// ---------------------------------------------------------------------------
-
-#[test]
-fn stream_state_insert_and_read() {
-    let conn = open_memory_db();
-
-    conn.execute(
-        "INSERT INTO stream_state (stream_key, stream_epoch, next_seq, acked_epoch, acked_through_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params!["192.168.1.100", 1, 1, 0, 0],
-    )
-    .expect("stream_state insert should succeed");
-
-    let (epoch, next_seq): (i64, i64) = conn
+    let acked: i64 = conn
         .query_row(
-            "SELECT stream_epoch, next_seq FROM stream_state WHERE stream_key = ?1",
-            rusqlite::params!["192.168.1.100"],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT acked_through_seq FROM receiver_stream_cursors WHERE endpoint_id = ?1 AND stream_id = ?2",
+            rusqlite::params!["receiver-1", "stream-1"],
+            |row| row.get(0),
         )
-        .expect("stream_state read");
-    assert_eq!(epoch, 1);
-    assert_eq!(next_seq, 1);
+        .expect("cursor read");
+    assert_eq!(acked, 12);
 }

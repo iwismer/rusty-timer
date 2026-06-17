@@ -810,6 +810,10 @@ mod tests {
             journal: forwarder::config::JournalConfig {
                 sqlite_path: db_path.display().to_string(),
                 prune_watermark_pct: 80,
+                min_retention_secs: 7 * 24 * 60 * 60,
+                max_retention_secs: 30 * 24 * 60 * 60,
+                emergency_free_disk_bytes: 1_000_000_000,
+                emergency_max_rows: 1_000_000,
             },
             status_http: forwarder::config::StatusHttpConfig {
                 bind: "127.0.0.1:0".to_string(),
@@ -1054,8 +1058,8 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(JournalAppendError::StreamState(_))),
-            "missing stream state should return StreamState error, got: {:?}",
+            matches!(result, Err(JournalAppendError::Append(_))),
+            "missing stream state should return an append error, got: {:?}",
             result
         );
     }
@@ -1654,6 +1658,10 @@ token_file = "/tmp/test-token"
             journal: forwarder::config::JournalConfig {
                 sqlite_path: db_path.display().to_string(),
                 prune_watermark_pct: 80,
+                min_retention_secs: 7 * 24 * 60 * 60,
+                max_retention_secs: 30 * 24 * 60 * 60,
+                emergency_free_disk_bytes: 1_000_000_000,
+                emergency_max_rows: 1_000_000,
             },
             status_http: forwarder::config::StatusHttpConfig {
                 bind: "127.0.0.1:0".to_string(),
@@ -1898,6 +1906,10 @@ token_file = "/tmp/test-token"
             journal: forwarder::config::JournalConfig {
                 sqlite_path: db_path.display().to_string(),
                 prune_watermark_pct: 80,
+                min_retention_secs: 7 * 24 * 60 * 60,
+                max_retention_secs: 30 * 24 * 60 * 60,
+                emergency_free_disk_bytes: 1_000_000_000,
+                emergency_max_rows: 1_000_000,
             },
             status_http: forwarder::config::StatusHttpConfig {
                 bind: "127.0.0.1:0".to_string(),
@@ -2021,6 +2033,10 @@ token_file = "/tmp/test-token"
             journal: forwarder::config::JournalConfig {
                 sqlite_path: db_path.display().to_string(),
                 prune_watermark_pct: 80,
+                min_retention_secs: 7 * 24 * 60 * 60,
+                max_retention_secs: 30 * 24 * 60 * 60,
+                emergency_free_disk_bytes: 1_000_000_000,
+                emergency_max_rows: 1_000_000,
             },
             status_http: forwarder::config::StatusHttpConfig {
                 bind: "127.0.0.1:0".to_string(),

@@ -5,6 +5,7 @@
 
 pub mod mock_ws_client;
 pub mod mock_ws_server;
+pub mod p2p;
 
 pub use mock_ws_client::MockWsClient;
 pub use mock_ws_server::MockWsServer;

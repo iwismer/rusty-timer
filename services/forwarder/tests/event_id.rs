@@ -1,8 +1,8 @@
-/// Tests for the event ID generator (epoch + seq monotonicity).
+/// Tests for the event ID generator (epoch + stream-wide seq monotonicity).
 ///
-/// Validates:
-/// - seq increments monotonically within an epoch
-/// - seq resets to 1 when epoch bumps
+/// Validates the new stream-wide sequence contract:
+/// - seq increments monotonically as events are inserted
+/// - seq is stream-wide and does NOT reset across an epoch bump
 /// - seq resumes from persisted state after restart (simulated via reopen)
 /// - epoch bump does not drop old-epoch unacked events
 use forwarder::storage::journal::Journal;
@@ -30,8 +30,14 @@ fn seq_is_monotonically_increasing_within_epoch() {
     // Init stream state at epoch 1, next_seq = 1
     j.ensure_stream_state(stream_key, 1).expect("init stream");
 
+    // next_seq is a pure read of durable high-water evidence, so it only
+    // advances once the previously-issued seq has actually been persisted.
     let s1 = j.next_seq(stream_key).expect("seq 1");
+    j.insert_event(stream_key, 1, s1, None, b"line", "RAW")
+        .expect("insert 1");
     let s2 = j.next_seq(stream_key).expect("seq 2");
+    j.insert_event(stream_key, 1, s2, None, b"line", "RAW")
+        .expect("insert 2");
     let s3 = j.next_seq(stream_key).expect("seq 3");
 
     assert_eq!(s1, 1);
@@ -49,25 +55,34 @@ fn first_seq_in_epoch_is_one() {
 }
 
 // ---------------------------------------------------------------------------
-// Epoch bump resets seq to 1
+// Epoch bump does NOT reset seq (stream-wide sequence)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn seq_resets_to_1_on_epoch_bump() {
+fn seq_continues_across_epoch_bump() {
     let (mut j, _f) = open_journal();
     let stream_key = "192.168.2.200";
     j.ensure_stream_state(stream_key, 1).expect("init stream");
 
-    // Advance seq in epoch 1
-    j.next_seq(stream_key).unwrap(); // 1
-    j.next_seq(stream_key).unwrap(); // 2
+    // Write two events in epoch 1 (seq 1 and 2)
+    let s1 = j.next_seq(stream_key).unwrap();
+    j.insert_event(stream_key, 1, s1, None, b"line", "RAW")
+        .unwrap();
+    let s2 = j.next_seq(stream_key).unwrap();
+    j.insert_event(stream_key, 1, s2, None, b"line", "RAW")
+        .unwrap();
+    assert_eq!((s1, s2), (1, 2));
 
     // Bump epoch to 2
     j.bump_epoch(stream_key, 2).expect("bump epoch");
 
-    // First seq in epoch 2 must be 1
+    // First seq in epoch 2 must continue from the stream-wide high-water (3),
+    // NOT reset to 1.
     let s = j.next_seq(stream_key).expect("seq after epoch bump");
-    assert_eq!(s, 1, "seq must reset to 1 after epoch bump");
+    assert_eq!(
+        s, 3,
+        "seq is stream-wide and must not reset after epoch bump"
+    );
 }
 
 #[test]
@@ -114,9 +129,11 @@ fn seq_resumes_from_persisted_state_after_reopen() {
     {
         let mut j = open_journal_at(&path);
         j.ensure_stream_state("192.168.2.50", 1).unwrap();
-        j.next_seq("192.168.2.50").unwrap(); // 1
-        j.next_seq("192.168.2.50").unwrap(); // 2
-        j.next_seq("192.168.2.50").unwrap(); // 3
+        for _ in 0..3 {
+            let seq = j.next_seq("192.168.2.50").unwrap();
+            j.insert_event("192.168.2.50", 1, seq, None, b"line", "RAW")
+                .unwrap();
+        }
     }
 
     // Reopen — seq must resume from 4, not restart at 1
@@ -135,21 +152,25 @@ fn epoch_resumes_from_persisted_state_after_reopen() {
     let tmp = NamedTempFile::new().expect("temp file");
     let path = tmp.path().to_path_buf();
 
-    // Write in epoch 1, bump to 2, write in epoch 2
+    // Write in epoch 1 (seq 1), bump to 2, write in epoch 2 (seq 2)
     {
         let mut j = open_journal_at(&path);
         j.ensure_stream_state("10.0.0.1", 1).unwrap();
-        j.next_seq("10.0.0.1").unwrap();
+        let s1 = j.next_seq("10.0.0.1").unwrap();
+        j.insert_event("10.0.0.1", 1, s1, None, b"line", "RAW")
+            .unwrap();
         j.bump_epoch("10.0.0.1", 2).unwrap();
-        j.next_seq("10.0.0.1").unwrap(); // seq=1 in epoch 2
+        let s2 = j.next_seq("10.0.0.1").unwrap(); // seq=2 (stream-wide) in epoch 2
+        j.insert_event("10.0.0.1", 2, s2, None, b"line", "RAW")
+            .unwrap();
     }
 
-    // Reopen — should be in epoch 2, next seq is 2
+    // Reopen — should be in epoch 2, next stream-wide seq is 3
     {
         let mut j = open_journal_at(&path);
         let (epoch, next_seq) = j.current_epoch_and_next_seq("10.0.0.1").expect("state");
         assert_eq!(epoch, 2, "epoch must be persisted");
-        assert_eq!(next_seq, 2, "next_seq after reopen in epoch 2 must be 2");
+        assert_eq!(next_seq, 3, "next_seq after reopen continues stream-wide");
     }
 }
 

@@ -285,6 +285,144 @@ target = "192.168.2.156:10000"
 }
 
 #[test]
+fn default_retention_config() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert_eq!(cfg.journal.min_retention_secs, 7 * 24 * 60 * 60);
+    assert_eq!(cfg.journal.max_retention_secs, 30 * 24 * 60 * 60);
+    assert_eq!(cfg.journal.emergency_free_disk_bytes, 1_000_000_000);
+    assert_eq!(cfg.journal.emergency_max_rows, 1_000_000);
+    let policy = cfg.journal.retention_policy();
+    assert_eq!(policy.min_retention_ms, 7 * 24 * 60 * 60 * 1000);
+    assert_eq!(policy.max_retention_ms, 30 * 24 * 60 * 60 * 1000);
+}
+
+#[test]
+fn custom_retention_config() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[journal]
+min_retention = "2d"
+max_retention = "9d"
+emergency_free_disk_bytes = 1234
+emergency_max_rows = 42
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let cfg = load_config_from_str(&toml, token_file.path()).unwrap();
+    assert_eq!(cfg.journal.min_retention_secs, 2 * 24 * 60 * 60);
+    assert_eq!(cfg.journal.max_retention_secs, 9 * 24 * 60 * 60);
+    assert_eq!(cfg.journal.emergency_free_disk_bytes, 1234);
+    assert_eq!(cfg.journal.emergency_max_rows, 42);
+}
+
+#[test]
+fn invalid_retention_suffix_fails() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[journal]
+min_retention = "7x"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let result = load_config_from_str(&toml, token_file.path());
+    assert!(
+        result.is_err(),
+        "invalid retention duration suffix must fail"
+    );
+}
+
+#[test]
+fn retention_min_max_inversion_fails() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[journal]
+min_retention = "30d"
+max_retention = "7d"
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let result = load_config_from_str(&toml, token_file.path());
+    assert!(result.is_err(), "max_retention < min_retention must fail");
+}
+
+#[test]
+fn zero_emergency_max_rows_fails() {
+    let token_file = write_token_file("tok");
+    let toml = format!(
+        r#"
+schema_version = 1
+
+[server]
+base_url = "https://timing.example.com"
+
+[auth]
+token_file = "{}"
+
+[journal]
+emergency_max_rows = 0
+
+[[readers]]
+target = "192.168.2.156:10000"
+"#,
+        token_file.path().display()
+    );
+    let result = load_config_from_str(&toml, token_file.path());
+    assert!(result.is_err(), "zero emergency_max_rows must fail");
+}
+
+#[test]
 fn default_ack_timeout_secs() {
     let token_file = write_token_file("tok");
     let toml = format!(

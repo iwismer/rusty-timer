@@ -1021,6 +1021,115 @@ target = "192.168.1.100:10000"
     );
 }
 
+/// Helper: start a config-editing server backed by a minimal temp config file.
+/// Returns the running server and the config file guard (kept to preserve the
+/// temp file for the duration of the test).
+async fn start_config_server() -> (StatusServer, tempfile::NamedTempFile) {
+    use forwarder::status_http::ConfigState;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    let mut config_file = NamedTempFile::new().expect("create temp file");
+    write!(
+        config_file,
+        r#"schema_version = 1
+[server]
+base_url = "https://timing.example.com"
+[auth]
+token_file = "/tmp/fake-token"
+[[readers]]
+target = "192.168.1.100:10000"
+"#
+    )
+    .expect("write config");
+
+    let cfg = StatusConfig {
+        bind: "127.0.0.1:0".to_owned(),
+        forwarder_version: "0.1.0-test".to_owned(),
+    };
+    let config_state = ConfigState::new(config_file.path().to_path_buf());
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(NoopJournal));
+    let restart_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server = StatusServer::start_with_config(
+        cfg,
+        SubsystemStatus::ready(),
+        journal,
+        std::sync::Arc::new(config_state),
+        restart_signal,
+    )
+    .await
+    .expect("start failed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (server, config_file)
+}
+
+#[tokio::test]
+async fn post_config_journal_rejects_invalid_retention_suffix() {
+    let (server, _config_file) = start_config_server().await;
+    let addr = server.local_addr();
+
+    let (status, _) = http_post(addr, "/api/v1/config/journal", r#"{"min_retention":"7x"}"#).await;
+    assert_eq!(
+        status, 400,
+        "invalid retention duration suffix must return 400"
+    );
+}
+
+#[tokio::test]
+async fn post_config_journal_rejects_min_max_inversion() {
+    let (server, _config_file) = start_config_server().await;
+    let addr = server.local_addr();
+
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/config/journal",
+        r#"{"min_retention":"30d","max_retention":"7d"}"#,
+    )
+    .await;
+    assert_eq!(status, 400, "max_retention < min_retention must return 400");
+}
+
+#[tokio::test]
+async fn post_config_journal_rejects_zero_emergency_rows() {
+    let (server, _config_file) = start_config_server().await;
+    let addr = server.local_addr();
+
+    let (status, _) = http_post(
+        addr,
+        "/api/v1/config/journal",
+        r#"{"emergency_max_rows":0}"#,
+    )
+    .await;
+    assert_eq!(status, 400, "zero emergency_max_rows must return 400");
+}
+
+#[tokio::test]
+async fn post_config_journal_accepts_valid_retention() {
+    let (server, config_file) = start_config_server().await;
+    let addr = server.local_addr();
+
+    let (status, response) = http_post(
+        addr,
+        "/api/v1/config/journal",
+        r#"{"min_retention":"2d","max_retention":"9d","emergency_max_rows":42}"#,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let json: serde_json::Value =
+        serde_json::from_str(response_body(&response)).expect("parse JSON");
+    assert_eq!(json["ok"], true);
+
+    let toml_str = std::fs::read_to_string(config_file.path()).expect("read config");
+    assert!(
+        toml_str.contains("2d"),
+        "min_retention persisted: {toml_str}"
+    );
+    assert!(
+        toml_str.contains("9d"),
+        "max_retention persisted: {toml_str}"
+    );
+}
+
 #[tokio::test]
 async fn post_config_uplink_updates_batch_settings() {
     use forwarder::status_http::ConfigState;
