@@ -23,3 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 dirs = "6"
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }

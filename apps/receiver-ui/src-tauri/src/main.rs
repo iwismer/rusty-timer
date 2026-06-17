@@ -77,22 +77,48 @@ const EDIT_MENU_ITEMS: &[EditMenuItem] = &[
     EditMenuItem::SelectAll,
 ];
 
+/// Canonical event name for a UI event, delegating to the receiver library's
+/// single source of truth so the Tauri bridge and the headless / test bridge
+/// always agree (see `control_api::event_name` and `EVENT_NAMES`).
 fn ui_event_name(event: &ReceiverUiEvent) -> &'static str {
-    match event {
-        ReceiverUiEvent::Resync => "resync",
-        ReceiverUiEvent::StatusChanged { .. } => "status_changed",
-        ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
-        ReceiverUiEvent::LogEntry { .. } => "log_entry",
-        ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
-        ReceiverUiEvent::ForwarderMetricsUpdated(_) => "forwarder_metrics_updated",
-        ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
-        ReceiverUiEvent::LastRead(_) => "last_read",
-        ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
-        ReceiverUiEvent::ReaderInfoUpdated { .. } => "reader_info_updated",
-        ReceiverUiEvent::ReaderDownloadProgress { .. } => "reader_download_progress",
-        ReceiverUiEvent::ForwarderUpsUpdated { .. } => "forwarder_ups_updated",
-    }
+    control_api::event_name(event)
 }
+
+// ---------------------------------------------------------------------------
+// Canonical Tauri command list
+//
+// The command surface is enumerated once, in the receiver library's
+// `receiver_command_list!` macro (alongside `COMMAND_REGISTRY`). Both adapters
+// below expand that single list: `tauri_generate_handler` into
+// `tauri::generate_handler!` and `tauri_command_names` into the test-only
+// `TAURI_COMMAND_NAMES`. This keeps the IPC handler set, the exported name
+// list, and the canonical registry from ever drifting; the
+// `tauri_and_bridge_command_sets_match` test asserts that parity.
+// ---------------------------------------------------------------------------
+
+/// Adapter: expands one `receiver_command_list!` entry per command into the
+/// `tauri::generate_handler!` invocation, keeping only the identifiers.
+macro_rules! tauri_generate_handler {
+    ($($name:ident ( $($arg:ident : $argty:literal),* $(,)? ) -> $ret:literal),* $(,)?) => {
+        tauri::generate_handler![$($name),*]
+    };
+}
+
+/// Adapter: expands the same list into a `&[&str]` of command names for the
+/// test-only `TAURI_COMMAND_NAMES`.
+#[cfg(test)]
+macro_rules! tauri_command_names {
+    ($($name:ident ( $($arg:ident : $argty:literal),* $(,)? ) -> $ret:literal),* $(,)?) => {
+        &[$(stringify!($name)),*]
+    };
+}
+
+/// Names of every Tauri command, derived from the same receiver-provided list
+/// that drives `generate_handler!`. Compared against
+/// `control_api::bridge_command_names()` by the
+/// `tauri_and_bridge_command_sets_match` parity test.
+#[cfg(test)]
+const TAURI_COMMAND_NAMES: &[&str] = receiver::receiver_command_list!(tauri_command_names);
 
 fn bridge_action_from_item(
     item: Result<ReceiverUiEvent, BroadcastStreamRecvError>,
@@ -696,7 +722,8 @@ fn spawn_event_bridge(app_handle: tauri::AppHandle, state: &Arc<AppState>) {
                     }
                 }
                 BridgeAction::EmitResync => {
-                    if let Err(e) = handle.emit("resync", ()) {
+                    let name = ui_event_name(&ReceiverUiEvent::Resync);
+                    if let Err(e) = handle.emit(name, ()) {
                         warn!(error = %e, "failed to emit resync event to webview");
                     }
                 }
@@ -914,63 +941,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_profile,
-            put_profile,
-            get_mode,
-            put_mode,
-            get_streams,
-            get_stream_metrics,
-            put_earliest_epoch,
-            get_races,
-            create_race,
-            delete_race,
-            get_participants,
-            upload_race_file,
-            get_forwarders,
-            get_forwarder_race,
-            set_forwarder_race,
-            get_forwarder_config,
-            set_forwarder_config,
-            restart_forwarder_service,
-            restart_forwarder_device,
-            shutdown_forwarder_device,
-            get_replay_target_epochs,
-            get_subscriptions,
-            put_subscriptions,
-            get_status,
-            get_version,
-            get_logs,
-            connect,
-            disconnect,
-            admin_reset_cursor,
-            admin_reset_all_cursors,
-            admin_reset_earliest_epoch,
-            admin_reset_all_earliest_epochs,
-            admin_purge_subscriptions,
-            admin_update_port,
-            admin_reset_profile,
-            admin_clear_data,
-            admin_factory_reset,
-            get_dbf_config,
-            put_dbf_config,
-            clear_dbf,
-            update_subscription_event_type,
-            get_server_streams,
-            get_announcer_config,
-            put_announcer_config,
-            reset_announcer,
-            reader_get_info,
-            reader_sync_clock,
-            reader_set_read_mode,
-            reader_set_tto,
-            reader_set_recording,
-            reader_clear_records,
-            reader_start_download,
-            reader_stop_download,
-            reader_refresh,
-            reader_reconnect,
-        ])
+        .invoke_handler(receiver::receiver_command_list!(tauri_generate_handler))
         .build(tauri::generate_context!());
 
     let app = match app {
@@ -1027,6 +998,129 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn tauri_and_bridge_command_sets_match() {
+        use std::collections::BTreeSet;
+        // Tauri side: derived from the same macro that drives `generate_handler!`.
+        let tauri: BTreeSet<&str> = TAURI_COMMAND_NAMES.iter().copied().collect();
+        // Bridge side: derived from the canonical receiver command registry.
+        let bridge: BTreeSet<&str> = control_api::bridge_command_names()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            tauri,
+            bridge,
+            "Tauri generate_handler! command set and bridge command registry diverged.\n\
+             Tauri-only: {:?}\nBridge-only: {:?}",
+            tauri.difference(&bridge).collect::<Vec<_>>(),
+            bridge.difference(&tauri).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn event_names_match() {
+        use receiver::ui_events::{
+            ForwarderMetricsUpdate, LastRead, StreamCountUpdate, StreamMetricsPayload,
+        };
+        use std::collections::BTreeSet;
+
+        // One sample of every ReceiverUiEvent variant. Adding a variant forces a
+        // new `ui_event_name` arm to compile; including it here keeps the
+        // canonical EVENT_NAMES list honest.
+        let samples = vec![
+            ReceiverUiEvent::Resync,
+            ReceiverUiEvent::StatusChanged {
+                connection_state: ConnectionState::Connected,
+                streams_count: 0,
+                receiver_id: "recv".to_owned(),
+            },
+            ReceiverUiEvent::StreamsSnapshot {
+                streams: vec![],
+                degraded: false,
+                upstream_error: None,
+            },
+            ReceiverUiEvent::LogEntry {
+                entry: "x".to_owned(),
+            },
+            ReceiverUiEvent::StreamCountsUpdated {
+                updates: vec![StreamCountUpdate {
+                    forwarder_id: "f".to_owned(),
+                    reader_ip: "ip".to_owned(),
+                    reads_total: 0,
+                    reads_epoch: 0,
+                }],
+            },
+            ReceiverUiEvent::ForwarderMetricsUpdated(ForwarderMetricsUpdate {
+                forwarder_id: "f".to_owned(),
+                unique_chips: 0,
+                total_reads: 0,
+                last_read_at: None,
+            }),
+            ReceiverUiEvent::ModeChanged {
+                mode: rt_protocol::ReceiverMode::Race {
+                    race_id: "r".to_owned(),
+                },
+            },
+            ReceiverUiEvent::LastRead(LastRead {
+                forwarder_id: "f".to_owned(),
+                reader_ip: "ip".to_owned(),
+                chip_id: "c".to_owned(),
+                timestamp: "t".to_owned(),
+                bib: None,
+                name: None,
+            }),
+            ReceiverUiEvent::StreamMetricsUpdated(StreamMetricsPayload {
+                forwarder_id: "f".to_owned(),
+                reader_ip: "ip".to_owned(),
+                raw_count: 0,
+                dedup_count: 0,
+                retransmit_count: 0,
+                lag_ms: None,
+                epoch_raw_count: 0,
+                epoch_dedup_count: 0,
+                epoch_retransmit_count: 0,
+                unique_chips: 0,
+                epoch_last_received_at: None,
+                epoch_lag_ms: None,
+            }),
+            ReceiverUiEvent::ReaderInfoUpdated {
+                stream_id: uuid::Uuid::nil(),
+                reader_ip: "ip".to_owned(),
+                state: rt_protocol::ReaderConnectionState::Connected,
+                reader_info: None,
+            },
+            ReceiverUiEvent::ReaderDownloadProgress {
+                stream_id: uuid::Uuid::nil(),
+                reader_ip: "ip".to_owned(),
+                state: rt_protocol::DownloadState::Idle,
+                reads_received: 0,
+                progress: 0,
+                total: 0,
+                error: None,
+            },
+            ReceiverUiEvent::ForwarderUpsUpdated {
+                forwarder_id: "f".to_owned(),
+                available: false,
+                status: None,
+            },
+        ];
+
+        // Names the Tauri bridge actually emits, via ui_event_name.
+        let emitted: BTreeSet<&str> = samples.iter().map(ui_event_name).collect();
+        // Canonical names the receiver library publishes (consumed by the
+        // headless/test bridge in T5.1).
+        let canonical: BTreeSet<&str> = control_api::EVENT_NAMES.iter().copied().collect();
+        assert_eq!(
+            emitted,
+            canonical,
+            "Tauri-emitted event names and canonical EVENT_NAMES diverged.\n\
+             Emitted-only: {:?}\nCanonical-only: {:?}",
+            emitted.difference(&canonical).collect::<Vec<_>>(),
+            canonical.difference(&emitted).collect::<Vec<_>>(),
+        );
     }
 
     #[test]

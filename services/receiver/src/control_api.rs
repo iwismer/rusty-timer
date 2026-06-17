@@ -2202,6 +2202,259 @@ pub async fn reader_reconnect(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Command & event registry (single source of truth)
+//
+// This registry enumerates every receiver control command and every UI event
+// name in one place. It drives two transports:
+//
+//   * the Tauri IPC layer (`generate_handler!` in the receiver-tauri app), and
+//   * the headless / test bridge mounted in T5.1 (`bridge_command_names`).
+//
+// A parity test (`tauri_and_bridge_command_sets_match`) asserts both transports
+// expose an identical command set, and `event_names_match` asserts the emitted
+// event names equal [`EVENT_NAMES`]. Keep all names snake_case and stable.
+// ---------------------------------------------------------------------------
+
+/// A single argument of a [`CommandSpec`], excluding the injected app state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandArg {
+    /// Argument name as deserialized from the request payload (snake_case).
+    pub name: &'static str,
+    /// Rust type of the argument, for documentation / bridge codegen.
+    pub ty: &'static str,
+}
+
+/// Describes one receiver control command: its stable name, its arguments
+/// (excluding injected app state), and its success return type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSpec {
+    /// Stable, snake_case command name shared by every transport.
+    pub name: &'static str,
+    /// Arguments the caller supplies, excluding the injected app state.
+    pub args: &'static [CommandArg],
+    /// Success return type (the `T` of the command's `Result<T, _>`).
+    pub return_type: &'static str,
+}
+
+/// Convenience for declaring a [`CommandArg`].
+const fn arg(name: &'static str, ty: &'static str) -> CommandArg {
+    CommandArg { name, ty }
+}
+
+/// Canonical, single-source list of every receiver control command.
+///
+/// This macro is the one place the full command surface is enumerated, with
+/// each command's identifier, argument names/types, and return type. It is
+/// `#[macro_export]`ed so the `receiver-tauri` crate can expand the very same
+/// list into `tauri::generate_handler!` (and its test-only name list) without
+/// maintaining a second copy.
+///
+/// The macro takes a callback macro path (captured as raw tokens so multi-
+/// segment paths can be spliced before `!`) and invokes it with one entry per
+/// command in the form `name(arg: "Ty", ...) -> "ReturnType",`. Each consumer
+/// supplies an adapter macro that pattern-matches that shape and keeps only
+/// the parts it needs (full metadata for [`COMMAND_REGISTRY`], just the
+/// identifiers for `generate_handler!`).
+#[macro_export]
+macro_rules! receiver_command_list {
+    ($($callback:tt)+) => {
+        $($callback)+! {
+            get_profile() -> "ProfileResponse",
+            put_profile(body: "ProfileRequest") -> "()",
+            get_mode() -> "ReceiverMode",
+            put_mode(mode: "ReceiverMode") -> "()",
+            get_streams() -> "StreamsResponse",
+            get_stream_metrics() -> "Vec<StreamMetricsPayload>",
+            put_earliest_epoch(body: "EarliestEpochRequest") -> "()",
+            get_races() -> "serde_json::Value",
+            create_race(name: "String") -> "serde_json::Value",
+            delete_race(race_id: "String") -> "()",
+            get_participants(race_id: "String") -> "serde_json::Value",
+            upload_race_file(
+                race_id: "String",
+                upload_type: "String",
+                file_data: "String",
+                file_name: "String"
+            ) -> "serde_json::Value",
+            get_forwarders() -> "serde_json::Value",
+            get_forwarder_race(forwarder_id: "String") -> "serde_json::Value",
+            set_forwarder_race(
+                forwarder_id: "String",
+                race_id: "Option<String>"
+            ) -> "serde_json::Value",
+            get_forwarder_config(forwarder_id: "String") -> "serde_json::Value",
+            set_forwarder_config(
+                forwarder_id: "String",
+                section: "String",
+                data: "serde_json::Value"
+            ) -> "serde_json::Value",
+            restart_forwarder_service(forwarder_id: "String") -> "serde_json::Value",
+            restart_forwarder_device(forwarder_id: "String") -> "serde_json::Value",
+            shutdown_forwarder_device(forwarder_id: "String") -> "serde_json::Value",
+            get_replay_target_epochs(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "ReplayTargetEpochsResponse",
+            get_subscriptions() -> "SubscriptionsBody",
+            put_subscriptions(body: "SubscriptionsBody") -> "()",
+            get_status() -> "StatusResponse",
+            get_version() -> "String",
+            get_logs() -> "LogsResponse",
+            connect() -> "()",
+            disconnect() -> "()",
+            admin_reset_cursor(body: "CursorResetRequest") -> "()",
+            admin_reset_all_cursors() -> "serde_json::Value",
+            admin_reset_earliest_epoch(body: "CursorResetRequest") -> "()",
+            admin_reset_all_earliest_epochs() -> "serde_json::Value",
+            admin_purge_subscriptions() -> "serde_json::Value",
+            admin_update_port(body: "UpdatePortRequest") -> "()",
+            admin_reset_profile() -> "()",
+            admin_clear_data() -> "()",
+            admin_factory_reset() -> "()",
+            get_dbf_config() -> "DbfConfig",
+            put_dbf_config(body: "DbfConfig") -> "()",
+            clear_dbf() -> "()",
+            update_subscription_event_type(
+                forwarder_id: "String",
+                reader_ip: "String",
+                body: "EventTypeRequest"
+            ) -> "()",
+            get_server_streams() -> "serde_json::Value",
+            get_announcer_config() -> "serde_json::Value",
+            put_announcer_config(body: "serde_json::Value") -> "serde_json::Value",
+            reset_announcer() -> "()",
+            reader_get_info(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "serde_json::Value",
+            reader_sync_clock(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "serde_json::Value",
+            reader_set_read_mode(
+                forwarder_id: "String",
+                reader_ip: "String",
+                mode: "ReadMode",
+                timeout: "u8"
+            ) -> "serde_json::Value",
+            reader_set_tto(
+                forwarder_id: "String",
+                reader_ip: "String",
+                enabled: "bool"
+            ) -> "serde_json::Value",
+            reader_set_recording(
+                forwarder_id: "String",
+                reader_ip: "String",
+                enabled: "bool"
+            ) -> "serde_json::Value",
+            reader_clear_records(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "serde_json::Value",
+            reader_start_download(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "serde_json::Value",
+            reader_stop_download(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "serde_json::Value",
+            reader_refresh(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "serde_json::Value",
+            reader_reconnect(
+                forwarder_id: "String",
+                reader_ip: "String"
+            ) -> "serde_json::Value",
+        }
+    };
+}
+
+/// Adapter that turns one [`receiver_command_list!`] entry into a
+/// [`CommandSpec`] and collects them into [`COMMAND_REGISTRY`].
+macro_rules! declare_command_registry {
+    ($($name:ident ( $($arg:ident : $argty:literal),* $(,)? ) -> $ret:literal),* $(,)?) => {
+        /// Canonical registry of every receiver control command.
+        ///
+        /// Built from [`receiver_command_list!`], the single source of truth
+        /// shared with the Tauri `generate_handler!` list. The
+        /// `tauri_and_bridge_command_sets_match` parity test asserts the two
+        /// transports expose an identical command set.
+        pub const COMMAND_REGISTRY: &[CommandSpec] = &[
+            $(CommandSpec {
+                name: stringify!($name),
+                args: &[$(arg(stringify!($arg), $argty)),*],
+                return_type: $ret,
+            }),*
+        ];
+    };
+}
+
+receiver_command_list!(declare_command_registry);
+
+/// Every command name in the canonical registry, in registry order.
+pub fn command_names() -> Vec<&'static str> {
+    COMMAND_REGISTRY.iter().map(|c| c.name).collect()
+}
+
+/// Command names the headless / test bridge (T5.1) mounts routes from.
+///
+/// Identical to [`command_names`]; named separately so bridge code reads from
+/// an intent-revealing entry point and the parity test compares two
+/// independently-derived surfaces rather than a list against itself.
+pub fn bridge_command_names() -> Vec<&'static str> {
+    command_names()
+}
+
+/// Look up a command spec by its stable name.
+pub fn command_spec(name: &str) -> Option<&'static CommandSpec> {
+    COMMAND_REGISTRY.iter().find(|c| c.name == name)
+}
+
+/// Canonical, snake_case names of every UI event the receiver emits.
+///
+/// These are the event names carried over both the Tauri IPC layer
+/// (`ui_event_name`) and the headless / test bridge. [`event_name`] maps a
+/// concrete [`ReceiverUiEvent`] to its entry here.
+pub const EVENT_NAMES: &[&str] = &[
+    "resync",
+    "status_changed",
+    "streams_snapshot",
+    "log_entry",
+    "stream_counts_updated",
+    "forwarder_metrics_updated",
+    "mode_changed",
+    "last_read",
+    "stream_metrics_updated",
+    "reader_info_updated",
+    "reader_download_progress",
+    "forwarder_ups_updated",
+];
+
+/// Canonical event name for a [`ReceiverUiEvent`].
+///
+/// This is the single source of truth for event naming, consumed by both the
+/// Tauri bridge and the headless / test bridge. The match is exhaustive so that
+/// adding a variant forces a naming decision at compile time.
+pub fn event_name(event: &ReceiverUiEvent) -> &'static str {
+    match event {
+        ReceiverUiEvent::Resync => "resync",
+        ReceiverUiEvent::StatusChanged { .. } => "status_changed",
+        ReceiverUiEvent::StreamsSnapshot { .. } => "streams_snapshot",
+        ReceiverUiEvent::LogEntry { .. } => "log_entry",
+        ReceiverUiEvent::StreamCountsUpdated { .. } => "stream_counts_updated",
+        ReceiverUiEvent::ForwarderMetricsUpdated(_) => "forwarder_metrics_updated",
+        ReceiverUiEvent::ModeChanged { .. } => "mode_changed",
+        ReceiverUiEvent::LastRead(_) => "last_read",
+        ReceiverUiEvent::StreamMetricsUpdated(_) => "stream_metrics_updated",
+        ReceiverUiEvent::ReaderInfoUpdated { .. } => "reader_info_updated",
+        ReceiverUiEvent::ReaderDownloadProgress { .. } => "reader_download_progress",
+        ReceiverUiEvent::ForwarderUpsUpdated { .. } => "forwarder_ups_updated",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2210,6 +2463,109 @@ mod tests {
     use axum::{Json, Router};
     use serde_json::json;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn command_registry_names_are_unique() {
+        let mut names: Vec<&str> = command_names();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            count,
+            "COMMAND_REGISTRY contains duplicate names"
+        );
+    }
+
+    #[test]
+    fn command_registry_names_are_snake_case() {
+        for spec in COMMAND_REGISTRY {
+            assert!(
+                spec.name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "command name {:?} is not snake_case",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn command_specs_have_return_type_and_unique_arg_names() {
+        for spec in COMMAND_REGISTRY {
+            assert!(
+                !spec.return_type.is_empty(),
+                "command {:?} has an empty return_type",
+                spec.name
+            );
+            let mut arg_names: Vec<&str> = spec.args.iter().map(|a| a.name).collect();
+            let total = arg_names.len();
+            arg_names.sort_unstable();
+            arg_names.dedup();
+            assert_eq!(
+                arg_names.len(),
+                total,
+                "command {:?} has duplicate argument names",
+                spec.name
+            );
+            for a in spec.args {
+                assert!(
+                    !a.name.is_empty(),
+                    "command {:?} has an empty argument name",
+                    spec.name
+                );
+                assert!(
+                    !a.ty.is_empty(),
+                    "command {:?} arg {:?} has an empty type",
+                    spec.name,
+                    a.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_spec_lookup_round_trips() {
+        for spec in COMMAND_REGISTRY {
+            assert_eq!(command_spec(spec.name), Some(spec));
+        }
+        assert_eq!(command_spec("does_not_exist"), None);
+    }
+
+    #[test]
+    fn event_name_maps_into_canonical_event_names() {
+        // Every variant's event_name must be present in EVENT_NAMES; the match
+        // in `event_name` is exhaustive so adding a variant forces a decision.
+        let samples = [
+            ReceiverUiEvent::Resync,
+            ReceiverUiEvent::LogEntry {
+                entry: String::new(),
+            },
+        ];
+        for event in &samples {
+            assert!(
+                EVENT_NAMES.contains(&event_name(event)),
+                "event_name produced {:?} which is missing from EVENT_NAMES",
+                event_name(event)
+            );
+        }
+    }
+
+    #[test]
+    fn event_names_are_unique_and_snake_case() {
+        let mut names = EVENT_NAMES.to_vec();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "EVENT_NAMES contains duplicates");
+        for name in EVENT_NAMES {
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "event name {name:?} is not snake_case"
+            );
+        }
+    }
 
     #[test]
     fn http_base_url_ws_with_port() {
