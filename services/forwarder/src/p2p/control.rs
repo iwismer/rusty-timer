@@ -15,14 +15,18 @@
 //! Data-plane subscriber delivery and the persistent allow-list / revocation
 //! flows are intentionally out of scope here and handled by later tasks.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
 use rt_iroh::{Connection, RecvStream, SendStream};
 use rt_p2p_protocol::{
-    ControlC2F, ControlF2C, Hello, MAX_FRAME_BYTES, Ping, Pong, ProtocolError, ProtocolErrorCode,
-    StreamCatalog, WireProtocolError, control_c2f, control_f2c, encode_frame, negotiate,
+    ControlC2F, ControlF2C, DownloadProgress, Hello, MAX_FRAME_BYTES, Ping, Pong, ProtocolError,
+    ProtocolErrorCode, ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus,
+    StreamCatalog, SyncClock, UpsStatus, WireProtocolError, control_c2f, control_f2c, encode_frame,
+    negotiate,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -66,6 +70,142 @@ impl<C: CatalogProvider + ?Sized> CatalogProvider for Arc<C> {
     fn catalog(&self) -> StreamCatalog {
         (**self).catalog()
     }
+}
+
+/// Future returned by a typed reader-control handler.
+pub type ReaderControlFuture<'a> = Pin<Box<dyn Future<Output = ReaderControlResponse> + Send + 'a>>;
+
+/// Handles typed reader-control requests received from the P2P control stream.
+pub trait ReaderControlHandler: std::fmt::Debug + Send + Sync + 'static {
+    /// Performs the requested action and returns the response to send back to
+    /// the receiver. Implementations must not tunnel control results through
+    /// data-plane read records.
+    fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_>;
+}
+
+/// Future returned by a P2P sync-clock drift reader.
+pub type SyncClockFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<crate::reader_control::ClockInfo, String>> + Send + 'a>>;
+
+/// Future returned by a clock rewrite operation.
+pub type RewriteClockFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+/// Reader-clock operations available to the P2P sync-clock adapter.
+pub trait SyncClockSource: std::fmt::Debug + Send + Sync + 'static {
+    /// Reads/records reader-clock drift for status reporting.
+    fn record_clock_drift(&self) -> SyncClockFuture<'_>;
+
+    /// Rewrites the reader clock. P2P sync-clock handling intentionally does
+    /// not invoke this operation; it is present so tests can enforce that
+    /// contract against the same source abstraction.
+    fn set_date_time(&self) -> RewriteClockFuture<'_>;
+}
+
+/// P2P reader-control adapter for sync-clock requests.
+#[derive(Debug)]
+pub struct SyncClockDriftHandler<C> {
+    clock_source: Arc<C>,
+}
+
+impl<C> SyncClockDriftHandler<C>
+where
+    C: SyncClockSource,
+{
+    /// Builds a sync-clock drift handler backed by `clock_source`.
+    #[must_use]
+    pub fn new(clock_source: Arc<C>) -> Self {
+        Self { clock_source }
+    }
+}
+
+impl<C> ReaderControlHandler for SyncClockDriftHandler<C>
+where
+    C: SyncClockSource,
+{
+    fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
+        let clock_source = Arc::clone(&self.clock_source);
+        Box::pin(async move {
+            if request.command != "sync_clock" {
+                return ReaderControlResponse {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    success: false,
+                    message: format!("unsupported reader control command: {}", request.command),
+                };
+            }
+
+            match clock_source.record_clock_drift().await {
+                Ok(clock) => ReaderControlResponse {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    success: true,
+                    message: format!("clock drift recorded: {}ms", clock.drift_ms),
+                },
+                Err(error) => ReaderControlResponse {
+                    stream_id: request.stream_id,
+                    request_id: request.request_id,
+                    success: false,
+                    message: error,
+                },
+            }
+        })
+    }
+}
+
+/// Default reader-control handler used until production wiring installs a real
+/// adapter to the forwarder's reader-control runtime.
+#[derive(Debug)]
+pub struct NoopReaderControlHandler;
+
+impl ReaderControlHandler for NoopReaderControlHandler {
+    fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
+        Box::pin(async move {
+            ReaderControlResponse {
+                stream_id: request.stream_id,
+                request_id: request.request_id,
+                success: false,
+                message: "reader control handler not configured".to_owned(),
+            }
+        })
+    }
+}
+
+/// Typed status/control-plane events sent from the forwarder to a receiver.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ControlEvent {
+    /// Reader connection/liveness status.
+    ReaderStatus(ReaderStatus),
+    /// Static descriptive information about a reader.
+    ReaderInfo(ReaderInfo),
+    /// Stored-read download progress.
+    DownloadProgress(DownloadProgress),
+    /// UPS status for the forwarder host.
+    UpsStatus(UpsStatus),
+    /// Clock-status publication for receiver-side clock alignment.
+    SyncClock(SyncClock),
+}
+
+impl ControlEvent {
+    fn into_frame(self) -> ControlF2C {
+        let msg = match self {
+            Self::ReaderStatus(status) => control_f2c::Msg::ReaderStatus(status),
+            Self::ReaderInfo(info) => control_f2c::Msg::ReaderInfo(info),
+            Self::DownloadProgress(progress) => control_f2c::Msg::DownloadProgress(progress),
+            Self::UpsStatus(status) => control_f2c::Msg::UpsStatus(status),
+            Self::SyncClock(clock) => control_f2c::Msg::SyncClock(clock),
+        };
+        ControlF2C { msg: Some(msg) }
+    }
+}
+
+pub type ControlEventSender = mpsc::Sender<ControlEvent>;
+pub type ControlEventReceiver = mpsc::Receiver<ControlEvent>;
+
+/// Builds a channel for publishing typed control-plane events to the control
+/// stream.
+#[must_use]
+pub fn control_event_channel(capacity: usize) -> (ControlEventSender, ControlEventReceiver) {
+    mpsc::channel(capacity)
 }
 
 /// Heartbeat (`Ping`/`Pong`) timing for the control stream.
@@ -137,6 +277,27 @@ pub(crate) async fn serve_control(
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
 ) -> Result<(), BoxError> {
+    serve_control_with_typed_control(
+        connection,
+        catalog,
+        handshake_timeout,
+        heartbeat,
+        Arc::new(NoopReaderControlHandler),
+        None,
+    )
+    .await
+}
+
+/// Serves the control stream with a typed reader-control handler and optional
+/// outbound status-event channel.
+pub(crate) async fn serve_control_with_typed_control(
+    connection: &Connection,
+    catalog: &dyn CatalogProvider,
+    handshake_timeout: Duration,
+    heartbeat: HeartbeatConfig,
+    reader_control: Arc<dyn ReaderControlHandler>,
+    outbound_events: Option<ControlEventReceiver>,
+) -> Result<(), BoxError> {
     let (send, recv) = match tokio::time::timeout(
         handshake_timeout,
         negotiate_and_serve_catalog(connection, catalog, heartbeat),
@@ -147,7 +308,7 @@ pub(crate) async fn serve_control(
         Err(_elapsed) => return Err("control handshake timed out".into()),
     };
 
-    run_heartbeat(send, recv, heartbeat).await
+    run_control_loop(send, recv, heartbeat, reader_control, outbound_events).await
 }
 
 /// Accepts the control stream, negotiates versions, and serves the catalog.
@@ -219,12 +380,14 @@ async fn negotiate_and_serve_catalog(
     Ok((send, recv))
 }
 
-/// Runs the `Ping`/`Pong` heartbeat until the peer misses `max_missed`
-/// consecutive pongs (returns `Err`) or disconnects cleanly (returns `Ok`).
-async fn run_heartbeat(
+/// Runs the typed control loop until the peer misses `max_missed` consecutive
+/// pongs (returns `Err`) or disconnects cleanly (returns `Ok`).
+async fn run_control_loop(
     mut send: SendStream,
     mut recv: RecvStream,
     config: HeartbeatConfig,
+    reader_control: Arc<dyn ReaderControlHandler>,
+    mut outbound_events: Option<ControlEventReceiver>,
 ) -> Result<(), BoxError> {
     // Read frames on a dedicated task so heartbeat ticks never cancel a
     // partially-read frame (which would desync the length-prefixed framing).
@@ -245,6 +408,8 @@ async fn run_heartbeat(
 
     let mut nonce: u64 = 0;
     let mut outstanding: u32 = 0;
+    let (control_response_tx, mut control_response_rx) = mpsc::channel::<ReaderControlResponse>(16);
+    let mut control_tasks = tokio::task::JoinSet::new();
 
     let result = loop {
         tokio::select! {
@@ -279,18 +444,61 @@ async fn run_heartbeat(
                                 break Ok(());
                             }
                         }
-                        // ReaderControlRequest and unknown messages are ignored
-                        // until later tasks add their handling.
-                        _ => {}
+                        Some(control_c2f::Msg::ReaderControlRequest(request)) => {
+                            let stream_id = request.stream_id.clone();
+                            let request_id = request.request_id.clone();
+                            let reader_control = Arc::clone(&reader_control);
+                            let control_response_tx = control_response_tx.clone();
+                            control_tasks.spawn(async move {
+                                let mut response = reader_control.handle(request).await;
+                                response.stream_id = stream_id;
+                                response.request_id = request_id;
+                                let _ = control_response_tx.send(response).await;
+                            });
+                        }
+                        Some(control_c2f::Msg::Hello(_)) | None => {}
                     },
                     None => break Ok(()),
                 }
             }
+            response = control_response_rx.recv() => {
+                match response {
+                    Some(response) => {
+                        let frame = ControlF2C {
+                            msg: Some(control_f2c::Msg::ReaderControlResponse(response)),
+                        };
+                        if write_frame(&mut send, &frame).await.is_err() {
+                            break Ok(());
+                        }
+                    }
+                    None => break Ok(()),
+                }
+            }
+            event = recv_control_event(&mut outbound_events) => {
+                match event {
+                    Some(event) => {
+                        let frame = event.into_frame();
+                        if write_frame(&mut send, &frame).await.is_err() {
+                            break Ok(());
+                        }
+                    }
+                    None => outbound_events = None,
+                }
+            }
+            _ = control_tasks.join_next(), if !control_tasks.is_empty() => {}
         }
     };
 
     reader.abort();
+    control_tasks.abort_all();
     result
+}
+
+async fn recv_control_event(events: &mut Option<ControlEventReceiver>) -> Option<ControlEvent> {
+    match events {
+        Some(events) => events.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Writes a single length-prefixed protobuf frame to a send stream.
@@ -324,7 +532,10 @@ mod tests {
     use super::*;
 
     use rt_iroh::{Endpoint, EndpointBuilder, NodeAddr};
-    use rt_p2p_protocol::StreamEntry;
+    use rt_p2p_protocol::{ReaderControlRequest, StreamEntry, control_f2c};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
 
     type TestResult = Result<(), BoxError>;
@@ -364,6 +575,25 @@ mod tests {
         handshake_timeout: Duration,
         heartbeat: HeartbeatConfig,
     ) -> Result<(Endpoint, NodeAddr, JoinHandle<Result<(), String>>), BoxError> {
+        spawn_forwarder_with_control(
+            seed,
+            catalog,
+            handshake_timeout,
+            heartbeat,
+            Arc::new(NoopReaderControlHandler),
+            None,
+        )
+        .await
+    }
+
+    async fn spawn_forwarder_with_control(
+        seed: [u8; 32],
+        catalog: StaticCatalog,
+        handshake_timeout: Duration,
+        heartbeat: HeartbeatConfig,
+        handler: Arc<dyn ReaderControlHandler>,
+        outbound_events: Option<ControlEventReceiver>,
+    ) -> Result<(Endpoint, NodeAddr, JoinHandle<Result<(), String>>), BoxError> {
         let endpoint = EndpointBuilder::test(seed).bind().await?;
         let node_addr = endpoint.node_addr().await;
 
@@ -374,7 +604,15 @@ mod tests {
                 Ok(None) => return Err("endpoint closed before a connection arrived".to_string()),
                 Err(error) => return Err(format!("accept failed: {error}")),
             };
-            let result = serve_control(&connection, &catalog, handshake_timeout, heartbeat).await;
+            let result = serve_control_with_typed_control(
+                &connection,
+                &catalog,
+                handshake_timeout,
+                heartbeat,
+                handler,
+                outbound_events,
+            )
+            .await;
             if let Err(error) = &result {
                 connection.close(1u32.into(), b"control stream failed");
                 return Err(error.to_string());
@@ -402,6 +640,74 @@ mod tests {
         )
         .await?;
         Ok((connection, send, recv))
+    }
+
+    #[derive(Debug)]
+    struct EchoControlHandler;
+
+    impl ReaderControlHandler for EchoControlHandler {
+        fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
+            Box::pin(async move {
+                rt_p2p_protocol::ReaderControlResponse {
+                    stream_id: vec![0],
+                    request_id: "handler-local-id".to_owned(),
+                    success: true,
+                    message: format!("handled {}", request.command),
+                }
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct SlowControlHandler {
+        started_tx: Mutex<Option<oneshot::Sender<()>>>,
+        release_rx: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl ReaderControlHandler for SlowControlHandler {
+        fn handle(&self, request: ReaderControlRequest) -> ReaderControlFuture<'_> {
+            let started_tx = self.started_tx.lock().unwrap().take();
+            let release_rx = self.release_rx.lock().unwrap().take();
+            Box::pin(async move {
+                if let Some(started_tx) = started_tx {
+                    let _ = started_tx.send(());
+                }
+                if let Some(release_rx) = release_rx {
+                    let _ = release_rx.await;
+                }
+                rt_p2p_protocol::ReaderControlResponse {
+                    stream_id: vec![0],
+                    request_id: "handler-local-slow-id".to_owned(),
+                    success: true,
+                    message: format!("handled {}", request.command),
+                }
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeSyncClockSource {
+        record_drift_calls: AtomicUsize,
+        set_date_time_calls: AtomicUsize,
+    }
+
+    impl SyncClockSource for FakeSyncClockSource {
+        fn record_clock_drift(&self) -> SyncClockFuture<'_> {
+            Box::pin(async move {
+                self.record_drift_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::reader_control::ClockInfo {
+                    reader_clock: "2026-06-16T12:00:00.000".to_owned(),
+                    drift_ms: 125,
+                })
+            })
+        }
+
+        fn set_date_time(&self) -> RewriteClockFuture<'_> {
+            Box::pin(async move {
+                self.set_date_time_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
     }
 
     #[tokio::test]
@@ -508,6 +814,232 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn reader_control_roundtrip() -> TestResult {
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_control(
+            [46; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            quiet_heartbeat(),
+            Arc::new(EchoControlHandler),
+            None,
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([47; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        let stream_id = vec![9u8; 16];
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ReaderControlRequest(
+                    ReaderControlRequest {
+                        stream_id: stream_id.clone(),
+                        command: "refresh".to_owned(),
+                        request_id: "req-1".to_owned(),
+                    },
+                )),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ReaderControlResponse(response)) => {
+                assert_eq!(response.stream_id, stream_id);
+                assert_eq!(response.request_id, "req-1");
+                assert!(response.success);
+                assert_eq!(response.message, "handled refresh");
+            }
+            other => return Err(format!("expected ReaderControlResponse, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reader_control_handler_does_not_block_outbound_events() -> TestResult {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (event_tx, outbound_events) = control_event_channel(4);
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_control(
+            [48; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            quiet_heartbeat(),
+            Arc::new(SlowControlHandler {
+                started_tx: Mutex::new(Some(started_tx)),
+                release_rx: Mutex::new(Some(release_rx)),
+            }),
+            Some(outbound_events),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([49; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        let stream_id = vec![8u8; 16];
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ReaderControlRequest(
+                    ReaderControlRequest {
+                        stream_id,
+                        command: "refresh".to_owned(),
+                        request_id: "slow-1".to_owned(),
+                    },
+                )),
+            },
+        )
+        .await?;
+        tokio::time::timeout(LONG_HANDSHAKE, started_rx).await??;
+
+        event_tx
+            .send(ControlEvent::ReaderStatus(rt_p2p_protocol::ReaderStatus {
+                stream_id: vec![7u8; 16],
+                connected: true,
+                state: "online".to_owned(),
+                last_read_unix_ms: 1_700_000_000_125,
+            }))
+            .await
+            .expect("control event receiver alive");
+
+        let frame = tokio::time::timeout(
+            Duration::from_millis(250),
+            read_frame::<ControlF2C>(&mut recv),
+        )
+        .await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ReaderStatus(status)) => {
+                assert_eq!(status.stream_id, vec![7u8; 16]);
+                assert!(status.connected);
+            }
+            other => {
+                return Err(format!(
+                    "expected ReaderStatus while handler is pending, got {other:?}"
+                )
+                .into());
+            }
+        }
+
+        release_tx.send(()).expect("handler still pending");
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ReaderControlResponse(response)) => {
+                assert_eq!(response.request_id, "slow-1");
+                assert!(response.success);
+                assert_eq!(response.message, "handled refresh");
+            }
+            other => return Err(format!("expected ReaderControlResponse, got {other:?}").into()),
+        }
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_clock_records_drift_not_rewrite() -> TestResult {
+        let clock_source = Arc::new(FakeSyncClockSource {
+            record_drift_calls: AtomicUsize::new(0),
+            set_date_time_calls: AtomicUsize::new(0),
+        });
+        let (event_tx, outbound_events) = control_event_channel(4);
+        let (forwarder, forwarder_addr, handle) = spawn_forwarder_with_control(
+            [50; 32],
+            StaticCatalog::new(sample_catalog()),
+            LONG_HANDSHAKE,
+            quiet_heartbeat(),
+            Arc::new(SyncClockDriftHandler::new(Arc::clone(&clock_source))),
+            Some(outbound_events),
+        )
+        .await?;
+
+        let receiver = EndpointBuilder::test([51; 32]).bind().await?;
+        let (connection, mut send, mut recv) = tokio::time::timeout(
+            LONG_HANDSHAKE,
+            open_control(&receiver, forwarder_addr, forwarder_hello()),
+        )
+        .await??;
+
+        let _hello_ok = read_frame::<ControlF2C>(&mut recv).await?;
+        let _catalog = read_frame::<ControlF2C>(&mut recv).await?;
+
+        event_tx
+            .send(ControlEvent::SyncClock(rt_p2p_protocol::SyncClock {
+                server_unix_ms: 1_700_000_000_125,
+            }))
+            .await
+            .expect("control event receiver alive");
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::SyncClock(sync)) => {
+                assert_eq!(sync.server_unix_ms, 1_700_000_000_125);
+            }
+            other => return Err(format!("expected SyncClock, got {other:?}").into()),
+        }
+
+        let stream_id = vec![8u8; 16];
+        write_frame(
+            &mut send,
+            &ControlC2F {
+                msg: Some(control_c2f::Msg::ReaderControlRequest(
+                    ReaderControlRequest {
+                        stream_id: stream_id.clone(),
+                        command: "sync_clock".to_owned(),
+                        request_id: "sync-1".to_owned(),
+                    },
+                )),
+            },
+        )
+        .await?;
+
+        let frame =
+            tokio::time::timeout(LONG_HANDSHAKE, read_frame::<ControlF2C>(&mut recv)).await??;
+        match frame.msg {
+            Some(control_f2c::Msg::ReaderControlResponse(response)) => {
+                assert_eq!(response.stream_id, stream_id);
+                assert_eq!(response.request_id, "sync-1");
+                assert!(response.success);
+                assert_eq!(response.message, "clock drift recorded: 125ms");
+            }
+            other => return Err(format!("expected ReaderControlResponse, got {other:?}").into()),
+        }
+
+        assert_eq!(clock_source.record_drift_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(clock_source.set_date_time_calls.load(Ordering::SeqCst), 0);
+
+        connection.close(0u32.into(), b"done");
+        handle.abort();
+        receiver.close().await;
+        forwarder.close().await;
+        Ok(())
+    }
     #[tokio::test]
     async fn heartbeat_timeout_closes() -> TestResult {
         let heartbeat = HeartbeatConfig {

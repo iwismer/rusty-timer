@@ -19,6 +19,10 @@ mod data;
 mod endpoint;
 
 pub use allowlist::AllowList;
-pub use control::{CatalogProvider, HeartbeatConfig, StaticCatalog};
+pub use control::{
+    CatalogProvider, ControlEvent, ControlEventReceiver, ControlEventSender, HeartbeatConfig,
+    NoopReaderControlHandler, ReaderControlFuture, ReaderControlHandler, RewriteClockFuture,
+    StaticCatalog, SyncClockDriftHandler, SyncClockFuture, SyncClockSource, control_event_channel,
+};
 pub use data::{DataConfig, serve_data_streams};
 pub use endpoint::P2pEndpoint;
