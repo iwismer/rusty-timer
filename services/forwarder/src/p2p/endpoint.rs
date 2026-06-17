@@ -3,39 +3,31 @@
 //! [`P2pEndpoint`] wraps an [`rt_iroh::Endpoint`] and serves inbound receiver
 //! connections. For each accepted connection the remote node id is read from
 //! the transport handshake and checked against an [`AllowList`]; unknown peers
-//! are closed immediately. Admitted peers complete the control-plane `Hello`
-//! handshake and are held open until the peer disconnects.
+//! are closed immediately. Admitted peers are handed to the control-stream
+//! handler ([`crate::p2p::control`]), which performs the `Hello`/`HelloOk`
+//! negotiation, serves the [`StreamCatalog`](rt_p2p_protocol::StreamCatalog),
+//! and runs the heartbeat until the peer disconnects or is declared dead.
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use prost::Message;
-use rt_iroh::{
-    Connection, Endpoint, EndpointBuilder, NodeAddr, NodeId, RecvStream, load_or_create_secret_key,
-};
-use rt_p2p_protocol::{
-    ControlC2F, ControlF2C, Hello, MAX_FRAME_BYTES, control_c2f, control_f2c, encode_frame,
-    negotiate,
-};
+use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, NodeId, load_or_create_secret_key};
 
-/// Protocol minor version this forwarder speaks for the P2P transport.
-const PROTOCOL_MINOR: u32 = 1;
+use super::control::{CatalogProvider, HeartbeatConfig, serve_control};
 
 /// QUIC application error code used when closing a rejected connection.
 const REJECT_ERROR_CODE: u32 = 1;
 
-/// QUIC application error code used when closing a connection whose handshake
-/// timed out or failed.
-const HANDSHAKE_ERROR_CODE: u32 = 2;
+/// QUIC application error code used when closing a connection whose control
+/// stream failed, timed out, or whose peer was declared dead by the heartbeat.
+const CONTROL_ERROR_CODE: u32 = 2;
 
 /// Maximum time an admitted peer is given to complete the control-plane
 /// `Hello` handshake before the connection is closed. Bounds the lifetime of
 /// broken or malicious allow-listed peers that connect but never make progress.
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// In-memory set of peer node ids allowed to connect.
 ///
@@ -67,15 +59,18 @@ impl AllowList {
 pub struct P2pEndpoint {
     endpoint: Endpoint,
     allow_list: AllowList,
+    catalog: Arc<dyn CatalogProvider>,
     handshake_timeout: Duration,
+    heartbeat: HeartbeatConfig,
 }
 
 impl P2pEndpoint {
     /// Binds the endpoint, loading or creating the persistent secret key at
-    /// `secret_key_path`.
+    /// `secret_key_path`. Admitted peers are served the catalog from `catalog`.
     pub async fn bind(
         secret_key_path: impl AsRef<Path>,
         allow_list: AllowList,
+        catalog: Arc<dyn CatalogProvider>,
     ) -> Result<Self, rt_iroh::Error> {
         let secret_key = load_or_create_secret_key(secret_key_path)?;
         let endpoint = EndpointBuilder::default()
@@ -85,7 +80,9 @@ impl P2pEndpoint {
         Ok(Self {
             endpoint,
             allow_list,
+            catalog,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            heartbeat: HeartbeatConfig::default(),
         })
     }
 
@@ -115,9 +112,18 @@ impl P2pEndpoint {
             match self.endpoint.accept().await {
                 Ok(Some(connection)) => {
                     let allow_list = self.allow_list.clone();
+                    let catalog = Arc::clone(&self.catalog);
                     let handshake_timeout = self.handshake_timeout;
+                    let heartbeat = self.heartbeat;
                     tokio::spawn(async move {
-                        handle_connection(connection, allow_list, handshake_timeout).await;
+                        handle_connection(
+                            connection,
+                            allow_list,
+                            catalog,
+                            handshake_timeout,
+                            heartbeat,
+                        )
+                        .await;
                     });
                 }
                 Ok(None) => break,
@@ -129,11 +135,14 @@ impl P2pEndpoint {
     }
 }
 
-/// Admits or rejects a single inbound connection based on the allow-list.
+/// Admits or rejects a single inbound connection based on the allow-list, then
+/// serves the control stream for admitted peers.
 async fn handle_connection(
     connection: Connection,
     allow_list: AllowList,
+    catalog: Arc<dyn CatalogProvider>,
     handshake_timeout: Duration,
+    heartbeat: HeartbeatConfig,
 ) {
     let Ok(node_id) = connection.remote_node_id() else {
         tracing::warn!("p2p: rejecting connection without a remote node id");
@@ -148,86 +157,34 @@ async fn handle_connection(
     }
 
     tracing::info!(%node_id, "p2p: admitted allow-listed peer");
-    match tokio::time::timeout(handshake_timeout, serve_handshake(&connection)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(%node_id, %error, "p2p: handshake failed");
-            connection.close(HANDSHAKE_ERROR_CODE.into(), b"handshake failed");
-            return;
+    match serve_control(&connection, catalog.as_ref(), handshake_timeout, heartbeat).await {
+        Ok(()) => {
+            tracing::info!(%node_id, "p2p: control stream closed by peer");
         }
-        Err(_elapsed) => {
-            tracing::warn!(
-                %node_id,
-                timeout_ms = handshake_timeout.as_millis(),
-                "p2p: handshake timed out"
-            );
-            connection.close(HANDSHAKE_ERROR_CODE.into(), b"handshake timed out");
-            return;
+        Err(error) => {
+            tracing::warn!(%node_id, %error, "p2p: control stream failed");
+            connection.close(CONTROL_ERROR_CODE.into(), b"control stream failed");
         }
     }
-
-    // Hold the connection open until the peer disconnects. Later tasks layer
-    // the catalog, heartbeat, and data planes on top of this admitted state.
-    connection.closed().await;
-}
-
-/// Completes the control-plane `Hello`/`HelloOk` handshake for an admitted peer.
-async fn serve_handshake(connection: &Connection) -> Result<(), BoxError> {
-    let (mut send, mut recv) = connection.accept_bi().await?;
-
-    let control = read_frame::<ControlC2F>(&mut recv).await?;
-    let client_hello = match control.msg {
-        Some(control_c2f::Msg::Hello(hello)) => hello,
-        other => return Err(format!("expected control Hello, got {other:?}").into()),
-    };
-
-    let hello_ok = negotiate(&client_hello, &forwarder_hello())?;
-    send.write_all(
-        encode_frame(&ControlF2C {
-            msg: Some(control_f2c::Msg::HelloOk(hello_ok)),
-        })
-        .as_ref(),
-    )
-    .await?;
-
-    Ok(())
-}
-
-/// The forwarder's own `Hello`, used to negotiate against the client's.
-fn forwarder_hello() -> Hello {
-    Hello {
-        min_minor: PROTOCOL_MINOR,
-        max_minor: PROTOCOL_MINOR,
-        capabilities: Vec::new(),
-        max_frame_bytes: u32::try_from(MAX_FRAME_BYTES).unwrap_or(u32::MAX),
-        catalog_generation: 0,
-    }
-}
-
-/// Reads a single length-prefixed protobuf frame from a receive stream.
-async fn read_frame<M>(recv: &mut RecvStream) -> Result<M, BoxError>
-where
-    M: Message + Default,
-{
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_BYTES {
-        return Err(format!("frame length {len} exceeds MAX_FRAME_BYTES {MAX_FRAME_BYTES}").into());
-    }
-
-    let mut payload = vec![0u8; len];
-    recv.read_exact(&mut payload).await?;
-    Ok(M::decode(payload.as_slice())?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use rt_p2p_protocol::HelloOk;
+    use crate::p2p::control::{
+        PROTOCOL_MINOR, StaticCatalog, forwarder_hello, read_frame, write_frame,
+    };
+    use rt_p2p_protocol::{
+        ControlC2F, ControlF2C, HelloOk, StreamCatalog, control_c2f, control_f2c,
+    };
 
+    type BoxError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), BoxError>;
+
+    fn empty_catalog() -> Arc<dyn CatalogProvider> {
+        Arc::new(StaticCatalog::new(StreamCatalog::default()))
+    }
 
     impl P2pEndpoint {
         /// Binds a hermetic loopback endpoint seeded with `seed` for tests.
@@ -236,7 +193,9 @@ mod tests {
             Ok(Self {
                 endpoint,
                 allow_list,
+                catalog: empty_catalog(),
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+                heartbeat: HeartbeatConfig::default(),
             })
         }
 
@@ -258,11 +217,11 @@ mod tests {
         let connection = receiver.connect(forwarder_addr).await?;
 
         let (mut send, mut recv) = connection.open_bi().await?;
-        send.write_all(
-            encode_frame(&ControlC2F {
+        write_frame(
+            &mut send,
+            &ControlC2F {
                 msg: Some(control_c2f::Msg::Hello(forwarder_hello())),
-            })
-            .as_ref(),
+            },
         )
         .await?;
 

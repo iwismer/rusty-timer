@@ -11,6 +11,8 @@
 //! revocation, the full control-plane catalog/heartbeat, and data-plane
 //! delivery are implemented in later tasks.
 
+mod control;
 mod endpoint;
 
+pub use control::{CatalogProvider, HeartbeatConfig, StaticCatalog};
 pub use endpoint::{AllowList, P2pEndpoint};
