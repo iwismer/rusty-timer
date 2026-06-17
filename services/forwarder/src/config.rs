@@ -40,6 +40,7 @@ pub struct ForwarderConfig {
     pub control: ControlConfig,
     pub update: UpdateConfig,
     pub ups: UpsConfig,
+    pub p2p: P2pConfig,
     pub readers: Vec<ReaderConfig>,
     #[cfg(feature = "eink")]
     pub eink: Option<rt_eink::state::EinkConfig>,
@@ -104,6 +105,23 @@ pub struct UpsConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct P2pConfig {
+    pub enabled: bool,
+    pub secret_key_path: Option<String>,
+    pub secret_key_seed_hex: Option<String>,
+    pub bind_addr_v4: String,
+    pub relay_disabled: bool,
+    pub discovery_disabled: bool,
+    pub max_concurrent_bidi_streams: Option<u32>,
+    pub static_allowed_receivers: Vec<String>,
+    pub allowlist_cache_path: Option<String>,
+    pub thin_node_url: Option<String>,
+    pub thin_node_token_file: Option<String>,
+    pub allowlist_poll_interval_secs: u64,
+    pub allowlist_request_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReaderConfig {
     pub target: String,
     pub enabled: bool,
@@ -127,6 +145,7 @@ pub struct RawConfig {
     pub control: Option<RawControlConfig>,
     pub update: Option<RawUpdateConfig>,
     pub ups: Option<RawUpsConfig>,
+    pub p2p: Option<RawP2pConfig>,
     pub readers: Option<Vec<RawReaderConfig>>,
     #[cfg(feature = "eink")]
     pub eink: Option<rt_eink::state::EinkConfig>,
@@ -188,6 +207,23 @@ pub struct RawUpsConfig {
     pub daemon_addr: Option<String>,
     pub poll_interval_secs: Option<u64>,
     pub upstream_heartbeat_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawP2pConfig {
+    pub enabled: Option<bool>,
+    pub secret_key_path: Option<String>,
+    pub secret_key_seed_hex: Option<String>,
+    pub bind_addr_v4: Option<String>,
+    pub relay_disabled: Option<bool>,
+    pub discovery_disabled: Option<bool>,
+    pub max_concurrent_bidi_streams: Option<u32>,
+    pub static_allowed_receivers: Option<Vec<String>>,
+    pub allowlist_cache_path: Option<String>,
+    pub thin_node_url: Option<String>,
+    pub thin_node_token_file: Option<String>,
+    pub allowlist_poll_interval_secs: Option<u64>,
+    pub allowlist_request_timeout_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +428,79 @@ pub fn load_config_from_str(
         },
     };
 
+    // P2P defaults. Disabled unless explicitly enabled, so legacy WebSocket-only
+    // deployments keep their existing startup behavior.
+    let p2p = match raw.p2p {
+        Some(p) => {
+            let allowlist_poll_interval_secs = p.allowlist_poll_interval_secs.unwrap_or(60);
+            if allowlist_poll_interval_secs == 0 {
+                return Err(ConfigError::InvalidValue(
+                    "p2p.allowlist_poll_interval_secs must be at least 1".to_owned(),
+                ));
+            }
+            let allowlist_request_timeout_secs = p.allowlist_request_timeout_secs.unwrap_or(10);
+            if allowlist_request_timeout_secs == 0 {
+                return Err(ConfigError::InvalidValue(
+                    "p2p.allowlist_request_timeout_secs must be at least 1".to_owned(),
+                ));
+            }
+            if p.secret_key_path.is_some() && p.secret_key_seed_hex.is_some() {
+                return Err(ConfigError::InvalidValue(
+                    "p2p.secret_key_path and p2p.secret_key_seed_hex are mutually exclusive"
+                        .to_owned(),
+                ));
+            }
+            if let Some(seed) = p.secret_key_seed_hex.as_deref() {
+                validate_hex_seed(seed, "p2p.secret_key_seed_hex")?;
+            }
+            let enabled = p.enabled.unwrap_or(false);
+            // The forwarder reserves one bidirectional stream for the long-lived
+            // control plane and needs at least one more for data subscriptions,
+            // so a P2P-enabled endpoint must permit at least two concurrent
+            // bidirectional streams.
+            if enabled
+                && p.max_concurrent_bidi_streams
+                    .is_some_and(|max_streams| max_streams < 2)
+            {
+                return Err(ConfigError::InvalidValue(
+                    "p2p.max_concurrent_bidi_streams must be at least 2 when p2p is enabled \
+                     (one stream is reserved for control, one for data)"
+                        .to_owned(),
+                ));
+            }
+            P2pConfig {
+                enabled,
+                secret_key_path: p.secret_key_path,
+                secret_key_seed_hex: p.secret_key_seed_hex,
+                bind_addr_v4: p.bind_addr_v4.unwrap_or_else(|| "0.0.0.0:0".to_owned()),
+                relay_disabled: p.relay_disabled.unwrap_or(false),
+                discovery_disabled: p.discovery_disabled.unwrap_or(false),
+                max_concurrent_bidi_streams: p.max_concurrent_bidi_streams,
+                static_allowed_receivers: p.static_allowed_receivers.unwrap_or_default(),
+                allowlist_cache_path: p.allowlist_cache_path,
+                thin_node_url: p.thin_node_url,
+                thin_node_token_file: p.thin_node_token_file,
+                allowlist_poll_interval_secs,
+                allowlist_request_timeout_secs,
+            }
+        }
+        None => P2pConfig {
+            enabled: false,
+            secret_key_path: None,
+            secret_key_seed_hex: None,
+            bind_addr_v4: "0.0.0.0:0".to_owned(),
+            relay_disabled: false,
+            discovery_disabled: false,
+            max_concurrent_bidi_streams: None,
+            static_allowed_receivers: Vec::new(),
+            allowlist_cache_path: None,
+            thin_node_url: None,
+            thin_node_token_file: None,
+            allowlist_poll_interval_secs: 60,
+            allowlist_request_timeout_secs: 10,
+        },
+    };
+
     // Validate readers
     let raw_readers = raw
         .readers
@@ -440,6 +549,7 @@ pub fn load_config_from_str(
         control,
         update,
         ups,
+        p2p,
         readers,
         #[cfg(feature = "eink")]
         eink,
@@ -497,6 +607,15 @@ pub fn validate_retention_settings(
         && rows < 1
     {
         return Err("emergency_max_rows must be at least 1".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_hex_seed(value: &str, field: &str) -> Result<(), ConfigError> {
+    if value.len() != 64 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(ConfigError::InvalidValue(format!(
+            "{field} must be exactly 64 hex characters"
+        )));
     }
     Ok(())
 }
@@ -631,6 +750,108 @@ target = "192.168.1.100"
         let (toml, _dir) = minimal_toml("[update]");
         let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
         assert_eq!(cfg.update.mode, rt_updater::UpdateMode::CheckAndDownload);
+    }
+
+    #[test]
+    fn p2p_section_absent_defaults_to_disabled() {
+        let (toml, _dir) = minimal_toml("");
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(!cfg.p2p.enabled);
+        assert_eq!(cfg.p2p.bind_addr_v4, "0.0.0.0:0");
+        assert!(cfg.p2p.static_allowed_receivers.is_empty());
+    }
+
+    #[test]
+    fn p2p_section_parses_loopback_deterministic_options() {
+        let (toml, _dir) = minimal_toml(
+            r#"
+[p2p]
+enabled = true
+secret_key_seed_hex = "0101010101010101010101010101010101010101010101010101010101010101"
+bind_addr_v4 = "127.0.0.1:0"
+relay_disabled = true
+discovery_disabled = true
+max_concurrent_bidi_streams = 64
+static_allowed_receivers = ["receiver-node-id"]
+allowlist_cache_path = "/tmp/forwarder-p2p-allowlist.cache"
+thin_node_url = "http://127.0.0.1:9999"
+thin_node_token_file = "/tmp/thin-token"
+allowlist_poll_interval_secs = 5
+"#,
+        );
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert!(cfg.p2p.enabled);
+        assert_eq!(
+            cfg.p2p.secret_key_seed_hex.as_deref(),
+            Some("0101010101010101010101010101010101010101010101010101010101010101")
+        );
+        assert_eq!(cfg.p2p.bind_addr_v4, "127.0.0.1:0");
+        assert!(cfg.p2p.relay_disabled);
+        assert!(cfg.p2p.discovery_disabled);
+        assert_eq!(cfg.p2p.max_concurrent_bidi_streams, Some(64));
+        assert_eq!(cfg.p2p.static_allowed_receivers, vec!["receiver-node-id"]);
+        assert_eq!(
+            cfg.p2p.allowlist_cache_path.as_deref(),
+            Some("/tmp/forwarder-p2p-allowlist.cache")
+        );
+        assert_eq!(
+            cfg.p2p.thin_node_url.as_deref(),
+            Some("http://127.0.0.1:9999")
+        );
+        assert_eq!(
+            cfg.p2p.thin_node_token_file.as_deref(),
+            Some("/tmp/thin-token")
+        );
+        assert_eq!(cfg.p2p.allowlist_poll_interval_secs, 5);
+    }
+
+    #[test]
+    fn p2p_enabled_rejects_max_concurrent_bidi_streams_below_two() {
+        let (toml, _dir) = minimal_toml(
+            r#"
+[p2p]
+enabled = true
+static_allowed_receivers = ["receiver-node-id"]
+max_concurrent_bidi_streams = 1
+"#,
+        );
+        let err = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap_err();
+        match err {
+            ConfigError::InvalidValue(msg) => {
+                assert!(
+                    msg.contains("max_concurrent_bidi_streams"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p2p_disabled_ignores_low_max_concurrent_bidi_streams() {
+        let (toml, _dir) = minimal_toml(
+            r#"
+[p2p]
+enabled = false
+max_concurrent_bidi_streams = 1
+"#,
+        );
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.p2p.max_concurrent_bidi_streams, Some(1));
+    }
+
+    #[test]
+    fn p2p_enabled_accepts_max_concurrent_bidi_streams_of_two() {
+        let (toml, _dir) = minimal_toml(
+            r#"
+[p2p]
+enabled = true
+static_allowed_receivers = ["receiver-node-id"]
+max_concurrent_bidi_streams = 2
+"#,
+        );
+        let cfg = load_config_from_str(&toml, Path::new("/tmp/test.toml")).unwrap();
+        assert_eq!(cfg.p2p.max_concurrent_bidi_streams, Some(2));
     }
 
     #[test]

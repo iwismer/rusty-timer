@@ -114,6 +114,17 @@ impl AllowList {
         self.lock().allowed.contains(node_id)
     }
 
+    /// Unions `additional` node ids into the allowed set in memory only.
+    ///
+    /// Unlike [`AllowList::apply_update`], this neither persists to the cache
+    /// nor revokes anything: it is additive. It exists so statically configured
+    /// receivers can be allowed *on top of* the cached/last-known (or
+    /// thin-node-fetched) set at startup, rather than replacing it.
+    pub fn add_allowed(&self, additional: impl IntoIterator<Item = NodeId>) {
+        let mut state = self.lock();
+        state.allowed.extend(additional);
+    }
+
     /// Atomically replaces the allowed set with `allowed`, persisting it and
     /// force-closing every open connection whose node id was removed.
     ///

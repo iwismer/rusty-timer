@@ -13,8 +13,7 @@ use rt_p2p_protocol::{
     data_c2f, data_f2c,
 };
 use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
-use uuid::Uuid;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::replay::ReplayEngine;
 use crate::storage::journal::{Journal, JournalEvent};
@@ -57,25 +56,41 @@ impl Default for DataConfig {
 /// Per-stream task isolation is intentional: a receiver whose QUIC flow-control
 /// window is exhausted can block only its own codec write, not other data
 /// streams on the same connection.
+///
+/// All spawned per-stream tasks are tracked in a [`JoinSet`] that is aborted and
+/// drained before this function returns. The accept loop ends when the QUIC
+/// connection closes (the control plane closes it on any control-loop
+/// termination), so closing the connection both stops admitting new data
+/// streams and tears down every in-flight one before the allow-list connection
+/// guard is dropped.
 pub async fn serve_data_streams(
     connection: Connection,
     journal: Arc<Mutex<Journal>>,
     receiver_id: String,
     config: DataConfig,
 ) -> Result<(), BoxError> {
-    loop {
+    let mut tasks: JoinSet<()> = JoinSet::new();
+    let result = loop {
         let (send, recv) = match connection.accept_bi().await {
             Ok(streams) => streams,
-            Err(error) => return Err(Box::new(error)),
+            Err(error) => break Err(Box::new(error) as BoxError),
         };
+        // Reap finished tasks so the set does not grow unbounded over a
+        // long-lived connection.
+        while tasks.try_join_next().is_some() {}
         let journal = Arc::clone(&journal);
         let receiver_id = receiver_id.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             if let Err(error) = serve_data_stream(send, recv, journal, receiver_id, config).await {
                 tracing::warn!(%error, "p2p: data stream failed");
             }
         });
-    }
+    };
+    // Ensure no per-stream task outlives the accept loop (and thus the
+    // allow-list/revocation guard held by the caller).
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    result
 }
 
 async fn serve_data_stream(
@@ -383,8 +398,16 @@ fn to_read_record(event: &JournalEvent, stream_id: &[u8]) -> Result<ReadRecord, 
     })
 }
 
+/// Resolves a wire `stream_id` to its durable journal stream key.
+///
+/// The forwarder journal keys reader streams by their network address (for
+/// example `10.0.0.5:10000`) and the control catalog advertises those same
+/// UTF-8 address bytes as the `stream_id`, so a `DataSubscribe.stream_id` is
+/// always the UTF-8 journal key. This is decoded unconditionally: a
+/// length-based UUID heuristic would misroute reader addresses that happen to
+/// be exactly 16 bytes (e.g. `100.64.0.1:10000`).
 fn wire_stream_key(stream_id: &[u8]) -> Result<String, BoxError> {
-    Ok(Uuid::from_slice(stream_id)?.to_string())
+    Ok(std::str::from_utf8(stream_id)?.to_owned())
 }
 
 fn i64_from_u64(value: u64) -> Result<i64, BoxError> {
@@ -410,12 +433,15 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
-    use uuid::Uuid;
 
     type BoxError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult<T = ()> = Result<T, BoxError>;
 
-    const STREAM_BYTES: [u8; 16] = [7; 16];
+    /// Primary stream key: a reader network address, exactly as the journal and
+    /// catalog represent stream ids in production.
+    const STREAM_KEY: &str = "10.0.0.5:10000";
+    /// Secondary stream key used by tests that need a second, distinct stream.
+    const OTHER_STREAM_KEY: &str = "10.0.0.6:10000";
     const RECEIVER_ID: &str = "receiver-a";
 
     struct Harness {
@@ -428,11 +454,11 @@ mod tests {
     }
 
     fn stream_id() -> Vec<u8> {
-        STREAM_BYTES.to_vec()
+        STREAM_KEY.as_bytes().to_vec()
     }
 
     fn stream_key() -> String {
-        Uuid::from_bytes(STREAM_BYTES).to_string()
+        STREAM_KEY.to_owned()
     }
 
     async fn start_harness(config: DataConfig) -> TestResult<Harness> {
@@ -470,6 +496,14 @@ mod tests {
         harness: &Harness,
         after_seq: u64,
     ) -> TestResult<(rt_iroh::SendStream, rt_iroh::RecvStream, SubscribeOk)> {
+        open_subscription_for_stream(harness, stream_id(), after_seq).await
+    }
+
+    async fn open_subscription_for_stream(
+        harness: &Harness,
+        stream_id: Vec<u8>,
+        after_seq: u64,
+    ) -> TestResult<(rt_iroh::SendStream, rt_iroh::RecvStream, SubscribeOk)> {
         harness
             .receiver
             .add_node_addr(harness.forwarder_addr.clone())?;
@@ -482,7 +516,7 @@ mod tests {
             &mut send,
             &DataC2F {
                 msg: Some(data_c2f::Msg::DataSubscribe(DataSubscribe {
-                    stream_id: stream_id(),
+                    stream_id,
                     after_seq,
                     mode: SubscribeMode::Replay as i32,
                 })),
@@ -583,6 +617,28 @@ mod tests {
                 other => return Err(format!("expected CaughtUp, got {other:?}").into()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn exactly_16_byte_address_routes_to_journal_stream() -> TestResult {
+        // `100.64.0.1:10000` is exactly 16 bytes; a UUID length heuristic would
+        // misroute it. The address must resolve to its journal stream key.
+        let harness = start_harness(DataConfig::default()).await?;
+        let address_key = "100.64.0.1:10000";
+        assert_eq!(address_key.len(), 16);
+        {
+            let mut journal = harness.journal.lock().await;
+            journal.ensure_stream_state(address_key, 1)?;
+            journal.append_read(address_key, Some("1000"), b"addr-record", "chip")?;
+        }
+
+        let (_send, mut recv, subscribe_ok) =
+            open_subscription_for_stream(&harness, address_key.as_bytes().to_vec(), 0).await?;
+        assert_eq!(subscribe_ok.earliest_available_seq, 1);
+        assert_eq!(subscribe_ok.latest_seq_at_open, 1);
+        let batch = read_batch(&mut recv).await?;
+        assert_eq!(batch.records[0].raw_frame, b"addr-record");
+        Ok(())
     }
 
     #[tokio::test]
@@ -774,7 +830,7 @@ mod tests {
             max_events_per_batch: 1,
         })
         .await?;
-        let slow_stream = Uuid::from_bytes([8; 16]).to_string();
+        let slow_stream = OTHER_STREAM_KEY.to_owned();
         let fast_stream = stream_key();
         {
             let mut journal = harness.journal.lock().await;
@@ -799,7 +855,7 @@ mod tests {
             &mut slow_send,
             &DataC2F {
                 msg: Some(data_c2f::Msg::DataSubscribe(DataSubscribe {
-                    stream_id: [8; 16].to_vec(),
+                    stream_id: OTHER_STREAM_KEY.as_bytes().to_vec(),
                     after_seq: 0,
                     mode: SubscribeMode::Replay as i32,
                 })),
@@ -896,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn mismatched_ack_stream_id_is_ignored() -> TestResult {
         let harness = start_harness(DataConfig::default()).await?;
-        let other_stream = Uuid::from_bytes([8; 16]).to_string();
+        let other_stream = OTHER_STREAM_KEY.to_owned();
         {
             let mut journal = harness.journal.lock().await;
             journal.ensure_stream_state(&stream_key(), 1)?;
@@ -917,7 +973,7 @@ mod tests {
             &mut send,
             &DataC2F {
                 msg: Some(data_c2f::Msg::Ack(Ack {
-                    stream_id: [8; 16].to_vec(),
+                    stream_id: OTHER_STREAM_KEY.as_bytes().to_vec(),
                     through_seq: 3,
                 })),
             },

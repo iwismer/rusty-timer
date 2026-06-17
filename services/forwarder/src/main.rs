@@ -273,6 +273,32 @@ async fn main() {
     }
     status_server.set_local_ip(local_ip).await;
 
+    let p2p_runtime = match forwarder::p2p::start_forwarder_p2p(
+        &cfg.p2p,
+        Arc::clone(&journal),
+        &all_readers
+            .iter()
+            .map(|(addr, _)| addr.clone())
+            .collect::<Vec<_>>(),
+    )
+    .await
+    {
+        Ok(Some(runtime)) => {
+            let node_addr = runtime.node_addr().await;
+            info!(
+                p2p_node_id = %runtime.node_id(),
+                p2p_node_addr = ?node_addr,
+                "p2p iroh server started"
+            );
+            Some(runtime)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("FATAL: failed to start P2P endpoint: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // --- E-ink display (optional, compile-time gated) ---
     #[cfg(feature = "eink")]
     {
@@ -615,6 +641,10 @@ async fn main() {
     // Signal all tasks to stop
     shutdown_tx.send(true).ok();
 
+    if let Some(runtime) = p2p_runtime {
+        runtime.shutdown().await;
+    }
+
     // Brief delay to allow tasks to observe shutdown and flush
     sleep(Duration::from_millis(200)).await;
 
@@ -651,6 +681,25 @@ mod tests {
     use tokio::time::timeout;
     use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::protocol::Message;
+
+    fn disabled_p2p_config() -> forwarder::config::P2pConfig {
+        forwarder::config::P2pConfig {
+            enabled: false,
+            secret_key_path: None,
+            secret_key_seed_hex: None,
+            bind_addr_v4: "0.0.0.0:0".to_owned(),
+            relay_disabled: false,
+            discovery_disabled: false,
+            max_concurrent_bidi_streams: None,
+            static_allowed_receivers: Vec::new(),
+            allowlist_cache_path: None,
+            thin_node_url: None,
+            thin_node_token_file: None,
+            allowlist_poll_interval_secs: 60,
+            allowlist_request_timeout_secs: 10,
+        }
+    }
+
     #[tokio::test]
     async fn run_uplink_reconnects_after_replay_epoch_reset_before_main_loop() {
         let reader_ip = "10.0.0.1".to_string();
@@ -835,6 +884,7 @@ mod tests {
                 poll_interval_secs: 5,
                 upstream_heartbeat_secs: 60,
             },
+            p2p: disabled_p2p_config(),
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -1683,6 +1733,7 @@ token_file = "/tmp/test-token"
                 poll_interval_secs: 5,
                 upstream_heartbeat_secs: 60,
             },
+            p2p: disabled_p2p_config(),
             readers: vec![],
             #[cfg(feature = "eink")]
             eink: None,
@@ -1931,6 +1982,7 @@ token_file = "/tmp/test-token"
                 poll_interval_secs: 5,
                 upstream_heartbeat_secs: 60,
             },
+            p2p: disabled_p2p_config(),
             readers: vec![forwarder::config::ReaderConfig {
                 target: reader_ip.clone(),
                 enabled: true,
@@ -2058,6 +2110,7 @@ token_file = "/tmp/test-token"
                 poll_interval_secs: 5,
                 upstream_heartbeat_secs: 60,
             },
+            p2p: disabled_p2p_config(),
             readers: vec![],
             #[cfg(feature = "eink")]
             eink: None,

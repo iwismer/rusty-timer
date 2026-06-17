@@ -21,7 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
-use rt_iroh::{Connection, RecvStream, SendStream};
+#[cfg(test)]
+use rt_iroh::Connection;
+use rt_iroh::{RecvStream, SendStream};
 use rt_p2p_protocol::{
     ControlC2F, ControlF2C, DownloadProgress, Hello, MAX_FRAME_BYTES, Ping, Pong, ProtocolError,
     ProtocolErrorCode, ReaderControlRequest, ReaderControlResponse, ReaderInfo, ReaderStatus,
@@ -265,22 +267,44 @@ fn wire_protocol_error(error: &ProtocolError) -> WireProtocolError {
     }
 }
 
-/// Serves the control stream for an admitted connection until it is closed.
+/// Performs `Hello`/`HelloOk` negotiation and catalog delivery on a
+/// pre-accepted control stream, bounded by `handshake_timeout`.
 ///
-/// The `Hello`/`HelloOk` negotiation and catalog delivery must complete within
-/// `handshake_timeout`; afterwards the heartbeat governs the stream's lifetime.
-/// Returns `Ok(())` when the peer disconnects cleanly and `Err` when the
-/// handshake fails/times out or the heartbeat declares the peer dead.
-pub(crate) async fn serve_control(
-    connection: &Connection,
+/// Returns the negotiated stream halves so the caller can run the heartbeat
+/// loop. Crucially, the caller must not serve any data streams until this
+/// completes successfully: data delivery is gated on a finished control
+/// handshake so an allow-listed peer cannot receive journal data before
+/// `Hello`/catalog negotiation succeeds.
+pub(crate) async fn negotiate_control_stream(
+    send: SendStream,
+    recv: RecvStream,
     catalog: &dyn CatalogProvider,
     handshake_timeout: Duration,
     heartbeat: HeartbeatConfig,
-) -> Result<(), BoxError> {
-    serve_control_with_typed_control(
-        connection,
-        catalog,
+) -> Result<(SendStream, RecvStream), BoxError> {
+    match tokio::time::timeout(
         handshake_timeout,
+        negotiate_and_serve_catalog_stream(send, recv, catalog, heartbeat),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err("control handshake timed out".into()),
+    }
+}
+
+/// Runs the post-negotiation heartbeat/control loop on an already-negotiated
+/// control stream until the peer disconnects cleanly (`Ok`) or is declared dead
+/// (`Err`). Uses the default no-op reader-control handler and no outbound event
+/// channel.
+pub(crate) async fn run_control_stream_loop(
+    send: SendStream,
+    recv: RecvStream,
+    heartbeat: HeartbeatConfig,
+) -> Result<(), BoxError> {
+    run_control_loop(
+        send,
+        recv,
         heartbeat,
         Arc::new(NoopReaderControlHandler),
         None,
@@ -290,6 +314,7 @@ pub(crate) async fn serve_control(
 
 /// Serves the control stream with a typed reader-control handler and optional
 /// outbound status-event channel.
+#[cfg(test)]
 pub(crate) async fn serve_control_with_typed_control(
     connection: &Connection,
     catalog: &dyn CatalogProvider,
@@ -298,15 +323,31 @@ pub(crate) async fn serve_control_with_typed_control(
     reader_control: Arc<dyn ReaderControlHandler>,
     outbound_events: Option<ControlEventReceiver>,
 ) -> Result<(), BoxError> {
-    let (send, recv) = match tokio::time::timeout(
+    let (send, recv) = connection.accept_bi().await?;
+    serve_control_stream_with_typed_control(
+        send,
+        recv,
+        catalog,
         handshake_timeout,
-        negotiate_and_serve_catalog(connection, catalog, heartbeat),
+        heartbeat,
+        reader_control,
+        outbound_events,
     )
     .await
-    {
-        Ok(result) => result?,
-        Err(_elapsed) => return Err("control handshake timed out".into()),
-    };
+}
+
+#[cfg(test)]
+pub(crate) async fn serve_control_stream_with_typed_control(
+    send: SendStream,
+    recv: RecvStream,
+    catalog: &dyn CatalogProvider,
+    handshake_timeout: Duration,
+    heartbeat: HeartbeatConfig,
+    reader_control: Arc<dyn ReaderControlHandler>,
+    outbound_events: Option<ControlEventReceiver>,
+) -> Result<(), BoxError> {
+    let (send, recv) =
+        negotiate_control_stream(send, recv, catalog, handshake_timeout, heartbeat).await?;
 
     run_control_loop(send, recv, heartbeat, reader_control, outbound_events).await
 }
@@ -318,13 +359,12 @@ pub(crate) async fn serve_control_with_typed_control(
 /// always agree at open time as the protocol requires. The advertised
 /// `HelloOk.heartbeat_interval_secs` is taken from the heartbeat config the
 /// handler actually pings with.
-async fn negotiate_and_serve_catalog(
-    connection: &Connection,
+async fn negotiate_and_serve_catalog_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
     catalog: &dyn CatalogProvider,
     heartbeat: HeartbeatConfig,
 ) -> Result<(SendStream, RecvStream), BoxError> {
-    let (mut send, mut recv) = connection.accept_bi().await?;
-
     let control = read_frame::<ControlC2F>(&mut recv).await?;
     let client_hello = match control.msg {
         Some(control_c2f::Msg::Hello(hello)) => hello,
