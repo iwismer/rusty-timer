@@ -4,7 +4,6 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
-use uuid::Uuid;
 const SCHEMA_SQL: &str = include_str!("storage/schema.sql");
 pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
 
@@ -130,10 +129,11 @@ pub struct CursorRecord {
     pub last_seq: i64,
 }
 
-/// New P2P event payload to persist. `stream_id` is stored as canonical UUID TEXT.
+/// New P2P event payload to persist. `stream_id` is an arbitrary UTF-8 stream
+/// key (e.g. the forwarder journal key `ip:port`) stored verbatim as TEXT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceivedEventInsert<'a> {
-    pub stream_id: Uuid,
+    pub stream_id: &'a str,
     pub seq: i64,
     pub epoch: i64,
     pub raw_frame: &'a [u8],
@@ -145,7 +145,7 @@ pub struct ReceivedEventInsert<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedEvent {
-    pub stream_id: Uuid,
+    pub stream_id: String,
     pub seq: i64,
     pub epoch: i64,
     pub raw_frame: Vec<u8>,
@@ -157,7 +157,7 @@ pub struct ReceivedEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GapMarkerInsert<'a> {
-    pub stream_id: Uuid,
+    pub stream_id: &'a str,
     pub requested_after_seq: i64,
     pub earliest_available_seq: i64,
     pub latest_available_seq: i64,
@@ -167,7 +167,7 @@ pub struct GapMarkerInsert<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GapMarker {
-    pub stream_id: Uuid,
+    pub stream_id: String,
     pub requested_after_seq: i64,
     pub earliest_available_seq: i64,
     pub latest_available_seq: i64,
@@ -573,7 +573,7 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (stream_id, seq) DO NOTHING",
             rusqlite::params![
-                event.stream_id.to_string(),
+                event.stream_id,
                 event.seq,
                 event.epoch,
                 event.raw_frame,
@@ -586,23 +586,20 @@ impl Db {
         Ok(changed > 0)
     }
 
-    pub fn load_received_events(&self, stream_id: Uuid) -> DbResult<Vec<ReceivedEvent>> {
+    pub fn load_received_events(&self, stream_id: &str) -> DbResult<Vec<ReceivedEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
              FROM received_events
              WHERE stream_id = ?1
              ORDER BY seq",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![stream_id.to_string()],
-            received_event_from_row,
-        )?;
+        let rows = stmt.query_map(rusqlite::params![stream_id], received_event_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn load_received_events_after(
         &self,
-        stream_id: Uuid,
+        stream_id: &str,
         after_seq: i64,
     ) -> DbResult<Vec<ReceivedEvent>> {
         let mut stmt = self.conn.prepare(
@@ -612,7 +609,7 @@ impl Db {
              ORDER BY seq",
         )?;
         let rows = stmt.query_map(
-            rusqlite::params![stream_id.to_string(), after_seq],
+            rusqlite::params![stream_id, after_seq],
             received_event_from_row,
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -626,7 +623,7 @@ impl Db {
     /// replay/re-run never re-emits an already-written `(stream_id, seq)`.
     pub fn load_undelivered_received_events(
         &self,
-        stream_id: Uuid,
+        stream_id: &str,
     ) -> DbResult<Vec<ReceivedEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
@@ -634,10 +631,7 @@ impl Db {
              WHERE stream_id = ?1 AND dbf_delivered_unix_ms IS NULL
              ORDER BY seq",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![stream_id.to_string()],
-            received_event_from_row,
-        )?;
+        let rows = stmt.query_map(rusqlite::params![stream_id], received_event_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -646,7 +640,7 @@ impl Db {
     /// overwriting an earlier delivery timestamp. Returns whether a row changed.
     pub fn mark_dbf_delivered(
         &self,
-        stream_id: Uuid,
+        stream_id: &str,
         seq: i64,
         delivered_unix_ms: i64,
     ) -> DbResult<bool> {
@@ -654,7 +648,7 @@ impl Db {
             "UPDATE received_events
              SET dbf_delivered_unix_ms = ?3
              WHERE stream_id = ?1 AND seq = ?2 AND dbf_delivered_unix_ms IS NULL",
-            rusqlite::params![stream_id.to_string(), seq, delivered_unix_ms],
+            rusqlite::params![stream_id, seq, delivered_unix_ms],
         )?;
         Ok(changed > 0)
     }
@@ -662,10 +656,10 @@ impl Db {
     /// Clear the DBF delivery markers for every event of `stream_id`, returning
     /// the number of rows reset. Used when regenerating the DBF file from the
     /// durable store so all events are re-delivered on the next feed run.
-    pub fn reset_dbf_delivered(&self, stream_id: Uuid) -> DbResult<usize> {
+    pub fn reset_dbf_delivered(&self, stream_id: &str) -> DbResult<usize> {
         let count = self.conn.execute(
             "UPDATE received_events SET dbf_delivered_unix_ms = NULL WHERE stream_id = ?1",
-            rusqlite::params![stream_id.to_string()],
+            rusqlite::params![stream_id],
         )?;
         Ok(count)
     }
@@ -678,17 +672,14 @@ impl Db {
     /// This is the source for the idempotent announcer push: once an event is
     /// marked pushed via [`Db::mark_announcer_pushed`], it is no longer returned
     /// here, so a repush never re-emits an already-sent `(stream_id, seq)`.
-    pub fn load_unpushed_announcer_events(&self, stream_id: Uuid) -> DbResult<Vec<ReceivedEvent>> {
+    pub fn load_unpushed_announcer_events(&self, stream_id: &str) -> DbResult<Vec<ReceivedEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
              FROM received_events
              WHERE stream_id = ?1 AND announcer_pushed_unix_ms IS NULL
              ORDER BY received_unix_ms, seq",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![stream_id.to_string()],
-            received_event_from_row,
-        )?;
+        let rows = stmt.query_map(rusqlite::params![stream_id], received_event_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -697,7 +688,7 @@ impl Db {
     /// overwriting an earlier push timestamp. Returns whether a row changed.
     pub fn mark_announcer_pushed(
         &self,
-        stream_id: Uuid,
+        stream_id: &str,
         seq: i64,
         pushed_unix_ms: i64,
     ) -> DbResult<bool> {
@@ -705,18 +696,18 @@ impl Db {
             "UPDATE received_events
              SET announcer_pushed_unix_ms = ?3
              WHERE stream_id = ?1 AND seq = ?2 AND announcer_pushed_unix_ms IS NULL",
-            rusqlite::params![stream_id.to_string(), seq, pushed_unix_ms],
+            rusqlite::params![stream_id, seq, pushed_unix_ms],
         )?;
         Ok(changed > 0)
     }
 
     /// Return the highest announcer source generation accepted for `stream_id`,
     /// or `None` if no generation has been fenced yet.
-    pub fn load_announcer_fence(&self, stream_id: Uuid) -> DbResult<Option<i64>> {
+    pub fn load_announcer_fence(&self, stream_id: &str) -> DbResult<Option<i64>> {
         self.conn
             .query_row(
                 "SELECT generation FROM announcer_source_fence WHERE stream_id = ?1",
-                rusqlite::params![stream_id.to_string()],
+                rusqlite::params![stream_id],
                 |row| row.get(0),
             )
             .optional()
@@ -731,7 +722,7 @@ impl Db {
     /// stale so callers can avoid sending rows for an outdated source.
     pub fn accept_announcer_generation(
         &self,
-        stream_id: Uuid,
+        stream_id: &str,
         generation: i64,
     ) -> DbResult<AnnouncerGenerationAcceptance> {
         let changed = self.conn.execute(
@@ -739,7 +730,7 @@ impl Db {
              VALUES (?1, ?2)
              ON CONFLICT (stream_id) DO UPDATE SET generation = excluded.generation
              WHERE excluded.generation >= announcer_source_fence.generation",
-            rusqlite::params![stream_id.to_string(), generation],
+            rusqlite::params![stream_id, generation],
         )?;
         if changed > 0 {
             return Ok(AnnouncerGenerationAcceptance::Current { generation });
@@ -754,7 +745,7 @@ impl Db {
 
     pub fn load_received_event(
         &self,
-        stream_id: Uuid,
+        stream_id: &str,
         seq: i64,
     ) -> DbResult<Option<ReceivedEvent>> {
         self.conn
@@ -762,7 +753,7 @@ impl Db {
                 "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
                  FROM received_events
                  WHERE stream_id = ?1 AND seq = ?2",
-                rusqlite::params![stream_id.to_string(), seq],
+                rusqlite::params![stream_id, seq],
                 received_event_from_row,
             )
             .optional()
@@ -773,12 +764,12 @@ impl Db {
     /// no cursor row exists yet. The cursor is the highest contiguous seq that
     /// has been durably stored and acknowledged for `stream_id`; it is the
     /// `after_seq` a resuming `DataSubscribe` must request.
-    pub fn load_stream_cursor(&self, stream_id: Uuid) -> DbResult<i64> {
+    pub fn load_stream_cursor(&self, stream_id: &str) -> DbResult<i64> {
         let last_seq: Option<i64> = self
             .conn
             .query_row(
                 "SELECT last_seq FROM cursors WHERE stream_id = ?1",
-                rusqlite::params![stream_id.to_string()],
+                rusqlite::params![stream_id],
                 |r| r.get(0),
             )
             .optional()?;
@@ -790,18 +781,17 @@ impl Db {
     /// `earliest_available_seq - 1`). The cursor only ever moves forward: a jump
     /// target at or below the current cursor is ignored so a late or duplicate
     /// gap notice cannot regress progress.
-    pub fn jump_stream_cursor(&self, stream_id: Uuid, last_seq: i64) -> DbResult<()> {
+    pub fn jump_stream_cursor(&self, stream_id: &str, last_seq: i64) -> DbResult<()> {
         self.conn.execute(
             "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)
              ON CONFLICT (stream_id) DO UPDATE SET last_seq = excluded.last_seq
              WHERE excluded.last_seq > cursors.last_seq",
-            rusqlite::params![stream_id.to_string(), last_seq],
+            rusqlite::params![stream_id, last_seq],
         )?;
         Ok(())
     }
 
-    pub fn advance_cursor_contiguous_prefix(&self, stream_id: Uuid) -> DbResult<i64> {
-        let stream_id = stream_id.to_string();
+    pub fn advance_cursor_contiguous_prefix(&self, stream_id: &str) -> DbResult<i64> {
         let current: Option<i64> = self
             .conn
             .query_row(
@@ -815,7 +805,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT seq FROM received_events WHERE stream_id = ?1 AND seq > ?2 ORDER BY seq",
         )?;
-        let rows = stmt.query_map(rusqlite::params![&stream_id, last_seq], |r| {
+        let rows = stmt.query_map(rusqlite::params![stream_id, last_seq], |r| {
             r.get::<_, i64>(0)
         })?;
         for row in rows {
@@ -829,7 +819,7 @@ impl Db {
 
         let updated = self.conn.execute(
             "UPDATE cursors SET last_seq = ?2 WHERE stream_id = ?1 AND last_seq < ?2",
-            rusqlite::params![&stream_id, last_seq],
+            rusqlite::params![stream_id, last_seq],
         )?;
         if updated == 0 && current.is_none() {
             self.conn.execute(
@@ -846,7 +836,7 @@ impl Db {
              (stream_id, requested_after_seq, earliest_available_seq, latest_available_seq, reason, created_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
-                marker.stream_id.to_string(),
+                marker.stream_id,
                 marker.requested_after_seq,
                 marker.earliest_available_seq,
                 marker.latest_available_seq,
@@ -857,18 +847,16 @@ impl Db {
         Ok(())
     }
 
-    pub fn load_gap_markers(&self, stream_id: Uuid) -> DbResult<Vec<GapMarker>> {
+    pub fn load_gap_markers(&self, stream_id: &str) -> DbResult<Vec<GapMarker>> {
         let mut stmt = self.conn.prepare(
             "SELECT stream_id, requested_after_seq, earliest_available_seq, latest_available_seq, reason, created_unix_ms
              FROM gap_markers
              WHERE stream_id = ?1
              ORDER BY created_unix_ms, id",
         )?;
-        let rows = stmt.query_map(rusqlite::params![stream_id.to_string()], |r| {
-            let raw_stream_id = r.get::<_, String>(0)?;
-            let parsed_stream_id = parse_uuid_column(raw_stream_id, 0)?;
+        let rows = stmt.query_map(rusqlite::params![stream_id], |r| {
             Ok(GapMarker {
-                stream_id: parsed_stream_id,
+                stream_id: r.get(0)?,
                 requested_after_seq: r.get(1)?,
                 earliest_available_seq: r.get(2)?,
                 latest_available_seq: r.get(3)?,
@@ -1231,21 +1219,9 @@ fn legacy_cursor_stream_id(fwd: &str, ip: &str) -> String {
     format!("legacy:{fwd}\u{1f}{ip}")
 }
 
-fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(&value).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            column,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-        )
-    })
-}
-
 fn received_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceivedEvent> {
-    let raw_stream_id = row.get::<_, String>(0)?;
-    let parsed_stream_id = parse_uuid_column(raw_stream_id, 0)?;
     Ok(ReceivedEvent {
-        stream_id: parsed_stream_id,
+        stream_id: row.get(0)?,
         seq: row.get(1)?,
         epoch: row.get(2)?,
         raw_frame: row.get(3)?,
@@ -1975,7 +1951,7 @@ mod tests {
     #[test]
     fn announcer_generation_acceptance_reports_current_and_stale() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let stream_id = "11111111-1111-1111-1111-111111111111";
 
         assert_eq!(
             db.accept_announcer_generation(stream_id, 3).unwrap(),
@@ -2082,7 +2058,7 @@ mod tests {
         assert_eq!(rows[0].stream_epoch, 7);
         assert_eq!(rows[0].last_seq, 42);
 
-        let stream_id = uuid::Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        let stream_id = "44444444-4444-4444-4444-444444444444";
         assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 0);
     }
 
@@ -2258,7 +2234,7 @@ mod tests {
     #[test]
     fn insert_on_conflict_do_nothing() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let stream_id = "11111111-1111-1111-1111-111111111111";
         let event = ReceivedEventInsert {
             stream_id,
             seq: 7,
@@ -2288,7 +2264,7 @@ mod tests {
     #[test]
     fn cursor_advances_contiguous_prefix() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let stream_id = "22222222-2222-2222-2222-222222222222";
 
         for seq in [1, 2, 4] {
             let event = ReceivedEventInsert {
@@ -2324,7 +2300,7 @@ mod tests {
     #[test]
     fn load_stream_cursor_defaults_to_zero_then_reflects_advance() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = uuid::Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
+        let stream_id = "55555555-5555-5555-5555-555555555555";
         assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
         for seq in [1, 2, 3] {
             db.insert_received_event(&ReceivedEventInsert {
@@ -2346,7 +2322,7 @@ mod tests {
     #[test]
     fn jump_stream_cursor_moves_forward_only() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = uuid::Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+        let stream_id = "66666666-6666-6666-6666-666666666666";
         db.jump_stream_cursor(stream_id, 14).unwrap();
         assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 14);
         // A regressing jump target is ignored.
@@ -2358,9 +2334,60 @@ mod tests {
     }
 
     #[test]
+    fn non_uuid_stream_id_persists_and_advances_cursor() {
+        // A real forwarder P2P stream_id is an arbitrary UTF-8 journal key such
+        // as `ip:port`, not a parseable UUID. It must persist, dedup, and
+        // advance the contiguous cursor like any other stream_id.
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = "127.0.0.1:10000";
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
+        for seq in [1, 2, 3] {
+            assert!(
+                db.insert_received_event(&ReceivedEventInsert {
+                    stream_id,
+                    seq,
+                    epoch: 1,
+                    raw_frame: b"frame",
+                    read_kind: "chip",
+                    reader_timestamp: None,
+                    received_unix_ms: 1_700_000_000_000 + seq,
+                    dbf_delivered_unix_ms: None,
+                })
+                .unwrap()
+            );
+        }
+        let rows = db.load_received_events(stream_id).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].stream_id, stream_id);
+        assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 3);
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 3);
+
+        // Exactly-16-byte id (the legacy UUID byte length) must also work as a
+        // plain string, proving we never reinterpret it as raw UUID bytes.
+        let sixteen = "100.64.0.1:10000";
+        assert_eq!(sixteen.len(), 16);
+        assert!(
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id: sixteen,
+                seq: 1,
+                epoch: 1,
+                raw_frame: b"frame",
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: 1,
+                dbf_delivered_unix_ms: None,
+            })
+            .unwrap()
+        );
+        assert_eq!(db.advance_cursor_contiguous_prefix(sixteen).unwrap(), 1);
+        db.accept_announcer_generation(sixteen, 1).unwrap();
+        assert_eq!(db.load_announcer_fence(sixteen).unwrap(), Some(1));
+    }
+
+    #[test]
     fn gap_marker_persists() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let stream_id = "33333333-3333-3333-3333-333333333333";
         let marker = GapMarkerInsert {
             stream_id,
             requested_after_seq: 10,
@@ -2376,6 +2403,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].stream_id, stream_id);
         assert_eq!(rows[0].requested_after_seq, 10);
+        // `stream_id` here is `&str`; `rows[0].stream_id` is `String`.
         assert_eq!(rows[0].earliest_available_seq, 15);
         assert_eq!(rows[0].latest_available_seq, 20);
         assert_eq!(rows[0].reason, "retention-window");

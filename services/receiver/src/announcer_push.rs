@@ -25,7 +25,6 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError};
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::db::{AnnouncerGenerationAcceptance, Db, DbError};
 use crate::ui_events::chip_id_from_raw_frame;
@@ -62,7 +61,7 @@ where
 /// populated when the chip resolves to a known participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnnouncerRow {
-    pub stream_id: Uuid,
+    pub stream_id: String,
     pub seq: i64,
     pub received_unix_ms: i64,
     pub announcer_source_generation: i64,
@@ -79,7 +78,7 @@ pub trait AnnouncerPushClient {
 }
 
 type StreamPushLock = Arc<StdMutex<()>>;
-type StreamPushLocks = HashMap<Uuid, StreamPushLock>;
+type StreamPushLocks = HashMap<String, StreamPushLock>;
 
 static ANNOUNCER_PUSH_LOCKS: LazyLock<StdMutex<StreamPushLocks>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
@@ -88,10 +87,10 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> StdMutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn announcer_push_lock(stream_id: Uuid) -> StreamPushLock {
+fn announcer_push_lock(stream_id: &str) -> StreamPushLock {
     let mut locks = lock_unpoisoned(&ANNOUNCER_PUSH_LOCKS);
     locks
-        .entry(stream_id)
+        .entry(stream_id.to_owned())
         .or_insert_with(|| Arc::new(StdMutex::new(())))
         .clone()
 }
@@ -126,7 +125,7 @@ pub fn push_announcer_rows(
     db: &Db,
     client: &dyn AnnouncerPushClient,
     resolver: &dyn ParticipantResolver,
-    stream_id: Uuid,
+    stream_id: &str,
     generation: i64,
     pushed_unix_ms: i64,
 ) -> Result<PushOutcome, AnnouncerPushError> {
@@ -154,7 +153,7 @@ pub fn push_announcer_rows(
             let chip_id = chip_id_from_raw_frame(&event.raw_frame);
             let resolved = resolver.resolve(&chip_id);
             AnnouncerRow {
-                stream_id: event.stream_id,
+                stream_id: event.stream_id.clone(),
                 seq: event.seq,
                 received_unix_ms: event.received_unix_ms,
                 announcer_source_generation: generation,
@@ -200,7 +199,7 @@ mod tests {
         b"aa400000000123450a2a01123018455927a7".to_vec()
     }
 
-    fn insert_event(db: &Db, stream_id: Uuid, seq: i64, raw: &[u8], received_unix_ms: i64) {
+    fn insert_event(db: &Db, stream_id: &str, seq: i64, raw: &[u8], received_unix_ms: i64) {
         db.insert_received_event(&ReceivedEventInsert {
             stream_id,
             seq,
@@ -262,7 +261,7 @@ mod tests {
     #[test]
     fn pushes_resolved_rows() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let stream_id = "127.0.0.1:10000";
         let raw = sample_raw_frame();
         // Insert out of received order to prove ordering by received_unix_ms.
         insert_event(&db, stream_id, 2, &raw, 1_700_000_000_200);
@@ -294,7 +293,7 @@ mod tests {
     #[test]
     fn pushes_rows_without_name_when_unresolved() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
 
@@ -316,7 +315,7 @@ mod tests {
     #[test]
     fn idempotent_repush() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap();
+        let stream_id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
         insert_event(&db, stream_id, 2, &raw, 1_700_000_000_200);
@@ -344,7 +343,7 @@ mod tests {
     #[test]
     fn stale_generation_not_sent() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("dddddddd-dddd-dddd-dddd-dddddddddddd").unwrap();
+        let stream_id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
 
@@ -379,7 +378,7 @@ mod tests {
 
     struct NewerGenerationWinsDuringResolve<'a> {
         db: &'a Db,
-        stream_id: Uuid,
+        stream_id: &'a str,
         triggered: AtomicBool,
     }
 
@@ -402,7 +401,7 @@ mod tests {
     #[test]
     fn interleaved_newer_generation_prevents_stale_send() {
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee").unwrap();
+        let stream_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
         let raw = sample_raw_frame();
         insert_event(&db, stream_id, 1, &raw, 1_700_000_000_100);
 

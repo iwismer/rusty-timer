@@ -48,7 +48,7 @@ message HelloOk {
 
 // A single stream advertised in the catalog.
 message StreamEntry {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   string display_name = 2;
   string network_addr = 3;
@@ -65,7 +65,7 @@ message StreamCatalog {
 
 // Request to perform a control action against a reader.
 message ReaderControlRequest {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   // Action verb (e.g. "connect", "disconnect", "download").
   string command = 2;
@@ -75,7 +75,7 @@ message ReaderControlRequest {
 
 // Result of a ReaderControlRequest.
 message ReaderControlResponse {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   string request_id = 2;
   bool success = 3;
@@ -84,7 +84,7 @@ message ReaderControlResponse {
 
 // Connection/liveness status for a reader.
 message ReaderStatus {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   bool connected = 2;
   // Human/machine readable state token (e.g. "online", "reconnecting").
@@ -95,7 +95,7 @@ message ReaderStatus {
 
 // Static descriptive information about a reader.
 message ReaderInfo {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   string hardware_reader_id = 2;
   string firmware_version = 3;
@@ -104,7 +104,7 @@ message ReaderInfo {
 
 // Progress of an in-flight download (e.g. backup retrieval).
 message DownloadProgress {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   uint64 downloaded_bytes = 2;
   uint64 total_bytes = 3;
@@ -138,7 +138,7 @@ message ProtocolError {
   string message = 2;
   // True if the client may retry the failed operation.
   bool retryable = 3;
-  // Stream the error pertains to, if any: a UUID encoded as 16 bytes.
+  // Stream the error pertains to, if any: opaque UTF-8 bytes agreed by the catalog.
   optional bytes stream_id = 4;
 }
 
@@ -157,7 +157,7 @@ enum SubscribeMode {
 
 // Request to subscribe to a stream's read events.
 message DataSubscribe {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   // Deliver records with seq strictly greater than this value.
   uint64 after_seq = 2;
@@ -166,7 +166,7 @@ message DataSubscribe {
 
 // Acknowledgement that a subscription was opened.
 message SubscribeOk {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   // Lowest seq currently retained and replayable.
   uint64 earliest_available_seq = 2;
@@ -176,7 +176,7 @@ message SubscribeOk {
 
 // A single chip read.
 message ReadRecord {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   uint64 seq = 2;
   uint64 epoch = 3;
@@ -198,21 +198,21 @@ message EventBatch {
 
 // Client acknowledgement of records processed up to and including `through_seq`.
 message Ack {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   uint64 through_seq = 2;
 }
 
 // Forwarder notice that the client has caught up to the live tail.
 message CaughtUp {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   uint64 through_seq = 2;
 }
 
 // Forwarder notice that requested data is no longer available.
 message GapNotice {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   uint64 requested_after_seq = 2;
   uint64 earliest_available_seq = 3;
@@ -222,7 +222,7 @@ message GapNotice {
 
 // Notice that a new stream epoch has begun (e.g. reader restart).
 message StreamEpochStarted {
-  // Stream identifier: a UUID encoded as 16 bytes.
+  // Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
   bytes stream_id = 1;
   uint64 epoch = 2;
   uint64 start_seq = 3;

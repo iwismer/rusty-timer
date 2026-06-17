@@ -14,7 +14,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 /// A handle to a running local proxy for one stream.
 pub struct LocalProxy {
@@ -63,7 +62,7 @@ impl LocalProxy {
     /// back from SQLite before writing it to the local TCP consumer.
     pub async fn bind_durable(
         port: u16,
-        stream_id: Uuid,
+        stream_id: String,
         db: Arc<Mutex<Db>>,
         durable_seq_tx: broadcast::Sender<i64>,
     ) -> std::io::Result<Self> {
@@ -84,7 +83,7 @@ impl LocalProxy {
                             Ok((stream, peer)) => {
                                 debug!(?peer, port, %stream_id, "durable local consumer connected");
                                 let rx = durable_seq_tx.subscribe();
-                                tokio::spawn(serve_durable_consumer(stream, stream_id, db.clone(), rx));
+                                tokio::spawn(serve_durable_consumer(stream, stream_id.clone(), db.clone(), rx));
                             }
                             Err(e) => { warn!(error=%e, "accept error"); }
                         }
@@ -129,14 +128,14 @@ async fn serve_consumer(mut stream: TcpStream, mut rx: broadcast::Receiver<ReadE
 
 async fn serve_durable_consumer(
     mut stream: TcpStream,
-    stream_id: Uuid,
+    stream_id: String,
     db: Arc<Mutex<Db>>,
     mut rx: broadcast::Receiver<i64>,
 ) {
     let mut last_delivered_seq = 0;
     let replay = {
         let db = db.lock().await;
-        db.load_received_events_after(stream_id, last_delivered_seq)
+        db.load_received_events_after(&stream_id, last_delivered_seq)
     };
     match replay {
         Ok(events) => {
@@ -159,7 +158,7 @@ async fn serve_durable_consumer(
             Ok(seq) => {
                 let events = {
                     let db = db.lock().await;
-                    db.load_received_events_after(stream_id, last_delivered_seq)
+                    db.load_received_events_after(&stream_id, last_delivered_seq)
                 };
                 match events {
                     Ok(events) => {
@@ -183,7 +182,7 @@ async fn serve_durable_consumer(
                 );
                 let events = {
                     let db = db.lock().await;
-                    db.load_received_events_after(stream_id, last_delivered_seq)
+                    db.load_received_events_after(&stream_id, last_delivered_seq)
                 };
                 match events {
                     Ok(events) => {
@@ -233,7 +232,6 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
-    use uuid::Uuid;
 
     fn make_event(raw: &[u8]) -> ReadEvent {
         ReadEvent {
@@ -249,7 +247,7 @@ mod tests {
 
     async fn insert_durable_event(
         db: &Arc<Mutex<Db>>,
-        stream_id: Uuid,
+        stream_id: &str,
         seq: i64,
         raw_frame: &[u8],
     ) {
@@ -273,11 +271,12 @@ mod tests {
     #[tokio::test]
     async fn new_client_gets_replay() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let stream_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        // A real forwarder P2P stream_id (`ip:port`), not a parseable UUID.
+        let stream_id = "127.0.0.1:10000";
         insert_durable_event(&db, stream_id, 2, b"second").await;
         insert_durable_event(&db, stream_id, 1, b"first").await;
         let (durable_tx, _rx) = broadcast::channel(16);
-        let proxy = LocalProxy::bind_durable(0, stream_id, db, durable_tx)
+        let proxy = LocalProxy::bind_durable(0, stream_id.to_owned(), db, durable_tx)
             .await
             .unwrap();
 
@@ -300,12 +299,13 @@ mod tests {
     #[tokio::test]
     async fn live_reads_after_durable() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let stream_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let stream_id = "22222222-2222-2222-2222-222222222222";
         insert_durable_event(&db, stream_id, 1, b"replay").await;
         let (durable_tx, _rx) = broadcast::channel(16);
-        let proxy = LocalProxy::bind_durable(0, stream_id, db.clone(), durable_tx.clone())
-            .await
-            .unwrap();
+        let proxy =
+            LocalProxy::bind_durable(0, stream_id.to_owned(), db.clone(), durable_tx.clone())
+                .await
+                .unwrap();
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
             .unwrap();
@@ -339,12 +339,13 @@ mod tests {
     #[tokio::test]
     async fn out_of_order_durable_rows_wait_for_contiguous_gap() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let stream_id = Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
+        let stream_id = "55555555-5555-5555-5555-555555555555";
         insert_durable_event(&db, stream_id, 1, b"one").await;
         let (durable_tx, _rx) = broadcast::channel(16);
-        let proxy = LocalProxy::bind_durable(0, stream_id, db.clone(), durable_tx.clone())
-            .await
-            .unwrap();
+        let proxy =
+            LocalProxy::bind_durable(0, stream_id.to_owned(), db.clone(), durable_tx.clone())
+                .await
+                .unwrap();
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
             .unwrap();
@@ -390,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_live_overlap_does_not_duplicate() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let stream_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let stream_id = "33333333-3333-3333-3333-333333333333";
         let (durable_tx, rx) = broadcast::channel(16);
         insert_durable_event(&db, stream_id, 1, b"once").await;
         durable_tx.send(1).unwrap();
@@ -399,7 +400,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (server_stream, _) = listener.accept().await.unwrap();
-        let handle = tokio::spawn(serve_durable_consumer(server_stream, stream_id, db, rx));
+        let handle = tokio::spawn(serve_durable_consumer(
+            server_stream,
+            stream_id.to_owned(),
+            db,
+            rx,
+        ));
 
         let mut buf = vec![0u8; b"once".len()];
         tokio::time::timeout(
@@ -428,12 +434,13 @@ mod tests {
     #[tokio::test]
     async fn lagged_live_hint_recovers_from_durable_store() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let stream_id = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        let stream_id = "44444444-4444-4444-4444-444444444444";
         insert_durable_event(&db, stream_id, 1, b"one").await;
         let (durable_tx, _rx) = broadcast::channel(1);
-        let proxy = LocalProxy::bind_durable(0, stream_id, db.clone(), durable_tx.clone())
-            .await
-            .unwrap();
+        let proxy =
+            LocalProxy::bind_durable(0, stream_id.to_owned(), db.clone(), durable_tx.clone())
+                .await
+                .unwrap();
         let mut client = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", proxy.port))
             .await
             .unwrap();

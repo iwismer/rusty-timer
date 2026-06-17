@@ -527,14 +527,14 @@ async fn admin_update_port_clears_override() {
 #[tokio::test]
 async fn streams_response_includes_cursor_data() {
     let state = setup();
-    let stream_1 = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
-    let stream_2 = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+    let stream_1 = "127.0.0.1:10000";
+    let stream_2 = "127.0.0.1:10001";
     {
         let mut db = state.db.lock().await;
         db.replace_stream_subscriptions(&[
             StreamSubscription {
                 forwarder_endpoint_id: "endpoint-1".to_owned(),
-                stream_id: stream_1.to_string(),
+                stream_id: stream_1.to_owned(),
                 local_port_override: None,
                 event_type: EventType::Finish,
                 forwarder_id: Some("f1".to_owned()),
@@ -542,7 +542,7 @@ async fn streams_response_includes_cursor_data() {
             },
             StreamSubscription {
                 forwarder_endpoint_id: "endpoint-2".to_owned(),
-                stream_id: stream_2.to_string(),
+                stream_id: stream_2.to_owned(),
                 local_port_override: None,
                 event_type: EventType::Finish,
                 forwarder_id: Some("f2".to_owned()),
@@ -558,7 +558,7 @@ async fn streams_response_includes_cursor_data() {
     let f1 = response
         .streams
         .iter()
-        .find(|s| s.stream_id == stream_1.to_string())
+        .find(|s| s.stream_id == stream_1)
         .unwrap();
     assert_eq!(f1.cursor_epoch, None);
     assert_eq!(f1.cursor_seq, Some(42));
@@ -566,7 +566,7 @@ async fn streams_response_includes_cursor_data() {
     let f2 = response
         .streams
         .iter()
-        .find(|s| s.stream_id == stream_2.to_string())
+        .find(|s| s.stream_id == stream_2)
         .unwrap();
     assert_eq!(f2.cursor_epoch, None);
     assert_eq!(f2.cursor_seq, None);

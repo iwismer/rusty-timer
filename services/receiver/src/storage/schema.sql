@@ -7,7 +7,8 @@
 --   PRAGMA foreign_keys=ON;
 -- At startup, run PRAGMA integrity_check; exit if result != 'ok'.
 --
--- P2P stream IDs are stored as canonical UUID TEXT (lowercase hyphenated form).
+-- P2P stream IDs are stored as arbitrary UTF-8 TEXT (e.g. the forwarder journal
+-- key `ip:port`). They are never required to be parseable UUIDs.
 -- Legacy receiver APIs populate compatibility columns where present so the
 -- incremental migration can keep existing callers green while new P2P APIs use
 -- stream_id directly.

@@ -2660,7 +2660,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_reset_cursor_uses_stream_id() {
-        let stream_id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let stream_id = "127.0.0.1:10000";
         let db = Db::open_in_memory().unwrap();
         db.jump_stream_cursor(stream_id, 42).unwrap();
         let (state, _shutdown_rx) = AppState::new(db, "recv-test".to_owned());
@@ -2668,7 +2668,7 @@ mod tests {
         admin_reset_cursor(
             &state,
             CursorResetRequest {
-                stream_id: stream_id.to_string(),
+                stream_id: stream_id.to_owned(),
             },
         )
         .await

@@ -50,7 +50,7 @@ pub struct HelloOk {
 /// A single stream advertised in the catalog.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StreamEntry {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(string, tag = "2")]
@@ -74,7 +74,7 @@ pub struct StreamCatalog {
 /// Request to perform a control action against a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReaderControlRequest {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     /// Action verb (e.g. "connect", "disconnect", "download").
@@ -87,7 +87,7 @@ pub struct ReaderControlRequest {
 /// Result of a ReaderControlRequest.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReaderControlResponse {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(string, tag = "2")]
@@ -100,7 +100,7 @@ pub struct ReaderControlResponse {
 /// Connection/liveness status for a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReaderStatus {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bool, tag = "2")]
@@ -115,7 +115,7 @@ pub struct ReaderStatus {
 /// Static descriptive information about a reader.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReaderInfo {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(string, tag = "2")]
@@ -128,7 +128,7 @@ pub struct ReaderInfo {
 /// Progress of an in-flight download (e.g. backup retrieval).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DownloadProgress {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
@@ -174,14 +174,14 @@ pub struct ProtocolError {
     /// True if the client may retry the failed operation.
     #[prost(bool, tag = "3")]
     pub retryable: bool,
-    /// Stream the error pertains to, if any: a UUID encoded as 16 bytes.
+    /// Stream the error pertains to, if any: opaque UTF-8 bytes agreed by the catalog.
     #[prost(bytes = "vec", optional, tag = "4")]
     pub stream_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Request to subscribe to a stream's read events.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DataSubscribe {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     /// Deliver records with seq strictly greater than this value.
@@ -193,7 +193,7 @@ pub struct DataSubscribe {
 /// Acknowledgement that a subscription was opened.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SubscribeOk {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     /// Lowest seq currently retained and replayable.
@@ -206,7 +206,7 @@ pub struct SubscribeOk {
 /// A single chip read.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ReadRecord {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
@@ -237,7 +237,7 @@ pub struct EventBatch {
 /// Client acknowledgement of records processed up to and including `through_seq`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Ack {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
@@ -246,7 +246,7 @@ pub struct Ack {
 /// Forwarder notice that the client has caught up to the live tail.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CaughtUp {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
@@ -255,7 +255,7 @@ pub struct CaughtUp {
 /// Forwarder notice that requested data is no longer available.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GapNotice {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
@@ -270,7 +270,7 @@ pub struct GapNotice {
 /// Notice that a new stream epoch has begun (e.g. reader restart).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StreamEpochStarted {
-    /// Stream identifier: a UUID encoded as 16 bytes.
+    /// Stream identifier: opaque UTF-8 bytes agreed by the catalog (for example, an ip:port journal key).
     #[prost(bytes = "vec", tag = "1")]
     pub stream_id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]

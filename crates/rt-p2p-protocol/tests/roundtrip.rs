@@ -3,7 +3,7 @@
 use prost::Message;
 use rt_p2p_protocol::{Hello, ReadRecord, WireProtocolError};
 
-// A stream_id is a UUID represented as 16 bytes on the wire.
+// A stream_id is opaque bytes on the wire; this test uses a 16-byte sample.
 const STREAM_ID: [u8; 16] = [
     0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
 ];

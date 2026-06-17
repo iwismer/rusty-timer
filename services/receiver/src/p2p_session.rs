@@ -35,7 +35,6 @@ use rt_p2p_protocol::{
     data_f2c, encode_frame,
 };
 use tokio::sync::{Mutex, watch};
-use uuid::Uuid;
 
 use crate::db::{Db, GapMarkerInsert, ReceivedEventInsert};
 
@@ -72,10 +71,10 @@ pub enum P2pSessionError {
     /// A stream-scoped frame carried a `stream_id` that did not match the
     /// subscribed stream. Treated as a data-integrity violation: the frame is
     /// neither persisted nor acked.
-    #[error("stream_id mismatch: subscribed to {expected}, frame carried {actual:02x?}")]
+    #[error("stream_id mismatch: subscribed to {expected:?}, frame carried {actual:02x?}")]
     StreamIdMismatch {
         /// The stream this session subscribed to.
-        expected: Uuid,
+        expected: String,
         /// The raw `stream_id` bytes carried by the offending frame.
         actual: Vec<u8>,
     },
@@ -84,7 +83,7 @@ pub enum P2pSessionError {
     #[error("conflicting duplicate for stream {stream_id} seq {seq}")]
     ConflictingDuplicate {
         /// The stream the conflicting record belongs to.
-        stream_id: Uuid,
+        stream_id: String,
         /// The sequence number with conflicting payloads.
         seq: i64,
     },
@@ -162,8 +161,9 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
 /// Parameters for a reconnecting single-stream session.
 #[derive(Clone, Debug)]
 pub struct SessionParams {
-    /// The stream to subscribe to (stored as canonical UUID in the durable store).
-    pub stream_id: Uuid,
+    /// The stream to subscribe to. An arbitrary UTF-8 stream key (e.g. the
+    /// forwarder journal key `ip:port`), stored verbatim in the durable store.
+    pub stream_id: String,
     /// The client `Hello` to present during control-plane negotiation.
     pub client_hello: Hello,
     /// Subscription mode (typically [`SubscribeMode::Replay`] to resume + go live).
@@ -186,18 +186,21 @@ pub struct ControlSession {
     _control_recv: RecvStream,
 }
 
-fn stream_id_bytes(stream_id: Uuid) -> Vec<u8> {
+fn stream_id_bytes(stream_id: &str) -> Vec<u8> {
     stream_id.as_bytes().to_vec()
 }
 
 /// Validate that a stream-scoped frame's `stream_id` matches the subscribed
-/// stream. Returns [`P2pSessionError::StreamIdMismatch`] on any divergence.
-fn check_stream_id(expected: Uuid, actual: &[u8]) -> Result<(), P2pSessionError> {
+/// stream. The configured stream ID is a UTF-8 string, so wire bytes are
+/// compared for exact equality against its UTF-8 bytes. Any divergence —
+/// including non-UTF-8 wire bytes that cannot equal a UTF-8 key — is rejected as
+/// [`P2pSessionError::StreamIdMismatch`] rather than lossily converted.
+fn check_stream_id(expected: &str, actual: &[u8]) -> Result<(), P2pSessionError> {
     if actual == expected.as_bytes() {
         Ok(())
     } else {
         Err(P2pSessionError::StreamIdMismatch {
-            expected,
+            expected: expected.to_owned(),
             actual: actual.to_vec(),
         })
     }
@@ -295,7 +298,7 @@ pub async fn connect_and_hello(
 /// *before* any insertion, so a batch carrying a foreign record persists
 /// nothing. A duplicate `(stream_id, seq)` whose immutable payload differs from
 /// the stored row is rejected as [`P2pSessionError::ConflictingDuplicate`].
-fn persist_batch(db: &Db, stream_id: Uuid, batch: &EventBatch) -> Result<i64, P2pSessionError> {
+fn persist_batch(db: &Db, stream_id: &str, batch: &EventBatch) -> Result<i64, P2pSessionError> {
     let mut records = Vec::with_capacity(batch.records.len());
     for record in &batch.records {
         check_stream_id(stream_id, &record.stream_id)?;
@@ -344,7 +347,7 @@ fn persist_batch(db: &Db, stream_id: Uuid, batch: &EventBatch) -> Result<i64, P2
                     || received_unix_ms_conflicts;
                 if conflicts {
                     return Err(P2pSessionError::ConflictingDuplicate {
-                        stream_id,
+                        stream_id: stream_id.to_owned(),
                         seq: insert.seq,
                     });
                 }
@@ -356,7 +359,7 @@ fn persist_batch(db: &Db, stream_id: Uuid, batch: &EventBatch) -> Result<i64, P2
 
 /// Record a gap marker and jump the cursor past the unavailable history,
 /// returning the resulting durable cursor.
-fn persist_gap(db: &Db, stream_id: Uuid, gap: &GapNotice) -> Result<i64, P2pSessionError> {
+fn persist_gap(db: &Db, stream_id: &str, gap: &GapNotice) -> Result<i64, P2pSessionError> {
     check_stream_id(stream_id, &gap.stream_id)?;
     let requested_after_seq = u64_to_i64(gap.requested_after_seq, "gap.requested_after_seq")?;
     let earliest_available_seq =
@@ -378,7 +381,7 @@ fn persist_gap(db: &Db, stream_id: Uuid, gap: &GapNotice) -> Result<i64, P2pSess
 
 async fn send_ack(
     send: &mut SendStream,
-    stream_id: Uuid,
+    stream_id: &str,
     through_seq: i64,
 ) -> Result<(), P2pSessionError> {
     write_frame(
@@ -411,7 +414,7 @@ async fn send_ack(
 pub async fn run_data_subscription(
     connection: &Connection,
     db: &Arc<Mutex<Db>>,
-    stream_id: Uuid,
+    stream_id: &str,
     mode: SubscribeMode,
 ) -> Result<SessionOutcome, P2pSessionError> {
     let after_seq = { db.lock().await.load_stream_cursor(stream_id)? };
@@ -501,7 +504,7 @@ async fn run_once(
     params: &SessionParams,
 ) -> Result<SessionOutcome, P2pSessionError> {
     let session = connect_and_hello(endpoint, forwarder_addr, params.client_hello.clone()).await?;
-    run_data_subscription(&session.connection, db, params.stream_id, params.mode).await
+    run_data_subscription(&session.connection, db, &params.stream_id, params.mode).await
 }
 
 /// Run a reconnecting single-stream session: dial + hello + data subscription,
@@ -574,24 +577,25 @@ mod tests {
     use rt_test_utils::p2p::{ConnectivityFault, ForwarderScript, MockForwarderPeer};
     use rt_test_utils::poll_until;
 
-    const STREAM_UUID: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    // A real forwarder P2P stream_id is an arbitrary UTF-8 journal key such as
+    // `ip:port`, not a parseable UUID. The session must subscribe to it as a
+    // plain string and validate wire bytes against its UTF-8 bytes.
+    const STREAM_ID: &str = "127.0.0.1:10000";
+    const OTHER_STREAM_ID: &str = "127.0.0.1:10001";
     const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-    fn stream_uuid() -> Uuid {
-        Uuid::parse_str(STREAM_UUID).unwrap()
+    fn stream_id() -> &'static str {
+        STREAM_ID
     }
 
     fn sid_bytes() -> Vec<u8> {
-        stream_uuid().as_bytes().to_vec()
+        STREAM_ID.as_bytes().to_vec()
     }
 
     /// A `stream_id` for a *different* stream than the one the session
     /// subscribes to, used to exercise stream-id validation.
     fn other_sid_bytes() -> Vec<u8> {
-        Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
-            .unwrap()
-            .as_bytes()
-            .to_vec()
+        OTHER_STREAM_ID.as_bytes().to_vec()
     }
 
     fn test_db() -> Arc<Mutex<Db>> {
@@ -663,7 +667,7 @@ mod tests {
     #[tokio::test]
     async fn ack_after_durable_only() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             // Seq 3 is missing, so the contiguous cursor must stop at 2 even
             // though seq 4 was received and stored.
@@ -715,7 +719,7 @@ mod tests {
     #[tokio::test]
     async fn gap_notice_jumps_cursor() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             script.gap_notice = Some(GapNotice {
                 stream_id: sid_bytes(),
@@ -755,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_resumes_from_cursor() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             script.batches = vec![batch(&[1, 2])];
             script.caught_up_through = Some(2);
@@ -810,7 +814,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_seq_deduped() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             // Duplicate seqs within a single batch.
             script.batches = vec![batch(&[1, 1, 2, 2, 3])];
@@ -887,7 +891,7 @@ mod tests {
             .unwrap();
         let (_tx, shutdown_rx) = watch::channel(true);
         let params = SessionParams {
-            stream_id: stream_uuid(),
+            stream_id: stream_id().to_owned(),
             client_hello: test_hello(0),
             mode: SubscribeMode::Replay,
             backoff: BackoffConfig::default(),
@@ -923,7 +927,7 @@ mod tests {
     #[tokio::test]
     async fn mismatched_event_stream_id_rejected() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             // A record claiming a different stream than the subscription.
             script.batches = vec![EventBatch {
@@ -965,7 +969,7 @@ mod tests {
     #[tokio::test]
     async fn mismatched_gap_stream_id_rejected() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             script.gap_notice = Some(GapNotice {
                 stream_id: other_sid_bytes(),
@@ -1005,7 +1009,7 @@ mod tests {
     #[tokio::test]
     async fn mismatched_subscribe_ok_stream_id_rejected() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             script.subscribe_ok.stream_id = other_sid_bytes();
             // Keep the forwarder blocked awaiting an ack so the SubscribeOk frame
@@ -1037,7 +1041,7 @@ mod tests {
     #[tokio::test]
     async fn conflicting_duplicate_seq_rejected() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             // Same seq, divergent immutable payload within one batch: the second
             // record is a conflicting duplicate of the first.
@@ -1076,7 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn benign_duplicate_seq_not_rejected() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             // Identical payloads under the same seq are a benign retransmit and
             // must collapse to one row without error.
@@ -1111,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_seq_with_different_received_unix_ms_rejected() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             script.batches = vec![EventBatch {
                 records: vec![
@@ -1150,7 +1154,7 @@ mod tests {
     #[tokio::test]
     async fn over_i64_seq_rejected_without_persist_or_ack() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             script.batches = vec![EventBatch {
                 records: vec![ReadRecord {
@@ -1196,7 +1200,7 @@ mod tests {
     #[tokio::test]
     async fn over_i64_gap_rejected_without_marker_or_ack() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             script.gap_notice = Some(GapNotice {
                 stream_id: sid_bytes(),
@@ -1249,7 +1253,7 @@ mod tests {
         let (tx, shutdown_rx) = watch::channel(false);
         drop(tx);
         let params = SessionParams {
-            stream_id: stream_uuid(),
+            stream_id: stream_id().to_owned(),
             client_hello: test_hello(0),
             mode: SubscribeMode::Replay,
             backoff: BackoffConfig {
@@ -1275,7 +1279,7 @@ mod tests {
     #[tokio::test]
     async fn disconnect_before_subscribe_ok_reports_pre_open() {
         tokio::time::timeout(TEST_TIMEOUT, async {
-            let stream_id = stream_uuid();
+            let stream_id = stream_id();
             let mut script = base_script();
             // Partition the data plane so the forwarder closes before SubscribeOk.
             script.data_fault = ConnectivityFault::partitioned();
@@ -1321,7 +1325,7 @@ mod tests {
             let db = test_db();
             let (_tx, shutdown_rx) = watch::channel(false);
             let params = SessionParams {
-                stream_id: stream_uuid(),
+                stream_id: stream_id().to_owned(),
                 client_hello: test_hello(0),
                 mode: SubscribeMode::Replay,
                 backoff: BackoffConfig {
@@ -1362,14 +1366,14 @@ mod tests {
         assert!(!P2pSessionError::UnexpectedMessage { plane: "data" }.is_retryable());
         assert!(
             !P2pSessionError::StreamIdMismatch {
-                expected: stream_uuid(),
+                expected: stream_id().to_owned(),
                 actual: other_sid_bytes(),
             }
             .is_retryable()
         );
         assert!(
             !P2pSessionError::ConflictingDuplicate {
-                stream_id: stream_uuid(),
+                stream_id: stream_id().to_owned(),
                 seq: 1,
             }
             .is_retryable()

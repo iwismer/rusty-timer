@@ -21,7 +21,6 @@ use rt_protocol::ReadEvent;
 use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::db::{Db, DbError, EventType, ReceivedEvent};
-use uuid::Uuid;
 
 /// Reasons why a raw frame cannot be mapped to a [`DbfRecord`].
 #[derive(Debug)]
@@ -478,7 +477,7 @@ fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
 
 fn mark_dbf_delivered_or_confirm(
     db: &Db,
-    stream_id: Uuid,
+    stream_id: &str,
     seq: i64,
     delivered_unix_ms: i64,
 ) -> Result<bool, DbError> {
@@ -519,7 +518,7 @@ fn mark_dbf_delivered_or_confirm(
 ///   receiver receipt time (`received_unix_ms`).
 pub fn deliver_durable_events_to_dbf(
     db: &Db,
-    stream_id: Uuid,
+    stream_id: &str,
     path: &Path,
     event_type: EventType,
     reader_index: u8,
@@ -564,7 +563,7 @@ pub fn deliver_durable_events_to_dbf(
 /// written.
 pub fn regenerate_dbf_from_received_events(
     db: &Db,
-    stream_id: Uuid,
+    stream_id: &str,
     path: &Path,
     event_type: EventType,
     reader_index: u8,
@@ -736,13 +735,12 @@ mod tests {
     use super::*;
     use crate::db::{Db, ReceivedEventInsert};
     use dbase::FieldValue;
-    use uuid::Uuid;
 
     fn sample_raw_frame() -> Vec<u8> {
         b"aa400000000123450a2a01123018455927a7".to_vec()
     }
 
-    fn insert_durable_event(db: &Db, stream_id: Uuid, seq: i64, raw: &[u8], received_unix_ms: i64) {
+    fn insert_durable_event(db: &Db, stream_id: &str, seq: i64, raw: &[u8], received_unix_ms: i64) {
         db.insert_received_event(&ReceivedEventInsert {
             stream_id,
             seq,
@@ -773,7 +771,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dbf_path = dir.path().join("out.dbf");
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let stream_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
         let raw = sample_raw_frame();
         insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
         insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
@@ -823,7 +821,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dbf_path = dir.path().join("out.dbf");
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("dddddddd-dddd-dddd-dddd-dddddddddddd").unwrap();
+        let stream_id = "127.0.0.1:10000";
         let raw = sample_raw_frame();
         insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
 
@@ -870,7 +868,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dbf_path = dir.path().join("out.dbf");
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee").unwrap();
+        let stream_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
         let raw = sample_raw_frame();
         insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
         let written = deliver_durable_events_to_dbf(
@@ -917,7 +915,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dbf_path = dir.path().join("out.dbf");
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let stream_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
         // received_unix_ms is the receiver receipt time; it must NOT influence the
         // DBF TIME/DAYCODE fields. Those come from the reader timestamp carried in
         // the frame (18:45:59.39 on day 01/12/30).
@@ -948,7 +946,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dbf_path = dir.path().join("out.dbf");
         let db = Db::open_in_memory().unwrap();
-        let stream_id = Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap();
+        let stream_id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         let raw = sample_raw_frame();
         insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
         insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
