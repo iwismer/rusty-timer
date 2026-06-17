@@ -4,6 +4,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
+use uuid::Uuid;
 const SCHEMA_SQL: &str = include_str!("storage/schema.sql");
 pub const DEFAULT_UPDATE_MODE: &str = "check-and-download";
 
@@ -101,6 +102,58 @@ pub struct CursorRecord {
     pub stream_epoch: i64,
     pub last_seq: i64,
 }
+
+/// New P2P event payload to persist. `stream_id` is stored as canonical UUID TEXT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceivedEventInsert<'a> {
+    pub stream_id: Uuid,
+    pub seq: i64,
+    pub epoch: i64,
+    pub raw_frame: &'a [u8],
+    pub read_kind: &'a str,
+    pub reader_timestamp: Option<&'a str>,
+    pub received_unix_ms: i64,
+    pub dbf_delivered_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedEvent {
+    pub stream_id: Uuid,
+    pub seq: i64,
+    pub epoch: i64,
+    pub raw_frame: Vec<u8>,
+    pub read_kind: String,
+    pub reader_timestamp: Option<String>,
+    pub received_unix_ms: i64,
+    pub dbf_delivered_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapMarkerInsert<'a> {
+    pub stream_id: Uuid,
+    pub requested_after_seq: i64,
+    pub earliest_available_seq: i64,
+    pub latest_available_seq: i64,
+    pub reason: &'a str,
+    pub created_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GapMarker {
+    pub stream_id: Uuid,
+    pub requested_after_seq: i64,
+    pub earliest_available_seq: i64,
+    pub latest_available_seq: i64,
+    pub reason: String,
+    pub created_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnouncerGenerationAcceptance {
+    Current { generation: i64 },
+    Stale { current: i64, attempted: i64 },
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -231,7 +284,14 @@ impl Db {
         Ok(())
     }
     pub fn load_subscriptions(&self) -> DbResult<Vec<Subscription>> {
-        let mut s = self.conn.prepare("SELECT forwarder_id, reader_ip, local_port_override, event_type FROM subscriptions ORDER BY forwarder_id, reader_ip")?;
+        let mut s = self.conn.prepare(
+            "SELECT COALESCE(forwarder_id, forwarder_endpoint_id),
+                    COALESCE(reader_ip, stream_id),
+                    local_port_override,
+                    event_type
+             FROM subscriptions
+             ORDER BY COALESCE(forwarder_id, forwarder_endpoint_id), COALESCE(reader_ip, stream_id)",
+        )?;
         let rows = s.query_map([], |r| {
             Ok(Subscription {
                 forwarder_id: r.get(0)?,
@@ -263,7 +323,9 @@ impl Db {
         event_type: Option<EventType>,
     ) -> DbResult<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO subscriptions
+             (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
+             VALUES (?1, ?2, ?3, ?4, ?1, ?2)",
             rusqlite::params![fwd, ip, port.map(|p| p as i64), event_type.unwrap_or(EventType::Finish).as_str()],
         )?;
         Ok(())
@@ -273,7 +335,9 @@ impl Db {
         tx.execute_batch("DELETE FROM subscriptions")?;
         for s in subs {
             tx.execute(
-                "INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO subscriptions
+                 (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
+                 VALUES (?1, ?2, ?3, ?4, ?1, ?2)",
                 rusqlite::params![&s.forwarder_id, &s.reader_ip, s.local_port_override.map(|p| p as i64), s.event_type.as_str()],
             )?;
         }
@@ -293,7 +357,12 @@ impl Db {
             .collect())
     }
     pub fn load_cursors(&self) -> DbResult<Vec<CursorRecord>> {
-        let mut s = self.conn.prepare("SELECT forwarder_id, reader_ip, stream_epoch, acked_through_seq FROM cursors ORDER BY forwarder_id, reader_ip")?;
+        let mut s = self.conn.prepare(
+            "SELECT forwarder_id, reader_ip, COALESCE(stream_epoch, 0), last_seq
+             FROM cursors
+             WHERE forwarder_id IS NOT NULL AND reader_ip IS NOT NULL
+             ORDER BY forwarder_id, reader_ip",
+        )?;
         let rows = s.query_map([], |r| {
             Ok(CursorRecord {
                 forwarder_id: r.get(0)?,
@@ -305,25 +374,363 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn save_cursor(&self, fwd: &str, ip: &str, epoch: i64, seq: i64) -> DbResult<()> {
-        self.conn.execute(
-            "INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (forwarder_id, reader_ip) DO UPDATE SET
-                 stream_epoch = ?3,
-                 acked_through_seq = ?4
-             WHERE excluded.stream_epoch > cursors.stream_epoch
-                OR (excluded.stream_epoch = cursors.stream_epoch AND excluded.acked_through_seq > cursors.acked_through_seq)",
-            rusqlite::params![fwd, ip, epoch, seq],
-        )?;
+        let stream_id = legacy_cursor_stream_id(fwd, ip);
+        let existing: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(stream_epoch, 0), last_seq
+                 FROM cursors
+                 WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)
+                 LIMIT 1",
+                rusqlite::params![&stream_id, fwd, ip],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+
+        match existing {
+            Some((stored_epoch, stored_seq))
+                if epoch > stored_epoch || (epoch == stored_epoch && seq > stored_seq) =>
+            {
+                self.conn.execute(
+                    "UPDATE cursors
+                     SET stream_id = ?1, last_seq = ?5, forwarder_id = ?2, reader_ip = ?3, stream_epoch = ?4
+                     WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)",
+                    rusqlite::params![stream_id, fwd, ip, epoch, seq],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO cursors (stream_id, last_seq, forwarder_id, reader_ip, stream_epoch)
+                     VALUES (?1, ?5, ?2, ?3, ?4)",
+                    rusqlite::params![stream_id, fwd, ip, epoch, seq],
+                )?;
+            }
+            Some(_) => {}
+        }
         Ok(())
     }
     pub fn delete_cursor(&self, fwd: &str, ip: &str) -> DbResult<()> {
+        let stream_id = legacy_cursor_stream_id(fwd, ip);
         self.conn.execute(
-            "DELETE FROM cursors WHERE forwarder_id = ?1 AND reader_ip = ?2",
-            rusqlite::params![fwd, ip],
+            "DELETE FROM cursors WHERE stream_id = ?1 OR (forwarder_id = ?2 AND reader_ip = ?3)",
+            rusqlite::params![stream_id, fwd, ip],
         )?;
         Ok(())
     }
+
+    pub fn insert_received_event(&self, event: &ReceivedEventInsert<'_>) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO received_events
+             (stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (stream_id, seq) DO NOTHING",
+            rusqlite::params![
+                event.stream_id.to_string(),
+                event.seq,
+                event.epoch,
+                event.raw_frame,
+                event.read_kind,
+                event.reader_timestamp,
+                event.received_unix_ms,
+                event.dbf_delivered_unix_ms,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn load_received_events(&self, stream_id: Uuid) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1
+             ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string()],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_received_events_after(
+        &self,
+        stream_id: Uuid,
+        after_seq: i64,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND seq > ?2
+             ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string(), after_seq],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Load every durable event for `stream_id` that has not yet been written to
+    /// the DBF file (`dbf_delivered_unix_ms IS NULL`), ordered by `seq`.
+    ///
+    /// This is the source for the idempotent DBF feed: once an event is marked
+    /// delivered via [`Db::mark_dbf_delivered`], it is no longer returned here, so
+    /// replay/re-run never re-emits an already-written `(stream_id, seq)`.
+    pub fn load_undelivered_received_events(
+        &self,
+        stream_id: Uuid,
+    ) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND dbf_delivered_unix_ms IS NULL
+             ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string()],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a single durable event as written to the DBF file. Only updates rows
+    /// whose marker is still NULL, so this is safe to call repeatedly without
+    /// overwriting an earlier delivery timestamp. Returns whether a row changed.
+    pub fn mark_dbf_delivered(
+        &self,
+        stream_id: Uuid,
+        seq: i64,
+        delivered_unix_ms: i64,
+    ) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "UPDATE received_events
+             SET dbf_delivered_unix_ms = ?3
+             WHERE stream_id = ?1 AND seq = ?2 AND dbf_delivered_unix_ms IS NULL",
+            rusqlite::params![stream_id.to_string(), seq, delivered_unix_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Clear the DBF delivery markers for every event of `stream_id`, returning
+    /// the number of rows reset. Used when regenerating the DBF file from the
+    /// durable store so all events are re-delivered on the next feed run.
+    pub fn reset_dbf_delivered(&self, stream_id: Uuid) -> DbResult<usize> {
+        let count = self.conn.execute(
+            "UPDATE received_events SET dbf_delivered_unix_ms = NULL WHERE stream_id = ?1",
+            rusqlite::params![stream_id.to_string()],
+        )?;
+        Ok(count)
+    }
+
+    /// Load every durable event for `stream_id` that has not yet been pushed to
+    /// the announcer (`announcer_pushed_unix_ms IS NULL`), ordered by the
+    /// announcer ordering key `received_unix_ms` (with `seq` as a stable
+    /// tie-breaker).
+    ///
+    /// This is the source for the idempotent announcer push: once an event is
+    /// marked pushed via [`Db::mark_announcer_pushed`], it is no longer returned
+    /// here, so a repush never re-emits an already-sent `(stream_id, seq)`.
+    pub fn load_unpushed_announcer_events(&self, stream_id: Uuid) -> DbResult<Vec<ReceivedEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+             FROM received_events
+             WHERE stream_id = ?1 AND announcer_pushed_unix_ms IS NULL
+             ORDER BY received_unix_ms, seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![stream_id.to_string()],
+            received_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Mark a single durable event as pushed to the announcer. Only updates rows
+    /// whose marker is still NULL, so this is safe to call repeatedly without
+    /// overwriting an earlier push timestamp. Returns whether a row changed.
+    pub fn mark_announcer_pushed(
+        &self,
+        stream_id: Uuid,
+        seq: i64,
+        pushed_unix_ms: i64,
+    ) -> DbResult<bool> {
+        let changed = self.conn.execute(
+            "UPDATE received_events
+             SET announcer_pushed_unix_ms = ?3
+             WHERE stream_id = ?1 AND seq = ?2 AND announcer_pushed_unix_ms IS NULL",
+            rusqlite::params![stream_id.to_string(), seq, pushed_unix_ms],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Return the highest announcer source generation accepted for `stream_id`,
+    /// or `None` if no generation has been fenced yet.
+    pub fn load_announcer_fence(&self, stream_id: Uuid) -> DbResult<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT generation FROM announcer_source_fence WHERE stream_id = ?1",
+                rusqlite::params![stream_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Atomically accept `generation` as current for `stream_id`, or report it
+    /// stale when a higher generation has already been accepted.
+    ///
+    /// The stored value only ever moves forward. Equal generations are current
+    /// and accepted for idempotent retries; lower generations are observable as
+    /// stale so callers can avoid sending rows for an outdated source.
+    pub fn accept_announcer_generation(
+        &self,
+        stream_id: Uuid,
+        generation: i64,
+    ) -> DbResult<AnnouncerGenerationAcceptance> {
+        let changed = self.conn.execute(
+            "INSERT INTO announcer_source_fence (stream_id, generation)
+             VALUES (?1, ?2)
+             ON CONFLICT (stream_id) DO UPDATE SET generation = excluded.generation
+             WHERE excluded.generation >= announcer_source_fence.generation",
+            rusqlite::params![stream_id.to_string(), generation],
+        )?;
+        if changed > 0 {
+            return Ok(AnnouncerGenerationAcceptance::Current { generation });
+        }
+
+        let current = self.load_announcer_fence(stream_id)?.unwrap_or(generation);
+        Ok(AnnouncerGenerationAcceptance::Stale {
+            current,
+            attempted: generation,
+        })
+    }
+
+    pub fn load_received_event(
+        &self,
+        stream_id: Uuid,
+        seq: i64,
+    ) -> DbResult<Option<ReceivedEvent>> {
+        self.conn
+            .query_row(
+                "SELECT stream_id, seq, epoch, raw_frame, read_kind, reader_timestamp, received_unix_ms, dbf_delivered_unix_ms
+                 FROM received_events
+                 WHERE stream_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id.to_string(), seq],
+                received_event_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Read the current durable cursor (`last_seq`) for a P2P stream, or 0 when
+    /// no cursor row exists yet. The cursor is the highest contiguous seq that
+    /// has been durably stored and acknowledged for `stream_id`; it is the
+    /// `after_seq` a resuming `DataSubscribe` must request.
+    pub fn load_stream_cursor(&self, stream_id: Uuid) -> DbResult<i64> {
+        let last_seq: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT last_seq FROM cursors WHERE stream_id = ?1",
+                rusqlite::params![stream_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(last_seq.unwrap_or(0))
+    }
+
+    /// Jump the durable cursor for `stream_id` forward to `last_seq`, used when a
+    /// `GapNotice` makes earlier seqs permanently unavailable (jump target is
+    /// `earliest_available_seq - 1`). The cursor only ever moves forward: a jump
+    /// target at or below the current cursor is ignored so a late or duplicate
+    /// gap notice cannot regress progress.
+    pub fn jump_stream_cursor(&self, stream_id: Uuid, last_seq: i64) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)
+             ON CONFLICT (stream_id) DO UPDATE SET last_seq = excluded.last_seq
+             WHERE excluded.last_seq > cursors.last_seq",
+            rusqlite::params![stream_id.to_string(), last_seq],
+        )?;
+        Ok(())
+    }
+
+    pub fn advance_cursor_contiguous_prefix(&self, stream_id: Uuid) -> DbResult<i64> {
+        let stream_id = stream_id.to_string();
+        let current: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT last_seq FROM cursors WHERE stream_id = ?1",
+                rusqlite::params![&stream_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut last_seq = current.unwrap_or(0);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT seq FROM received_events WHERE stream_id = ?1 AND seq > ?2 ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![&stream_id, last_seq], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        for row in rows {
+            let seq = row?;
+            if seq == last_seq + 1 {
+                last_seq = seq;
+            } else if seq > last_seq + 1 {
+                break;
+            }
+        }
+
+        let updated = self.conn.execute(
+            "UPDATE cursors SET last_seq = ?2 WHERE stream_id = ?1 AND last_seq < ?2",
+            rusqlite::params![&stream_id, last_seq],
+        )?;
+        if updated == 0 && current.is_none() {
+            self.conn.execute(
+                "INSERT INTO cursors (stream_id, last_seq) VALUES (?1, ?2)",
+                rusqlite::params![stream_id, last_seq],
+            )?;
+        }
+        Ok(last_seq)
+    }
+
+    pub fn save_gap_marker(&self, marker: &GapMarkerInsert<'_>) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT INTO gap_markers
+             (stream_id, requested_after_seq, earliest_available_seq, latest_available_seq, reason, created_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                marker.stream_id.to_string(),
+                marker.requested_after_seq,
+                marker.earliest_available_seq,
+                marker.latest_available_seq,
+                marker.reason,
+                marker.created_unix_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_gap_markers(&self, stream_id: Uuid) -> DbResult<Vec<GapMarker>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stream_id, requested_after_seq, earliest_available_seq, latest_available_seq, reason, created_unix_ms
+             FROM gap_markers
+             WHERE stream_id = ?1
+             ORDER BY created_unix_ms, id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![stream_id.to_string()], |r| {
+            let raw_stream_id = r.get::<_, String>(0)?;
+            let parsed_stream_id = parse_uuid_column(raw_stream_id, 0)?;
+            Ok(GapMarker {
+                stream_id: parsed_stream_id,
+                requested_after_seq: r.get(1)?,
+                earliest_available_seq: r.get(2)?,
+                latest_available_seq: r.get(3)?,
+                reason: r.get(4)?,
+                created_unix_ms: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     fn apply_pragmas(&self) -> DbResult<()> {
         self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000; PRAGMA foreign_keys=ON;")?;
         Ok(())
@@ -361,6 +768,63 @@ impl Db {
             "ALTER TABLE subscriptions ADD COLUMN event_type TEXT NOT NULL DEFAULT 'finish';",
             "event_type",
         )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE subscriptions ADD COLUMN forwarder_endpoint_id TEXT NOT NULL DEFAULT '';",
+            "forwarder_endpoint_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE subscriptions ADD COLUMN stream_id TEXT NOT NULL DEFAULT '';",
+            "stream_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE subscriptions ADD COLUMN local_port_override INTEGER;",
+            "local_port_override",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE subscriptions ADD COLUMN forwarder_id TEXT;",
+            "forwarder_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE subscriptions ADD COLUMN reader_ip TEXT;",
+            "reader_ip",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE cursors ADD COLUMN stream_id TEXT;",
+            "stream_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE cursors ADD COLUMN last_seq BIGINT NOT NULL DEFAULT 0;",
+            "last_seq",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE cursors ADD COLUMN forwarder_id TEXT;",
+            "forwarder_id",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE cursors ADD COLUMN reader_ip TEXT;",
+            "reader_ip",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE cursors ADD COLUMN stream_epoch BIGINT;",
+            "stream_epoch",
+        )?;
+        apply_add_column_migration(
+            &self.conn,
+            "ALTER TABLE received_events ADD COLUMN announcer_pushed_unix_ms BIGINT;",
+            "announcer_pushed_unix_ms",
+        )?;
+        migrate_subscriptions_to_endpoint_stream_shape(&self.conn)?;
+        migrate_cursors_to_stream_id_shape(&self.conn)?;
         Ok(())
     }
 
@@ -381,7 +845,10 @@ impl Db {
         port: Option<u16>,
     ) -> DbResult<bool> {
         let count = self.conn.execute(
-            "UPDATE subscriptions SET local_port_override = ?1 WHERE forwarder_id = ?2 AND reader_ip = ?3",
+            "UPDATE subscriptions
+             SET local_port_override = ?1
+             WHERE (forwarder_endpoint_id = ?2 AND stream_id = ?3)
+                OR (forwarder_id = ?2 AND reader_ip = ?3)",
             rusqlite::params![port.map(|p| p as i64), fwd, ip],
         )?;
         Ok(count > 0)
@@ -404,6 +871,9 @@ impl Db {
     pub fn clear_data(&mut self) -> DbResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
+        tx.execute_batch("DELETE FROM received_events")?;
+        tx.execute_batch("DELETE FROM announcer_source_fence")?;
+        tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
         tx.execute(
@@ -417,6 +887,9 @@ impl Db {
     pub fn factory_reset(&mut self) -> DbResult<()> {
         let tx = self.conn.transaction()?;
         tx.execute_batch("DELETE FROM cursors")?;
+        tx.execute_batch("DELETE FROM received_events")?;
+        tx.execute_batch("DELETE FROM announcer_source_fence")?;
+        tx.execute_batch("DELETE FROM gap_markers")?;
         tx.execute_batch("DELETE FROM earliest_epochs")?;
         tx.execute_batch("DELETE FROM subscriptions")?;
         tx.execute_batch("DELETE FROM profile")?;
@@ -473,7 +946,10 @@ impl Db {
         event_type: EventType,
     ) -> DbResult<bool> {
         let count = self.conn.execute(
-            "UPDATE subscriptions SET event_type = ?1 WHERE forwarder_id = ?2 AND reader_ip = ?3",
+            "UPDATE subscriptions
+             SET event_type = ?1
+             WHERE (forwarder_endpoint_id = ?2 AND stream_id = ?3)
+                OR (forwarder_id = ?2 AND reader_ip = ?3)",
             rusqlite::params![event_type.as_str(), fwd, ip],
         )?;
         Ok(count > 0)
@@ -491,11 +967,13 @@ impl Db {
                         (
                             SELECT COUNT(*)
                             FROM subscriptions s2
-                            WHERE s2.forwarder_id < s1.forwarder_id
-                               OR (s2.forwarder_id = s1.forwarder_id AND s2.reader_ip < s1.reader_ip)
+                            WHERE COALESCE(s2.forwarder_id, s2.forwarder_endpoint_id) < COALESCE(s1.forwarder_id, s1.forwarder_endpoint_id)
+                               OR (COALESCE(s2.forwarder_id, s2.forwarder_endpoint_id) = COALESCE(s1.forwarder_id, s1.forwarder_endpoint_id)
+                                   AND COALESCE(s2.reader_ip, s2.stream_id) < COALESCE(s1.reader_ip, s1.stream_id))
                         ) AS subscription_index
                  FROM subscriptions s1
-                 WHERE s1.forwarder_id = ?1 AND s1.reader_ip = ?2",
+                 WHERE (s1.forwarder_endpoint_id = ?1 AND s1.stream_id = ?2)
+                    OR (s1.forwarder_id = ?1 AND s1.reader_ip = ?2)",
                 rusqlite::params![fwd, ip],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -533,6 +1011,38 @@ impl Db {
     }
 }
 
+/// Deterministic stream_id used for legacy cursor rows keyed only by
+/// `(forwarder_id, reader_ip)`. Unit Separator avoids ambiguity between the
+/// two user-provided strings while keeping the value human-readable in SQLite.
+fn legacy_cursor_stream_id(fwd: &str, ip: &str) -> String {
+    format!("legacy:{fwd}\u{1f}{ip}")
+}
+
+fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(&value).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })
+}
+
+fn received_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceivedEvent> {
+    let raw_stream_id = row.get::<_, String>(0)?;
+    let parsed_stream_id = parse_uuid_column(raw_stream_id, 0)?;
+    Ok(ReceivedEvent {
+        stream_id: parsed_stream_id,
+        seq: row.get(1)?,
+        epoch: row.get(2)?,
+        raw_frame: row.get(3)?,
+        read_kind: row.get(4)?,
+        reader_timestamp: row.get(5)?,
+        received_unix_ms: row.get(6)?,
+        dbf_delivered_unix_ms: row.get(7)?,
+    })
+}
+
 fn apply_add_column_migration(conn: &Connection, sql: &str, column_name: &str) -> DbResult<()> {
     match conn.execute_batch(sql) {
         Ok(()) => Ok(()),
@@ -543,6 +1053,121 @@ fn apply_add_column_migration(conn: &Connection, sql: &str, column_name: &str) -
         }
         Err(e) => Err(e.into()),
     }
+}
+
+fn migrate_subscriptions_to_endpoint_stream_shape(conn: &Connection) -> DbResult<()> {
+    let columns = load_table_columns(conn, "subscriptions")?;
+    if has_column_pk_notnull(&columns, "forwarder_endpoint_id", 1, true)
+        && has_column_pk_notnull(&columns, "stream_id", 2, true)
+        && !legacy_column_has_pk_or_notnull(&columns, "forwarder_id")
+        && !legacy_column_has_pk_or_notnull(&columns, "reader_ip")
+    {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "SAVEPOINT migrate_subscriptions_to_v2;
+         CREATE TABLE subscriptions_v2 (
+             forwarder_endpoint_id TEXT NOT NULL,
+             stream_id             TEXT NOT NULL,
+             local_port_override   INTEGER,
+             event_type            TEXT NOT NULL DEFAULT 'finish',
+             forwarder_id          TEXT,
+             reader_ip             TEXT,
+             PRIMARY KEY (forwarder_endpoint_id, stream_id)
+         );
+         INSERT OR REPLACE INTO subscriptions_v2
+             (forwarder_endpoint_id, stream_id, local_port_override, event_type, forwarder_id, reader_ip)
+         SELECT
+             COALESCE(NULLIF(forwarder_endpoint_id, ''), forwarder_id),
+             COALESCE(NULLIF(stream_id, ''), reader_ip),
+             local_port_override,
+             COALESCE(event_type, 'finish'),
+             forwarder_id,
+             reader_ip
+         FROM subscriptions;
+         DROP TABLE subscriptions;
+         ALTER TABLE subscriptions_v2 RENAME TO subscriptions;
+         RELEASE migrate_subscriptions_to_v2;",
+    )?;
+    Ok(())
+}
+
+fn migrate_cursors_to_stream_id_shape(conn: &Connection) -> DbResult<()> {
+    let columns = load_table_columns(conn, "cursors")?;
+    if has_column_pk_notnull(&columns, "stream_id", 1, false)
+        && has_column_notnull(&columns, "last_seq", true)
+        && !legacy_column_has_pk_or_notnull(&columns, "forwarder_id")
+        && !legacy_column_has_pk_or_notnull(&columns, "reader_ip")
+    {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "SAVEPOINT migrate_cursors_to_v2;
+         CREATE TABLE cursors_v2 (
+             stream_id    TEXT PRIMARY KEY,
+             last_seq     BIGINT NOT NULL,
+             forwarder_id TEXT,
+             reader_ip    TEXT,
+             stream_epoch BIGINT
+         );
+         INSERT OR REPLACE INTO cursors_v2
+             (stream_id, last_seq, forwarder_id, reader_ip, stream_epoch)
+         SELECT
+             COALESCE(NULLIF(stream_id, ''), 'legacy:' || forwarder_id || char(31) || reader_ip),
+             acked_through_seq,
+             forwarder_id,
+             reader_ip,
+             stream_epoch
+         FROM cursors;
+         DROP TABLE cursors;
+         ALTER TABLE cursors_v2 RENAME TO cursors;
+         RELEASE migrate_cursors_to_v2;",
+    )?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct TableColumn {
+    name: String,
+    notnull: bool,
+    pk: i64,
+}
+
+fn load_table_columns(conn: &Connection, table: &str) -> DbResult<Vec<TableColumn>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TableColumn {
+            name: row.get(1)?,
+            notnull: row.get::<_, i64>(3)? != 0,
+            pk: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn has_column_pk_notnull(
+    columns: &[TableColumn],
+    column_name: &str,
+    expected_pk: i64,
+    expected_notnull: bool,
+) -> bool {
+    columns.iter().any(|column| {
+        column.name == column_name && column.pk == expected_pk && column.notnull == expected_notnull
+    })
+}
+
+fn has_column_notnull(columns: &[TableColumn], column_name: &str, expected_notnull: bool) -> bool {
+    columns
+        .iter()
+        .any(|column| column.name == column_name && column.notnull == expected_notnull)
+}
+
+fn legacy_column_has_pk_or_notnull(columns: &[TableColumn], column_name: &str) -> bool {
+    columns
+        .iter()
+        .any(|column| column.name == column_name && (column.pk != 0 || column.notnull))
 }
 
 fn is_duplicate_column_error(message: &str, column_name: &str) -> bool {
@@ -936,6 +1561,33 @@ mod tests {
     }
 
     #[test]
+    fn announcer_generation_acceptance_reports_current_and_stale() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 3).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 3 }
+        );
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 5).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 5 }
+        );
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 5).unwrap(),
+            AnnouncerGenerationAcceptance::Current { generation: 5 }
+        );
+        assert_eq!(
+            db.accept_announcer_generation(stream_id, 4).unwrap(),
+            AnnouncerGenerationAcceptance::Stale {
+                current: 5,
+                attempted: 4
+            }
+        );
+        assert_eq!(db.load_announcer_fence(stream_id).unwrap(), Some(5));
+    }
+
+    #[test]
     fn dbf_config_defaults_and_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut db = Db::open(dir.path().join("test.db").as_path()).unwrap();
@@ -980,6 +1632,117 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_cursors_to_stream_id_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE cursors (
+                    forwarder_id TEXT NOT NULL,
+                    reader_ip TEXT NOT NULL,
+                    stream_epoch BIGINT NOT NULL,
+                    acked_through_seq BIGINT NOT NULL,
+                    PRIMARY KEY (forwarder_id, reader_ip)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cursors (forwarder_id, reader_ip, stream_epoch, acked_through_seq)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["fwd-1", "10.0.0.1:10000", 7i64, 42i64],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+
+        let columns = table_info(&db.conn, "cursors");
+        assert_eq!(columns.get("stream_id"), Some(&(1, 0)));
+        assert_eq!(columns.get("last_seq"), Some(&(0, 1)));
+        assert_eq!(columns.get("forwarder_id"), Some(&(0, 0)));
+        assert_eq!(columns.get("reader_ip"), Some(&(0, 0)));
+
+        let rows = db.load_cursors().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].forwarder_id, "fwd-1");
+        assert_eq!(rows[0].reader_ip, "10.0.0.1:10000");
+        assert_eq!(rows[0].stream_epoch, 7);
+        assert_eq!(rows[0].last_seq, 42);
+
+        let stream_id = uuid::Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn migrates_legacy_subscriptions_to_endpoint_stream_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE subscriptions (
+                    forwarder_id TEXT NOT NULL,
+                    reader_ip TEXT NOT NULL,
+                    local_port_override INTEGER,
+                    event_type TEXT NOT NULL DEFAULT 'finish',
+                    PRIMARY KEY (forwarder_id, reader_ip)
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO subscriptions (forwarder_id, reader_ip, local_port_override, event_type)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["fwd-1", "10.0.0.1:10000", 10001i64, "start"],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+
+        let columns = table_info(&db.conn, "subscriptions");
+        assert_eq!(columns.get("forwarder_endpoint_id"), Some(&(1, 1)));
+        assert_eq!(columns.get("stream_id"), Some(&(2, 1)));
+        assert_eq!(columns.get("forwarder_id"), Some(&(0, 0)));
+        assert_eq!(columns.get("reader_ip"), Some(&(0, 0)));
+
+        let subs = db.load_subscriptions().unwrap();
+        assert_eq!(
+            subs,
+            vec![Subscription {
+                forwarder_id: "fwd-1".to_owned(),
+                reader_ip: "10.0.0.1:10000".to_owned(),
+                local_port_override: Some(10001),
+                event_type: EventType::Start,
+            }]
+        );
+
+        db.conn
+            .execute(
+                "INSERT INTO subscriptions (forwarder_endpoint_id, stream_id, event_type)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params!["fwd-2", "10.0.0.2:10000", "finish"],
+            )
+            .unwrap();
+        assert_eq!(db.load_subscriptions().unwrap().len(), 2);
+    }
+
+    fn table_info(conn: &Connection, table: &str) -> std::collections::HashMap<String, (i64, i64)> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    (row.get::<_, i64>(5)?, row.get::<_, i64>(3)?),
+                ))
+            })
+            .unwrap();
+        rows.collect::<Result<_, _>>().unwrap()
+    }
+
+    #[test]
     fn load_subscription_dbf_details_returns_latest_index_and_event_type() {
         let db = Db::open_in_memory().unwrap();
         db.save_subscription("fwd2", "10.0.0.2", None, Some(EventType::Finish))
@@ -992,5 +1755,132 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(details, (1, EventType::Finish));
+    }
+
+    #[test]
+    fn insert_on_conflict_do_nothing() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let event = ReceivedEventInsert {
+            stream_id,
+            seq: 7,
+            epoch: 3,
+            raw_frame: b"frame-one",
+            read_kind: "chip",
+            reader_timestamp: Some("12:34:56.789"),
+            received_unix_ms: 1_700_000_000_123,
+            dbf_delivered_unix_ms: None,
+        };
+
+        assert!(db.insert_received_event(&event).unwrap());
+
+        let duplicate = ReceivedEventInsert {
+            raw_frame: b"different-frame",
+            received_unix_ms: 1_700_000_000_999,
+            ..event
+        };
+        assert!(!db.insert_received_event(&duplicate).unwrap());
+
+        let rows = db.load_received_events(stream_id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].raw_frame, b"frame-one");
+        assert_eq!(rows[0].received_unix_ms, 1_700_000_000_123);
+    }
+
+    #[test]
+    fn cursor_advances_contiguous_prefix() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+
+        for seq in [1, 2, 4] {
+            let event = ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch: 9,
+                raw_frame: b"frame",
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: 1_700_000_000_000 + seq,
+                dbf_delivered_unix_ms: None,
+            };
+            assert!(db.insert_received_event(&event).unwrap());
+        }
+
+        assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 2);
+
+        let event = ReceivedEventInsert {
+            stream_id,
+            seq: 3,
+            epoch: 9,
+            raw_frame: b"frame",
+            read_kind: "chip",
+            reader_timestamp: None,
+            received_unix_ms: 1_700_000_000_003,
+            dbf_delivered_unix_ms: None,
+        };
+        assert!(db.insert_received_event(&event).unwrap());
+
+        assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 4);
+    }
+
+    #[test]
+    fn load_stream_cursor_defaults_to_zero_then_reflects_advance() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = uuid::Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 0);
+        for seq in [1, 2, 3] {
+            db.insert_received_event(&ReceivedEventInsert {
+                stream_id,
+                seq,
+                epoch: 1,
+                raw_frame: b"frame",
+                read_kind: "chip",
+                reader_timestamp: None,
+                received_unix_ms: seq,
+                dbf_delivered_unix_ms: None,
+            })
+            .unwrap();
+        }
+        assert_eq!(db.advance_cursor_contiguous_prefix(stream_id).unwrap(), 3);
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 3);
+    }
+
+    #[test]
+    fn jump_stream_cursor_moves_forward_only() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = uuid::Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+        db.jump_stream_cursor(stream_id, 14).unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 14);
+        // A regressing jump target is ignored.
+        db.jump_stream_cursor(stream_id, 5).unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 14);
+        // A forward jump advances the cursor.
+        db.jump_stream_cursor(stream_id, 20).unwrap();
+        assert_eq!(db.load_stream_cursor(stream_id).unwrap(), 20);
+    }
+
+    #[test]
+    fn gap_marker_persists() {
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let marker = GapMarkerInsert {
+            stream_id,
+            requested_after_seq: 10,
+            earliest_available_seq: 15,
+            latest_available_seq: 20,
+            reason: "retention-window",
+            created_unix_ms: 1_700_000_001_000,
+        };
+
+        db.save_gap_marker(&marker).unwrap();
+
+        let rows = db.load_gap_markers(stream_id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stream_id, stream_id);
+        assert_eq!(rows[0].requested_after_seq, 10);
+        assert_eq!(rows[0].earliest_available_seq, 15);
+        assert_eq!(rows[0].latest_available_seq, 20);
+        assert_eq!(rows[0].reason, "retention-window");
+        assert_eq!(rows[0].created_unix_ms, 1_700_000_001_000);
     }
 }

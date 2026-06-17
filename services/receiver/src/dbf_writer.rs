@@ -9,7 +9,7 @@
 
 use std::convert::TryFrom;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -20,7 +20,8 @@ use ipico_core::read::ChipRead;
 use rt_protocol::ReadEvent;
 use tokio::sync::{Mutex, broadcast, watch};
 
-use crate::db::{Db, EventType};
+use crate::db::{Db, DbError, EventType, ReceivedEvent};
+use uuid::Uuid;
 
 /// Reasons why a raw frame cannot be mapped to a [`DbfRecord`].
 #[derive(Debug)]
@@ -214,6 +215,12 @@ fn serialize_record(record: &DbfRecord) -> [u8; RECORD_DATA_LEN] {
     buf
 }
 
+fn template_writer_with_dest<W: Write + Seek>(dest: W) -> std::io::Result<dbase::TableWriter<W>> {
+    let reader = dbase::Reader::new(Cursor::new(DBF_TEMPLATE_BYTES))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(TableWriterBuilder::from_reader(reader).build_with_dest(dest))
+}
+
 fn template_writer(
     path: &Path,
 ) -> std::io::Result<dbase::TableWriter<std::io::BufWriter<std::fs::File>>> {
@@ -334,6 +341,7 @@ fn append_record_if_active(
     file.write_all(&new_count.to_le_bytes())?;
 
     file.flush()?;
+    file.sync_data()?;
     file.unlock()?;
     Ok(true)
 }
@@ -353,8 +361,230 @@ pub fn clear_dbf(path: &Path) -> std::io::Result<()> {
     file.lock_exclusive()?;
     file.set_len(0)?;
     write_empty_header(&mut file)?;
+    file.sync_data()?;
     file.unlock()?;
     Ok(())
+}
+
+fn durable_dbf_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.to_path_buf();
+    let lock_name = path
+        .file_name()
+        .map(|name| format!("{}.lock", name.to_string_lossy()))
+        .unwrap_or_else(|| ".dbf.lock".to_owned());
+    lock_path.set_file_name(lock_name);
+    lock_path
+}
+
+fn with_durable_dbf_lock<T>(
+    path: &Path,
+    f: impl FnOnce() -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    let lock_path = durable_dbf_lock_path(path);
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock_file.lock_exclusive()?;
+    let result = f();
+    lock_file.unlock()?;
+    result
+}
+
+fn validate_reader_index_for_rebuild(reader_index: u8) -> Result<(), DbError> {
+    if reader_index > 9 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            DbfMappingError::ReaderIndexTooLarge(reader_index).to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn collect_dbf_records(
+    events: &[ReceivedEvent],
+    event_type: EventType,
+    reader_index: u8,
+) -> (Vec<DbfRecord>, Vec<i64>) {
+    let mut records = Vec::new();
+    let mut delivered_seqs = Vec::new();
+    for event in events {
+        match map_to_dbf_fields(&event.raw_frame, event_type, reader_index) {
+            Ok(record) => {
+                records.push(record);
+                delivered_seqs.push(event.seq);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    stream_id = %event.stream_id,
+                    seq = event.seq,
+                    read_kind = %event.read_kind,
+                    error = %e,
+                    "skipping undeliverable durable frame for DBF write"
+                );
+            }
+        }
+    }
+    (records, delivered_seqs)
+}
+
+fn write_replacement_dbf(path: &Path, records: &[DbfRecord]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(".dbf-")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+
+    {
+        let mut writer = template_writer_with_dest(temp.as_file_mut())?;
+        for record in records {
+            writer
+                .write_record(record)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+
+    temp.as_file_mut().sync_all()?;
+    let persisted = temp.persist(path).map_err(|e| e.error)?;
+    persisted.sync_all()?;
+    sync_parent_dir(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn mark_dbf_delivered_or_confirm(
+    db: &Db,
+    stream_id: Uuid,
+    seq: i64,
+    delivered_unix_ms: i64,
+) -> Result<bool, DbError> {
+    if db.mark_dbf_delivered(stream_id, seq, delivered_unix_ms)? {
+        return Ok(true);
+    }
+
+    match db.load_received_event(stream_id, seq)? {
+        Some(event) if event.dbf_delivered_unix_ms.is_some() => Ok(false),
+        Some(_) => Err(std::io::Error::other(format!(
+            "DBF delivery marker update affected 0 rows for stream_id={stream_id} seq={seq} while marker is still NULL"
+        ))
+        .into()),
+        None => Err(std::io::Error::other(format!(
+            "DBF delivery marker update affected 0 rows for missing stream_id={stream_id} seq={seq}"
+        ))
+        .into()),
+    }
+}
+
+/// Deliver not-yet-marked durable events for `stream_id` to the DBF file at
+/// `path`, marking each event's `dbf_delivered_unix_ms` only after the DBF file
+/// has been durably replaced. Returns the number of newly-marked records.
+///
+/// This is the P2P durable DBF feed. It differs from the legacy broadcast writer
+/// ([`run_dbf_writer`]) in three ways that match the durable-store contract:
+///
+/// * **Idempotent / regenerable.** When any event is pending, the DBF file is
+///   rebuilt from durable `received_events` and atomically replaced. If a prior
+///   run crashed after writing the DBF but before marking SQLite, the next run
+///   writes the same DBF contents instead of appending duplicate rows.
+/// * **No sentinel filtering.** Unlike the legacy path, `__`-prefixed types are
+///   not skipped here; each frame's own parsed content (and the subscription's
+///   `event_type`) determines the DBF output. Frames that are not valid chip
+///   reads are logged and skipped without being marked delivered.
+/// * **Reader timestamp is authoritative.** The DBF TIME/DAYCODE fields are
+///   derived from the reader timestamp embedded in the frame, never from the
+///   receiver receipt time (`received_unix_ms`).
+pub fn deliver_durable_events_to_dbf(
+    db: &Db,
+    stream_id: Uuid,
+    path: &Path,
+    event_type: EventType,
+    reader_index: u8,
+    delivered_unix_ms: i64,
+) -> Result<usize, DbError> {
+    validate_reader_index_for_rebuild(reader_index)?;
+    with_durable_dbf_lock(path, || {
+        let pending_events = db.load_undelivered_received_events(stream_id)?;
+        if pending_events.is_empty() {
+            return Ok(0);
+        }
+        let pending_seqs = pending_events
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>();
+        let all_events = db.load_received_events(stream_id)?;
+        let (records, deliverable_seqs) =
+            collect_dbf_records(&all_events, event_type, reader_index);
+        let pending_deliverable_seqs = deliverable_seqs
+            .into_iter()
+            .filter(|seq| pending_seqs.contains(seq))
+            .collect::<Vec<_>>();
+
+        write_replacement_dbf(path, &records)?;
+
+        let mut marked = 0usize;
+        for seq in pending_deliverable_seqs {
+            if mark_dbf_delivered_or_confirm(db, stream_id, seq, delivered_unix_ms)? {
+                marked += 1;
+            }
+        }
+        Ok(marked)
+    })
+}
+
+/// Rebuild the DBF file at `path` entirely from durable `received_events`.
+///
+/// The replacement DBF is written to a temporary file, synced, and atomically
+/// moved into place before delivery markers are reset and re-marked. The
+/// durable store is the source of truth, so this can recover a lost or corrupt
+/// DBF file without first clearing the live DBF. Returns the number of records
+/// written.
+pub fn regenerate_dbf_from_received_events(
+    db: &Db,
+    stream_id: Uuid,
+    path: &Path,
+    event_type: EventType,
+    reader_index: u8,
+    delivered_unix_ms: i64,
+) -> Result<usize, DbError> {
+    validate_reader_index_for_rebuild(reader_index)?;
+    with_durable_dbf_lock(path, || {
+        let all_events = db.load_received_events(stream_id)?;
+        let (records, deliverable_seqs) =
+            collect_dbf_records(&all_events, event_type, reader_index);
+        let written = records.len();
+
+        write_replacement_dbf(path, &records)?;
+        db.reset_dbf_delivered(stream_id)?;
+        for seq in deliverable_seqs {
+            mark_dbf_delivered_or_confirm(db, stream_id, seq, delivered_unix_ms)?;
+        }
+
+        Ok(written)
+    })
 }
 
 /// Maximum consecutive I/O failures before the writer gives up and stops.
@@ -504,10 +734,263 @@ pub async fn run_dbf_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Db, ReceivedEventInsert};
     use dbase::FieldValue;
+    use uuid::Uuid;
 
     fn sample_raw_frame() -> Vec<u8> {
         b"aa400000000123450a2a01123018455927a7".to_vec()
+    }
+
+    fn insert_durable_event(db: &Db, stream_id: Uuid, seq: i64, raw: &[u8], received_unix_ms: i64) {
+        db.insert_received_event(&ReceivedEventInsert {
+            stream_id,
+            seq,
+            epoch: 1,
+            raw_frame: raw,
+            read_kind: "chip",
+            reader_timestamp: None,
+            received_unix_ms,
+            dbf_delivered_unix_ms: None,
+        })
+        .unwrap();
+    }
+
+    fn dbf_records(path: &Path) -> Vec<dbase::Record> {
+        let mut reader = dbase::Reader::from_path(path).unwrap();
+        reader.read().unwrap()
+    }
+
+    fn char_field(record: &dbase::Record, field: &str) -> Option<String> {
+        record.get(field).and_then(|v| match v {
+            FieldValue::Character(Some(s)) => Some(s.trim().to_owned()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn dbf_idempotent_on_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
+
+        let first = deliver_durable_events_to_dbf(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            0,
+            1_700_000_010_000,
+        )
+        .unwrap();
+        assert_eq!(first, 2, "first run should write both pending events");
+
+        // Replay/re-run: every event is already marked delivered, so nothing new.
+        let second = deliver_durable_events_to_dbf(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            0,
+            1_700_000_020_000,
+        )
+        .unwrap();
+        assert_eq!(
+            second, 0,
+            "replay must not re-deliver already-delivered events"
+        );
+
+        let records = dbf_records(&dbf_path);
+        assert_eq!(
+            records.len(),
+            2,
+            "replay must not duplicate DBF rows for already-delivered (stream_id, seq)"
+        );
+
+        // Both events carry a delivery marker after a successful write.
+        for seq in [1, 2] {
+            let stored = db.load_received_event(stream_id, seq).unwrap().unwrap();
+            assert_eq!(stored.dbf_delivered_unix_ms, Some(1_700_000_010_000));
+        }
+    }
+
+    #[test]
+    fn dbf_marker_null_with_existing_row_rebuilds_without_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = Uuid::parse_str("dddddddd-dddd-dddd-dddd-dddddddddddd").unwrap();
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+
+        let record = map_to_dbf_fields(&raw, EventType::Finish, 0).unwrap();
+        append_record(&dbf_path, &record).unwrap();
+        assert_eq!(dbf_records(&dbf_path).len(), 1);
+        assert_eq!(
+            db.load_received_event(stream_id, 1)
+                .unwrap()
+                .unwrap()
+                .dbf_delivered_unix_ms,
+            None,
+            "test setup simulates a crash after DBF write but before marker update"
+        );
+
+        let written = deliver_durable_events_to_dbf(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            0,
+            1_700_000_010_000,
+        )
+        .unwrap();
+        assert_eq!(written, 1);
+
+        let records = dbf_records(&dbf_path);
+        assert_eq!(
+            records.len(),
+            1,
+            "recovery must rebuild the DBF from received_events instead of appending a duplicate row"
+        );
+        assert_eq!(
+            db.load_received_event(stream_id, 1)
+                .unwrap()
+                .unwrap()
+                .dbf_delivered_unix_ms,
+            Some(1_700_000_010_000)
+        );
+    }
+
+    #[test]
+    fn dbf_regeneration_failure_preserves_existing_file_and_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = Uuid::parse_str("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee").unwrap();
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+        let written = deliver_durable_events_to_dbf(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            0,
+            1_700_000_010_000,
+        )
+        .unwrap();
+        assert_eq!(written, 1);
+
+        let result = regenerate_dbf_from_received_events(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            10,
+            1_700_000_030_000,
+        );
+        assert!(
+            result.is_err(),
+            "invalid reader index should abort regeneration"
+        );
+
+        assert_eq!(
+            dbf_records(&dbf_path).len(),
+            1,
+            "failed regeneration must not clear the live DBF before it can replace it"
+        );
+        assert_eq!(
+            db.load_received_event(stream_id, 1)
+                .unwrap()
+                .unwrap()
+                .dbf_delivered_unix_ms,
+            Some(1_700_000_010_000),
+            "failed regeneration must not reset stale delivery markers"
+        );
+    }
+
+    #[test]
+    fn dbf_uses_reader_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        // received_unix_ms is the receiver receipt time; it must NOT influence the
+        // DBF TIME/DAYCODE fields. Those come from the reader timestamp carried in
+        // the frame (18:45:59.39 on day 01/12/30).
+        insert_durable_event(&db, stream_id, 1, &sample_raw_frame(), 0);
+
+        let written = deliver_durable_events_to_dbf(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            0,
+            1_700_000_000_000,
+        )
+        .unwrap();
+        assert_eq!(written, 1);
+
+        let records = dbf_records(&dbf_path);
+        assert_eq!(records.len(), 1);
+        assert_eq!(char_field(&records[0], "TIME"), Some("18455939".to_owned()));
+        assert_eq!(
+            char_field(&records[0], "DAYCODE"),
+            Some("011230".to_owned())
+        );
+    }
+
+    #[test]
+    fn dbf_regenerates_from_received_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let dbf_path = dir.path().join("out.dbf");
+        let db = Db::open_in_memory().unwrap();
+        let stream_id = Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap();
+        let raw = sample_raw_frame();
+        insert_durable_event(&db, stream_id, 1, &raw, 1_700_000_000_000);
+        insert_durable_event(&db, stream_id, 2, &raw, 1_700_000_000_001);
+
+        let written = deliver_durable_events_to_dbf(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            0,
+            1_700_000_010_000,
+        )
+        .unwrap();
+        assert_eq!(written, 2);
+        assert_eq!(dbf_records(&dbf_path).len(), 2);
+
+        // Simulate a lost/corrupt DBF file; the durable store is the source of truth.
+        std::fs::remove_file(&dbf_path).unwrap();
+
+        let regenerated = regenerate_dbf_from_received_events(
+            &db,
+            stream_id,
+            &dbf_path,
+            EventType::Finish,
+            0,
+            1_700_000_030_000,
+        )
+        .unwrap();
+        assert_eq!(
+            regenerated, 2,
+            "regeneration should re-emit every stored event"
+        );
+
+        let records = dbf_records(&dbf_path);
+        assert_eq!(
+            records.len(),
+            2,
+            "DBF must be fully rebuilt from received_events"
+        );
+        for record in &records {
+            assert_eq!(char_field(record, "CHIP"), Some("000000012345".to_owned()));
+        }
     }
 
     #[test]

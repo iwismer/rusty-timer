@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use prost::Message;
 use rt_iroh::{Connection, Endpoint, EndpointBuilder, NodeAddr, SendStream};
 use rt_p2p_protocol::{
-    Ack, CaughtUp, ControlC2F, ControlF2C, DataC2F, DataF2C, EventBatch, Hello, StreamCatalog,
-    SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c, negotiate,
+    Ack, CaughtUp, ControlC2F, ControlF2C, DataC2F, DataF2C, DataSubscribe, EventBatch, GapNotice,
+    Hello, StreamCatalog, SubscribeOk, control_c2f, control_f2c, data_c2f, data_f2c, negotiate,
 };
 use tokio::task::JoinHandle;
 
@@ -21,6 +21,9 @@ pub struct ForwarderScript {
     pub catalog: StreamCatalog,
     /// `SubscribeOk` delivered on the data plane after a `DataSubscribe`.
     pub subscribe_ok: SubscribeOk,
+    /// If set, a `GapNotice` delivered on the data plane immediately after
+    /// `SubscribeOk` (before any batches), simulating unavailable history.
+    pub gap_notice: Option<GapNotice>,
     /// Event batches delivered on the data plane after `SubscribeOk`.
     pub batches: Vec<EventBatch>,
     /// If set, a `CaughtUp` notice (with this `through_seq`) is sent after the
@@ -41,6 +44,7 @@ pub struct MockForwarderPeer {
     node_addr: NodeAddr,
     accept_task: JoinHandle<()>,
     acks: Arc<Mutex<Vec<Ack>>>,
+    subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
 }
 
 impl MockForwarderPeer {
@@ -50,12 +54,14 @@ impl MockForwarderPeer {
         let node_addr = endpoint.node_addr().await;
 
         let acks = Arc::new(Mutex::new(Vec::new()));
+        let subscribes = Arc::new(Mutex::new(Vec::new()));
         let script = Arc::new(script);
 
         let accept_endpoint = endpoint.clone();
         let accept_acks = Arc::clone(&acks);
+        let accept_subscribes = Arc::clone(&subscribes);
         let accept_task = tokio::spawn(async move {
-            accept_loop(accept_endpoint, script, accept_acks).await;
+            accept_loop(accept_endpoint, script, accept_acks, accept_subscribes).await;
         });
 
         Ok(Self {
@@ -63,6 +69,7 @@ impl MockForwarderPeer {
             node_addr,
             accept_task,
             acks,
+            subscribes,
         })
     }
 
@@ -76,6 +83,16 @@ impl MockForwarderPeer {
         self.acks.lock().expect("acks mutex poisoned").clone()
     }
 
+    /// A snapshot of the `DataSubscribe` requests received, in arrival order.
+    /// Useful for asserting that a reconnecting receiver resumes from its
+    /// persisted cursor (`after_seq`).
+    pub fn subscribes(&self) -> Vec<DataSubscribe> {
+        self.subscribes
+            .lock()
+            .expect("subscribes mutex poisoned")
+            .clone()
+    }
+
     /// Stops the accept loop and closes the endpoint.
     pub async fn shutdown(self) {
         self.accept_task.abort();
@@ -83,14 +100,20 @@ impl MockForwarderPeer {
     }
 }
 
-async fn accept_loop(endpoint: Endpoint, script: Arc<ForwarderScript>, acks: Arc<Mutex<Vec<Ack>>>) {
+async fn accept_loop(
+    endpoint: Endpoint,
+    script: Arc<ForwarderScript>,
+    acks: Arc<Mutex<Vec<Ack>>>,
+    subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
+) {
     while let Ok(Some(connection)) = endpoint.accept().await {
         let script = Arc::clone(&script);
         let acks = Arc::clone(&acks);
+        let subscribes = Arc::clone(&subscribes);
         tokio::spawn(async move {
             // Errors here are surfaced via missing acks / failed reads on the
             // receiver side; the harness self-test asserts on those.
-            let _ = handle_connection(connection, script, acks).await;
+            let _ = handle_connection(connection, script, acks, subscribes).await;
         });
     }
 }
@@ -99,9 +122,10 @@ async fn handle_connection(
     connection: Connection,
     script: Arc<ForwarderScript>,
     acks: Arc<Mutex<Vec<Ack>>>,
+    subscribes: Arc<Mutex<Vec<DataSubscribe>>>,
 ) -> HarnessResult {
     serve_control(&connection, &script).await?;
-    serve_data(&connection, &script, &acks).await?;
+    serve_data(&connection, &script, &acks, &subscribes).await?;
     Ok(())
 }
 
@@ -137,6 +161,7 @@ async fn serve_data(
     connection: &Connection,
     script: &ForwarderScript,
     acks: &Arc<Mutex<Vec<Ack>>>,
+    subscribes: &Arc<Mutex<Vec<DataSubscribe>>>,
 ) -> HarnessResult {
     let (mut send, mut recv) = connection.accept_bi().await?;
 
@@ -145,6 +170,10 @@ async fn serve_data(
         Some(data_c2f::Msg::DataSubscribe(subscribe)) => subscribe,
         other => return Err(format!("expected DataSubscribe, got {other:?}").into()),
     };
+    subscribes
+        .lock()
+        .expect("subscribes mutex poisoned")
+        .push(subscribe.clone());
 
     write_faulted_data_frame(
         &mut send,
@@ -154,6 +183,17 @@ async fn serve_data(
         },
     )
     .await?;
+
+    if let Some(gap_notice) = &script.gap_notice {
+        write_faulted_data_frame(
+            &mut send,
+            &script.data_fault,
+            &DataF2C {
+                msg: Some(data_f2c::Msg::GapNotice(gap_notice.clone())),
+            },
+        )
+        .await?;
+    }
 
     for batch in &script.batches {
         write_faulted_data_frame(
@@ -181,6 +221,14 @@ async fn serve_data(
     }
 
     if script.data_fault.partitioned {
+        return Ok(());
+    }
+
+    // Only block on an inbound ack when the receiver was given something to
+    // acknowledge (events or a gap notice). A truly empty script expects no
+    // ack, so returning here closes the connection and lets the receiver
+    // observe EOF without deadlocking on a read that never arrives.
+    if script.batches.is_empty() && script.gap_notice.is_none() {
         return Ok(());
     }
 

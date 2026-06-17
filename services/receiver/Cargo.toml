@@ -7,6 +7,10 @@ edition = "2024"
 name = "receiver"
 path = "src/lib.rs"
 
+[features]
+default = []
+test-bridge = []
+
 [dependencies]
 rt-protocol = { path = "../../crates/rt-protocol" }
 rt-ui-log = { path = "../../crates/rt-ui-log" }
@@ -28,15 +32,18 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 getrandom = "0.4"
 ipico-core = { path = "../../crates/ipico-core" }
+rt-iroh = { path = "../../crates/rt-iroh" }
+rt-p2p-protocol = { path = "../../crates/rt-p2p-protocol" }
+prost = "0.14"
 dbase = { version = "0.7", features = ["serde", "yore"] }
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
+tempfile = "3"
+axum = { version = "0.8", features = ["ws"] }
 
 [dev-dependencies]
-tempfile = "3"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rt-test-utils = { path = "../../crates/rt-test-utils" }
 tokio = { version = "1", features = ["full", "test-util"] }
-axum = { version = "0.8", features = ["ws"] }
 http-body-util = "0.1"
 tokio-stream = { version = "0.1", features = ["sync"] }
