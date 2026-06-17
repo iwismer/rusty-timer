@@ -214,11 +214,26 @@ class Stack:
 # ---------------------------------------------------------------------------
 # Build + node-id derivation
 # ---------------------------------------------------------------------------
-def cargo_build():
-    print("[build] cargo build -p emulator -p forwarder -p receiver -p thin-node ...")
+def cargo_build(*, agent_ui: bool = False):
+    if not agent_ui:
+        print("[build] cargo build -p emulator -p forwarder -p receiver -p thin-node ...")
+        subprocess.run(
+            ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "receiver",
+             "-p", "thin-node"],
+            cwd=str(REPO_ROOT),
+            check=True,
+        )
+        return
+
+    print("[build] cargo build -p emulator -p forwarder -p thin-node ...")
     subprocess.run(
-        ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "receiver",
-         "-p", "thin-node"],
+        ["cargo", "build", "-p", "emulator", "-p", "forwarder", "-p", "thin-node"],
+        cwd=str(REPO_ROOT),
+        check=True,
+    )
+    print("[build] cargo build -p receiver --features test-bridge ...")
+    subprocess.run(
+        ["cargo", "build", "-p", "receiver", "--features", "test-bridge"],
         cwd=str(REPO_ROOT),
         check=True,
     )
@@ -391,6 +406,45 @@ def thin_node_healthy(base_url: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Optional exploratory bridge-agent artifact capture (T5.5)
+# ---------------------------------------------------------------------------
+def receiver_headless_url(log_path: Path) -> str:
+    prefix = "receiver-headless listening on "
+    for line in reversed(log_path.read_text(errors="replace").splitlines()):
+        idx = line.find(prefix)
+        if idx >= 0:
+            return line[idx + len(prefix):].strip()
+    raise RuntimeError(f"receiver headless URL not found in {log_path}")
+
+
+def emit_agent_ui_artifacts(
+    *,
+    receiver_log_path: Path,
+    scenario_path: Path,
+    artifacts_dir: Path,
+    expected_stream_id: str,
+    expected_local_port: int,
+):
+    try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.e2e.agent_ui.bridge_agent import run_bridge_goal
+
+        bridge_url = receiver_headless_url(receiver_log_path)
+        findings = run_bridge_goal(
+            bridge_base_url=bridge_url,
+            scenario_path=scenario_path,
+            artifacts_dir=artifacts_dir,
+            expected_stream_id=expected_stream_id,
+            expected_local_port=expected_local_port,
+        )
+        print(f"[agent-ui] artifacts written to {artifacts_dir}")
+        print(f"[agent-ui] completed={findings.get('completed')} passed={findings.get('passed')}")
+    except Exception as exc:  # noqa: BLE001 - advisory layer must not gate backend checks
+        print(f"[agent-ui] artifact capture failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Assertion bookkeeping
 # ---------------------------------------------------------------------------
 @dataclass
@@ -456,7 +510,14 @@ def thin_node_announcer_ready(base_url: str):
     return False
 
 
-def run(tmp: Path, results: Results, stack: Stack):
+def run(
+    tmp: Path,
+    results: Results,
+    stack: Stack,
+    *,
+    agent_ui_scenario: Path | None = None,
+    agent_ui_artifacts_dir: Path | None = None,
+):
 
     # --- Ports (loopback only) ---
     emulator_port = free_tcp_port()
@@ -658,6 +719,15 @@ static_allowed_receivers = ["{receiver_node_id}"]
     results.expect_eq("DBF record count stable on recheck (no dup rows)",
                       dbf_record_count(dbf_path), NUM_READS)
 
+    if agent_ui_scenario is not None and agent_ui_artifacts_dir is not None:
+        emit_agent_ui_artifacts(
+            receiver_log_path=receiver2.log_path,
+            scenario_path=agent_ui_scenario,
+            artifacts_dir=agent_ui_artifacts_dir,
+            expected_stream_id=stream_id,
+            expected_local_port=proxy_port,
+        )
+
     return stack
 
 
@@ -666,17 +736,30 @@ def main() -> int:
     parser.add_argument("--no-build", action="store_true", help="skip cargo build")
     parser.add_argument("--keep", action="store_true",
                         help="keep the temp working dir on exit")
+    parser.add_argument("--agent-ui-scenario", type=Path,
+                        help="optional T5.5 bridge-agent scenario JSON")
+    parser.add_argument("--agent-ui-artifacts-dir", type=Path,
+                        help="directory for optional T5.5 bridge-agent artifacts")
     args = parser.parse_args()
 
+    if (args.agent_ui_scenario is None) != (args.agent_ui_artifacts_dir is None):
+        parser.error("--agent-ui-scenario and --agent-ui-artifacts-dir must be supplied together")
+
     if not args.no_build:
-        cargo_build()
+        cargo_build(agent_ui=args.agent_ui_scenario is not None)
 
     tmp = Path(tempfile.mkdtemp(prefix="rt-e2e-"))
     print(f"[tmp] working dir: {tmp}")
     results = Results()
     stack = Stack()
     try:
-        run(tmp, results, stack)
+        run(
+            tmp,
+            results,
+            stack,
+            agent_ui_scenario=args.agent_ui_scenario,
+            agent_ui_artifacts_dir=args.agent_ui_artifacts_dir,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"\n[error] {type(exc).__name__}: {exc}", file=sys.stderr)
         results.check("orchestration completed", False, str(exc))

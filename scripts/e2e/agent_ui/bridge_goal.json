@@ -1,0 +1,8 @@
+{
+  "goal": "Inspect the receiver bridge state after the P2P stack resumes from receiver SIGKILL and report whether the expected stream is subscribed, the cursor reached seq 8, local proxy port is present, and status shows one configured stream.",
+  "expected": {
+    "cursor_seq": 8,
+    "streams_count": 1,
+    "subscribed": true
+  }
+}
