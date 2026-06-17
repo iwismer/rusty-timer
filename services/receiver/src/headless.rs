@@ -1,0 +1,122 @@
+use crate::control_api::{self, AppState};
+use axum::extract::State;
+use axum::routing::get;
+use axum::{Json, Router};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+
+#[derive(Debug, Clone)]
+pub struct HeadlessConfig {
+    pub data_dir: PathBuf,
+    pub bind_addr: SocketAddr,
+    pub receiver_id: Option<String>,
+}
+
+pub struct HeadlessHost {
+    data_dir: PathBuf,
+    local_addr: SocketAddr,
+    state: Arc<AppState>,
+    server_shutdown_tx: Option<oneshot::Sender<()>>,
+    server_task: JoinHandle<Result<(), String>>,
+    runtime_task: JoinHandle<()>,
+}
+
+impl HeadlessHost {
+    pub async fn start(config: HeadlessConfig) -> Result<Self, String> {
+        if !config.bind_addr.ip().is_loopback() {
+            return Err(format!(
+                "bind_addr must be a loopback address, got {}",
+                config.bind_addr
+            ));
+        }
+        let (state, shutdown_rx) =
+            crate::runtime::init_with_data_dir(config.receiver_id, &config.data_dir).await?;
+        let listener = TcpListener::bind(config.bind_addr)
+            .await
+            .map_err(|e| format!("failed to bind control API: {e}"))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| format!("failed to read control API address: {e}"))?;
+        let router = control_router(Arc::clone(&state));
+        let (server_shutdown_tx, server_shutdown_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = server_shutdown_rx.await;
+                })
+                .await
+                .map_err(|e| format!("control API server failed: {e}"))
+        });
+        let runtime_task = tokio::spawn(crate::runtime::run(Arc::clone(&state), shutdown_rx));
+
+        Ok(Self {
+            data_dir: config.data_dir,
+            local_addr,
+            state,
+            server_shutdown_tx: Some(server_shutdown_tx),
+            server_task,
+            runtime_task,
+        })
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    pub async fn shutdown(mut self) -> Result<(), String> {
+        self.state.request_process_shutdown();
+        if let Some(tx) = self.server_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        // Await both tasks so neither JoinHandle is dropped without being
+        // driven to completion, then surface any error. The runtime task is
+        // awaited even if the server task failed, preserving clean shutdown.
+        let server_result = self
+            .server_task
+            .await
+            .map_err(|e| format!("control API server task failed: {e}"))
+            .and_then(|inner| inner);
+        let runtime_result = self
+            .runtime_task
+            .await
+            .map_err(|e| format!("receiver runtime task failed: {e}"));
+        server_result?;
+        runtime_result?;
+        Ok(())
+    }
+}
+
+pub(crate) fn control_router(state: Arc<AppState>) -> Router {
+    let router = Router::new()
+        .route("/api/v1/status", get(get_status))
+        .with_state(state);
+    install_test_bridge_routes(router)
+}
+
+async fn get_status(State(state): State<Arc<AppState>>) -> Json<control_api::StatusResponse> {
+    Json(control_api::get_status(state.as_ref()).await)
+}
+
+#[cfg(feature = "test-bridge")]
+fn install_test_bridge_routes(router: Router) -> Router {
+    router.route("/api/v1/test-bridge", get(test_bridge_status))
+}
+
+#[cfg(not(feature = "test-bridge"))]
+fn install_test_bridge_routes(router: Router) -> Router {
+    router
+}
+
+#[cfg(feature = "test-bridge")]
+async fn test_bridge_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "enabled": true }))
+}

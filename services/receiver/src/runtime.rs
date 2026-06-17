@@ -6,6 +6,7 @@ use crate::local_proxy::LocalProxy;
 use crate::ports::{PortAssignment, resolve_ports, stream_key};
 use rt_ui_log::UiLogLevel;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
@@ -79,8 +80,15 @@ pub async fn init(
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("rusty-timer")
         .join("receiver");
+    init_with_data_dir(receiver_id, data_dir).await
+}
 
-    std::fs::create_dir_all(&data_dir)
+pub async fn init_with_data_dir(
+    receiver_id: Option<String>,
+    data_dir: impl AsRef<Path>,
+) -> Result<(Arc<AppState>, watch::Receiver<ShutdownSignal>), String> {
+    let data_dir = data_dir.as_ref();
+    std::fs::create_dir_all(data_dir)
         .map_err(|e| format!("could not create data directory: {e}"))?;
 
     let db_path = data_dir.join("receiver.sqlite3");
@@ -207,12 +215,15 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
     // Uses tokio::spawn (not tauri::async_runtime::spawn) because this is a
     // library crate with no Tauri dependency — the caller spawns `run()` onto
     // the Tauri async runtime, so tokio::spawn here runs on the same executor.
-    {
+    // The JoinHandle is owned by this function so the task is cancelled and
+    // awaited during graceful shutdown, ensuring it no longer holds an
+    // Arc<AppState> / SQLite connection once `run` returns.
+    let sse_refresher_task = {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
             run_upstream_dashboard_sse_refresher(state).await;
-        });
-    }
+        })
+    };
 
     // -------------------------------------------------------------------------
     // Event loop: watch connection_state + reconcile subscriptions
@@ -276,7 +287,27 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                         if delay_secs > 0 {
                             state.logger.log(format!("Reconnecting in {delay_secs}s"));
                         }
-                        if !wait_for_reconnect_delay_or_abort(&state, attempt, retries).await {
+                        // Race shutdown against the reconnect backoff so Ctrl-C /
+                        // process shutdown is honored promptly even while waiting
+                        // out a long (up to 30s) reconnect delay.
+                        let proceed = tokio::select! {
+                            biased;
+                            result = shutdown_rx.changed() => {
+                                if result.is_err() {
+                                    info!("shutdown channel closed during reconnect backoff, exiting");
+                                    break;
+                                }
+                                if should_exit_on_shutdown_signal(&shutdown_rx.borrow()) {
+                                    info!("process shutdown requested during reconnect backoff");
+                                    break;
+                                }
+                                // Non-terminal signal (e.g. disconnect): abandon
+                                // this attempt and re-evaluate from the top.
+                                continue;
+                            }
+                            proceed = wait_for_reconnect_delay_or_abort(&state, attempt, retries) => proceed,
+                        };
+                        if !proceed {
                             continue;
                         }
 
@@ -314,16 +345,56 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
                                         .await;
                                   }
                                   Ok(ws_request) => {
-                                match connect_async(ws_request).await {
+                                // Race shutdown against the in-flight connect attempt
+                                // so shutdown is honored promptly instead of waiting
+                                // for the connect to succeed, fail, or time out.
+                                let connect_result = tokio::select! {
+                                    biased;
+                                    result = shutdown_rx.changed() => {
+                                        if result.is_err() {
+                                            info!("shutdown channel closed during connect attempt, exiting");
+                                            break;
+                                        }
+                                        if should_exit_on_shutdown_signal(&shutdown_rx.borrow()) {
+                                            info!("process shutdown requested during connect attempt");
+                                            break;
+                                        }
+                                        // Non-terminal signal: abandon this connect
+                                        // attempt and re-evaluate from the top.
+                                        continue;
+                                    }
+                                    connect_result = connect_async(ws_request) => connect_result,
+                                };
+                                match connect_result {
                                     Err(e) => {
                                         state.logger.log_at(UiLogLevel::Error, format!("Connection failed: {e}"));
                                         let _ = retry_connect_if_attempt_current(&state, attempt)
                                             .await;
                                     }
                                     Ok((ws, _)) => {
-                                        let (session_result, ws) = {
-                                            let receiver_id = state.receiver_id.read().await.clone();
-                                            do_handshake(ws, &state.db, &state.ui_tx, &receiver_id, &state.http_client, &state.stream_metrics_cache).await
+                                        // Race shutdown against the post-upgrade handshake so
+                                        // shutdown is honored promptly instead of blocking
+                                        // forever on a server that upgrades but never sends the
+                                        // expected heartbeat.
+                                        let (session_result, ws) = tokio::select! {
+                                            biased;
+                                            result = shutdown_rx.changed() => {
+                                                if result.is_err() {
+                                                    info!("shutdown channel closed during handshake, exiting");
+                                                    break;
+                                                }
+                                                if should_exit_on_shutdown_signal(&shutdown_rx.borrow()) {
+                                                    info!("process shutdown requested during handshake");
+                                                    break;
+                                                }
+                                                // Non-terminal signal: abandon this handshake
+                                                // attempt and re-evaluate from the top.
+                                                continue;
+                                            }
+                                            handshake = async {
+                                                let receiver_id = state.receiver_id.read().await.clone();
+                                                do_handshake(ws, &state.db, &state.ui_tx, &receiver_id, &state.http_client, &state.stream_metrics_cache).await
+                                            } => handshake,
                                         };
                                         match (session_result, ws) {
                                             (Err(e), _) => {
@@ -498,6 +569,8 @@ pub async fn run(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<Shutdown
 
     // Graceful shutdown
     state.logger.log("shutdown signal received");
+    sse_refresher_task.abort();
+    let _ = sse_refresher_task.await;
     cancel_session(&mut session_task, &mut session_cancel_tx, &state.logger).await;
     stop_dbf_writer(
         dbf_writer_cancel_tx.take(),
@@ -1330,6 +1403,112 @@ mod tests {
             handler(ws).await;
         });
         (addr, task)
+    }
+
+    #[tokio::test]
+    async fn run_cancels_owned_sse_refresher_on_shutdown() {
+        let db = Db::open_in_memory().expect("open db");
+        let (state, shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+
+        let run_handle = tokio::spawn(run(Arc::clone(&state), shutdown_rx));
+
+        // Let `run` reach steady state and spawn the owned SSE refresher task,
+        // which clones the `Arc<AppState>`.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Request a graceful process shutdown.
+        state.request_process_shutdown();
+
+        // `run` must return promptly, having cancelled and awaited the refresher.
+        tokio::time::timeout(std::time::Duration::from_secs(5), run_handle)
+            .await
+            .expect("run should exit promptly on shutdown")
+            .expect("run task should not panic");
+
+        // Once `run` has returned, only the test's own Arc should remain. If the
+        // refresher had been left detached it would still hold a clone here.
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "owned SSE refresher must be cancelled so it no longer holds Arc<AppState>"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_interrupts_reconnect_backoff_on_shutdown() {
+        // Drive `run` into a long reconnect backoff, then request shutdown and
+        // assert it returns promptly instead of waiting out the (up to 30s)
+        // backoff delay. Uses paused time so the backoff never elapses on its
+        // own: only a prompt shutdown observation can make `run` return.
+        let db = Db::open_in_memory().expect("open db");
+        let (state, shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+
+        // Force a reconnect with the maximum backoff delay (30s) before `run`
+        // observes the connection state. `request_retry_connect` increments the
+        // retry streak each call and leaves the state in `Connecting`.
+        for _ in 0..6 {
+            state.request_retry_connect().await;
+        }
+        assert_eq!(
+            compute_reconnect_delay_secs(state.current_retry_streak()),
+            30
+        );
+
+        let run_handle = tokio::spawn(run(Arc::clone(&state), shutdown_rx));
+
+        // Let `run` reach steady state and park inside the reconnect backoff
+        // wait. With paused time, the shorter test sleep fires first, so `run`
+        // remains parked in the backoff.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        state.request_process_shutdown();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), run_handle)
+            .await
+            .expect("run should exit promptly when shutdown interrupts reconnect backoff")
+            .expect("run task should not panic");
+    }
+
+    #[tokio::test]
+    async fn run_interrupts_connect_attempt_on_shutdown() {
+        // Point `run` at a TCP server that accepts connections but never
+        // completes the WebSocket upgrade, so `connect_async` hangs. Then
+        // request shutdown and assert `run` returns promptly instead of waiting
+        // on the stalled connect attempt.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stall server");
+        let addr = listener.local_addr().expect("local addr");
+        let stall_server = tokio::spawn(async move {
+            // Hold accepted sockets open without responding so the client's
+            // upgrade handshake never completes.
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let mut db = Db::open_in_memory().expect("open db");
+        db.save_profile(&format!("ws://{addr}"), "test-token", "manual", None)
+            .expect("save profile");
+        let (state, shutdown_rx) = AppState::new(db, "test-receiver".to_owned());
+
+        // `run` auto-connects on startup because the profile has URL + token,
+        // with a zero-delay first attempt, so it proceeds straight into the
+        // stalled `connect_async`.
+        let run_handle = tokio::spawn(run(Arc::clone(&state), shutdown_rx));
+
+        // Let `run` reach the stalled connect attempt.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        state.request_process_shutdown();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), run_handle)
+            .await
+            .expect("run should exit promptly when shutdown interrupts a connect attempt")
+            .expect("run task should not panic");
+
+        stall_server.abort();
     }
 
     #[tokio::test]
