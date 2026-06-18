@@ -1,15 +1,18 @@
-//! Power-Loss Forwarder: journal integrity tests for simulated power loss.
+//! Power-Loss Forwarder: journal-level durability unit tests.
 //!
-//! The design calls for `SIGKILL` + restart on a spawned child process.
-//! Since the forwarder binary isn't fully wired end-to-end in the current
-//! implementation, these tests validate the journal's power-loss durability
-//! properties directly (WAL+FULL sync settings) and simulate the equivalent
-//! of an abrupt kill by closing the SQLite connection without checkpointing,
-//! then reopening and verifying data integrity.
+//! These are **narrow unit tests** for the SQLite journal's power-loss
+//! durability primitives (WAL+FULL sync, abrupt-drop survival, ack-cursor
+//! persistence, independent per-stream recovery). They simulate an abrupt kill
+//! by dropping the SQLite connection without checkpointing, then reopening.
 //!
-//! NOTE: Full SIGKILL of the forwarder binary requires a running, correctly
-//! configured forwarder process. The tests here validate the underlying
-//! journal durability properties that SIGKILL safety depends on.
+//! They are NOT the T6.1 power-loss proof. The authoritative T6.1 evidence is
+//! the real multi-process power-loss suite in `scripts/e2e/run_stack.py`, which
+//! boots real OS processes and `SIGKILL`s the live forwarder *and* receiver
+//! binaries mid-stream, restarts them, and asserts lossless end-to-end resume
+//! (exact received rows/raw frames/seqs, exact DBF rows/chips with no
+//! duplicates, local TCP proxy replay, and thin-node announcer state). Treat
+//! these unit tests only as fast, focused coverage of the journal invariants
+//! that the real-process suite depends on.
 //!
 //! # Scenarios
 //! 1. WAL+FULL sync settings are applied (durability baseline).

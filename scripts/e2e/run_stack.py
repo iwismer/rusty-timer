@@ -25,14 +25,21 @@ Assertions (all must be green):
    client.
 4. Thin-node ``/status`` reports the expected announcer generation and finisher
    count.
-5. Power-loss lane: the receiver is SIGKILLed mid-stream and restarted; the
-   stack resumes losslessly with no duplicate ``received_events``/DBF rows.
+5. Power-loss lanes (T6.1): both the receiver *and* the forwarder are, in
+   separate full-stack runs, SIGKILLed mid-stream (after ``0 < count_at_kill <
+   NUM_READS`` durable progress) and restarted with the same config/seed/port.
+   Each restarted stack must resume losslessly with no duplicate
+   ``received_events``/DBF rows. The receiver lane recovers via forwarder
+   journal+P2P replay; the forwarder lane recovers via its own durable journal
+   while the emulator pauses (``--pause-when-unsubscribed``) so no read is lost
+   while the forwarder is down.
 
 Usage::
 
-    uv run scripts/e2e/run_stack.py            # build (if needed) + run
+    uv run scripts/e2e/run_stack.py            # build (if needed) + run BOTH lanes
     uv run scripts/e2e/run_stack.py --no-build # skip cargo build
     uv run scripts/e2e/run_stack.py --keep      # keep the temp dir on exit
+    uv run scripts/e2e/run_stack.py --power-loss-target forwarder  # one lane only
 
 Stdlib only; uses ``cargo`` to build the four service binaries.
 """
@@ -72,6 +79,27 @@ RECONCILE_MS = 200
 
 FRAME_LEN = 36  # IPICO raw frame length (chars)
 WIRE_FRAME = FRAME_LEN + 2  # frame + trailing CRLF as stored/replayed
+
+# Power-loss lanes exercised by the real-process suite. Both are SIGKILL +
+# restart of a real OS process mid-stream; the stack must resume losslessly.
+POWER_LOSS_TARGETS = ("receiver", "forwarder")
+
+
+def resolve_power_loss_targets(value: str) -> list[str]:
+    """Map a ``--power-loss-target`` value to the ordered list of lanes to run.
+
+    ``"both"`` (the default) enumerates every lane in :data:`POWER_LOSS_TARGETS`
+    so the one-command run exercises receiver *and* forwarder SIGKILL. A single
+    target name selects just that lane (used by CI sharding / debugging).
+    """
+    if value == "both":
+        return list(POWER_LOSS_TARGETS)
+    if value in POWER_LOSS_TARGETS:
+        return [value]
+    raise ValueError(
+        f"unknown power-loss target {value!r}; "
+        f"expected 'both' or one of {POWER_LOSS_TARGETS}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +364,37 @@ def received_count(db_path: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Forwarder journal progress (durable events the forwarder has committed)
+# ---------------------------------------------------------------------------
+def forwarder_event_count(journal_path: Path, stream_id: str) -> int:
+    """Return the number of durably-journaled forwarder events for a stream.
+
+    Reads the forwarder's SQLite journal ``events`` table read-only. Used by the
+    forwarder power-loss lane to confirm ``0 < count_at_kill < NUM_READS``
+    durable progress before issuing SIGKILL.
+    """
+    if not journal_path.exists():
+        return 0
+    conn = sqlite3.connect(f"file:{journal_path}?mode=ro", uri=True, timeout=5)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE stream_id = ?", (stream_id,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError as exc:
+        if "no such table: events" in str(exc):
+            return 0
+        raise
+    finally:
+        conn.close()
+
+
+def partial_forwarder_count(journal_path: Path, stream_id: str):
+    count = forwarder_event_count(journal_path, stream_id)
+    return count if 0 < count < NUM_READS else False
+
+
+# ---------------------------------------------------------------------------
 # DBF record count (Visual FoxPro header: record count at bytes 4..8 LE)
 # ---------------------------------------------------------------------------
 def dbf_record_count(dbf_path: Path) -> int:
@@ -515,9 +574,13 @@ def run(
     results: Results,
     stack: Stack,
     *,
+    power_loss_target: str = "receiver",
     agent_ui_scenario: Path | None = None,
     agent_ui_artifacts_dir: Path | None = None,
 ):
+    if power_loss_target not in POWER_LOSS_TARGETS:
+        raise ValueError(f"invalid power_loss_target {power_loss_target!r}")
+    print(f"\n########## power-loss lane: SIGKILL {power_loss_target} ##########")
 
     # --- Ports (loopback only) ---
     emulator_port = free_tcp_port()
@@ -602,14 +665,21 @@ static_allowed_receivers = ["{receiver_node_id}"]
     print("[up] thin-node healthy")
 
     # --- 2. emulator (deterministic, verbatim, once) ---
+    emulator_argv = [str(bin_path("emulator")),
+                     "-p", str(emulator_port),
+                     "-f", str(reads_file),
+                     "-d", str(READ_DELAY_MS),
+                     "-t", "raw",
+                     "--verbatim", "--once"]
+    if power_loss_target == "forwarder":
+        # The forwarder is the only TCP client of the emulator. When it is
+        # SIGKILLed mid-stream the emulator must not race ahead and drop the
+        # reads the (restarted) forwarder still needs: pausing while no client
+        # is connected makes the forwarder power-loss resume lossless.
+        emulator_argv.append("--pause-when-unsubscribed")
     emulator = stack.add(Managed(
         name="emulator",
-        argv=[str(bin_path("emulator")),
-              "-p", str(emulator_port),
-              "-f", str(reads_file),
-              "-d", str(READ_DELAY_MS),
-              "-t", "raw",
-              "--verbatim", "--once"],
+        argv=emulator_argv,
         log_path=tmp / "emulator.log",
         env={"RUST_LOG": "info"},
     ))
@@ -620,12 +690,15 @@ static_allowed_receivers = ["{receiver_node_id}"]
     print("[up] emulator listening")
 
     # --- 3. forwarder (P2P, seeded, relay/discovery off, static allow-list) ---
-    forwarder = stack.add(Managed(
-        name="forwarder",
-        argv=[str(bin_path("forwarder")), "--config", str(forwarder_config)],
-        log_path=tmp / "forwarder.log",
-        env={"RUST_LOG": "info,forwarder=debug"},
-    ))
+    def make_forwarder(suffix: str) -> Managed:
+        return Managed(
+            name=f"forwarder[{suffix}]",
+            argv=[str(bin_path("forwarder")), "--config", str(forwarder_config)],
+            log_path=tmp / f"forwarder-{suffix}.log",
+            env={"RUST_LOG": "info,forwarder=debug"},
+        )
+
+    forwarder = stack.add(make_forwarder("1"))
     forwarder.start()
     wait_for_log(forwarder.log_path, "p2p iroh server started", timeout=30,
                  what="forwarder p2p startup")
@@ -660,18 +733,40 @@ static_allowed_receivers = ["{receiver_node_id}"]
                  what="receiver p2p startup")
     print("[up] receiver-headless p2p running")
 
-    # --- Power-loss lane: SIGKILL the receiver mid-stream, then restart ---
-    print("[power-loss] waiting for first received event, then SIGKILL receiver")
-    count_at_kill = wait_until(lambda: partial_received_count(receiver_db_path), timeout=30,
-                               what="receiver to persist a partial event set")
-    receiver.sigkill()
-    print(f"[power-loss] SIGKILLed receiver with {count_at_kill}/{NUM_READS} events persisted")
+    # --- Power-loss lane: SIGKILL the target mid-stream, then restart ---
+    active_receiver = receiver
+    if power_loss_target == "receiver":
+        print("[power-loss] waiting for first received event, then SIGKILL receiver")
+        count_at_kill = wait_until(lambda: partial_received_count(receiver_db_path),
+                                   timeout=30,
+                                   what="receiver to persist a partial event set")
+        receiver.sigkill()
+        print(f"[power-loss] SIGKILLed receiver with {count_at_kill}/{NUM_READS} "
+              "events persisted")
 
-    receiver2 = stack.add(make_receiver("2"))
-    receiver2.start()
-    wait_for_log(receiver2.log_path, "p2p_node_id=", timeout=30,
-                 what="receiver restart p2p startup")
-    print("[up] receiver-headless restarted")
+        receiver2 = stack.add(make_receiver("2"))
+        receiver2.start()
+        wait_for_log(receiver2.log_path, "p2p_node_id=", timeout=30,
+                     what="receiver restart p2p startup")
+        active_receiver = receiver2
+        print("[up] receiver-headless restarted")
+    else:  # power_loss_target == "forwarder"
+        print("[power-loss] waiting for durable journal progress, then SIGKILL forwarder")
+        count_at_kill = wait_until(
+            lambda: partial_forwarder_count(journal_path, stream_id),
+            timeout=30,
+            what="forwarder to durably journal a partial event set",
+        )
+        forwarder.sigkill()
+        print(f"[power-loss] SIGKILLed forwarder with {count_at_kill}/{NUM_READS} "
+              "events durably journaled")
+
+        forwarder2 = stack.add(make_forwarder("2"))
+        forwarder2.start()
+        wait_for_log(forwarder2.log_path, "p2p iroh server started", timeout=30,
+                     what="forwarder restart p2p startup")
+        forwarder2.assert_alive()
+        print("[up] forwarder restarted; receiver resumes via journal replay")
 
     # --- Wait for the full deterministic set and async output workers. ---
     wait_until(lambda: received_count(receiver_db_path) >= NUM_READS, timeout=45,
@@ -684,8 +779,10 @@ static_allowed_receivers = ["{receiver_node_id}"]
     print("\n=== Assertions ===")
 
     # 1 + 5. Receiver received_events exact + lossless / no-dup after resume.
-    assert_received_events(results, receiver_db_path, "received_events (post-resume)", stream_id)
-    results.check("power-loss: receiver was killed mid-stream",
+    assert_received_events(results, receiver_db_path,
+                           f"received_events (post-resume, {power_loss_target} kill)",
+                           stream_id)
+    results.check(f"power-loss: {power_loss_target} was killed mid-stream",
                   0 < count_at_kill < NUM_READS,
                   f"killed at {count_at_kill}/{NUM_READS}")
 
@@ -721,7 +818,7 @@ static_allowed_receivers = ["{receiver_node_id}"]
 
     if agent_ui_scenario is not None and agent_ui_artifacts_dir is not None:
         emit_agent_ui_artifacts(
-            receiver_log_path=receiver2.log_path,
+            receiver_log_path=active_receiver.log_path,
             scenario_path=agent_ui_scenario,
             artifacts_dir=agent_ui_artifacts_dir,
             expected_stream_id=stream_id,
@@ -736,6 +833,10 @@ def main() -> int:
     parser.add_argument("--no-build", action="store_true", help="skip cargo build")
     parser.add_argument("--keep", action="store_true",
                         help="keep the temp working dir on exit")
+    parser.add_argument("--power-loss-target", choices=("both", *POWER_LOSS_TARGETS),
+                        default="both",
+                        help="which SIGKILL+restart lane(s) to run "
+                             "(default: both receiver and forwarder)")
     parser.add_argument("--agent-ui-scenario", type=Path,
                         help="optional T5.5 bridge-agent scenario JSON")
     parser.add_argument("--agent-ui-artifacts-dir", type=Path,
@@ -748,40 +849,62 @@ def main() -> int:
     if not args.no_build:
         cargo_build(agent_ui=args.agent_ui_scenario is not None)
 
-    tmp = Path(tempfile.mkdtemp(prefix="rt-e2e-"))
-    print(f"[tmp] working dir: {tmp}")
+    targets = resolve_power_loss_targets(args.power_loss_target)
+    # The bridge-agent artifacts are emitted once, on the final lane only, so
+    # repeated lanes do not clobber each other's artifact directory.
     results = Results()
-    stack = Stack()
-    try:
-        run(
-            tmp,
-            results,
-            stack,
-            agent_ui_scenario=args.agent_ui_scenario,
-            agent_ui_artifacts_dir=args.agent_ui_artifacts_dir,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"\n[error] {type(exc).__name__}: {exc}", file=sys.stderr)
-        results.check("orchestration completed", False, str(exc))
-    finally:
+    all_green = True
+    preserved: list[Path] = []
+    for i, target in enumerate(targets):
+        last = i == len(targets) - 1
+        tmp = Path(tempfile.mkdtemp(prefix=f"rt-e2e-{target}-"))
+        print(f"[tmp] working dir ({target} lane): {tmp}")
+        lane_results = Results()
+        stack = Stack()
         try:
-            _dump_logs_on_failure(stack, results)
+            run(
+                tmp,
+                lane_results,
+                stack,
+                power_loss_target=target,
+                agent_ui_scenario=args.agent_ui_scenario if last else None,
+                agent_ui_artifacts_dir=args.agent_ui_artifacts_dir if last else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n[error] {type(exc).__name__}: {exc}", file=sys.stderr)
+            lane_results.check(f"orchestration completed ({target} lane)", False, str(exc))
         finally:
-            stack.shutdown()
+            try:
+                _dump_logs_on_failure(stack, lane_results)
+            finally:
+                stack.shutdown()
 
-    print("\n=== Summary ===")
+        lane_passed = sum(1 for _, ok, _ in lane_results.checks if ok)
+        lane_total = len(lane_results.checks)
+        print(f"\n=== {target} lane summary: {lane_passed}/{lane_total} checks passed ===")
+        results.checks.extend(
+            (f"[{target}] {name}", ok, detail) for name, ok, detail in lane_results.checks
+        )
+        lane_green = lane_results.all_passed and lane_total > 0
+        all_green = all_green and lane_green
+        if lane_green and not args.keep:
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            preserved.append(tmp)
+
+    print("\n=== Summary (all lanes) ===")
     passed = sum(1 for _, ok, _ in results.checks if ok)
     total = len(results.checks)
+    print(f"  lanes: {', '.join(targets)}")
     print(f"  {passed}/{total} checks passed")
 
-    if results.all_passed and total > 0:
+    if all_green and total > 0:
         print("\nE2E STACK: GREEN")
-        if not args.keep:
-            shutil.rmtree(tmp, ignore_errors=True)
         return 0
 
     print("\nE2E STACK: RED")
-    print(f"  logs and config preserved in {tmp}")
+    for tmp in preserved:
+        print(f"  logs and config preserved in {tmp}")
     return 1
 
 

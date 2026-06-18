@@ -30,6 +30,13 @@ pub struct EmulatorConfig {
     /// looping forever. Combined with `verbatim` this yields a bounded,
     /// deterministic scenario.
     pub once: bool,
+    /// When true, the broadcast read generator pauses before emitting each read
+    /// whenever there are no connected clients, and resumes (without skipping
+    /// any read) once a client reconnects. This makes a forwarder/reader
+    /// power-loss scenario deterministic: reads are never emitted into the void
+    /// while the consumer is down, so a restarted consumer resumes losslessly
+    /// from exactly where the stream paused.
+    pub pause_when_unsubscribed: bool,
 }
 
 pub async fn send_reads(
@@ -133,19 +140,30 @@ async fn broadcast_reads(
     read_type: ReadType,
     verbatim: bool,
     once: bool,
+    pause_when_unsubscribed: bool,
 ) {
     // In bounded (`once`) scenarios, reads emitted before any client connects are
     // dropped by the broadcast channel and lost. Wait for the first consumer so
     // the exact, finite read set is delivered deterministically. The infinite
     // (looping) mode does not need this: a dropped early read is re-sent on the
-    // next loop.
-    if once {
+    // next loop. When `pause_when_unsubscribed` is set, the per-iteration guard
+    // below already covers the initial wait, so the start-only wait is skipped.
+    if once && !pause_when_unsubscribed {
         while tx.receiver_count() == 0 {
             sleep(Duration::from_millis(10)).await;
         }
     }
     let mut index = 0;
     loop {
+        // Pause before emitting the next read whenever no client is connected so
+        // a downed consumer (e.g. a SIGKILLed forwarder) never misses reads.
+        // The pending read index is preserved across the pause, so a restarted
+        // consumer resumes losslessly from exactly where the stream paused.
+        if pause_when_unsubscribed {
+            while tx.receiver_count() == 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
         let (mut chip_read, last) = if file_reads.is_empty() {
             (generate_read(read_type), true)
         } else {
@@ -214,6 +232,7 @@ pub async fn run_with_control(
         config.read_type,
         config.verbatim,
         config.once,
+        config.pause_when_unsubscribed,
     ));
 
     let listener = TcpListener::bind(("0.0.0.0", config.bind_port))
@@ -443,6 +462,7 @@ mod tests {
             ReadType::RAW,
             true,
             true,
+            false,
         ));
 
         let first = timeout(Duration::from_secs(1), rx.recv())
@@ -460,6 +480,73 @@ mod tests {
         timeout(Duration::from_secs(1), gen_task)
             .await
             .expect("broadcast_reads should stop in once mode")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn broadcast_reads_pause_when_unsubscribed_resumes_without_skipping() {
+        // Four distinct verbatim frames. With `pause_when_unsubscribed`, the
+        // generator must not advance past the next pending read while no client
+        // is connected: when a client reconnects it resumes from exactly the
+        // read it paused on, so a power-loss restart is lossless.
+        let frames = vec![
+            "aa400000000000010a2a01123018455900e8".to_owned(),
+            "aa400000000000020a2a01123018455900e9".to_owned(),
+            "aa400000000000030a2a01123018455900ea".to_owned(),
+            "aa400000000000040a2a01123018455900eb".to_owned(),
+        ];
+        let delay_ms = 50;
+        let (tx, _) = broadcast::channel::<String>(16);
+        let mut rx1 = tx.subscribe();
+        let gen_task = tokio::spawn(broadcast_reads(
+            delay_ms,
+            frames.clone(),
+            tx.clone(),
+            ReadType::RAW,
+            true,
+            true,
+            true,
+        ));
+
+        // First read is delivered to the initial subscriber.
+        let got1 = timeout(Duration::from_secs(1), rx1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got1, format!("{}\r\n", frames[0]));
+
+        // Consumer "dies": drop the only subscriber. The generator must pause
+        // before emitting the next read rather than racing ahead.
+        drop(rx1);
+
+        // Wait several read intervals; if the generator were not pausing it
+        // would emit (and drop) frames 2..4 and the `once` generator would even
+        // complete during this window.
+        sleep(Duration::from_millis(delay_ms * 6)).await;
+
+        // Consumer "restarts": a fresh subscriber must receive the exact read
+        // the stream paused on (frame 2), then the remainder in order.
+        let mut rx2 = tx.subscribe();
+        let got2 = timeout(Duration::from_secs(1), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got2, format!("{}\r\n", frames[1]));
+        let got3 = timeout(Duration::from_secs(1), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got3, format!("{}\r\n", frames[2]));
+        let got4 = timeout(Duration::from_secs(1), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got4, format!("{}\r\n", frames[3]));
+
+        // The generator must complete after the last read in `once` mode.
+        timeout(Duration::from_secs(1), gen_task)
+            .await
+            .expect("broadcast_reads should stop in once mode after resume")
             .unwrap();
     }
 

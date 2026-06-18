@@ -26,6 +26,7 @@ async fn start_emulator(state: EmulatedReaderState) -> (tokio::task::JoinHandle<
         read_type: ReadType::RAW,
         verbatim: false,
         once: false,
+        pause_when_unsubscribed: false,
     };
     let handle = tokio::spawn(async move {
         emulator::server::run_with_control(emulator_config, state, Some(port_tx)).await;

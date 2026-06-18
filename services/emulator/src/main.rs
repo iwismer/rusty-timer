@@ -86,6 +86,15 @@ async fn main() {
                 .long("once")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("pause_when_unsubscribed")
+                .help(
+                    "Pause read emission whenever no client is connected and resume \
+                     losslessly on reconnect (deterministic power-loss scenarios)",
+                )
+                .long("pause-when-unsubscribed")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let config = EmulatorConfig {
@@ -99,6 +108,7 @@ async fn main() {
             .expect("read_type has a default"),
         verbatim: matches.get_flag("verbatim"),
         once: matches.get_flag("once"),
+        pause_when_unsubscribed: matches.get_flag("pause_when_unsubscribed"),
     };
 
     let read_mode = match config.read_type {
